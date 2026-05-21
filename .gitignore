@@ -1,0 +1,18 @@
+# Binaries
+bin/
+lagotto
+dist/
+
+# Lambda build artifacts
+lambda/*/bootstrap
+lambda/*/capacity-poller
+lambda/*.zip
+
+# Test artifacts
+*.out
+coverage.html
+
+# IDE
+.idea/
+.vscode/
+*.swp
