@@ -1,0 +1,111 @@
+# GoReleaser configuration for spore-host/lagotto
+version: 2
+
+builds:
+  - id: lagotto
+    main: .
+    binary: lagotto
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/spore-host/lagotto/cmd.Version={{.Version}}
+    mod_timestamp: '{{ .CommitTimestamp }}'
+
+archives:
+  - id: lagotto-archive
+    name_template: 'lagotto_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+    files:
+      - LICENSE*
+
+checksum:
+  name_template: 'checksums.txt'
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+      - 'typo'
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: Bug fixes
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: Others
+      order: 999
+
+nfpms:
+  - package_name: lagotto
+    vendor: spore.host
+    homepage: https://spore.host
+    maintainer: "spore.host <hello@spore.host>"
+    description: "Watch for EC2 instance capacity across regions"
+    license: Apache-2.0
+    formats:
+      - deb
+      - rpm
+    file_name_template: "{{ .PackageName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    contents:
+      - src: LICENSE
+        dst: /usr/share/doc/lagotto/copyright
+        type: doc
+    rpm:
+      summary: "Watch for EC2 instance capacity across regions"
+
+brews:
+  - name: lagotto
+    repository:
+      owner: spore-host
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    homepage: https://github.com/spore-host/lagotto
+    description: "Watch for EC2 instance capacity across regions"
+    license: Apache-2.0
+    dependencies:
+      - name: spore-host/tap/truffle
+        type: runtime
+    test: |
+      system "#{bin}/lagotto", "version"
+    install: |
+      bin.install "lagotto"
+
+scoops:
+  - name: lagotto
+    repository:
+      owner: spore-host
+      name: scoop-bucket
+      branch: main
+      token: "{{ .Env.SCOOP_BUCKET_GITHUB_TOKEN }}"
+    directory: bucket
+    homepage: https://github.com/spore-host/lagotto
+    description: "Watch for EC2 instance capacity across regions"
+    license: Apache-2.0
+    depends:
+      - spore-host/truffle
+
+release:
+  github:
+    owner: spore-host
+    name: lagotto
+  draft: false
+  prerelease: auto
+  mode: replace
+  name_template: "v{{.Version}}"
