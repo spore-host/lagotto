@@ -14,7 +14,7 @@ GOTEST=$(GOCMD) test
 GOMOD=$(GOCMD) mod
 
 # Build flags
-LDFLAGS=-ldflags "-X github.com/scttfrdmn/spore-host/lagotto/cmd.Version=$(VERSION) -s -w"
+LDFLAGS=-ldflags "-X github.com/spore-host/lagotto/cmd.Version=$(VERSION) -s -w"
 
 # Default target
 all: test build
