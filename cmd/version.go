@@ -6,11 +6,21 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var (
+	GitCommit = "unknown"
+	BuildDate = "unknown"
+)
+
 var versionCmd = &cobra.Command{
 	Use:   "version",
-	Short: "Print the version number",
+	Short: "Print version information",
+	Long:  `Display version, build date, and git commit information for lagotto.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Printf("lagotto %s\n", Version)
+		fmt.Printf("🐕 Lagotto - EC2 Capacity Watcher\n\n")
+		fmt.Printf("Version:    %s\n", Version)
+		fmt.Printf("Git Commit: %s\n", GitCommit)
+		fmt.Printf("Build Date: %s\n", BuildDate)
+		fmt.Printf("\nProject:    https://spore.host\n")
 	},
 }
 

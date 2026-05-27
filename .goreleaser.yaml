@@ -17,6 +17,8 @@ builds:
     ldflags:
       - -s -w
       - -X github.com/spore-host/lagotto/cmd.Version={{.Version}}
+      - -X github.com/spore-host/lagotto/cmd.GitCommit={{.Commit}}
+      - -X github.com/spore-host/lagotto/cmd.BuildDate={{.Date}}
     mod_timestamp: '{{ .CommitTimestamp }}'
 
 archives:
