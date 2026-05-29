@@ -8,7 +8,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.32.17
 	github.com/aws/aws-sdk-go-v2/service/scheduler v1.17.24
 	github.com/spore-host/lagotto v0.0.0-00010101000000-000000000000
-	github.com/spore-host/truffle v0.35.0
+	github.com/spore-host/truffle v0.36.1
 )
 
 require github.com/spore-host/libs v0.35.0 // indirect
@@ -46,7 +46,7 @@ require (
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/spore-host/spawn v0.35.0 // indirect
+	github.com/spore-host/spawn v0.36.1 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws v0.68.0 // indirect
 	go.opentelemetry.io/otel v1.43.0 // indirect
