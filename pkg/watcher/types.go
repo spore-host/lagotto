@@ -29,6 +29,9 @@ const (
 	StatusExpired WatchStatus = "expired"
 	// StatusCancelled means the user cancelled the watch.
 	StatusCancelled WatchStatus = "cancelled"
+	// StatusFailed means a launch/hold hit a terminal error (bad AMI/IAM,
+	// exhausted quota) that retrying cannot resolve. The watch stops polling.
+	StatusFailed WatchStatus = "failed"
 )
 
 // Watch represents a user's request to monitor for instance capacity.
@@ -36,6 +39,7 @@ type Watch struct {
 	WatchID             string          `json:"watch_id" dynamodbav:"watch_id"`
 	UserID              string          `json:"user_id" dynamodbav:"user_id"`
 	Status              WatchStatus     `json:"status" dynamodbav:"status"`
+	Service             Service         `json:"service,omitempty" dynamodbav:"service,omitempty"`
 	InstanceTypePattern string          `json:"instance_type_pattern" dynamodbav:"instance_type_pattern"`
 	Regions             []string        `json:"regions" dynamodbav:"regions"`
 	Spot                bool            `json:"spot" dynamodbav:"spot"`
@@ -54,18 +58,23 @@ type Watch struct {
 
 // MatchResult records a capacity match event.
 type MatchResult struct {
-	WatchID          string    `json:"watch_id" dynamodbav:"watch_id"`
-	UserID           string    `json:"user_id" dynamodbav:"user_id"`
-	Region           string    `json:"region" dynamodbav:"region"`
-	AvailabilityZone string    `json:"availability_zone" dynamodbav:"availability_zone"`
-	InstanceType     string    `json:"instance_type" dynamodbav:"instance_type"`
-	Price            float64   `json:"price" dynamodbav:"price"`
-	IsSpot           bool      `json:"is_spot" dynamodbav:"is_spot"`
-	MatchedAt        time.Time `json:"matched_at" dynamodbav:"matched_at"`
-	ActionTaken      string    `json:"action_taken" dynamodbav:"action_taken"`
-	InstanceID       string    `json:"instance_id,omitempty" dynamodbav:"instance_id,omitempty"`
-	ReservationID    string    `json:"reservation_id,omitempty" dynamodbav:"reservation_id,omitempty"`
-	TTLTimestamp     int64     `json:"ttl_timestamp" dynamodbav:"ttl_timestamp"`
+	WatchID          string  `json:"watch_id" dynamodbav:"watch_id"`
+	UserID           string  `json:"user_id" dynamodbav:"user_id"`
+	Service          Service `json:"service,omitempty" dynamodbav:"service,omitempty"`
+	Region           string  `json:"region" dynamodbav:"region"`
+	AvailabilityZone string  `json:"availability_zone" dynamodbav:"availability_zone"`
+	InstanceType     string  `json:"instance_type" dynamodbav:"instance_type"`
+	// ProxiedFrom records the EC2 instance type used as a capacity proxy when
+	// Service is SageMaker (e.g. "g5.2xlarge" for an "ml.g5.2xlarge" match).
+	// Empty for direct EC2 watches.
+	ProxiedFrom   string    `json:"proxied_from,omitempty" dynamodbav:"proxied_from,omitempty"`
+	Price         float64   `json:"price" dynamodbav:"price"`
+	IsSpot        bool      `json:"is_spot" dynamodbav:"is_spot"`
+	MatchedAt     time.Time `json:"matched_at" dynamodbav:"matched_at"`
+	ActionTaken   string    `json:"action_taken" dynamodbav:"action_taken"`
+	InstanceID    string    `json:"instance_id,omitempty" dynamodbav:"instance_id,omitempty"`
+	ReservationID string    `json:"reservation_id,omitempty" dynamodbav:"reservation_id,omitempty"`
+	TTLTimestamp  int64     `json:"ttl_timestamp" dynamodbav:"ttl_timestamp"`
 }
 
 // NotifyChannel specifies how to reach the user on a match.

@@ -89,6 +89,20 @@ Action Taken: %s
 		m.ActionTaken,
 	)
 
+	if normalizeService(w.Service) == ServiceSageMaker {
+		body += fmt.Sprintf(`
+NOTE: This is an EC2-capacity proxy, not a direct SageMaker capacity check, and
+lagotto did NOT launch anything — for EC2 watches the launch itself is the only
+true capacity test, but lagotto cannot submit your SageMaker job for you.
+
+AWS exposes no read-only SageMaker capacity API, so lagotto watched the
+correlated EC2 type %s as a hint. It is now worth RETRYING your SageMaker job
+for %s — but EC2 %s availability does not guarantee SageMaker capacity (separate
+managed pool), so the job may still return CapacityError. If it does, leave the
+watch running and retry on the next notification.
+`, m.ProxiedFrom, m.InstanceType, m.ProxiedFrom)
+	}
+
 	if m.InstanceID != "" {
 		body += fmt.Sprintf("Instance ID: %s\n", m.InstanceID)
 	}
@@ -112,6 +126,11 @@ func (n *Notifier) sendWebhook(ctx context.Context, url string, w *Watch, m *Mat
 		"matched_at":        m.MatchedAt.Format(time.RFC3339),
 		"action_taken":      m.ActionTaken,
 		"pattern":           w.InstanceTypePattern,
+	}
+	if normalizeService(w.Service) == ServiceSageMaker {
+		payload["service"] = string(ServiceSageMaker)
+		payload["proxied_from"] = m.ProxiedFrom
+		payload["capacity_kind"] = "ec2_proxy"
 	}
 	if m.InstanceID != "" {
 		payload["instance_id"] = m.InstanceID

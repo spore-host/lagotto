@@ -13,8 +13,8 @@ import (
 	schedulertypes "github.com/aws/aws-sdk-go-v2/service/scheduler/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/google/uuid"
-	"github.com/spore-host/lagotto/pkg/watcher"
 	"github.com/spf13/cobra"
+	"github.com/spore-host/lagotto/pkg/watcher"
 	"gopkg.in/yaml.v3"
 )
 
@@ -26,15 +26,22 @@ var (
 	watchTTL         string
 	watchNotify      []string
 	watchSpawnConfig string
+	watchService     string
 )
 
 var watchCmd = &cobra.Command{
 	Use:   "watch <instance-type-pattern>",
 	Short: "Create a capacity watch for an instance type",
-	Long: `Watch for EC2 instance availability across regions and AZs.
+	Long: `Watch for instance availability across regions and AZs.
 
 The pattern supports wildcards: "p5.*" matches all p5 sizes, "g5.xlarge" is exact.
-When capacity is found matching your criteria, the configured action is taken.`,
+When capacity is found matching your criteria, the configured action is taken.
+
+With --service sagemaker, lagotto watches SageMaker ml.* capacity using the
+correlated EC2 family as a proxy (ml.g5.2xlarge -> g5.2xlarge). AWS exposes no
+direct SageMaker capacity API, so this is a heuristic: EC2 availability strongly
+indicates — but does not guarantee — SageMaker capacity. SageMaker watches
+support --action notify only.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runWatch,
 }
@@ -49,6 +56,7 @@ func init() {
 	watchCmd.Flags().StringVar(&watchTTL, "ttl", "24h", "How long to keep watching (e.g., 24h, 7d)")
 	watchCmd.Flags().StringSliceVar(&watchNotify, "notify", nil, "Notification channels (e.g., email:user@example.com, webhook:https://...)")
 	watchCmd.Flags().StringVar(&watchSpawnConfig, "spawn-config", "", "YAML file with spawn LaunchConfig (required for --action spawn)")
+	watchCmd.Flags().StringVar(&watchService, "service", "ec2", "Capacity service: ec2, or sagemaker (EC2-proxy for ml.* types)")
 }
 
 func runWatch(cmd *cobra.Command, args []string) error {
@@ -64,12 +72,28 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Validate service and that the pattern fits it (ml.* iff sagemaker).
+	service := watcher.Service(watchService)
+	if !service.Valid() {
+		return fmt.Errorf("invalid service %q: must be ec2 or sagemaker", watchService)
+	}
+	if err := watcher.ValidateWatchPattern(service, pattern); err != nil {
+		return err
+	}
+
 	// Validate action
 	action := watcher.ActionMode(watchAction)
 	switch action {
 	case watcher.ActionNotify, watcher.ActionSpawn, watcher.ActionHold:
 	default:
 		return fmt.Errorf("invalid action %q: must be notify, spawn, or hold", watchAction)
+	}
+
+	// SageMaker is watched via an EC2 proxy; spawn/hold are EC2-only actions
+	// (they launch an instance or reserve EC2 capacity with the matched type,
+	// which would be the invalid ml.* type for SageMaker). Restrict to notify.
+	if service == watcher.ServiceSageMaker && action != watcher.ActionNotify {
+		return fmt.Errorf("--service sagemaker supports --action notify only (got %q); spawn/hold act on EC2 instance types", watchAction)
 	}
 
 	// Load spawn config if action is spawn
@@ -108,6 +132,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		WatchID:             "w-" + uuid.New().String()[:8],
 		UserID:              *identity.Arn,
 		Status:              watcher.StatusActive,
+		Service:             service,
 		InstanceTypePattern: pattern,
 		Regions:             watchRegions,
 		Spot:                watchSpot,
@@ -139,6 +164,10 @@ func runWatch(cmd *cobra.Command, args []string) error {
 
 	fmt.Fprintf(cmd.OutOrStdout(), "Created watch %s\n", w.WatchID)
 	fmt.Fprintf(cmd.OutOrStdout(), "  Pattern:  %s\n", w.InstanceTypePattern)
+	if w.Service == watcher.ServiceSageMaker {
+		fmt.Fprintf(cmd.OutOrStdout(), "  Service:  sagemaker (EC2-proxy via %s; \"likely available\", not a direct SageMaker check)\n",
+			watcher.EC2EquivalentPattern(w.Service, w.InstanceTypePattern))
+	}
 	fmt.Fprintf(cmd.OutOrStdout(), "  Regions:  %v\n", displayRegions(w.Regions))
 	fmt.Fprintf(cmd.OutOrStdout(), "  Spot:     %v\n", w.Spot)
 	if w.MaxPrice > 0 {

@@ -7,9 +7,9 @@ import (
 	"os"
 
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/spf13/cobra"
 	"github.com/spore-host/lagotto/pkg/watcher"
 	truffleaws "github.com/spore-host/truffle/pkg/aws"
-	"github.com/spf13/cobra"
 )
 
 var pollCmd = &cobra.Command{
@@ -60,7 +60,7 @@ func runPoll(cmd *cobra.Command, args []string) error {
 		Holder:   holder,
 	})
 
-	matches, err := poller.PollAll(ctx)
+	summary, err := poller.PollAll(ctx)
 	if err != nil {
 		return fmt.Errorf("poll: %w", err)
 	}
@@ -68,16 +68,14 @@ func runPoll(cmd *cobra.Command, args []string) error {
 	if getOutputFormat() == "json" {
 		enc := json.NewEncoder(cmd.OutOrStdout())
 		enc.SetIndent("", "  ")
-		return enc.Encode(matches)
+		return enc.Encode(summary)
 	}
 
-	if len(matches) == 0 {
-		fmt.Fprintln(cmd.OutOrStdout(), "No matches found in this poll cycle.")
-		return nil
-	}
+	fmt.Fprintf(cmd.OutOrStdout(),
+		"Poll cycle: %d watched, %d launched, %d notified, %d retrying, %d failed, %d expired\n",
+		summary.Watched, summary.Launched, summary.Notified, summary.Retrying, summary.Failed, summary.Expired)
 
-	fmt.Fprintf(cmd.OutOrStdout(), "Found %d match(es):\n", len(matches))
-	for _, m := range matches {
+	for _, m := range summary.Matches {
 		spotLabel := "on-demand"
 		if m.IsSpot {
 			spotLabel = "spot"
