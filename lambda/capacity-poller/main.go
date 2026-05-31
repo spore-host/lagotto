@@ -64,17 +64,26 @@ func init() {
 	schedulerClient = scheduler.NewFromConfig(cfg)
 }
 
+// handler runs one account-wide poll cycle. The lambda is a stateless,
+// self-terminating singleton: one schedule per account drives it, every
+// invocation sweeps all active watches, and watches drop out of the active set
+// as they launch (matched), hit a terminal error (failed), or pass their TTL
+// (expired). When zero active watches remain, the lambda disables its own
+// schedule — no watches, no lambda. Creating a watch re-arms the schedule.
 func handler(ctx context.Context) error {
 	log.Println("Starting capacity poll cycle")
 
-	matches, err := poller.PollAll(ctx)
+	s, err := poller.PollAll(ctx)
 	if err != nil {
 		return fmt.Errorf("poll: %w", err)
 	}
 
-	log.Printf("Poll complete: %d matches found", len(matches))
+	log.Printf("Poll complete: watched=%d launched=%d notified=%d retrying=%d failed=%d expired=%d",
+		s.Watched, s.Launched, s.Notified, s.Retrying, s.Failed, s.Expired)
 
-	// Check if any active watches remain
+	// Check if any active watches remain. Retrying watches are still active, so
+	// the schedule stays armed until every watch has launched, failed, or
+	// expired.
 	active, err := store.ListActiveWatches(ctx)
 	if err != nil {
 		log.Printf("Warning: failed to check active watches: %v", err)

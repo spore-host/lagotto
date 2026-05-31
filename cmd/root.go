@@ -5,8 +5,8 @@ import (
 	"log"
 	"os"
 
-	"github.com/spore-host/libs/i18n"
 	"github.com/spf13/cobra"
+	"github.com/spore-host/libs/i18n"
 )
 
 var (

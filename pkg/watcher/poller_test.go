@@ -41,12 +41,12 @@ func TestNewPoller(t *testing.T) {
 
 func TestPollAll_NoWatches(t *testing.T) {
 	p, _, _ := pollerEnv(t, true)
-	matches, err := p.PollAll(context.Background())
+	summary, err := p.PollAll(context.Background())
 	if err != nil {
 		t.Fatalf("PollAll error = %v", err)
 	}
-	if len(matches) != 0 {
-		t.Errorf("expected 0 matches with no active watches, got %d", len(matches))
+	if summary.Watched != 0 || len(summary.Matches) != 0 {
+		t.Errorf("expected an empty summary with no active watches, got %+v", summary)
 	}
 }
 
@@ -62,16 +62,54 @@ func TestPollAll_WithActiveWatch(t *testing.T) {
 	}
 
 	// PollAll groups by region/pattern and runs the full search path.
-	matches, err := p.PollAll(context.Background())
+	summary, err := p.PollAll(context.Background())
 	if err != nil {
 		t.Fatalf("PollAll error = %v", err)
 	}
+	if summary.Watched != 1 {
+		t.Errorf("expected 1 watched, got %d", summary.Watched)
+	}
 	// Substrate seeds t3.micro, so a match is expected; assert the path ran
 	// and produced well-formed results (don't over-assert on emulator data).
-	for _, m := range matches {
+	for _, m := range summary.Matches {
 		if m.InstanceType == "" || m.Region == "" {
 			t.Errorf("match has empty fields: %+v", m)
 		}
+	}
+}
+
+// TestPollAll_ExpiresPastTTL verifies the poller enforces the watch TTL itself
+// (rather than waiting on lazy DynamoDB deletion): a still-"active" watch whose
+// ExpiresAt has passed is transitioned to expired and not polled.
+func TestPollAll_ExpiresPastTTL(t *testing.T) {
+	p, store, _ := pollerEnv(t, false)
+	ctx := context.Background()
+
+	w := newTestWatch("w-expired", "arn:aws:iam::123456789012:user/zoe")
+	w.InstanceTypePattern = "t3.micro"
+	w.Spot = false
+	w.ExpiresAt = time.Now().UTC().Add(-time.Hour) // already past TTL
+	if err := store.PutWatch(ctx, w); err != nil {
+		t.Fatalf("PutWatch: %v", err)
+	}
+
+	summary, err := p.PollAll(ctx)
+	if err != nil {
+		t.Fatalf("PollAll error = %v", err)
+	}
+	if summary.Expired != 1 {
+		t.Errorf("expected 1 expired, got %d (%+v)", summary.Expired, summary)
+	}
+	if summary.Watched != 0 {
+		t.Errorf("expired watch should not be polled; Watched = %d", summary.Watched)
+	}
+
+	got, err := store.GetWatch(ctx, "w-expired")
+	if err != nil {
+		t.Fatalf("GetWatch: %v", err)
+	}
+	if got.Status != watcher.StatusExpired {
+		t.Errorf("status = %q, want expired", got.Status)
 	}
 }
 

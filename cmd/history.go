@@ -8,8 +8,8 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
-	"github.com/spore-host/lagotto/pkg/watcher"
 	"github.com/spf13/cobra"
+	"github.com/spore-host/lagotto/pkg/watcher"
 )
 
 var historyWatchID string

@@ -7,9 +7,9 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/spf13/cobra"
 	"github.com/spore-host/lagotto/pkg/watcher"
 	"github.com/spore-host/libs/i18n"
-	"github.com/spf13/cobra"
 )
 
 var extendTTL string

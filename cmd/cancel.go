@@ -5,8 +5,8 @@ import (
 	"fmt"
 
 	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/spore-host/lagotto/pkg/watcher"
 	"github.com/spf13/cobra"
+	"github.com/spore-host/lagotto/pkg/watcher"
 )
 
 var cancelCmd = &cobra.Command{
