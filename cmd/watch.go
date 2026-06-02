@@ -147,6 +147,16 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	}
 
 	store := watcher.NewStore(cfg, watchesTable, historyTable)
+
+	// Auto-create the backing tables on first use so the tool is zero-setup (#12).
+	created, err := store.EnsureTables(ctx)
+	if err != nil {
+		return fmt.Errorf("ensure tables: %w", err)
+	}
+	for _, name := range created {
+		fmt.Fprintf(os.Stderr, "Created DynamoDB table %s\n", name)
+	}
+
 	if err := store.PutWatch(ctx, w); err != nil {
 		return fmt.Errorf("create watch: %w", err)
 	}
