@@ -2,6 +2,7 @@ package watcher
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -296,6 +297,262 @@ func (s *Store) ListMatchHistoryByUser(ctx context.Context, userID string) ([]Ma
 		return nil, fmt.Errorf("query match history by user: %w", err)
 	}
 	return unmarshalMatches(result.Items)
+}
+
+// EnsureTables creates the watches and match-history tables if they don't yet
+// exist, then waits until both are ACTIVE. It is idempotent: existing tables are
+// left untouched. This lets lagotto own its backend with zero manual setup (#12).
+//
+// Returns the names of any tables it created (empty if both already existed).
+func (s *Store) EnsureTables(ctx context.Context) ([]string, error) {
+	var created []string
+
+	madeWatches, err := s.ensureTable(ctx, s.watchesTable, watchesTableSchema(s.watchesTable))
+	if err != nil {
+		return created, fmt.Errorf("ensure watches table %q: %w", s.watchesTable, err)
+	}
+	if madeWatches {
+		created = append(created, s.watchesTable)
+	}
+
+	madeHistory, err := s.ensureTable(ctx, s.historyTable, historyTableSchema(s.historyTable))
+	if err != nil {
+		return created, fmt.Errorf("ensure history table %q: %w", s.historyTable, err)
+	}
+	if madeHistory {
+		created = append(created, s.historyTable)
+	}
+
+	// Wait for any newly-created tables to become ACTIVE before returning, so a
+	// subsequent write doesn't race table creation.
+	waiter := dynamodb.NewTableExistsWaiter(s.client)
+	for _, name := range created {
+		if err := waiter.Wait(ctx, &dynamodb.DescribeTableInput{TableName: aws.String(name)}, 2*time.Minute); err != nil {
+			return created, fmt.Errorf("wait for table %q to become active: %w", name, err)
+		}
+		// Enable DynamoDB TTL on ttl_timestamp so resolved watches (at expiry)
+		// and match history (90-day retention) age out on their own — the basis
+		// for the account self-cleaning once activity stops (#12).
+		if err := s.enableTTL(ctx, name); err != nil {
+			return created, fmt.Errorf("enable TTL on %q: %w", name, err)
+		}
+	}
+	return created, nil
+}
+
+// enableTTL turns on DynamoDB TTL for the ttl_timestamp attribute. Idempotent:
+// a table that already has TTL enabled is left as-is.
+func (s *Store) enableTTL(ctx context.Context, name string) error {
+	desc, err := s.client.DescribeTimeToLive(ctx, &dynamodb.DescribeTimeToLiveInput{TableName: aws.String(name)})
+	if err == nil && desc.TimeToLiveDescription != nil {
+		switch desc.TimeToLiveDescription.TimeToLiveStatus {
+		case types.TimeToLiveStatusEnabled, types.TimeToLiveStatusEnabling:
+			return nil
+		}
+	}
+	_, err = s.client.UpdateTimeToLive(ctx, &dynamodb.UpdateTimeToLiveInput{
+		TableName: aws.String(name),
+		TimeToLiveSpecification: &types.TimeToLiveSpecification{
+			Enabled:       aws.Bool(true),
+			AttributeName: aws.String("ttl_timestamp"),
+		},
+	})
+	if err != nil {
+		// Substrate / some emulators don't implement UpdateTimeToLive; treat as
+		// non-fatal so table creation still succeeds.
+		var notImpl *types.ResourceInUseException
+		if errors.As(err, &notImpl) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+// TablesEmpty reports whether both the watches and history tables contain zero
+// items. Used to decide when the account can be auto-torn-down (no litter).
+func (s *Store) TablesEmpty(ctx context.Context) (bool, error) {
+	for _, name := range []string{s.watchesTable, s.historyTable} {
+		out, err := s.client.Scan(ctx, &dynamodb.ScanInput{
+			TableName: aws.String(name),
+			Limit:     aws.Int32(1),
+			Select:    types.SelectCount,
+		})
+		if err != nil {
+			var notFound *types.ResourceNotFoundException
+			if errors.As(err, &notFound) {
+				continue // a missing table is trivially empty
+			}
+			return false, fmt.Errorf("scan %q: %w", name, err)
+		}
+		if out.Count > 0 {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// DeleteTables removes both lagotto tables unconditionally. Idempotent:
+// already-absent tables are ignored. Returns the names actually deleted.
+// Used by the explicit `lagotto teardown` command (user opted in).
+func (s *Store) DeleteTables(ctx context.Context) ([]string, error) {
+	var deleted []string
+	for _, name := range []string{s.watchesTable, s.historyTable} {
+		_, err := s.client.DeleteTable(ctx, &dynamodb.DeleteTableInput{TableName: aws.String(name)})
+		if err != nil {
+			var notFound *types.ResourceNotFoundException
+			if errors.As(err, &notFound) {
+				continue
+			}
+			return deleted, fmt.Errorf("delete table %q: %w", name, err)
+		}
+		deleted = append(deleted, name)
+	}
+	return deleted, nil
+}
+
+// DeleteManagedTables deletes only tables tagged as CLI-managed
+// (lagotto:managed=cli). CloudFormation-managed tables lack the tag and are left
+// untouched, so the lambda's automatic teardown never causes stack drift or
+// trips on missing control-plane IAM. Returns the names actually deleted.
+func (s *Store) DeleteManagedTables(ctx context.Context) ([]string, error) {
+	var deleted []string
+	for _, name := range []string{s.watchesTable, s.historyTable} {
+		managed, err := s.isManaged(ctx, name)
+		if err != nil {
+			return deleted, err
+		}
+		if !managed {
+			continue // CFN-managed or absent — don't touch
+		}
+		_, err = s.client.DeleteTable(ctx, &dynamodb.DeleteTableInput{TableName: aws.String(name)})
+		if err != nil {
+			var notFound *types.ResourceNotFoundException
+			if errors.As(err, &notFound) {
+				continue
+			}
+			return deleted, fmt.Errorf("delete table %q: %w", name, err)
+		}
+		deleted = append(deleted, name)
+	}
+	return deleted, nil
+}
+
+// isManaged reports whether the named table carries the lagotto:managed=cli tag.
+// A missing table returns false (nothing to delete).
+func (s *Store) isManaged(ctx context.Context, name string) (bool, error) {
+	desc, err := s.client.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: aws.String(name)})
+	if err != nil {
+		var notFound *types.ResourceNotFoundException
+		if errors.As(err, &notFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("describe table %q: %w", name, err)
+	}
+	arn := desc.Table.TableArn
+	if arn == nil {
+		return false, nil
+	}
+	tags, err := s.client.ListTagsOfResource(ctx, &dynamodb.ListTagsOfResourceInput{ResourceArn: arn})
+	if err != nil {
+		// If we can't read tags, be conservative and treat as unmanaged so we
+		// never delete something we shouldn't.
+		return false, nil
+	}
+	for _, t := range tags.Tags {
+		if aws.ToString(t.Key) == aws.ToString(managedTag.Key) && aws.ToString(t.Value) == aws.ToString(managedTag.Value) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// ensureTable creates one table if it does not already exist. Returns true if it
+// created the table, false if it already existed.
+func (s *Store) ensureTable(ctx context.Context, name string, input *dynamodb.CreateTableInput) (bool, error) {
+	_, err := s.client.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: aws.String(name)})
+	if err == nil {
+		return false, nil // already exists
+	}
+	var notFound *types.ResourceNotFoundException
+	if !errors.As(err, &notFound) {
+		return false, fmt.Errorf("describe table: %w", err)
+	}
+
+	if _, err := s.client.CreateTable(ctx, input); err != nil {
+		// Tolerate a concurrent creator (another lagotto invocation racing us).
+		var inUse *types.ResourceInUseException
+		if errors.As(err, &inUse) {
+			return false, nil
+		}
+		return false, fmt.Errorf("create table: %w", err)
+	}
+	return true, nil
+}
+
+// managedTag marks a table as created/owned by the lagotto CLI (as opposed to
+// the CloudFormation stack). Auto-teardown only deletes tables carrying this
+// tag, so it never destroys CFN-managed tables (which would cause stack drift
+// and lacks the IAM the deployed lambda holds).
+var managedTag = types.Tag{Key: aws.String("lagotto:managed"), Value: aws.String("cli")}
+
+// watchesTableSchema returns the CreateTable input for the watches table:
+// hash key watch_id, GSIs user_id-index and status-index.
+func watchesTableSchema(name string) *dynamodb.CreateTableInput {
+	return &dynamodb.CreateTableInput{
+		TableName:   aws.String(name),
+		BillingMode: types.BillingModePayPerRequest,
+		Tags:        []types.Tag{managedTag},
+		AttributeDefinitions: []types.AttributeDefinition{
+			{AttributeName: aws.String("watch_id"), AttributeType: types.ScalarAttributeTypeS},
+			{AttributeName: aws.String("user_id"), AttributeType: types.ScalarAttributeTypeS},
+			{AttributeName: aws.String("status"), AttributeType: types.ScalarAttributeTypeS},
+		},
+		KeySchema: []types.KeySchemaElement{
+			{AttributeName: aws.String("watch_id"), KeyType: types.KeyTypeHash},
+		},
+		GlobalSecondaryIndexes: []types.GlobalSecondaryIndex{
+			{
+				IndexName:  aws.String("user_id-index"),
+				KeySchema:  []types.KeySchemaElement{{AttributeName: aws.String("user_id"), KeyType: types.KeyTypeHash}},
+				Projection: &types.Projection{ProjectionType: types.ProjectionTypeAll},
+			},
+			{
+				IndexName:  aws.String("status-index"),
+				KeySchema:  []types.KeySchemaElement{{AttributeName: aws.String("status"), KeyType: types.KeyTypeHash}},
+				Projection: &types.Projection{ProjectionType: types.ProjectionTypeAll},
+			},
+		},
+	}
+}
+
+// historyTableSchema returns the CreateTable input for the match-history table:
+// hash key watch_id, range key matched_at, GSI user_id-index.
+func historyTableSchema(name string) *dynamodb.CreateTableInput {
+	return &dynamodb.CreateTableInput{
+		TableName:   aws.String(name),
+		BillingMode: types.BillingModePayPerRequest,
+		Tags:        []types.Tag{managedTag},
+		AttributeDefinitions: []types.AttributeDefinition{
+			{AttributeName: aws.String("watch_id"), AttributeType: types.ScalarAttributeTypeS},
+			{AttributeName: aws.String("matched_at"), AttributeType: types.ScalarAttributeTypeS},
+			{AttributeName: aws.String("user_id"), AttributeType: types.ScalarAttributeTypeS},
+		},
+		KeySchema: []types.KeySchemaElement{
+			{AttributeName: aws.String("watch_id"), KeyType: types.KeyTypeHash},
+			{AttributeName: aws.String("matched_at"), KeyType: types.KeyTypeRange},
+		},
+		GlobalSecondaryIndexes: []types.GlobalSecondaryIndex{
+			{
+				IndexName: aws.String("user_id-index"),
+				KeySchema: []types.KeySchemaElement{
+					{AttributeName: aws.String("user_id"), KeyType: types.KeyTypeHash},
+					{AttributeName: aws.String("matched_at"), KeyType: types.KeyTypeRange},
+				},
+				Projection: &types.Projection{ProjectionType: types.ProjectionTypeAll},
+			},
+		},
+	}
 }
 
 func unmarshalMatches(items []map[string]types.AttributeValue) ([]MatchResult, error) {
