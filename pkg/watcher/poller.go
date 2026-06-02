@@ -13,19 +13,21 @@ import (
 
 // Poller checks instance capacity for active watches.
 type Poller struct {
-	truffle  *truffleaws.Client
-	store    *Store
-	notifier *Notifier // nil = skip notifications
-	spawner  *Spawner  // nil = skip auto-spawn
-	holder   *Holder   // nil = skip capacity reservations
-	verbose  bool
+	truffle   *truffleaws.Client
+	store     *Store
+	notifier  *Notifier          // nil = skip notifications
+	spawner   *Spawner           // nil = skip auto-spawn
+	holder    *Holder            // nil = skip capacity reservations
+	sagemaker *SageMakerLauncher // nil = skip SageMaker job submission
+	verbose   bool
 }
 
 // PollerOpts configures optional Poller dependencies.
 type PollerOpts struct {
-	Notifier *Notifier
-	Spawner  *Spawner
-	Holder   *Holder
+	Notifier  *Notifier
+	Spawner   *Spawner
+	Holder    *Holder
+	SageMaker *SageMakerLauncher
 }
 
 // NewPoller creates a Poller backed by a truffle client and DynamoDB store.
@@ -39,6 +41,7 @@ func NewPoller(truffle *truffleaws.Client, store *Store, verbose bool, opts ...P
 		p.notifier = opts[0].Notifier
 		p.spawner = opts[0].Spawner
 		p.holder = opts[0].Holder
+		p.sagemaker = opts[0].SageMaker
 	}
 	return p
 }
@@ -74,20 +77,19 @@ func (p *Poller) PollAll(ctx context.Context) (*PollSummary, error) {
 		fmt.Fprintf(os.Stderr, "Polling %d active watches\n", len(watches))
 	}
 
-	// Group watches by the effective EC2 search so distinct services that resolve
-	// to the same EC2 pattern (e.g. ec2 "g5.*" and sagemaker "ml.g5.*") share one
-	// truffle call, and so API calls are deduplicated. The search pattern is the
-	// EC2-equivalent of each watch.
+	// EC2 watches are grouped by region+pattern+spot so they share one truffle
+	// capacity search. SageMaker watches don't use truffle at all — each submits
+	// the user's job directly — so they're handled individually.
 	type regionKey struct {
-		regions    string // sorted, joined
-		ec2Pattern string
-		spot       bool
+		regions string // sorted, joined
+		pattern string
+		spot    bool
 	}
 	type regionGroup struct {
-		regions    []string
-		ec2Pattern string
-		spot       bool
-		watches    []*Watch
+		regions []string
+		pattern string
+		spot    bool
+		watches []*Watch
 	}
 
 	// The watch TTL is the sole stopping limit (besides a successful launch or a
@@ -110,28 +112,34 @@ func (p *Poller) PollAll(ctx context.Context) (*PollSummary, error) {
 			continue
 		}
 		summary.Watched++
-		ec2Pattern := EC2EquivalentPattern(w.Service, w.InstanceTypePattern)
+
+		// SageMaker: submit/track the user's job directly, no EC2 search.
+		if normalizeService(w.Service) == ServiceSageMaker {
+			p.pollSageMakerWatch(ctx, w, summary)
+			continue
+		}
+
 		key := regionKey{
-			regions:    strings.Join(w.Regions, ","),
-			ec2Pattern: ec2Pattern,
-			spot:       w.Spot,
+			regions: strings.Join(w.Regions, ","),
+			pattern: w.InstanceTypePattern,
+			spot:    w.Spot,
 		}
 		if g, ok := groups[key]; ok {
 			g.watches = append(g.watches, w)
 		} else {
 			groups[key] = &regionGroup{
-				regions:    w.Regions,
-				ec2Pattern: ec2Pattern,
-				spot:       w.Spot,
-				watches:    []*Watch{w},
+				regions: w.Regions,
+				pattern: w.InstanceTypePattern,
+				spot:    w.Spot,
+				watches: []*Watch{w},
 			}
 		}
 	}
 
 	for _, g := range groups {
-		if err := p.pollGroup(ctx, g.regions, g.ec2Pattern, g.spot, g.watches, summary); err != nil {
+		if err := p.pollGroup(ctx, g.regions, g.pattern, g.spot, g.watches, summary); err != nil {
 			// Log but don't fail the entire poll cycle
-			fmt.Fprintf(os.Stderr, "Warning: poll failed for pattern %q: %v\n", g.ec2Pattern, err)
+			fmt.Fprintf(os.Stderr, "Warning: poll failed for pattern %q: %v\n", g.pattern, err)
 			continue
 		}
 	}
@@ -143,10 +151,87 @@ func (p *Poller) PollAll(ctx context.Context) (*PollSummary, error) {
 // match events (launched or notified). Useful for testing.
 func (p *Poller) PollWatch(ctx context.Context, w *Watch) ([]MatchResult, error) {
 	summary := &PollSummary{}
-	if err := p.pollGroup(ctx, w.Regions, EC2EquivalentPattern(w.Service, w.InstanceTypePattern), w.Spot, []*Watch{w}, summary); err != nil {
+	if normalizeService(w.Service) == ServiceSageMaker {
+		p.pollSageMakerWatch(ctx, w, summary)
+		return summary.Matches, nil
+	}
+	if err := p.pollGroup(ctx, w.Regions, w.InstanceTypePattern, w.Spot, []*Watch{w}, summary); err != nil {
 		return nil, err
 	}
 	return summary.Matches, nil
+}
+
+// pollSageMakerWatch submits/tracks the user's SageMaker job for one watch and
+// records the resulting state transition, mirroring the EC2 capacity→retry,
+// terminal→fail, success→matched semantics.
+func (p *Poller) pollSageMakerWatch(ctx context.Context, w *Watch, summary *PollSummary) {
+	now := time.Now().UTC()
+	m := &MatchResult{
+		WatchID:      w.WatchID,
+		UserID:       w.UserID,
+		Service:      ServiceSageMaker,
+		InstanceType: w.InstanceTypePattern,
+		MatchedAt:    now,
+	}
+
+	// notify-only SageMaker watches don't submit a job — there's nothing to do
+	// here beyond marking polled (a real capacity signal would require a launch).
+	if w.Action == ActionNotify || p.sagemaker == nil {
+		_ = p.store.UpdateLastPolled(ctx, w.WatchID)
+		summary.Retrying++
+		return
+	}
+
+	outcome, err := p.sagemaker.Launch(ctx, w, m)
+	if err != nil && p.verbose {
+		fmt.Fprintf(os.Stderr, "Watch %s (sagemaker, %s): %v\n", w.WatchID, failureLabel(outcome.Kind), err)
+	}
+
+	// Persist the in-flight job name (set on submit, cleared on capacity failure).
+	if outcome.ClearJobName {
+		_ = p.store.UpdateSageMakerJob(ctx, w.WatchID, "")
+	} else if outcome.JobName != "" && outcome.JobName != w.SageMakerJobName {
+		_ = p.store.UpdateSageMakerJob(ctx, w.WatchID, outcome.JobName)
+	}
+
+	p.recordOutcome(ctx, w, m, outcome.Kind, summary)
+}
+
+// recordOutcome applies the shared capacity/terminal/success state machine: a
+// capacity failure keeps the watch active (retry next cycle); a terminal failure
+// stops it as failed; success records the match, notifies, and marks matched.
+func (p *Poller) recordOutcome(ctx context.Context, w *Watch, m *MatchResult, failure FailureKind, summary *PollSummary) {
+	if failure == FailureCapacity {
+		if p.verbose {
+			fmt.Fprintf(os.Stderr, "Watch %s: capacity unavailable; will retry next cycle\n", w.WatchID)
+		}
+		summary.Retrying++
+		_ = p.store.UpdateLastPolled(ctx, w.WatchID)
+		return
+	}
+
+	if err := p.store.RecordMatch(ctx, w, m); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to record match for %s: %v\n", w.WatchID, err)
+	}
+	if p.notifier != nil {
+		if err := p.notifier.Notify(ctx, w, m); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: notification failed for %s: %v\n", w.WatchID, err)
+		}
+	}
+
+	endStatus := StatusMatched
+	if failure == FailureTerminal {
+		endStatus = StatusFailed
+		summary.Failed++
+	} else if m.ActionTaken == "spawned" || m.ActionTaken == "held" || m.ActionTaken == "sagemaker_launched" {
+		summary.Launched++
+	} else {
+		summary.Notified++
+	}
+	if err := p.store.UpdateWatchStatus(ctx, w.WatchID, endStatus); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to update watch status for %s: %v\n", w.WatchID, err)
+	}
+	summary.Matches = append(summary.Matches, *m)
 }
 
 func (p *Poller) pollGroup(ctx context.Context, regions []string, pattern string, spot bool, watches []*Watch, summary *PollSummary) error {
@@ -229,15 +314,6 @@ func (p *Poller) pollGroup(ctx context.Context, regions []string, pattern string
 		}
 
 		if bestMatch != nil {
-			// For SageMaker watches the EC2 result is a capacity proxy: relabel
-			// the match as the ml.* type and record which EC2 type backed it so
-			// notifications make the proxy explicit (#7).
-			if normalizeService(w.Service) == ServiceSageMaker {
-				bestMatch.Service = ServiceSageMaker
-				bestMatch.ProxiedFrom = bestMatch.InstanceType
-				bestMatch.InstanceType = sageMakerType(bestMatch.InstanceType)
-			}
-
 			if p.verbose {
 				fmt.Fprintf(os.Stderr, "Match found for watch %s: %s in %s at $%.4f/hr\n",
 					w.WatchID, bestMatch.InstanceType, bestMatch.Region, bestMatch.Price)
@@ -246,16 +322,9 @@ func (p *Poller) pollGroup(ctx context.Context, regions []string, pattern string
 			// Execute the action. The launch IS the capacity test: cheap signals
 			// (offerings, spot price) only decide it's worth attempting — they
 			// never prove capacity. So a capacity failure here is expected and
-			// must be retried, not treated as terminal. SageMaker matches are
-			// proxies for an ml.* type that EC2 spawn/hold cannot act on, so they
-			// force notify regardless of the stored action.
-			action := w.Action
-			if normalizeService(w.Service) == ServiceSageMaker {
-				action = ActionNotify
-			}
-
+			// must be retried, not treated as terminal.
 			failure := FailureNone
-			switch action {
+			switch w.Action {
 			case ActionSpawn:
 				if p.spawner != nil {
 					if err := p.spawner.Spawn(ctx, w, bestMatch); err != nil {
@@ -280,44 +349,7 @@ func (p *Poller) pollGroup(ctx context.Context, regions []string, pattern string
 				bestMatch.ActionTaken = "notified"
 			}
 
-			// A capacity failure means "no capacity right now" — keep the watch
-			// active so the next poll retries (bounded by the watch TTL). Only a
-			// success or a terminal failure ends polling.
-			if failure == FailureCapacity {
-				if p.verbose {
-					fmt.Fprintf(os.Stderr, "Watch %s: capacity unavailable on launch; will retry next cycle\n", w.WatchID)
-				}
-				summary.Retrying++
-				_ = p.store.UpdateLastPolled(ctx, w.WatchID)
-				continue
-			}
-
-			// Record the match/attempt (success or terminal failure).
-			if err := p.store.RecordMatch(ctx, w, bestMatch); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to record match for %s: %v\n", w.WatchID, err)
-			}
-
-			// Send notifications.
-			if p.notifier != nil {
-				if err := p.notifier.Notify(ctx, w, bestMatch); err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: notification failed for %s: %v\n", w.WatchID, err)
-				}
-			}
-
-			// Terminal failure stops the watch as failed; otherwise it matched.
-			endStatus := StatusMatched
-			if failure == FailureTerminal {
-				endStatus = StatusFailed
-				summary.Failed++
-			} else if bestMatch.ActionTaken == "spawned" || bestMatch.ActionTaken == "held" {
-				summary.Launched++
-			} else {
-				summary.Notified++
-			}
-			if err := p.store.UpdateWatchStatus(ctx, w.WatchID, endStatus); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to update watch status for %s: %v\n", w.WatchID, err)
-			}
-			summary.Matches = append(summary.Matches, *bestMatch)
+			p.recordOutcome(ctx, w, bestMatch, failure, summary)
 		} else {
 			_ = p.store.UpdateLastPolled(ctx, w.WatchID)
 		}

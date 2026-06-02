@@ -67,6 +67,31 @@ func (n *Notifier) sendEmail(ctx context.Context, email string, w *Watch, m *Mat
 		spotLabel = "Spot"
 	}
 
+	if normalizeService(w.Service) == ServiceSageMaker {
+		// SageMaker: lagotto submitted the user's job and it got capacity.
+		subject := fmt.Sprintf("[lagotto] SageMaker job launched for %s in %s", m.InstanceType, m.Region)
+		body := fmt.Sprintf(`Your SageMaker job for watch %s has been provisioned.
+
+Instance Type: %s
+Region: %s
+Matched At: %s
+Watch Pattern: %s
+Action Taken: %s
+`,
+			w.WatchID, m.InstanceType, m.Region,
+			m.MatchedAt.Format(time.RFC3339), w.InstanceTypePattern, m.ActionTaken,
+		)
+		if m.InstanceID != "" {
+			body += fmt.Sprintf("SageMaker Job ARN: %s\n", m.InstanceID)
+		}
+		_, err := n.snsClient.Publish(ctx, &sns.PublishInput{
+			TopicArn: aws.String(n.topicArn),
+			Subject:  aws.String(subject),
+			Message:  aws.String(body),
+		})
+		return err
+	}
+
 	subject := fmt.Sprintf("[lagotto] %s capacity found in %s", m.InstanceType, m.Region)
 	body := fmt.Sprintf(`Capacity found for your watch %s
 
@@ -88,20 +113,6 @@ Action Taken: %s
 		w.InstanceTypePattern,
 		m.ActionTaken,
 	)
-
-	if normalizeService(w.Service) == ServiceSageMaker {
-		body += fmt.Sprintf(`
-NOTE: This is an EC2-capacity proxy, not a direct SageMaker capacity check, and
-lagotto did NOT launch anything — for EC2 watches the launch itself is the only
-true capacity test, but lagotto cannot submit your SageMaker job for you.
-
-AWS exposes no read-only SageMaker capacity API, so lagotto watched the
-correlated EC2 type %s as a hint. It is now worth RETRYING your SageMaker job
-for %s — but EC2 %s availability does not guarantee SageMaker capacity (separate
-managed pool), so the job may still return CapacityError. If it does, leave the
-watch running and retry on the next notification.
-`, m.ProxiedFrom, m.InstanceType, m.ProxiedFrom)
-	}
 
 	if m.InstanceID != "" {
 		body += fmt.Sprintf("Instance ID: %s\n", m.InstanceID)
@@ -129,8 +140,6 @@ func (n *Notifier) sendWebhook(ctx context.Context, url string, w *Watch, m *Mat
 	}
 	if normalizeService(w.Service) == ServiceSageMaker {
 		payload["service"] = string(ServiceSageMaker)
-		payload["proxied_from"] = m.ProxiedFrom
-		payload["capacity_kind"] = "ec2_proxy"
 	}
 	if m.InstanceID != "" {
 		payload["instance_id"] = m.InstanceID

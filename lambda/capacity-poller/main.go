@@ -57,8 +57,9 @@ func init() {
 	}
 
 	poller = watcher.NewPoller(truffleClient, store, true, watcher.PollerOpts{
-		Notifier: notifier,
-		Spawner:  spawner,
+		Notifier:  notifier,
+		Spawner:   spawner,
+		SageMaker: watcher.NewSageMakerLauncher(cfg),
 	})
 
 	schedulerClient = scheduler.NewFromConfig(cfg)

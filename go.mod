@@ -3,16 +3,17 @@ module github.com/spore-host/lagotto
 go 1.26
 
 require (
-	github.com/aws/aws-sdk-go-v2 v1.41.7
+	github.com/aws/aws-sdk-go-v2 v1.41.9
 	github.com/aws/aws-sdk-go-v2/config v1.32.17
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.16
 	github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue v1.20.39
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.57.3
 	github.com/aws/aws-sdk-go-v2/service/ec2 v1.301.0
+	github.com/aws/aws-sdk-go-v2/service/sagemaker v1.250.2
 	github.com/aws/aws-sdk-go-v2/service/scheduler v1.17.24
 	github.com/aws/aws-sdk-go-v2/service/sns v1.39.17
 	github.com/aws/aws-sdk-go-v2/service/sts v1.42.1
-	github.com/aws/smithy-go v1.25.1
+	github.com/aws/smithy-go v1.26.0
 	github.com/google/uuid v1.6.0
 	github.com/scttfrdmn/substrate v0.65.0
 	github.com/spf13/cobra v1.10.2
@@ -26,8 +27,8 @@ require (
 	github.com/BurntSushi/toml v1.4.0 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.10 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.18.23 // indirect
-	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.23 // indirect
-	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.23 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.25 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.25 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/v4a v1.4.24 // indirect
 	github.com/aws/aws-sdk-go-v2/service/dynamodbstreams v1.32.16 // indirect
 	github.com/aws/aws-sdk-go-v2/service/fsx v1.65.10 // indirect
