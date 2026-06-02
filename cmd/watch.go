@@ -19,14 +19,15 @@ import (
 )
 
 var (
-	watchRegions     []string
-	watchSpot        bool
-	watchMaxPrice    float64
-	watchAction      string
-	watchTTL         string
-	watchNotify      []string
-	watchSpawnConfig string
-	watchService     string
+	watchRegions         []string
+	watchSpot            bool
+	watchMaxPrice        float64
+	watchAction          string
+	watchTTL             string
+	watchNotify          []string
+	watchSpawnConfig     string
+	watchSageMakerConfig string
+	watchService         string
 )
 
 var watchCmd = &cobra.Command{
@@ -35,13 +36,13 @@ var watchCmd = &cobra.Command{
 	Long: `Watch for instance availability across regions and AZs.
 
 The pattern supports wildcards: "p5.*" matches all p5 sizes, "g5.xlarge" is exact.
-When capacity is found matching your criteria, the configured action is taken.
+lagotto attempts to launch the requested instance and retries until it succeeds
+or the watch TTL expires — the launch itself is the capacity test (neither EC2
+nor SageMaker exposes a capacity API).
 
-With --service sagemaker, lagotto watches SageMaker ml.* capacity using the
-correlated EC2 family as a proxy (ml.g5.2xlarge -> g5.2xlarge). AWS exposes no
-direct SageMaker capacity API, so this is a heuristic: EC2 availability strongly
-indicates — but does not guarantee — SageMaker capacity. SageMaker watches
-support --action notify only.`,
+With --service sagemaker, lagotto submits your SageMaker job (--sagemaker-config)
+directly and retries it on CapacityError until SageMaker provisions it. SageMaker
+has its own AWS-managed compute pool, so the attempt targets SageMaker itself.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runWatch,
 }
@@ -56,7 +57,8 @@ func init() {
 	watchCmd.Flags().StringVar(&watchTTL, "ttl", "24h", "How long to keep watching (e.g., 24h, 7d)")
 	watchCmd.Flags().StringSliceVar(&watchNotify, "notify", nil, "Notification channels (e.g., email:user@example.com, webhook:https://...)")
 	watchCmd.Flags().StringVar(&watchSpawnConfig, "spawn-config", "", "YAML file with spawn LaunchConfig (required for --action spawn)")
-	watchCmd.Flags().StringVar(&watchService, "service", "ec2", "Capacity service: ec2, or sagemaker (EC2-proxy for ml.* types)")
+	watchCmd.Flags().StringVar(&watchSageMakerConfig, "sagemaker-config", "", "YAML/JSON file with the SageMaker job definition (required for --service sagemaker)")
+	watchCmd.Flags().StringVar(&watchService, "service", "ec2", "Capacity service: ec2, or sagemaker (submits your SageMaker job for ml.* types)")
 }
 
 func runWatch(cmd *cobra.Command, args []string) error {
@@ -89,22 +91,35 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid action %q: must be notify, spawn, or hold", watchAction)
 	}
 
-	// SageMaker is watched via an EC2 proxy; spawn/hold are EC2-only actions
-	// (they launch an instance or reserve EC2 capacity with the matched type,
-	// which would be the invalid ml.* type for SageMaker). Restrict to notify.
-	if service == watcher.ServiceSageMaker && action != watcher.ActionNotify {
-		return fmt.Errorf("--service sagemaker supports --action notify only (got %q); spawn/hold act on EC2 instance types", watchAction)
+	// hold creates an EC2 On-Demand Capacity Reservation and has no SageMaker
+	// equivalent; reject it for SageMaker watches.
+	if service == watcher.ServiceSageMaker && action == watcher.ActionHold {
+		return fmt.Errorf("--action hold is not supported for --service sagemaker (no capacity-reservation equivalent)")
 	}
 
-	// Load spawn config if action is spawn
+	// Load spawn config if action is spawn (EC2 watches).
 	var launchConfigJSON []byte
-	if action == watcher.ActionSpawn {
+	if service == watcher.ServiceEC2 && action == watcher.ActionSpawn {
 		if watchSpawnConfig == "" {
 			return fmt.Errorf("--spawn-config is required when --action=spawn")
 		}
 		launchConfigJSON, err = loadSpawnConfig(watchSpawnConfig)
 		if err != nil {
 			return fmt.Errorf("load spawn config: %w", err)
+		}
+	}
+
+	// Load the SageMaker job definition. lagotto submits this job on each attempt
+	// and retries on CapacityError until SageMaker provisions it. Required unless
+	// the user only wants to be notified.
+	var sageMakerJobJSON []byte
+	if service == watcher.ServiceSageMaker && action != watcher.ActionNotify {
+		if watchSageMakerConfig == "" {
+			return fmt.Errorf("--sagemaker-config is required for --service sagemaker (the job lagotto submits); use --action notify to only be told")
+		}
+		sageMakerJobJSON, err = loadSpawnConfig(watchSageMakerConfig)
+		if err != nil {
+			return fmt.Errorf("load sagemaker config: %w", err)
 		}
 	}
 
@@ -140,6 +155,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		Action:              action,
 		NotifyChannels:      channels,
 		LaunchConfigJSON:    launchConfigJSON,
+		SageMakerJobJSON:    sageMakerJobJSON,
 		CreatedAt:           now,
 		UpdatedAt:           now,
 		ExpiresAt:           expiresAt,
@@ -175,8 +191,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(cmd.OutOrStdout(), "Created watch %s\n", w.WatchID)
 	fmt.Fprintf(cmd.OutOrStdout(), "  Pattern:  %s\n", w.InstanceTypePattern)
 	if w.Service == watcher.ServiceSageMaker {
-		fmt.Fprintf(cmd.OutOrStdout(), "  Service:  sagemaker (EC2-proxy via %s; \"likely available\", not a direct SageMaker check)\n",
-			watcher.EC2EquivalentPattern(w.Service, w.InstanceTypePattern))
+		fmt.Fprintf(cmd.OutOrStdout(), "  Service:  sagemaker (submits your SageMaker job, retries on CapacityError)\n")
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "  Regions:  %v\n", displayRegions(w.Regions))
 	fmt.Fprintf(cmd.OutOrStdout(), "  Spot:     %v\n", w.Spot)
@@ -184,8 +199,11 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(cmd.OutOrStdout(), "  Max price: $%.4f/hr\n", w.MaxPrice)
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "  Action:   %s\n", w.Action)
-	if action == watcher.ActionSpawn {
+	if action == watcher.ActionSpawn && w.Service == watcher.ServiceEC2 {
 		fmt.Fprintf(cmd.OutOrStdout(), "  Spawn config: %s\n", watchSpawnConfig)
+	}
+	if w.Service == watcher.ServiceSageMaker && len(w.SageMakerJobJSON) > 0 {
+		fmt.Fprintf(cmd.OutOrStdout(), "  SageMaker config: %s\n", watchSageMakerConfig)
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "  Expires:  %s\n", w.ExpiresAt.Format(time.RFC3339))
 	return nil

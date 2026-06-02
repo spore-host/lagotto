@@ -98,3 +98,31 @@ func ClassifyFailure(err error) FailureKind {
 	// Non-AWS error (network, marshalling, client init). Treat as transient.
 	return FailureCapacity
 }
+
+// ClassifySageMakerFailure decides what to do with a SageMaker job attempt.
+// Unlike EC2 (synchronous InsufficientInstanceCapacity), SageMaker capacity
+// failure is asynchronous: CreateTrainingJob succeeds, and the job later reaches
+// status Failed with a FailureReason containing "CapacityError: ...". This
+// classifier maps the job status + FailureReason to the same FailureKind the
+// poller already acts on:
+//
+//   - terminal job status (Failed) with a CapacityError reason -> FailureCapacity
+//     (no capacity right now; retry next cycle).
+//   - terminal Failed with any other reason -> FailureTerminal (bad config/IAM/
+//     image; retrying won't help).
+//   - InProgress/Completed/Stopping/Stopped -> FailureNone (the job launched;
+//     capacity exists — success).
+func ClassifySageMakerFailure(jobStatus, failureReason string) FailureKind {
+	switch jobStatus {
+	case "Failed":
+		if strings.Contains(failureReason, "CapacityError") ||
+			strings.Contains(failureReason, "Unable to provision requested ML compute capacity") {
+			return FailureCapacity
+		}
+		return FailureTerminal
+	default:
+		// InProgress, Completed, Stopping, Stopped — instances were provisioned,
+		// so capacity exists. Not a failure.
+		return FailureNone
+	}
+}

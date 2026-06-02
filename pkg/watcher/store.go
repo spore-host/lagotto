@@ -247,6 +247,34 @@ func (s *Store) UpdateLastPolled(ctx context.Context, watchID string) error {
 	return nil
 }
 
+// UpdateSageMakerJob sets (or clears, with an empty name) the in-flight
+// SageMaker job name tracked on a watch between poll cycles.
+func (s *Store) UpdateSageMakerJob(ctx context.Context, watchID, jobName string) error {
+	var expr string
+	values := map[string]types.AttributeValue{
+		":now": &types.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)},
+	}
+	if jobName == "" {
+		// Clear the attribute when no job is in flight.
+		expr = "REMOVE sagemaker_job_name SET updated_at = :now"
+	} else {
+		expr = "SET sagemaker_job_name = :job, updated_at = :now"
+		values[":job"] = &types.AttributeValueMemberS{Value: jobName}
+	}
+	_, err := s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: &s.watchesTable,
+		Key: map[string]types.AttributeValue{
+			"watch_id": &types.AttributeValueMemberS{Value: watchID},
+		},
+		UpdateExpression:          aws.String(expr),
+		ExpressionAttributeValues: values,
+	})
+	if err != nil {
+		return fmt.Errorf("update sagemaker job: %w", err)
+	}
+	return nil
+}
+
 // ListMatchHistory returns match history, optionally filtered by watch ID.
 func (s *Store) ListMatchHistory(ctx context.Context, watchID string) ([]MatchResult, error) {
 	if watchID != "" {

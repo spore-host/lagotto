@@ -46,3 +46,29 @@ func TestClassifyFailure(t *testing.T) {
 		})
 	}
 }
+
+// TestClassifySageMakerFailure covers the async SageMaker job-status mapping
+// used by the SageMaker launcher (#14).
+func TestClassifySageMakerFailure(t *testing.T) {
+	cases := []struct {
+		name          string
+		status        string
+		failureReason string
+		want          watcher.FailureKind
+	}{
+		{"capacity error", "Failed", "CapacityError: Unable to provision requested ML compute capacity.", watcher.FailureCapacity},
+		{"capacity phrase only", "Failed", "Unable to provision requested ML compute capacity. Please retry.", watcher.FailureCapacity},
+		{"terminal bad image", "Failed", "ClientError: image does not exist", watcher.FailureTerminal},
+		{"terminal quota", "Failed", "ResourceLimitExceeded: account limit", watcher.FailureTerminal},
+		{"in progress is success", "InProgress", "", watcher.FailureNone},
+		{"completed is success", "Completed", "", watcher.FailureNone},
+		{"stopped is success", "Stopped", "", watcher.FailureNone},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := watcher.ClassifySageMakerFailure(c.status, c.failureReason); got != c.want {
+				t.Errorf("ClassifySageMakerFailure(%q, %q) = %v, want %v", c.status, c.failureReason, got, c.want)
+			}
+		})
+	}
+}

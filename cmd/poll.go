@@ -53,11 +53,13 @@ func runPoll(cmd *cobra.Command, args []string) error {
 	}
 
 	holder := watcher.NewHolder(cfg)
+	sagemaker := watcher.NewSageMakerLauncher(cfg)
 
 	poller := watcher.NewPoller(truffleClient, store, verbose, watcher.PollerOpts{
-		Notifier: notifier,
-		Spawner:  spawner,
-		Holder:   holder,
+		Notifier:  notifier,
+		Spawner:   spawner,
+		Holder:    holder,
+		SageMaker: sagemaker,
 	})
 
 	summary, err := poller.PollAll(ctx)
