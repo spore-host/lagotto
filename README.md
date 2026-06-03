@@ -38,7 +38,7 @@ lagotto watch "g5.xlarge" --action spawn --spawn-config my-job.yaml
 lagotto list
 lagotto status <watch-id>
 lagotto extend <watch-id> --ttl 48h
-lagotto cancel <watch-id>
+lagotto cancel <watch-id>          # prompts for confirmation; -y/--yes to skip
 lagotto history
 ```
 
