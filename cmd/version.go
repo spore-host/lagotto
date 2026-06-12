@@ -3,8 +3,8 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/spore-host/libs/update"
 	"github.com/spf13/cobra"
+	"github.com/spore-host/libs/update"
 )
 
 var (
@@ -24,15 +24,22 @@ var versionCmd = &cobra.Command{
 		fmt.Printf("\nProject:    https://spore.host\n")
 
 		// Explicit, user-initiated check — report whether a newer release exists.
-		if res := update.CheckNow("lagotto", Version); res == nil {
-			fmt.Printf("\n(couldn't check for updates)\n")
-		} else if res.HasUpdate() {
-			fmt.Printf("\n⬆️  A newer version is available: %s → %s\n    %s\n",
-				res.CurrentVersion, res.LatestVersion, res.UpdateURL)
-		} else {
-			fmt.Printf("\n✓ You're on the latest version.\n")
-		}
+		fmt.Print(renderUpdateNotice(update.CheckNow("lagotto", Version)))
 	},
+}
+
+// renderUpdateNotice formats the on-demand update check for the version command.
+// Pure, so it's unit-tested without a network call.
+func renderUpdateNotice(res *update.Result) string {
+	switch {
+	case res == nil:
+		return "\n(couldn't check for updates)\n"
+	case res.HasUpdate():
+		return fmt.Sprintf("\n⬆️  A newer version is available: %s → %s\n    %s\n",
+			res.CurrentVersion, res.LatestVersion, res.UpdateURL)
+	default:
+		return "\n✓ You're on the latest version.\n"
+	}
 }
 
 func init() {
