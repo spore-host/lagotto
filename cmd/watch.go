@@ -103,7 +103,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		if watchSpawnConfig == "" {
 			return fmt.Errorf("--spawn-config is required when --action=spawn")
 		}
-		launchConfigJSON, err = loadSpawnConfig(watchSpawnConfig)
+		launchConfigJSON, err = loadEC2SpawnConfig(watchSpawnConfig)
 		if err != nil {
 			return fmt.Errorf("load spawn config: %w", err)
 		}
@@ -207,6 +207,35 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "  Expires:  %s\n", w.ExpiresAt.Format(time.RFC3339))
 	return nil
+}
+
+// loadEC2SpawnConfig reads an EC2 --spawn-config YAML file, normalizes its keys
+// (so snake_case / kebab-case / CamelCase all map), validates it parses into a
+// SpawnConfigFile, and stores it as that struct's JSON so the spawner reads back
+// exactly the fields it will launch with. This is what fixes the "settings
+// silently dropped" gap (lagotto#19 issue #3): a key the struct doesn't know is
+// surfaced here at watch-creation rather than ignored at launch.
+func loadEC2SpawnConfig(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	cfg, err := watcher.ParseSpawnConfigYAML(data)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.InstanceType == "" && cfg.AMI == "" {
+		// A spawn config with neither an instance type nor an AMI is almost
+		// certainly a mis-keyed file (e.g. the user wrote `instancetype:` under a
+		// nested block). The instance type is overridden by the matched type at
+		// launch, so it's not strictly required — but flag the empty-shell case.
+		return nil, fmt.Errorf("spawn config %s has no recognized fields (check key names: instance_type, on_complete, pre_stop, command, …)", path)
+	}
+	jsonBytes, err := json.Marshal(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("marshal spawn config: %w", err)
+	}
+	return jsonBytes, nil
 }
 
 // loadSpawnConfig reads a YAML file and converts it to JSON bytes for storage.
