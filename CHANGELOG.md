@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `lagotto version` now reports whether a newer release is available (an
+  explicit, on-demand check) (#21).
+
 ### Fixed
 - `--action spawn` now launches a fully-functional spore via spawn's headless
   launcher (`launcher.Provision`): the AMI is auto-detected, the spored bootstrap
