@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.39.2] - 2026-06-12
+
+### Fixed
+- Bump spawn to v0.44.2, which stops sending an empty `KeyName` to
+  `RunInstances` (spawn#130). This was the second blocker on `--action spawn`
+  launches (after the user-data fix in 0.39.1) — with both fixed, the
+  watch→launch→run flow completes a headless, SSM-only launch end to end.
+
 ## [0.39.1] - 2026-06-12
 
 ### Fixed
@@ -67,7 +75,8 @@ Initial tagged release from the standalone `spore-host/lagotto` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/lagotto/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.39.1...HEAD
+[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.39.2...HEAD
+[0.39.2]: https://github.com/spore-host/lagotto/compare/v0.39.1...v0.39.2
 [0.39.1]: https://github.com/spore-host/lagotto/compare/v0.39.0...v0.39.1
 [0.39.0]: https://github.com/spore-host/lagotto/compare/v0.38.1...v0.39.0
 [0.38.1]: https://github.com/spore-host/lagotto/compare/v0.38.0...v0.38.1
