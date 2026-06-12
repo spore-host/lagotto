@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.39.1] - 2026-06-12
+
+### Fixed
+- Bump spawn to v0.44.1, which fixes user-data base64 encoding in
+  `launcher.Provision` (spawn#127). Before this, `--action spawn` launches failed
+  at `RunInstances` with "Invalid BASE64 encoding of user data" — so the
+  watch→launch→run flow now actually completes its first launch.
+
 ## [0.39.0] - 2026-06-12
 
 ### Added
@@ -59,7 +67,8 @@ Initial tagged release from the standalone `spore-host/lagotto` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/lagotto/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.39.0...HEAD
+[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.39.1...HEAD
+[0.39.1]: https://github.com/spore-host/lagotto/compare/v0.39.0...v0.39.1
 [0.39.0]: https://github.com/spore-host/lagotto/compare/v0.38.1...v0.39.0
 [0.38.1]: https://github.com/spore-host/lagotto/compare/v0.38.0...v0.38.1
 [0.38.0]: https://github.com/spore-host/lagotto/compare/v0.37.0...v0.38.0
