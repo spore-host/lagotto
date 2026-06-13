@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `lagotto poll --daemon [--interval 5m]`: a built-in foreground polling loop, so
+  `watch --action spawn` works hands-off in your own account with **no Lambda /
+  EventBridge / CloudFormation** (#30). It runs the same poll path as the hosted
+  Lambda, polls immediately then every interval, and exits cleanly when no active
+  watches remain or on Ctrl-C / SIGTERM. The hosted multi-tenant Lambda poller
+  stays as the team option. Addresses the "nothing polls the watch in an
+  end-user account" gap (#29).
+
 ## [0.39.2] - 2026-06-12
 
 ### Fixed

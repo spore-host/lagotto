@@ -42,6 +42,24 @@ lagotto cancel <watch-id>          # prompts for confirmation; -y/--yes to skip
 lagotto history
 ```
 
+## Polling
+
+A watch only fires when something polls it. Two ways:
+
+```bash
+# Infra-free: poll in the foreground until the watch fires/expires (no Lambda,
+# no CloudFormation). Keep it running — or under your own supervisor/cron.
+lagotto poll --daemon --interval 5m
+
+# One-off cycle (testing/debugging)
+lagotto poll
+```
+
+`--daemon` runs the same poll loop the hosted Lambda does, so
+`lagotto watch --action spawn` works hands-off in your own account with zero
+extra infrastructure. The hosted, multi-tenant Lambda poller (deployed via
+CloudFormation) remains the option for teams — see [DEPLOYMENT.md](DEPLOYMENT.md).
+
 ## Actions
 
 | Action | Description |
