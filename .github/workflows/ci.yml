@@ -26,7 +26,12 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: '1.26'
-          cache: true
+          # cache MUST stay false on the self-hosted orion runners: their
+          # filesystem persists between jobs, so ~/go/pkg/mod is already warm.
+          # setup-go's cache restore untars its archive over those files →
+          # "tar: Cannot open: File exists", failing the job in Setup Go before
+          # any code runs. Go reuses the on-disk module cache directly.
+          cache: false
 
       - name: Build
         run: go build ./...
