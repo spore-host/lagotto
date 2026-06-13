@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.40.0] - 2026-06-13
+
 ### Added
 - `lagotto poll --daemon [--interval 5m]`: a built-in foreground polling loop, so
   `watch --action spawn` works hands-off in your own account with **no Lambda /
@@ -84,7 +86,8 @@ Initial tagged release from the standalone `spore-host/lagotto` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/lagotto/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.39.2...HEAD
+[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.40.0...HEAD
+[0.40.0]: https://github.com/spore-host/lagotto/compare/v0.39.2...v0.40.0
 [0.39.2]: https://github.com/spore-host/lagotto/compare/v0.39.1...v0.39.2
 [0.39.1]: https://github.com/spore-host/lagotto/compare/v0.39.0...v0.39.1
 [0.39.0]: https://github.com/spore-host/lagotto/compare/v0.38.1...v0.39.0
