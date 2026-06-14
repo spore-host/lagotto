@@ -46,13 +46,9 @@ func (s *Spawner) Spawn(ctx context.Context, w *Watch, m *MatchResult) error {
 
 	cfg := file.ToLaunchConfig()
 
-	// Override region and AZ with where capacity was actually found, and pin the
-	// matched instance type (the watch pattern may have resolved to a specific
-	// type) and spot-ness.
+	// Override region and pin the matched instance type (the watch pattern may
+	// have resolved to a specific type) and spot-ness. AZ is set per-attempt below.
 	cfg.Region = m.Region
-	if m.AvailabilityZone != "" {
-		cfg.AvailabilityZone = m.AvailabilityZone
-	}
 	cfg.InstanceType = m.InstanceType
 	cfg.Spot = m.IsSpot
 
@@ -71,15 +67,37 @@ func (s *Spawner) Spawn(ctx context.Context, w *Watch, m *MatchResult) error {
 		cfg.IamInstanceProfile = profile
 	}
 
-	result, err := launcher.Provision(ctx, s.client, cfg, launcher.Options{
-		// Keyless: the poller Lambda has no SSH key. SSM-only launch.
-	})
-	if err != nil {
-		m.ActionTaken = "spawn_failed"
-		return fmt.Errorf("launch instance: %w", err)
+	// Try each candidate AZ in preference order, falling through to the next on a
+	// capacity failure. AZ breadth within a region is free (same-region data
+	// locality), so exhausting all offered AZs in one attempt maximizes the chance
+	// of catching scarce capacity before backing off to the next poll (#34). A
+	// terminal failure (bad AMI/IAM/quota) stops immediately — retrying other AZs
+	// won't help. Falls back to a single AZ-unpinned attempt when no candidates.
+	attempts := m.CandidateAZs
+	if len(attempts) == 0 {
+		attempts = []string{m.AvailabilityZone} // may be "" → let EC2 choose the AZ
 	}
 
-	m.InstanceID = result.InstanceID
-	m.ActionTaken = "spawned"
-	return nil
+	var lastErr error
+	for _, az := range attempts {
+		cfg.AvailabilityZone = az
+		result, err := launcher.Provision(ctx, s.client, cfg, launcher.Options{
+			// Keyless: the poller Lambda has no SSH key. SSM-only launch.
+		})
+		if err == nil {
+			m.InstanceID = result.InstanceID
+			m.AvailabilityZone = az
+			m.ActionTaken = "spawned"
+			return nil
+		}
+		lastErr = err
+		// Only fall through to the next AZ on a capacity failure; a terminal error
+		// (bad config) will fail identically in every AZ.
+		if ClassifyFailure(err) == FailureTerminal {
+			break
+		}
+	}
+
+	m.ActionTaken = "spawn_failed"
+	return fmt.Errorf("launch instance (tried %d AZ(s): %v): %w", len(attempts), attempts, lastErr)
 }

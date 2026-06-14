@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.41.0] - 2026-06-14
+
+### Added
+- `lagotto watch --azs us-west-2b,us-west-2c` pins/orders the availability zones
+  eligible within the watched region(s). Empty = all AZs. Widening across AZs is
+  free (same-region data locality), so by design all eligible AZs are tried each
+  poll (#34).
+
+### Changed
+- On an `--action spawn` match, lagotto now tries **every** offered AZ (in
+  preference order) within a poll, retrying the next on `InsufficientInstance
+  Capacity`, instead of attempting only one AZ and giving up until the next poll.
+  For capacity-scarce types this materially shortens the wait at zero extra cost,
+  since each AZ is an independent capacity pool reachable with no cross-AZ data
+  charge. A terminal failure (bad AMI/IAM/quota) still stops immediately (#34).
+
+### Documentation
+- `--regions` help now notes that widening across regions can break data
+  co-location (cross-region egress) and to prefer `--azs` within the data's
+  region first (#34).
+
 ## [0.40.0] - 2026-06-13
 
 ### Added
@@ -86,7 +107,8 @@ Initial tagged release from the standalone `spore-host/lagotto` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/lagotto/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.40.0...HEAD
+[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.41.0...HEAD
+[0.41.0]: https://github.com/spore-host/lagotto/compare/v0.40.0...v0.41.0
 [0.40.0]: https://github.com/spore-host/lagotto/compare/v0.39.2...v0.40.0
 [0.39.2]: https://github.com/spore-host/lagotto/compare/v0.39.1...v0.39.2
 [0.39.1]: https://github.com/spore-host/lagotto/compare/v0.39.0...v0.39.1

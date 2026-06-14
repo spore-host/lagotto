@@ -204,6 +204,108 @@ func TestEvaluate_OnDemand_NoAZs(t *testing.T) {
 	}
 }
 
+func TestEvaluate_OnDemand_CarriesAllCandidateAZs(t *testing.T) {
+	w := &Watch{WatchID: "w-azs", Spot: false}
+	candidate := MatchCandidate{
+		InstanceType: truffleaws.InstanceTypeResult{
+			InstanceType:  "g5.12xlarge",
+			Region:        "us-west-2",
+			AvailableAZs:  []string{"us-west-2a", "us-west-2b", "us-west-2c"},
+			OnDemandPrice: 5.67,
+		},
+	}
+	m := Evaluate(w, candidate)
+	if m == nil {
+		t.Fatal("expected match")
+	}
+	// All offered AZs are carried for retry; the primary is the first.
+	if m.AvailabilityZone != "us-west-2a" {
+		t.Errorf("primary AZ = %q, want us-west-2a", m.AvailabilityZone)
+	}
+	if len(m.CandidateAZs) != 3 {
+		t.Errorf("CandidateAZs = %v, want all 3 offered", m.CandidateAZs)
+	}
+}
+
+func TestEvaluate_OnDemand_AZsPinnedAndOrdered(t *testing.T) {
+	// --azs pins us-west-2c,us-west-2b — only those, in that order, from the offered set.
+	w := &Watch{WatchID: "w-pin", Spot: false, AvailabilityZones: []string{"us-west-2c", "us-west-2b"}}
+	candidate := MatchCandidate{
+		InstanceType: truffleaws.InstanceTypeResult{
+			InstanceType:  "g5.12xlarge",
+			Region:        "us-west-2",
+			AvailableAZs:  []string{"us-west-2a", "us-west-2b", "us-west-2c"},
+			OnDemandPrice: 5.67,
+		},
+	}
+	m := Evaluate(w, candidate)
+	if m == nil {
+		t.Fatal("expected match")
+	}
+	want := []string{"us-west-2c", "us-west-2b"}
+	if len(m.CandidateAZs) != 2 || m.CandidateAZs[0] != "us-west-2c" || m.CandidateAZs[1] != "us-west-2b" {
+		t.Errorf("CandidateAZs = %v, want %v (pinned + ordered, us-west-2a excluded)", m.CandidateAZs, want)
+	}
+	if m.AvailabilityZone != "us-west-2c" {
+		t.Errorf("primary AZ = %q, want us-west-2c (first preference)", m.AvailabilityZone)
+	}
+}
+
+func TestEvaluate_OnDemand_PinnedAZNotOffered_NoMatch(t *testing.T) {
+	// User pinned an AZ that doesn't offer the type this poll → no match.
+	w := &Watch{WatchID: "w-pin-miss", Spot: false, AvailabilityZones: []string{"us-west-2d"}}
+	candidate := MatchCandidate{
+		InstanceType: truffleaws.InstanceTypeResult{
+			InstanceType:  "g5.12xlarge",
+			Region:        "us-west-2",
+			AvailableAZs:  []string{"us-west-2a", "us-west-2b"},
+			OnDemandPrice: 5.67,
+		},
+	}
+	if m := Evaluate(w, candidate); m != nil {
+		t.Errorf("expected no match when pinned AZ isn't offered, got %+v", m)
+	}
+}
+
+func TestEvaluate_Spot_AZPinExcludes(t *testing.T) {
+	// Spot price is in us-east-1c, but the watch pins us-east-1a → no match.
+	w := &Watch{WatchID: "w-spot-pin", Spot: true, MaxPrice: 0, AvailabilityZones: []string{"us-east-1a"}}
+	candidate := MatchCandidate{SpotPrice: &truffleaws.SpotPriceResult{
+		InstanceType: "g5.xlarge", Region: "us-east-1", AvailabilityZone: "us-east-1c", SpotPrice: 0.3,
+	}}
+	if m := Evaluate(w, candidate); m != nil {
+		t.Errorf("expected no match when spot AZ excluded by pin, got %+v", m)
+	}
+}
+
+func TestOrderAZs(t *testing.T) {
+	// No preference → offered unchanged.
+	got := orderAZs([]string{"a", "b", "c"}, nil)
+	if len(got) != 3 || got[0] != "a" {
+		t.Errorf("no-pref should return offered as-is, got %v", got)
+	}
+	// Preference filters + reorders to pref order, dropping unoffered prefs.
+	got = orderAZs([]string{"a", "b", "c"}, []string{"c", "z", "a"})
+	if len(got) != 2 || got[0] != "c" || got[1] != "a" {
+		t.Errorf("orderAZs filter+order = %v, want [c a]", got)
+	}
+}
+
+func TestAZAllowed(t *testing.T) {
+	if !azAllowed("us-west-2a", nil) {
+		t.Error("empty pref should allow any AZ")
+	}
+	if !azAllowed("", []string{"us-west-2a"}) {
+		t.Error("empty AZ should be allowed (provider reported none)")
+	}
+	if azAllowed("us-west-2b", []string{"us-west-2a"}) {
+		t.Error("AZ not in pref should be disallowed")
+	}
+	if !azAllowed("us-west-2a", []string{"us-west-2a", "us-west-2b"}) {
+		t.Error("AZ in pref should be allowed")
+	}
+}
+
 func TestWildcardToRegex(t *testing.T) {
 	tests := []struct {
 		pattern string
