@@ -20,6 +20,7 @@ import (
 
 var (
 	watchRegions         []string
+	watchAZs             []string
 	watchSpot            bool
 	watchMaxPrice        float64
 	watchAction          string
@@ -50,7 +51,8 @@ has its own AWS-managed compute pool, so the attempt targets SageMaker itself.`,
 func init() {
 	rootCmd.AddCommand(watchCmd)
 
-	watchCmd.Flags().StringSliceVarP(&watchRegions, "regions", "r", nil, "Regions to watch (comma-separated; empty = all enabled)")
+	watchCmd.Flags().StringSliceVarP(&watchRegions, "regions", "r", nil, "Regions to watch (comma-separated; empty = all enabled). Widening across regions can break data co-location (cross-region egress) — prefer --azs within your data's region first.")
+	watchCmd.Flags().StringSliceVar(&watchAZs, "azs", nil, "Availability zones to pin/order within the region(s), comma-separated (e.g. us-west-2b,us-west-2c). Empty = all AZs. AZ breadth is free (same-region data locality), so all AZs are tried each poll.")
 	watchCmd.Flags().BoolVar(&watchSpot, "spot", false, "Watch for Spot capacity (default: On-Demand)")
 	watchCmd.Flags().Float64Var(&watchMaxPrice, "max-price", 0, "Maximum acceptable price per hour (0 = any)")
 	watchCmd.Flags().StringVar(&watchAction, "action", "notify", "Action on match: notify, spawn, hold")
@@ -150,6 +152,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		Service:             service,
 		InstanceTypePattern: pattern,
 		Regions:             watchRegions,
+		AvailabilityZones:   watchAZs,
 		Spot:                watchSpot,
 		MaxPrice:            watchMaxPrice,
 		Action:              action,
@@ -194,6 +197,11 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(cmd.OutOrStdout(), "  Service:  sagemaker (submits your SageMaker job, retries on CapacityError)\n")
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "  Regions:  %v\n", displayRegions(w.Regions))
+	if len(w.AvailabilityZones) > 0 {
+		fmt.Fprintf(cmd.OutOrStdout(), "  AZs:      %v\n", w.AvailabilityZones)
+	} else {
+		fmt.Fprintf(cmd.OutOrStdout(), "  AZs:      all in region\n")
+	}
 	fmt.Fprintf(cmd.OutOrStdout(), "  Spot:     %v\n", w.Spot)
 	if w.MaxPrice > 0 {
 		fmt.Fprintf(cmd.OutOrStdout(), "  Max price: $%.4f/hr\n", w.MaxPrice)

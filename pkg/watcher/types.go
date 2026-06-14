@@ -42,7 +42,12 @@ type Watch struct {
 	Service             Service         `json:"service,omitempty" dynamodbav:"service,omitempty"`
 	InstanceTypePattern string          `json:"instance_type_pattern" dynamodbav:"instance_type_pattern"`
 	Regions             []string        `json:"regions" dynamodbav:"regions"`
-	Spot                bool            `json:"spot" dynamodbav:"spot"`
+	// AvailabilityZones optionally pins/orders which AZs within the watched
+	// region(s) are eligible (e.g. ["us-west-2b","us-west-2c"]). Empty = all AZs
+	// in the region. Widening across AZs is free (same-region data locality), so
+	// the default is "every AZ"; this lever only narrows or reorders (#34).
+	AvailabilityZones []string        `json:"availability_zones,omitempty" dynamodbav:"availability_zones,omitempty"`
+	Spot              bool            `json:"spot" dynamodbav:"spot"`
 	MaxPrice            float64         `json:"max_price,omitempty" dynamodbav:"max_price,omitempty"`
 	Action              ActionMode      `json:"action" dynamodbav:"action"`
 	NotifyChannels      []NotifyChannel `json:"notify_channels,omitempty" dynamodbav:"notify_channels,omitempty"`
@@ -71,6 +76,10 @@ type MatchResult struct {
 	Service          Service   `json:"service,omitempty" dynamodbav:"service,omitempty"`
 	Region           string    `json:"region" dynamodbav:"region"`
 	AvailabilityZone string    `json:"availability_zone" dynamodbav:"availability_zone"`
+	// CandidateAZs are all AZs (in preference order) where this type was offered
+	// this poll, so the spawner can retry the next AZ on InsufficientInstance
+	// Capacity within a cycle. AvailabilityZone is CandidateAZs[0] (#34).
+	CandidateAZs     []string  `json:"candidate_azs,omitempty" dynamodbav:"candidate_azs,omitempty"`
 	InstanceType     string    `json:"instance_type" dynamodbav:"instance_type"`
 	Price            float64   `json:"price" dynamodbav:"price"`
 	IsSpot           bool      `json:"is_spot" dynamodbav:"is_spot"`
