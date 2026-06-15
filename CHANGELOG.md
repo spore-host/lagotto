@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- Semgrep SAST is now **enforcing** in CI (`--config=auto --error`) rather than
+  report-only (#368). The scan was already clean — no findings to triage.
+
 ## [0.41.0] - 2026-06-14
 
 ### Added
