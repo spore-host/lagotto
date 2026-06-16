@@ -49,6 +49,21 @@ type SpawnConfigFile struct {
 	CostLimit      float64 `json:"costlimit"`
 	KeyName        string  `json:"keyname"`
 	SessionTimeout string  `json:"sessiontimeout"`
+
+	// FSx auto-create (#43, requires spawn ≥ 0.57.0). The headless launcher
+	// (launcher.Provision) creates the filesystem asynchronously and spored mounts
+	// it once AVAILABLE, so the poller never blocks (spawn#194/#202). Only the
+	// "ephemeral" lifecycle is valid here — it's reaped when the instance
+	// terminates (spawn#192); durable storage must be pre-created out of band and
+	// mounted via fsxid. Lifecycle is REQUIRED with fsx_create and fails closed
+	// (spawn#193). See spawn docs/durable-storage-fsx.md.
+	FSxCreate          bool   `json:"fsxcreate"`
+	FSxLifecycle       string `json:"fsxlifecycle"` // "ephemeral" (durable not supported on the poller path)
+	FSxS3Bucket        string `json:"fsxs3bucket"`
+	FSxImportPath      string `json:"fsximportpath"`
+	FSxExportPath      string `json:"fsxexportpath"`
+	FSxMountPoint      string `json:"fsxmountpoint"`
+	FSxStorageCapacity int32  `json:"fsxstoragecapacity"`
 }
 
 // stringList accepts either a scalar string ("s3:ReadWrite") or a sequence
@@ -139,5 +154,17 @@ func (s *SpawnConfigFile) ToLaunchConfig() spawnaws.LaunchConfig {
 		CostLimit:       s.CostLimit,
 		KeyName:         s.KeyName,
 		SessionTimeout:  s.SessionTimeout,
+
+		// FSx auto-create passthrough (#43). launcher.Provision fires the async
+		// create + tags spawn:fsx-pending; spored waits/mounts (spawn#202/#194). It
+		// enforces the fail-closed lifecycle contract (ephemeral-only here), so an
+		// invalid/durable lifecycle is rejected at provision time, not silently.
+		FSxLustreCreate:    s.FSxCreate,
+		FSxLifecycle:       s.FSxLifecycle,
+		FSxS3Bucket:        s.FSxS3Bucket,
+		FSxImportPath:      s.FSxImportPath,
+		FSxExportPath:      s.FSxExportPath,
+		FSxMountPoint:      s.FSxMountPoint,
+		FSxStorageCapacity: s.FSxStorageCapacity,
 	}
 }
