@@ -124,6 +124,46 @@ func TestToLaunchConfig_CommandMapsToJobArrayCommand(t *testing.T) {
 	// instance profile separately, so they must not leak into the launch config.
 }
 
+// TestFSxCreatePassthrough verifies the FSx auto-create block (#43) parses from
+// snake_case YAML and forwards through ToLaunchConfig to the LaunchConfig fields
+// launcher.Provision consumes (spawn#202).
+func TestFSxCreatePassthrough(t *testing.T) {
+	cfg, err := ParseSpawnConfigYAML([]byte(`
+instance_type: g5.12xlarge
+region: us-east-1
+fsx_create: true
+fsx_lifecycle: ephemeral
+fsx_s3_bucket: aws-buckai
+fsx_import_path: s3://aws-buckai/indices/
+fsx_export_path: s3://aws-buckai/detections/
+fsx_mount_point: /fsx
+fsx_storage_capacity: 1200
+`))
+	if err != nil {
+		t.Fatalf("ParseSpawnConfigYAML: %v", err)
+	}
+	if !cfg.FSxCreate || cfg.FSxLifecycle != "ephemeral" || cfg.FSxS3Bucket != "aws-buckai" {
+		t.Fatalf("FSx fields not parsed from snake_case: %+v", cfg)
+	}
+
+	lc := cfg.ToLaunchConfig()
+	if !lc.FSxLustreCreate {
+		t.Error("FSxLustreCreate not forwarded")
+	}
+	if lc.FSxLifecycle != "ephemeral" {
+		t.Errorf("FSxLifecycle = %q, want ephemeral", lc.FSxLifecycle)
+	}
+	if lc.FSxS3Bucket != "aws-buckai" {
+		t.Errorf("FSxS3Bucket = %q", lc.FSxS3Bucket)
+	}
+	if lc.FSxImportPath != "s3://aws-buckai/indices/" || lc.FSxExportPath != "s3://aws-buckai/detections/" {
+		t.Errorf("import/export paths not forwarded: %q / %q", lc.FSxImportPath, lc.FSxExportPath)
+	}
+	if lc.FSxMountPoint != "/fsx" || lc.FSxStorageCapacity != 1200 {
+		t.Errorf("mount-point/capacity not forwarded: %q / %d", lc.FSxMountPoint, lc.FSxStorageCapacity)
+	}
+}
+
 // TestSpawnConfigFile_JSONRoundTrip ensures the struct the cmd loader stores is
 // read back identically by the spawner (both use encoding/json on this type).
 func TestSpawnConfigFile_JSONRoundTrip(t *testing.T) {

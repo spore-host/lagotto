@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- A watch's `--spawn-config` can now **auto-create ephemeral FSx Lustre storage**
+  for the launched instance (#43): `fsx_create: true`, `fsx_lifecycle: ephemeral`,
+  `fsx_s3_bucket`, `fsx_import_path`, `fsx_export_path`, `fsx_mount_point`,
+  `fsx_storage_capacity`. The filesystem is created asynchronously and mounted by
+  spored once AVAILABLE, so the poller never blocks (spawn#194/#202), and it's
+  reaped when the instance terminates (spawn#192). Only `ephemeral` is supported
+  here — durable storage must be pre-created and mounted via `fsxid`. Requires
+  spawn ≥ 0.57.0. See spawn's `docs/durable-storage-fsx.md`.
+
 ### Security
 - Semgrep SAST is now **enforcing** in CI (`--config=auto --error`) rather than
   report-only (#368). The scan was already clean — no findings to triage.
