@@ -7,7 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.42.0] - 2026-06-16
+### Changed
+- Bumped the `spawn` dependency to **v0.61.0**, which carries the FSx hardening
+  arc for `--action spawn` watches that auto-create ephemeral FSx (#45): `--az` is
+  honored when placing the filesystem (spawn#208), a capacity-failed launch no
+  longer orphans the FSx (spawn#210), and — the key one for lagotto's
+  retry-on-capacity loop — the ephemeral FSx is now created **only after**
+  `RunInstances` succeeds (spawn#213), so a multi-AZ capacity-fail poll creates
+  **zero** filesystems instead of one-per-AZ-attempt-per-poll.
+
+### Fixed
+- The `--action spawn` AZ retry sweep is now covered by tests (#45): a capacity
+  failure tries every candidate AZ in preference order within a poll, stops at the
+  first AZ that launches, and a terminal error (bad config/IAM) stops the sweep
+  immediately. This is the lagotto-side guard that, paired with spawn#213, keeps a
+  capacity-scarce FSx watch from churning filesystems.
 
 ### Added
 - A watch's `--spawn-config` can now **auto-create ephemeral FSx Lustre storage**

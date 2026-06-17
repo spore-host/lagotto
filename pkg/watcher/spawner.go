@@ -12,6 +12,9 @@ import (
 // Spawner launches instances via spawn's library when a watch matches.
 type Spawner struct {
 	client *spawnaws.Client
+	// provision is the launch function, indirected so tests can drive the AZ
+	// retry loop without a real AWS client. Defaults to launcher.Provision.
+	provision func(ctx context.Context, client *spawnaws.Client, cfg spawnaws.LaunchConfig, opts launcher.Options) (*spawnaws.LaunchResult, error)
 }
 
 // NewSpawner creates a Spawner that uses spawn's EC2 launch library.
@@ -20,7 +23,7 @@ func NewSpawner(ctx context.Context) (*Spawner, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create spawn client: %w", err)
 	}
-	return &Spawner{client: client}, nil
+	return &Spawner{client: client, provision: launcher.Provision}, nil
 }
 
 // Spawn deserializes the stored spawn config and launches a fully-functional
@@ -78,10 +81,15 @@ func (s *Spawner) Spawn(ctx context.Context, w *Watch, m *MatchResult) error {
 		attempts = []string{m.AvailabilityZone} // may be "" → let EC2 choose the AZ
 	}
 
+	provision := s.provision
+	if provision == nil {
+		provision = launcher.Provision
+	}
+
 	var lastErr error
 	for _, az := range attempts {
 		cfg.AvailabilityZone = az
-		result, err := launcher.Provision(ctx, s.client, cfg, launcher.Options{
+		result, err := provision(ctx, s.client, cfg, launcher.Options{
 			// Keyless: the poller Lambda has no SSH key. SSM-only launch.
 		})
 		if err == nil {
