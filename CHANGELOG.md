@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`lagotto deploy`** stands up the hosted capacity-poller stack (DynamoDB, SNS,
+  Lambda, EventBridge Scheduler) **in your own AWS account** (#48), so watches are
+  serviced server-side — armed once, then hands-off — instead of relying on a
+  foreground `poll --daemon` that dies when your laptop sleeps. It downloads the
+  published poller Lambda artifact for `--version`, uploads it to a bucket in your
+  account (auto-named/created, or `--lambda-bucket`), and deploys the embedded
+  CloudFormation template; the poller schedule deploys disabled and the first
+  `lagotto watch` arms it. `lagotto deploy --teardown` deletes the stack. Both
+  prompt for confirmation (`--yes` to skip).
+
 ## [0.44.0] - 2026-06-17
 
 ### Added
