@@ -229,3 +229,27 @@ func TestValidateAndDefaultTTL(t *testing.T) {
 		}
 	})
 }
+
+// TestToLaunchConfig_ReservationPassthrough verifies the #49 capacity-reservation
+// / Capacity Block fields forward to spawn's LaunchConfig (snake_case keys parse
+// via normalizeKey, and ToLaunchConfig maps them).
+func TestToLaunchConfig_ReservationPassthrough(t *testing.T) {
+	cfg, err := ParseSpawnConfigYAML([]byte(`
+instance_type: p5.48xlarge
+reservation_id: cr-0abc123
+capacity_block: true
+`))
+	if err != nil {
+		t.Fatalf("ParseSpawnConfigYAML: %v", err)
+	}
+	if cfg.ReservationID != "cr-0abc123" || !cfg.CapacityBlock {
+		t.Fatalf("fields not parsed: ReservationID=%q CapacityBlock=%v", cfg.ReservationID, cfg.CapacityBlock)
+	}
+	lc := cfg.ToLaunchConfig()
+	if lc.ReservationID != "cr-0abc123" {
+		t.Errorf("ReservationID not forwarded: %q", lc.ReservationID)
+	}
+	if !lc.CapacityBlock {
+		t.Error("CapacityBlock not forwarded")
+	}
+}
