@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -19,6 +20,7 @@ var (
 	cfg             aws.Config
 	store           *watcher.Store
 	poller          *watcher.Poller
+	spawner         *watcher.Spawner
 	schedulerClient *scheduler.Client
 	scheduleName    string
 )
@@ -50,8 +52,8 @@ func init() {
 		notifier = watcher.NewNotifier(cfg, snsTopicArn)
 	}
 
-	// Set up spawner (for action=spawn watches)
-	spawner, err := watcher.NewSpawner(ctx)
+	// Set up spawner (for action=spawn watches AND scheduled launches, #49)
+	spawner, err = watcher.NewSpawner(ctx)
 	if err != nil {
 		log.Printf("Warning: auto-spawn unavailable: %v", err)
 	}
@@ -65,13 +67,65 @@ func init() {
 	schedulerClient = scheduler.NewFromConfig(cfg)
 }
 
-// handler runs one account-wide poll cycle. The lambda is a stateless,
+// event is the Lambda invocation payload. The recurring capacity-poll schedule
+// sends no input (empty) → the poll sweep. A per-launch EventBridge Scheduler
+// target (#49) sends {"scheduled_launch_id":"sl-..."} → a one-shot launch. This
+// payload routing keeps a single Lambda/role/artifact for both jobs.
+type event struct {
+	ScheduledLaunchID string `json:"scheduled_launch_id"`
+}
+
+// handler routes by payload: a scheduled-launch id runs that one-shot launch;
+// anything else runs the account-wide capacity-poll sweep (handlePoll).
+func handler(ctx context.Context, raw json.RawMessage) error {
+	var e event
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &e) // a non-JSON/empty trigger is just the poll sweep
+	}
+	if e.ScheduledLaunchID != "" {
+		return handleScheduledLaunch(ctx, e.ScheduledLaunchID)
+	}
+	return handlePoll(ctx)
+}
+
+// handleScheduledLaunch fires a time-triggered launch (#49). It loads the
+// ScheduledLaunch, launches via the shared spawner, and records the outcome.
+// For a one-shot the EventBridge schedule self-deletes (ActionAfterCompletion);
+// a cron schedule stays armed and fires again.
+func handleScheduledLaunch(ctx context.Context, id string) error {
+	log.Printf("Scheduled launch %s firing", id)
+	sl, err := store.GetScheduledLaunch(ctx, id)
+	if err != nil {
+		return fmt.Errorf("get scheduled launch %s: %w", id, err)
+	}
+	if sl == nil {
+		log.Printf("scheduled launch %s not found (already cancelled/aged out) — nothing to do", id)
+		return nil
+	}
+	if spawner == nil {
+		return fmt.Errorf("scheduled launch %s: spawner unavailable", id)
+	}
+	instanceID, lerr := spawner.LaunchScheduled(ctx, sl)
+	if lerr != nil {
+		if uerr := store.UpdateScheduledLaunchStatus(ctx, id, watcher.ScheduledFailed, ""); uerr != nil {
+			log.Printf("warning: could not mark scheduled launch %s failed: %v", id, uerr)
+		}
+		return fmt.Errorf("scheduled launch %s: %w", id, lerr)
+	}
+	if uerr := store.UpdateScheduledLaunchStatus(ctx, id, watcher.ScheduledLaunched, instanceID); uerr != nil {
+		log.Printf("warning: launched %s but could not record it on scheduled launch %s: %v", instanceID, id, uerr)
+	}
+	log.Printf("Scheduled launch %s launched instance %s", id, instanceID)
+	return nil
+}
+
+// handlePoll runs one account-wide poll cycle. The lambda is a stateless,
 // self-terminating singleton: one schedule per account drives it, every
 // invocation sweeps all active watches, and watches drop out of the active set
 // as they launch (matched), hit a terminal error (failed), or pass their TTL
 // (expired). When zero active watches remain, the lambda disables its own
 // schedule — no watches, no lambda. Creating a watch re-arms the schedule.
-func handler(ctx context.Context) error {
+func handlePoll(ctx context.Context) error {
 	log.Println("Starting capacity poll cycle")
 
 	s, err := poller.PollAll(ctx)
@@ -91,8 +145,18 @@ func handler(ctx context.Context) error {
 		return nil
 	}
 
-	if len(active) == 0 {
-		log.Println("No active watches remaining, disabling schedule")
+	// Teardown refcount (#49): infra stays alive while EITHER an active watch OR a
+	// pending scheduled launch references it. A scheduled --at next week must not
+	// have its schedule disabled / tables deleted out from under it just because
+	// no watches are active.
+	pendingLaunches, perr := store.HasPendingScheduledLaunches(ctx)
+	if perr != nil {
+		log.Printf("Warning: could not check pending scheduled launches: %v — leaving infra in place", perr)
+		return nil
+	}
+
+	if len(active) == 0 && !pendingLaunches {
+		log.Println("No active watches or pending scheduled launches, disabling schedule")
 		if err := disableSchedule(ctx); err != nil {
 			log.Printf("Warning: failed to disable schedule: %v", err)
 		}
@@ -119,7 +183,7 @@ func handler(ctx context.Context) error {
 			log.Println("Tables still hold records (history retained until TTL); not deleting")
 		}
 	} else {
-		log.Printf("%d active watches remaining", len(active))
+		log.Printf("%d active watches, pendingScheduledLaunches=%v — leaving infra armed", len(active), pendingLaunches)
 	}
 
 	return nil

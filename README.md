@@ -60,6 +60,41 @@ lagotto poll
 extra infrastructure. The hosted, multi-tenant Lambda poller (deployed via
 CloudFormation) remains the option for teams — see [DEPLOYMENT.md](DEPLOYMENT.md).
 
+## Scheduled launches
+
+Where `watch` fires when *capacity* appears, `lagotto launch` fires at a *time* —
+once at a clock time, after a delay, or on a recurring cron. The motivating case
+is launching into an [EC2 Capacity Block for ML](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/capacity-blocks.html)
+at its reserved start time.
+
+```bash
+# Launch into a Capacity Block at its reserved start time (block.yaml sets
+# reservation_id + capacity_block; --az matches the block's AZ)
+lagotto launch --at 2026-07-01T08:00:00Z --az us-east-1a --spawn-config block.yaml
+
+# Launch 6 hours from now
+lagotto launch --after 6h --spawn-config job.yaml
+
+# Recurring: every weekday at 09:00 UTC
+lagotto launch --cron "0 9 ? * MON-FRI *" --spawn-config nightly.yaml
+```
+
+Scheduled launches are driven by EventBridge Scheduler in the hosted poller
+stack, so they require `lagotto deploy` first (the schedule targets the poller
+Lambda in your account). The launched instance always carries a TTL (#38), and a
+one-shot's schedule self-deletes after it fires.
+
+**Overlap policy.** If an instance with the same `Name` tag already exists when a
+schedule fires, `--if-exists` decides what happens:
+
+| `--if-exists` | Behavior | Default for |
+|---------------|----------|-------------|
+| `skip` | Don't launch; treat the existing instance as the fulfillment | `--at` / `--after` (a Capacity Block must not double-book) |
+| `launch` | Launch anyway — each fire is a fresh box | `--cron` |
+| `replace` | Terminate the existing instance, then launch | — |
+
+The dedup key is the instance `Name` tag (`--name`, or the spawn config's `name`).
+
 ## Actions
 
 | Action | Description |

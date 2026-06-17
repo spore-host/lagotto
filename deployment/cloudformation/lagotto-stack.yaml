@@ -292,3 +292,10 @@ Outputs:
     Value: !GetAtt CapacityPollerFunction.Arn
     Export:
       Name: !Sub '${AWS::StackName}-capacity-poller-function'
+
+  SchedulerInvokeRoleArn:
+    Condition: DeployLambda
+    Description: Role EventBridge Scheduler assumes to invoke the poller (reused by per-launch scheduled launches, #49)
+    Value: !GetAtt SchedulerInvokeRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-scheduler-invoke-role'

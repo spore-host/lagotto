@@ -12,19 +12,31 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
-// Store handles DynamoDB persistence for watches and match history.
+// Store handles DynamoDB persistence for watches, match history, and scheduled
+// launches.
 type Store struct {
-	client       *dynamodb.Client
-	watchesTable string
-	historyTable string
+	client         *dynamodb.Client
+	watchesTable   string
+	historyTable   string
+	scheduledTable string
 }
 
-// NewStore creates a Store backed by DynamoDB.
+// NewStore creates a Store backed by DynamoDB. The scheduled-launches table name
+// defaults to "lagotto-scheduled-launches"; override with SetScheduledTable.
 func NewStore(cfg aws.Config, watchesTable, historyTable string) *Store {
 	return &Store{
-		client:       dynamodb.NewFromConfig(cfg),
-		watchesTable: watchesTable,
-		historyTable: historyTable,
+		client:         dynamodb.NewFromConfig(cfg),
+		watchesTable:   watchesTable,
+		historyTable:   historyTable,
+		scheduledTable: "lagotto-scheduled-launches",
+	}
+}
+
+// SetScheduledTable overrides the scheduled-launches table name (for tests / a
+// --scheduled-table flag).
+func (s *Store) SetScheduledTable(name string) {
+	if name != "" {
+		s.scheduledTable = name
 	}
 }
 
@@ -368,6 +380,27 @@ func (s *Store) EnsureTables(ctx context.Context) ([]string, error) {
 	return created, nil
 }
 
+// EnsureScheduledTable creates the scheduled-launches table (idempotent), waits
+// for it to become ACTIVE, and enables TTL on ttl_timestamp. Returns the name if
+// it was created, or "" if it already existed (#49).
+func (s *Store) EnsureScheduledTable(ctx context.Context) (string, error) {
+	made, err := s.ensureTable(ctx, s.scheduledTable, scheduledTableSchema(s.scheduledTable))
+	if err != nil {
+		return "", fmt.Errorf("ensure scheduled-launches table %q: %w", s.scheduledTable, err)
+	}
+	if !made {
+		return "", nil
+	}
+	waiter := dynamodb.NewTableExistsWaiter(s.client)
+	if err := waiter.Wait(ctx, &dynamodb.DescribeTableInput{TableName: aws.String(s.scheduledTable)}, 2*time.Minute); err != nil {
+		return s.scheduledTable, fmt.Errorf("wait for table %q to become active: %w", s.scheduledTable, err)
+	}
+	if err := s.enableTTL(ctx, s.scheduledTable); err != nil {
+		return s.scheduledTable, fmt.Errorf("enable TTL on %q: %w", s.scheduledTable, err)
+	}
+	return s.scheduledTable, nil
+}
+
 // enableTTL turns on DynamoDB TTL for the ttl_timestamp attribute. Idempotent:
 // a table that already has TTL enabled is left as-is.
 func (s *Store) enableTTL(ctx context.Context, name string) error {
@@ -400,7 +433,7 @@ func (s *Store) enableTTL(ctx context.Context, name string) error {
 // TablesEmpty reports whether both the watches and history tables contain zero
 // items. Used to decide when the account can be auto-torn-down (no litter).
 func (s *Store) TablesEmpty(ctx context.Context) (bool, error) {
-	for _, name := range []string{s.watchesTable, s.historyTable} {
+	for _, name := range []string{s.watchesTable, s.historyTable, s.scheduledTable} {
 		out, err := s.client.Scan(ctx, &dynamodb.ScanInput{
 			TableName: aws.String(name),
 			Limit:     aws.Int32(1),
@@ -445,7 +478,7 @@ func (s *Store) DeleteTables(ctx context.Context) ([]string, error) {
 // trips on missing control-plane IAM. Returns the names actually deleted.
 func (s *Store) DeleteManagedTables(ctx context.Context) ([]string, error) {
 	var deleted []string
-	for _, name := range []string{s.watchesTable, s.historyTable} {
+	for _, name := range []string{s.watchesTable, s.historyTable, s.scheduledTable} {
 		managed, err := s.isManaged(ctx, name)
 		if err != nil {
 			return deleted, err

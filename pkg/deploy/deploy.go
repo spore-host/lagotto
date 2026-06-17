@@ -224,6 +224,13 @@ func (d *Deployer) stackExists(ctx context.Context, stackName string) (bool, err
 	return false, nil
 }
 
+// StackOutputs returns the deployed stack's outputs (e.g. the poller function
+// ARN and scheduler-invoke-role ARN that `lagotto launch` needs to wire a
+// per-launch EventBridge schedule, #49). Errors if the stack isn't deployed.
+func (d *Deployer) StackOutputs(ctx context.Context, stackName string) (map[string]string, error) {
+	return d.stackOutputs(ctx, stackName)
+}
+
 func (d *Deployer) stackOutputs(ctx context.Context, stackName string) (map[string]string, error) {
 	out, err := d.cfn.DescribeStacks(ctx, &cloudformation.DescribeStacksInput{StackName: aws.String(stackName)})
 	if err != nil {
