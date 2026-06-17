@@ -123,3 +123,34 @@ func TestSpawn_TerminalStopsImmediately(t *testing.T) {
 		t.Errorf("attempts = %d, want 1 (terminal error must stop the AZ sweep immediately)", attempts)
 	}
 }
+
+// TestSpawn_GuaranteesTTL is the #38 chokepoint guard: even when the stored
+// config carries NO ttl (e.g. written by an older CLI before watch-create
+// validation), the launch config handed to launcher.Provision must still have a
+// TTL — never empty — so lagotto can't create an unbounded billable instance.
+func TestSpawn_GuaranteesTTL(t *testing.T) {
+	var gotTTL string
+	sp := newSpawnerWithProvision(func(ctx context.Context, _ *spawnaws.Client, cfg spawnaws.LaunchConfig, _ launcher.Options) (*spawnaws.LaunchResult, error) {
+		gotTTL = cfg.TTL
+		return &spawnaws.LaunchResult{InstanceID: "i-ok"}, nil
+	})
+
+	// Stored config with an explicitly-empty TTL (no ValidateAndDefaultTTL ran).
+	cfg := SpawnConfigFile{InstanceType: "g5.12xlarge", Region: "us-east-1", TTL: ""}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	w := &Watch{WatchID: "w-nottl", LaunchConfigJSON: raw}
+	m := &MatchResult{Region: "us-east-1", CandidateAZs: []string{"us-east-1a"}}
+
+	if err := sp.Spawn(context.Background(), w, m); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if gotTTL == "" {
+		t.Error("launch config reached provision with an EMPTY TTL — #38 guard failed (instance could run unbounded)")
+	}
+	if gotTTL != DefaultInstanceTTL {
+		t.Errorf("TTL = %q, want default %q", gotTTL, DefaultInstanceTTL)
+	}
+}

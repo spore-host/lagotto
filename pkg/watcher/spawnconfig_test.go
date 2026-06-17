@@ -192,3 +192,40 @@ iam_policy: s3:ReadWrite
 		t.Errorf("round-trip lost iam policies: %v", back.IAMPolicies)
 	}
 }
+
+// TestValidateAndDefaultTTL is the #38 watch-create guard: an empty TTL defaults
+// to 24h, valid forms (Go duration + short "7d") pass, and malformed/non-positive
+// values fail closed so a watch can never store a config that launches a
+// TTL-less (unbounded) instance.
+func TestValidateAndDefaultTTL(t *testing.T) {
+	t.Run("empty defaults to 24h", func(t *testing.T) {
+		c := &SpawnConfigFile{}
+		if err := c.ValidateAndDefaultTTL(); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if c.TTL != DefaultInstanceTTL {
+			t.Errorf("TTL = %q, want %q", c.TTL, DefaultInstanceTTL)
+		}
+	})
+
+	t.Run("valid forms pass unchanged", func(t *testing.T) {
+		for _, v := range []string{"24h", "48h", "7d", "30m", "90m"} {
+			c := &SpawnConfigFile{TTL: v}
+			if err := c.ValidateAndDefaultTTL(); err != nil {
+				t.Errorf("ttl %q: unexpected error %v", v, err)
+			}
+			if c.TTL != v {
+				t.Errorf("ttl %q mutated to %q", v, c.TTL)
+			}
+		}
+	})
+
+	t.Run("malformed / non-positive fail closed", func(t *testing.T) {
+		for _, v := range []string{"garbage", "10x", "-5h", "0h", "0"} {
+			c := &SpawnConfigFile{TTL: v}
+			if err := c.ValidateAndDefaultTTL(); err == nil {
+				t.Errorf("ttl %q: expected an error, got none", v)
+			}
+		}
+	})
+}

@@ -239,6 +239,12 @@ func loadEC2SpawnConfig(path string) ([]byte, error) {
 		// launch, so it's not strictly required — but flag the empty-shell case.
 		return nil, fmt.Errorf("spawn config %s has no recognized fields (check key names: instance_type, on_complete, pre_stop, command, …)", path)
 	}
+	// Guarantee a TTL on the eventual launch (#38): default an empty one to 24h
+	// and reject a malformed one now, at watch-create, so the stored config can
+	// never produce an instance with no death clock.
+	if err := cfg.ValidateAndDefaultTTL(); err != nil {
+		return nil, err
+	}
 	jsonBytes, err := json.Marshal(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("marshal spawn config: %w", err)
@@ -340,24 +346,9 @@ func splitFirst(s string, sep byte) []string {
 	return []string{s}
 }
 
+// parseDuration parses lagotto's short duration form ("7d"/"24h"/"30m"). The
+// implementation now lives in pkg/watcher so the spawner can share it (#38);
+// this thin wrapper keeps the existing cmd call sites + tests unchanged.
 func parseDuration(s string) (time.Duration, error) {
-	if len(s) < 2 {
-		return 0, fmt.Errorf("invalid duration: %s", s)
-	}
-	unit := s[len(s)-1]
-	val := s[:len(s)-1]
-	var n int
-	if _, err := fmt.Sscanf(val, "%d", &n); err != nil {
-		return 0, fmt.Errorf("invalid duration number: %s", val)
-	}
-	switch unit {
-	case 'd':
-		return time.Duration(n) * 24 * time.Hour, nil
-	case 'h':
-		return time.Duration(n) * time.Hour, nil
-	case 'm':
-		return time.Duration(n) * time.Minute, nil
-	default:
-		return 0, fmt.Errorf("unknown duration unit: %c", unit)
-	}
+	return watcher.ParseDuration(s)
 }

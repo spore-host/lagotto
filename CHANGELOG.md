@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **lagotto now guarantees every spawned instance carries a TTL** (#38). The
+  `--spawn-config` `ttl` field had no default or validation, so an `--action
+  spawn` watch whose config omitted `ttl` could launch an instance with **no
+  death clock** — running unbounded and billing forever, contrary to the
+  "everything dies" invariant. lagotto now defaults a missing instance TTL to
+  `24h` (matching the watch's own `--ttl` default) and rejects a malformed one at
+  watch-create; the spawner also enforces a non-empty TTL as a hard floor at
+  launch time, so no path (CLI daemon, hosted poller, or configs written by an
+  older CLI) can launch a TTL-less instance.
+
 ## [0.43.0] - 2026-06-17
 
 ### Changed
