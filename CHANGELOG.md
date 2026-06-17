@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- The capacity-poller Lambda is now published as a release asset
+  (`capacity-poller_lambda_linux_arm64.zip`) attached to each GitHub Release (#29).
+  Previously the zip lived only in the `spore-host-infra` S3 bucket, so an end
+  user couldn't obtain it — groundwork for a future `lagotto deploy` that stands
+  up the poller stack in your own account (#48).
+
 ### Fixed
 - **The hosted capacity-poller can now actually launch `--action spawn` watches.**
   Its Lambda execution role had Describe-only EC2 permissions, so a deployed

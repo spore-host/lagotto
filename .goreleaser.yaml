@@ -1,6 +1,16 @@
 # GoReleaser configuration for spore-host/lagotto
 version: 2
 
+# Build the capacity-poller Lambda zip and attach it to the release (#29). The
+# Lambda is a SEPARATE go module (lambda/capacity-poller), so GoReleaser's own
+# `builds:` (which builds the root module) can't produce it — hence a before-hook
+# that mirrors lambda/capacity-poller/Makefile's build exactly. The zip is then
+# attached via `release.extra_files` below, making it end-user-pullable from the
+# GitHub Release (no infra-account S3 bucket required).
+before:
+  hooks:
+    - sh -c "cd lambda/capacity-poller && GOOS=linux GOARCH=arm64 go build -tags lambda.norpc -o bootstrap main.go && zip -j capacity-poller_lambda_linux_arm64.zip bootstrap"
+
 builds:
   - id: lagotto
     main: .
@@ -111,3 +121,8 @@ release:
   prerelease: auto
   mode: replace
   name_template: "v{{.Version}}"
+  # Attach the capacity-poller Lambda zip (built by the before-hook) so it's an
+  # end-user-pullable release asset (#29). `lagotto deploy` (#48) will download
+  # this and upload it to a bucket in the user's own account for the stack.
+  extra_files:
+    - glob: ./lambda/capacity-poller/capacity-poller_lambda_linux_arm64.zip
