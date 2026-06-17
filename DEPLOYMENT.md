@@ -8,6 +8,19 @@ This document describes how to deploy lagotto's infrastructure (DynamoDB, SNS, L
 - Go 1.26+ for building the Lambda binary
 - CloudFormation deploy permissions
 
+> **The Lambda zip is now a published release asset.** Each tagged release
+> attaches `capacity-poller_lambda_linux_arm64.zip` to its GitHub Release (built
+> by GoReleaser, #29), so you can download it directly instead of building +
+> uploading it yourself:
+>
+> ```bash
+> gh release download v<version> --repo spore-host/lagotto \
+>   --pattern 'capacity-poller_lambda_linux_arm64.zip'
+> ```
+>
+> The manual build/upload steps below remain the internal/`spore-host-infra`
+> path and are still valid.
+
 ## One-time Setup
 
 ### 1. Build the Lambda zip
