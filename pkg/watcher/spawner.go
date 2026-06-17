@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/launcher"
@@ -48,6 +49,15 @@ func (s *Spawner) Spawn(ctx context.Context, w *Watch, m *MatchResult) error {
 	}
 
 	cfg := file.ToLaunchConfig()
+
+	// Guarantee a TTL even if the stored config somehow lacks one (#38): a config
+	// written by an older CLI (before watch-create validation) could carry an
+	// empty TTL, and an instance with no death clock runs unbounded. This is the
+	// single chokepoint every launch passes through, so enforcing here makes "no
+	// TTL reaches launcher.Provision" a hard invariant regardless of config origin.
+	if strings.TrimSpace(cfg.TTL) == "" {
+		cfg.TTL = DefaultInstanceTTL
+	}
 
 	// Override region and pin the matched instance type (the watch pattern may
 	// have resolved to a specific type) and spot-ness. AZ is set per-attempt below.

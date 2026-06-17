@@ -5,10 +5,50 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	"gopkg.in/yaml.v3"
 )
+
+// DefaultInstanceTTL is the TTL applied to a lagotto-launched instance when the
+// spawn config doesn't specify one. It matches the watch-level --ttl default so
+// the instance and the watch expire on the same clock, and — critically — it
+// guarantees every instance lagotto launches has a death clock (#38): without a
+// TTL a spawned instance would run unbounded, violating the "everything dies"
+// invariant and burning cost silently. The spawner enforces this as a hard
+// floor so no launch path (CLI daemon, hosted Lambda, scheduled) can bypass it.
+const DefaultInstanceTTL = "24h"
+
+// parseTTL accepts both Go durations ("24h") and lagotto's short form ("7d"),
+// mirroring the two-step parse the CLI uses for --ttl.
+func parseTTL(s string) (time.Duration, error) {
+	if d, err := time.ParseDuration(s); err == nil {
+		return d, nil
+	}
+	return ParseDuration(s)
+}
+
+// ValidateAndDefaultTTL ensures the config carries a usable instance TTL (#38).
+// An empty TTL is defaulted to DefaultInstanceTTL (a watch already has its own
+// stopping clock, so matching it is sensible, not a user error). A non-empty TTL
+// is parsed and must be > 0 — a malformed or non-positive value is a hard error
+// (fail closed) rather than a silently-ignored field that leaves an instance
+// without a death clock.
+func (s *SpawnConfigFile) ValidateAndDefaultTTL() error {
+	if strings.TrimSpace(s.TTL) == "" {
+		s.TTL = DefaultInstanceTTL
+		return nil
+	}
+	d, err := parseTTL(s.TTL)
+	if err != nil {
+		return fmt.Errorf("invalid ttl %q in spawn config: %w", s.TTL, err)
+	}
+	if d <= 0 {
+		return fmt.Errorf("invalid ttl %q in spawn config: must be greater than zero", s.TTL)
+	}
+	return nil
+}
 
 // SpawnConfigFile is lagotto's view of the --spawn-config YAML. spawn's
 // LaunchConfig has no JSON/YAML struct tags, so snake_case keys a user naturally
