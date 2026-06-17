@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.46.0] - 2026-06-17
+
 ### Added
 - **`lagotto launch`** schedules a future or recurring instance launch — fire once
   at a clock time (`--at`), after a delay (`--after 6h`), or on a recurring cron
@@ -208,7 +210,8 @@ Initial tagged release from the standalone `spore-host/lagotto` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/lagotto/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.45.0...HEAD
+[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.46.0...HEAD
+[0.46.0]: https://github.com/spore-host/lagotto/compare/v0.45.0...v0.46.0
 [0.45.0]: https://github.com/spore-host/lagotto/compare/v0.44.0...v0.45.0
 [0.44.0]: https://github.com/spore-host/lagotto/compare/v0.43.0...v0.44.0
 [0.43.0]: https://github.com/spore-host/lagotto/compare/v0.42.0...v0.43.0
