@@ -157,18 +157,63 @@ Resources:
               Action: sns:Publish
               Resource: !Ref LagottoCapacityAlertsTopic
         - Statement:
+            # Capacity discovery (truffle) + the read APIs spawn's launcher needs
+            # to resolve an AMI, VPC/subnet, security group, and key pair.
             - Effect: Allow
               Action:
                 - ec2:DescribeInstanceTypes
                 - ec2:DescribeInstanceTypeOfferings
                 - ec2:DescribeSpotPriceHistory
                 - ec2:DescribeRegions
+                - ec2:DescribeImages
+                - ec2:DescribeVpcs
+                - ec2:DescribeSubnets
+                - ec2:DescribeSecurityGroups
+                - ec2:DescribeKeyPairs
+                - ec2:DescribeInstances
+                - ssm:GetParameter
+                - ssm:GetParameters
               Resource: '*'
             - Effect: Allow
               Action:
                 - scheduler:UpdateSchedule
                 - scheduler:GetSchedule
               Resource: !Sub 'arn:aws:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/default/lagotto-capacity-poller'
+        # An --action spawn watch launches via spawn's headless launcher, which
+        # runs RunInstances, tags the instance, and (re)uses the spored IAM
+        # instance profile. Without these the hosted poller can only NOTIFY, never
+        # spawn — the gap that made hosted --action spawn silently a no-op.
+        - Statement:
+            - Effect: Allow
+              Action:
+                - ec2:RunInstances
+                - ec2:CreateTags
+                - ec2:CreateSecurityGroup
+                - ec2:AuthorizeSecurityGroupIngress
+              Resource: '*'
+            # spored IAM instance profile + role setup (launcher.SetupSporedIAMRole
+            # / CreateOrGetInstanceProfile). Scoped to the spored* name prefix.
+            - Effect: Allow
+              Action:
+                - iam:GetRole
+                - iam:CreateRole
+                - iam:PutRolePolicy
+                - iam:AttachRolePolicy
+                - iam:GetInstanceProfile
+                - iam:CreateInstanceProfile
+                - iam:AddRoleToInstanceProfile
+              Resource:
+                - !Sub 'arn:aws:iam::${AWS::AccountId}:role/spored*'
+                - !Sub 'arn:aws:iam::${AWS::AccountId}:instance-profile/spored*'
+            # PassRole is required for RunInstances to attach the spored instance
+            # profile to the launched instance; scoped to the spored role + the EC2
+            # service so it can't be used to pass arbitrary roles elsewhere.
+            - Effect: Allow
+              Action: iam:PassRole
+              Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/spored*'
+              Condition:
+                StringEquals:
+                  iam:PassedToService: ec2.amazonaws.com
       Tags:
         Environment: !Ref Environment
         Application: lagotto

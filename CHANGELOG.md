@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **The hosted capacity-poller can now actually launch `--action spawn` watches.**
+  Its Lambda execution role had Describe-only EC2 permissions, so a deployed
+  `--action spawn` watch matched capacity but **silently failed to launch** (no
+  `ec2:RunInstances` / `iam:PassRole`). The CloudFormation stack now grants the
+  launch permissions spawn's headless launcher needs — `RunInstances`,
+  `CreateTags`, security-group create/authorize, the AMI/VPC/subnet/keypair
+  describe reads + `ssm:GetParameter`, and scoped `spored*` role/instance-profile
+  management with `iam:PassRole` (conditioned to `ec2.amazonaws.com`). Redeploy
+  the stack to apply.
 - **lagotto now guarantees every spawned instance carries a TTL** (#38). The
   `--spawn-config` `ttl` field had no default or validation, so an `--action
   spawn` watch whose config omitted `ttl` could launch an instance with **no
