@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`lagotto launch`** schedules a future or recurring instance launch — fire once
+  at a clock time (`--at`), after a delay (`--after 6h`), or on a recurring cron
+  (`--cron`) — as opposed to `watch`, which fires on *capacity* appearing (#49).
+  The motivating case is launching into an EC2 Capacity Block for ML at its
+  reserved start time. It's driven by EventBridge Scheduler in the hosted poller
+  stack, so it requires `lagotto deploy` first; the launched instance always
+  carries a TTL (#38). One-shots self-delete their schedule after firing.
+- **Overlap policy** for scheduled launches: when an instance with the same `Name`
+  tag already exists at fire time, `--if-exists` decides what happens — `skip`
+  (don't double-launch; the default for `--at`/`--after`, so a Capacity Block
+  can't double-book), `launch` (launch anyway; the default for `--cron`, so each
+  fire is a fresh box), or `replace` (terminate the existing instance, then
+  launch). `--name` overrides the dedup key (defaults to the spawn config's name).
+
+### Changed
+- The hosted poller's self-teardown now reference-counts **pending scheduled
+  launches** alongside active watches: the poller schedule and CLI-managed tables
+  are only torn down when there are neither active watches nor pending scheduled
+  launches, so a `lagotto launch --at next-week` can't have its infrastructure
+  removed out from under it (#49).
+
 ## [0.45.0] - 2026-06-17
 
 ### Added

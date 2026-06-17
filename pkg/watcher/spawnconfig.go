@@ -60,6 +60,7 @@ func (s *SpawnConfigFile) ValidateAndDefaultTTL() error {
 // field spored's bootstrap actually reads — issue #2).
 type SpawnConfigFile struct {
 	// Core
+	Name         string `json:"name"` // instance Name tag; the dedup key for a scheduled launch's IfExists policy (#49)
 	InstanceType string `json:"instancetype"`
 	Region       string `json:"region"`
 	AMI          string `json:"ami"`
@@ -187,6 +188,7 @@ func normalizeKey(k string) string {
 // spawn:command tag and executes after the instance is ready (issue #2).
 func (s *SpawnConfigFile) ToLaunchConfig() spawnaws.LaunchConfig {
 	return spawnaws.LaunchConfig{
+		Name:            s.Name,
 		InstanceType:    s.InstanceType,
 		Region:          s.Region,
 		AMI:             s.AMI,

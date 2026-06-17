@@ -64,6 +64,22 @@ Creates:
 
 The schedule starts disabled to avoid billing when no watches are active. The `lagotto watch` CLI enables it on first watch creation; the Lambda disables it when the last active watch is removed.
 
+#### Scheduled launches (`lagotto launch`, #49)
+
+`lagotto launch --at/--after/--cron` (see the README) reuses this stack: the
+poller Lambda doubles as the scheduled-launch target, and each `launch` creates a
+per-launch EventBridge schedule (`lagotto-launch-sl-<id>`) that invokes the poller
+with a routing payload. This relies on two stack outputs — `CapacityPollerFunctionArn`
+(the target) and `SchedulerInvokeRoleArn` (the role Scheduler assumes) — so a stack
+deployed **without** the Lambda can't run scheduled launches. A third DynamoDB table,
+`lagotto-scheduled-launches` (PAY_PER_REQUEST, TTL on `ttl_timestamp`), is created on
+first `launch`.
+
+The poller's self-teardown reference-counts pending scheduled launches alongside
+active watches: the schedule is only disabled / CLI-managed tables deleted when
+there are **neither** active watches **nor** pending scheduled launches, so a
+`launch --at next-week` can't have its infrastructure removed out from under it.
+
 ### 4. Verify deployment
 
 ```bash

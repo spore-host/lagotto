@@ -154,3 +154,108 @@ func TestSpawn_GuaranteesTTL(t *testing.T) {
 		t.Errorf("TTL = %q, want default %q", gotTTL, DefaultInstanceTTL)
 	}
 }
+
+// scheduledLaunch builds a one-AZ ScheduledLaunch with the given Name + IfExists.
+func scheduledLaunch(t *testing.T, name, ifExists string) *ScheduledLaunch {
+	t.Helper()
+	raw, err := json.Marshal(SpawnConfigFile{Name: name, InstanceType: "g5.12xlarge", Region: "us-east-1", TTL: "24h"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return &ScheduledLaunch{ScheduleID: "sl-1", Region: "us-east-1", AvailabilityZone: "us-east-1a", InstanceName: name, IfExists: ifExists, LaunchConfigJSON: raw}
+}
+
+// TestLaunchScheduled_SkipWhenExists: a one-shot's default skip policy must NOT
+// launch when an instance with the same Name already exists — it returns the
+// existing id (a --at into a Capacity Block can't double-book).
+func TestLaunchScheduled_SkipWhenExists(t *testing.T) {
+	launched := false
+	sp := newSpawnerWithProvision(func(context.Context, *spawnaws.Client, spawnaws.LaunchConfig, launcher.Options) (*spawnaws.LaunchResult, error) {
+		launched = true
+		return &spawnaws.LaunchResult{InstanceID: "i-new"}, nil
+	})
+	sp.listInstances = func(context.Context, string, string) ([]spawnaws.InstanceInfo, error) {
+		return []spawnaws.InstanceInfo{{InstanceID: "i-existing", Name: "block-job"}}, nil
+	}
+
+	id, err := sp.LaunchScheduled(context.Background(), scheduledLaunch(t, "block-job", IfExistsSkip))
+	if err != nil {
+		t.Fatalf("LaunchScheduled: %v", err)
+	}
+	if launched {
+		t.Error("skip policy launched a new instance despite an existing one")
+	}
+	if id != "i-existing" {
+		t.Errorf("id = %q, want the existing i-existing", id)
+	}
+}
+
+// TestLaunchScheduled_ReplaceTerminatesThenLaunches: replace terminates the
+// existing instance, then launches a fresh one.
+func TestLaunchScheduled_ReplaceTerminatesThenLaunches(t *testing.T) {
+	var terminated string
+	sp := newSpawnerWithProvision(func(context.Context, *spawnaws.Client, spawnaws.LaunchConfig, launcher.Options) (*spawnaws.LaunchResult, error) {
+		return &spawnaws.LaunchResult{InstanceID: "i-new"}, nil
+	})
+	sp.listInstances = func(context.Context, string, string) ([]spawnaws.InstanceInfo, error) {
+		return []spawnaws.InstanceInfo{{InstanceID: "i-old", Name: "nightly"}}, nil
+	}
+	sp.terminateInstance = func(_ context.Context, _, id string) error {
+		terminated = id
+		return nil
+	}
+
+	id, err := sp.LaunchScheduled(context.Background(), scheduledLaunch(t, "nightly", IfExistsReplace))
+	if err != nil {
+		t.Fatalf("LaunchScheduled: %v", err)
+	}
+	if terminated != "i-old" {
+		t.Errorf("terminated = %q, want i-old", terminated)
+	}
+	if id != "i-new" {
+		t.Errorf("id = %q, want i-new", id)
+	}
+}
+
+// TestLaunchScheduled_LaunchPolicySkipsLookup: the launch policy (cron default)
+// launches unconditionally and never even queries for an existing instance.
+func TestLaunchScheduled_LaunchPolicySkipsLookup(t *testing.T) {
+	listed := false
+	sp := newSpawnerWithProvision(func(context.Context, *spawnaws.Client, spawnaws.LaunchConfig, launcher.Options) (*spawnaws.LaunchResult, error) {
+		return &spawnaws.LaunchResult{InstanceID: "i-fresh"}, nil
+	})
+	sp.listInstances = func(context.Context, string, string) ([]spawnaws.InstanceInfo, error) {
+		listed = true
+		return nil, nil
+	}
+
+	id, err := sp.LaunchScheduled(context.Background(), scheduledLaunch(t, "cron-box", IfExistsLaunch))
+	if err != nil {
+		t.Fatalf("LaunchScheduled: %v", err)
+	}
+	if listed {
+		t.Error("launch policy should not query existing instances")
+	}
+	if id != "i-fresh" {
+		t.Errorf("id = %q, want i-fresh", id)
+	}
+}
+
+// TestLaunchScheduled_SkipLaunchesWhenAbsent: skip policy still launches when no
+// matching instance exists.
+func TestLaunchScheduled_SkipLaunchesWhenAbsent(t *testing.T) {
+	sp := newSpawnerWithProvision(func(context.Context, *spawnaws.Client, spawnaws.LaunchConfig, launcher.Options) (*spawnaws.LaunchResult, error) {
+		return &spawnaws.LaunchResult{InstanceID: "i-first"}, nil
+	})
+	sp.listInstances = func(context.Context, string, string) ([]spawnaws.InstanceInfo, error) {
+		return []spawnaws.InstanceInfo{{InstanceID: "i-other", Name: "different-name"}}, nil
+	}
+
+	id, err := sp.LaunchScheduled(context.Background(), scheduledLaunch(t, "block-job", IfExistsSkip))
+	if err != nil {
+		t.Fatalf("LaunchScheduled: %v", err)
+	}
+	if id != "i-first" {
+		t.Errorf("id = %q, want i-first (no overlap → launch)", id)
+	}
+}
