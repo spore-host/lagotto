@@ -104,6 +104,14 @@ type SpawnConfigFile struct {
 	FSxExportPath      string `json:"fsxexportpath"`
 	FSxMountPoint      string `json:"fsxmountpoint"`
 	FSxStorageCapacity int32  `json:"fsxstoragecapacity"`
+
+	// Capacity Reservation / Capacity Block targeting (requires spawn ≥ 0.62.0).
+	// ReservationID launches into an existing reservation; CapacityBlock marks it
+	// as a Capacity Block for ML consume (MarketType=capacity-block) — the basis
+	// for scheduling a launch into a block at its start time (#49 / lagotto#49).
+	// (JSON keys are lowercase-no-separator because normalizeKey strips _/-.)
+	ReservationID string `json:"reservationid"`
+	CapacityBlock bool   `json:"capacityblock"`
 }
 
 // stringList accepts either a scalar string ("s3:ReadWrite") or a sequence
@@ -206,5 +214,9 @@ func (s *SpawnConfigFile) ToLaunchConfig() spawnaws.LaunchConfig {
 		FSxExportPath:      s.FSxExportPath,
 		FSxMountPoint:      s.FSxMountPoint,
 		FSxStorageCapacity: s.FSxStorageCapacity,
+
+		// Capacity Reservation / Capacity Block passthrough (#49, spawn#216).
+		ReservationID: s.ReservationID,
+		CapacityBlock: s.CapacityBlock,
 	}
 }

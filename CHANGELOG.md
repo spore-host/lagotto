@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- A watch's `--spawn-config` can now target an **EC2 Capacity Reservation /
+  Capacity Block for ML**: `reservation_id` launches into an existing reservation
+  and `capacity_block: true` consumes a Capacity Block (forwarded to spawn's
+  `--reservation-id`/`--capacity-block`, spawn#216). Bumps the spawn dependency to
+  v0.62.0. Groundwork for scheduling a launch into a block at its start time (#49).
 - **`lagotto deploy`** stands up the hosted capacity-poller stack (DynamoDB, SNS,
   Lambda, EventBridge Scheduler) **in your own AWS account** (#48), so watches are
   serviced server-side — armed once, then hands-off — instead of relying on a
