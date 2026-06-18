@@ -20,8 +20,8 @@ func TestReadYes(t *testing.T) {
 		{"  y  \n", true},
 		{"n\n", false},
 		{"no\n", false},
-		{"\n", false},   // bare enter → default no
-		{"", false},     // EOF / closed pipe → no
+		{"\n", false}, // bare enter → default no
+		{"", false},   // EOF / closed pipe → no
 		{"yep\n", false},
 	}
 	for _, c := range cases {

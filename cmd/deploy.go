@@ -10,6 +10,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spf13/cobra"
 	"github.com/spore-host/lagotto/pkg/deploy"
+	"github.com/spore-host/lagotto/pkg/watcher"
 )
 
 var (
@@ -84,7 +85,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	}
 
 	if deployTeardown {
-		if !confirm(fmt.Sprintf("Delete CloudFormation stack %q in %s (account %s)? This removes the poller, tables, SNS topic.", deployStackName, region, acctID)) {
+		if !confirm(fmt.Sprintf("Delete CloudFormation stack %q in %s (account %s)? This removes the poller, SNS topic, and schedule. Your DynamoDB tables (watches/history/scheduled) are CLI-owned and are NOT deleted.", deployStackName, region, acctID)) {
 			fmt.Fprintln(out, "Aborted.")
 			return nil
 		}
@@ -105,14 +106,33 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	// Ensure the CLI-owned DynamoDB tables exist before deploying (#59). The stack
+	// references them by name and never creates them, so deploying against an
+	// account that already ran `lagotto watch`/`launch` (tables present) — or a
+	// fresh account (tables absent) — both work. EnsureTables is idempotent.
+	store := watcher.NewStore(cfg, watchesTable, historyTable)
+	if created, terr := store.EnsureTables(ctx); terr != nil {
+		return fmt.Errorf("ensure watches/history tables: %w", terr)
+	} else if len(created) > 0 {
+		fmt.Fprintf(os.Stderr, "Created DynamoDB table(s): %v\n", created)
+	}
+	if name, terr := store.EnsureScheduledTable(ctx); terr != nil {
+		return fmt.Errorf("ensure scheduled-launches table: %w", terr)
+	} else if name != "" {
+		fmt.Fprintf(os.Stderr, "Created DynamoDB table: %s\n", name)
+	}
+
 	fmt.Fprintf(os.Stderr, "Deploying %s (poller v%s) into %s / %s...\n", deployStackName, deployVersion, acctID, region)
 	outputs, err := d.Deploy(ctx, deploy.Options{
-		StackName:   deployStackName,
-		Region:      region,
-		Version:     deployVersion,
-		Environment: deployEnv,
-		Bucket:      deployBucket,
-		AccountID:   acctID,
+		StackName:      deployStackName,
+		Region:         region,
+		Version:        deployVersion,
+		Environment:    deployEnv,
+		Bucket:         deployBucket,
+		AccountID:      acctID,
+		WatchesTable:   watchesTable,
+		HistoryTable:   historyTable,
+		ScheduledTable: store.ScheduledTable(),
 	})
 	if err != nil {
 		return err

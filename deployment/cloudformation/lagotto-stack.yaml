@@ -22,92 +22,30 @@ Parameters:
     Default: ''
     Description: S3 key for Lambda zip file
 
+  # DynamoDB tables are owned by the CLI, not this stack (#59). The CLI
+  # auto-creates them on first `lagotto watch`/`launch` (#12) and `lagotto deploy`
+  # ensures they exist before deploying this stack, so the stack only *references*
+  # them by name (env vars + IAM). This reconciles #12 and #48 — the natural
+  # watch-then-deploy flow no longer collides on AlreadyExists. The names are
+  # parameters so a non-default table set (--watches-table/--history-table) still
+  # wires the poller correctly.
+  WatchesTableName:
+    Type: String
+    Default: lagotto-watches
+    Description: Name of the (CLI-owned) watches DynamoDB table
+  HistoryTableName:
+    Type: String
+    Default: lagotto-match-history
+    Description: Name of the (CLI-owned) match-history DynamoDB table
+  ScheduledTableName:
+    Type: String
+    Default: lagotto-scheduled-launches
+    Description: Name of the (CLI-owned) scheduled-launches DynamoDB table
+
 Conditions:
   DeployLambda: !Not [!Equals [!Ref LambdaCodeBucket, '']]
 
 Resources:
-  # DynamoDB Tables
-
-  LagottoWatchesTable:
-    Type: AWS::DynamoDB::Table
-    Properties:
-      TableName: lagotto-watches
-      BillingMode: PAY_PER_REQUEST
-      AttributeDefinitions:
-        - AttributeName: watch_id
-          AttributeType: S
-        - AttributeName: user_id
-          AttributeType: S
-        - AttributeName: status
-          AttributeType: S
-      KeySchema:
-        - AttributeName: watch_id
-          KeyType: HASH
-      GlobalSecondaryIndexes:
-        - IndexName: user_id-index
-          KeySchema:
-            - AttributeName: user_id
-              KeyType: HASH
-          Projection:
-            ProjectionType: ALL
-        - IndexName: status-index
-          KeySchema:
-            - AttributeName: status
-              KeyType: HASH
-          Projection:
-            ProjectionType: ALL
-      TimeToLiveSpecification:
-        AttributeName: ttl_timestamp
-        Enabled: true
-      PointInTimeRecoverySpecification:
-        PointInTimeRecoveryEnabled: true
-      Tags:
-        - Key: Environment
-          Value: !Ref Environment
-        - Key: Application
-          Value: lagotto
-        - Key: Component
-          Value: watches
-
-  LagottoMatchHistoryTable:
-    Type: AWS::DynamoDB::Table
-    Properties:
-      TableName: lagotto-match-history
-      BillingMode: PAY_PER_REQUEST
-      AttributeDefinitions:
-        - AttributeName: watch_id
-          AttributeType: S
-        - AttributeName: matched_at
-          AttributeType: S
-        - AttributeName: user_id
-          AttributeType: S
-      KeySchema:
-        - AttributeName: watch_id
-          KeyType: HASH
-        - AttributeName: matched_at
-          KeyType: RANGE
-      GlobalSecondaryIndexes:
-        - IndexName: user_id-index
-          KeySchema:
-            - AttributeName: user_id
-              KeyType: HASH
-            - AttributeName: matched_at
-              KeyType: RANGE
-          Projection:
-            ProjectionType: ALL
-      TimeToLiveSpecification:
-        AttributeName: ttl_timestamp
-        Enabled: true
-      PointInTimeRecoverySpecification:
-        PointInTimeRecoveryEnabled: true
-      Tags:
-        - Key: Environment
-          Value: !Ref Environment
-        - Key: Application
-          Value: lagotto
-        - Key: Component
-          Value: match-history
-
   # SNS Topic
 
   # trivy:ignore:AVD-AWS-0136 -- lagotto uses AWS-managed SNS key (alias/aws/sns); CMK not required for this tool
@@ -143,15 +81,22 @@ Resources:
         Key: !Ref LambdaCodeKey
       Environment:
         Variables:
-          WATCHES_TABLE: !Ref LagottoWatchesTable
-          HISTORY_TABLE: !Ref LagottoMatchHistoryTable
+          WATCHES_TABLE: !Ref WatchesTableName
+          HISTORY_TABLE: !Ref HistoryTableName
+          SCHEDULED_TABLE: !Ref ScheduledTableName
           SNS_TOPIC_ARN: !Ref LagottoCapacityAlertsTopic
           SCHEDULE_NAME: lagotto-capacity-poller
       Policies:
+        # The tables are CLI-owned (#59), so scope CRUD by name rather than !Ref a
+        # stack-managed resource. The scheduled-launches table (#49) is included —
+        # the poller's handleScheduledLaunch / HasPendingScheduledLaunches read and
+        # write it, and its IAM was missing before (silent AccessDenied).
         - DynamoDBCrudPolicy:
-            TableName: !Ref LagottoWatchesTable
+            TableName: !Ref WatchesTableName
         - DynamoDBCrudPolicy:
-            TableName: !Ref LagottoMatchHistoryTable
+            TableName: !Ref HistoryTableName
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ScheduledTableName
         - Statement:
             - Effect: Allow
               Action: sns:Publish
@@ -257,28 +202,22 @@ Resources:
 
 Outputs:
   WatchesTableName:
-    Description: Name of the watches table
-    Value: !Ref LagottoWatchesTable
+    Description: Name of the (CLI-owned) watches table the poller is wired to
+    Value: !Ref WatchesTableName
     Export:
       Name: !Sub '${AWS::StackName}-watches-table'
 
-  WatchesTableArn:
-    Description: ARN of the watches table
-    Value: !GetAtt LagottoWatchesTable.Arn
-    Export:
-      Name: !Sub '${AWS::StackName}-watches-table-arn'
-
   MatchHistoryTableName:
-    Description: Name of the match history table
-    Value: !Ref LagottoMatchHistoryTable
+    Description: Name of the (CLI-owned) match history table the poller is wired to
+    Value: !Ref HistoryTableName
     Export:
       Name: !Sub '${AWS::StackName}-match-history-table'
 
-  MatchHistoryTableArn:
-    Description: ARN of the match history table
-    Value: !GetAtt LagottoMatchHistoryTable.Arn
+  ScheduledTableName:
+    Description: Name of the (CLI-owned) scheduled-launches table the poller is wired to
+    Value: !Ref ScheduledTableName
     Export:
-      Name: !Sub '${AWS::StackName}-match-history-table-arn'
+      Name: !Sub '${AWS::StackName}-scheduled-table'
 
   CapacityAlertsTopicArn:
     Description: ARN of the capacity alerts SNS topic

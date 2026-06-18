@@ -56,13 +56,14 @@ AWS_PROFILE=spore-host-infra aws cloudformation deploy \
 ```
 
 Creates:
-- DynamoDB tables: `lagotto-watches`, `lagotto-match-history` (PAY_PER_REQUEST, PITR, TTL)
 - SNS topic: `lagotto-capacity-alerts` (KMS encrypted with `alias/aws/sns`)
 - Lambda: `lagotto-capacity-poller` (arm64, provided.al2023, 512MB, 900s timeout)
 - EventBridge Schedule: `lagotto-capacity-poller` at `rate(5 minutes)`, starts **DISABLED**
 - IAM roles for Lambda execution + EventBridge invocation
 
-The schedule starts disabled to avoid billing when no watches are active. The `lagotto watch` CLI enables it on first watch creation; the Lambda disables it when the last active watch is removed.
+**The DynamoDB tables (`lagotto-watches`, `lagotto-match-history`, `lagotto-scheduled-launches`) are NOT created by the stack** (#59). They are owned by the CLI, which auto-creates them on first `lagotto watch`/`launch` (#12); the stack only *references* them by name (the poller's env vars + IAM are scoped to them). `lagotto deploy` ensures they exist before deploying, so the natural "`watch` first, then `deploy`" flow works whether or not the tables already exist. The table names are stack parameters (`WatchesTableName` / `HistoryTableName` / `ScheduledTableName`) defaulting to the standard names, so a non-default table set (`--watches-table`/`--history-table`) still wires the poller correctly.
+
+The schedule starts disabled to avoid billing when no watches are active. The `lagotto watch` CLI enables it on first watch creation; the Lambda disables it when the last active watch is removed. The deployed poller does **not** auto-delete the data tables when they idle to empty (it sets no `AUTO_DELETE_TABLES`) — deployed infra is persistent; tear it down with `lagotto deploy --teardown` (which deletes the stack but retains your tables) or `lagotto teardown` (which deletes the tables).
 
 #### Scheduled launches (`lagotto launch`, #49)
 
@@ -122,10 +123,13 @@ Tests clean up after themselves (cancel their test watches). The `g7e.xlarge` wa
 ## Teardown
 
 ```bash
+# Deletes the poller stack (Lambda, SNS, schedule, IAM) but RETAINS the data tables
+lagotto deploy --teardown
+# or, equivalently, delete the stack directly:
 AWS_PROFILE=spore-host-infra aws cloudformation delete-stack --stack-name lagotto --region us-east-1
 ```
 
-DynamoDB tables will be deleted with the stack. Match history is lost (90-day TTL anyway).
+The DynamoDB tables are **not** part of the stack (#59), so deleting the stack leaves them intact — watches and match history survive a redeploy. To delete the tables too (when they're empty, or `--force`), use `lagotto teardown`.
 
 ## AWS Account Reference
 

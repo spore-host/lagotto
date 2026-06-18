@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`lagotto deploy` no longer fails when the DynamoDB tables already exist** from
+  prior CLI use (#59). The CLI auto-creates the tables on first `watch`/`launch`
+  (#12) and the stack used to *also* create them, so the natural watch-then-deploy
+  flow collided on `AlreadyExists` and rolled the whole stack back. The tables are
+  now unambiguously **CLI-owned**: `lagotto deploy` ensures they exist, and the
+  stack only *references* them by name (env vars + IAM) — it never creates or
+  deletes them. The poller's IAM now also covers the **scheduled-launches** table
+  (#49), which was previously missing (silent `AccessDenied` on scheduled launches
+  from the hosted poller).
+- **`lagotto deploy` recovers from a wedged stack**: a previous deploy left in a
+  `ROLLBACK_COMPLETE` (or other failed-create) state — which can never be updated —
+  is now deleted and recreated automatically instead of failing every retry (#59).
+
+### Changed
+- The hosted poller no longer auto-deletes the DynamoDB tables when they idle to
+  empty unless `AUTO_DELETE_TABLES=true` (#59). A deployed poller is deliberate,
+  persistent infrastructure that references the CLI-owned tables, so it must not
+  delete them out from under itself; tear down explicitly with `lagotto deploy
+  --teardown` or `lagotto teardown`. (The infra-free `poll --daemon` path is
+  unaffected — it never deleted tables.) `lagotto deploy --teardown` now states
+  that your data tables are retained.
+
 ## [0.47.0] - 2026-06-17
 
 ### Added
