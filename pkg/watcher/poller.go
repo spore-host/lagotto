@@ -2,6 +2,7 @@ package watcher
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -10,6 +11,13 @@ import (
 
 	truffleaws "github.com/spore-host/truffle/pkg/aws"
 )
+
+// leaseTTL bounds how long a poller's processing lease on a watch is honored
+// before it's considered stale and re-claimable (#47). It must comfortably
+// exceed a single watch's action time (a RunInstances + FSx-create attempt
+// across AZs) but stay well under a poll interval so a crashed poller frees the
+// watch within one cycle.
+const leaseTTL = 2 * time.Minute
 
 // Poller checks instance capacity for active watches.
 type Poller struct {
@@ -20,6 +28,73 @@ type Poller struct {
 	holder    *Holder            // nil = skip capacity reservations
 	sagemaker *SageMakerLauncher // nil = skip SageMaker job submission
 	verbose   bool
+	// filter, when non-nil, scopes which watches this poller services (#47): a
+	// local `poll --daemon` can poll only its own project/owner/watch-ids instead
+	// of every watch in a shared account. nil = poll all (the hosted Lambda).
+	filter *WatchFilter
+	// leaseOwner, when set, makes the poller claim a short lease on each watch
+	// before acting (#47) so two pollers can't double-fire the same watch. Empty
+	// = no leasing (the single hosted Lambda needs none).
+	leaseOwner string
+}
+
+// WatchFilter scopes a poll sweep to a subset of watches (#47). A zero-value
+// filter (all fields empty) matches every watch — equivalent to no filter.
+type WatchFilter struct {
+	Project  string   // only watches with this Project label
+	Owner    string   // only watches whose UserID equals this (caller ARN)
+	WatchIDs []string // only these specific watch IDs
+}
+
+// matches reports whether a watch is in scope for this filter. An empty filter
+// (or empty field) doesn't constrain on that dimension.
+func (f *WatchFilter) matches(w *Watch) bool {
+	if f == nil {
+		return true
+	}
+	if f.Project != "" && w.Project != f.Project {
+		return false
+	}
+	if f.Owner != "" && w.UserID != f.Owner {
+		return false
+	}
+	if len(f.WatchIDs) > 0 {
+		found := false
+		for _, id := range f.WatchIDs {
+			if id == w.WatchID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+// Empty reports whether the filter constrains nothing (matches every watch).
+func (f *WatchFilter) Empty() bool {
+	return f == nil || (f.Project == "" && f.Owner == "" && len(f.WatchIDs) == 0)
+}
+
+// Describe renders the active scope for log output (#47), e.g.
+// "project=fieldwork, mine, watches=[w-aaa w-bbb]".
+func (f *WatchFilter) Describe() string {
+	if f.Empty() {
+		return "all account watches"
+	}
+	var parts []string
+	if f.Project != "" {
+		parts = append(parts, "project="+f.Project)
+	}
+	if f.Owner != "" {
+		parts = append(parts, "mine")
+	}
+	if len(f.WatchIDs) > 0 {
+		parts = append(parts, fmt.Sprintf("watches=%v", f.WatchIDs))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // PollerOpts configures optional Poller dependencies.
@@ -28,6 +103,10 @@ type PollerOpts struct {
 	Spawner   *Spawner
 	Holder    *Holder
 	SageMaker *SageMakerLauncher
+	// Filter scopes which watches are serviced (#47); nil = all.
+	Filter *WatchFilter
+	// LeaseOwner enables the double-poller guard (#47); empty = no leasing.
+	LeaseOwner string
 }
 
 // NewPoller creates a Poller backed by a truffle client and DynamoDB store.
@@ -42,6 +121,8 @@ func NewPoller(truffle *truffleaws.Client, store *Store, verbose bool, opts ...P
 		p.spawner = opts[0].Spawner
 		p.holder = opts[0].Holder
 		p.sagemaker = opts[0].SageMaker
+		p.filter = opts[0].Filter
+		p.leaseOwner = opts[0].LeaseOwner
 	}
 	return p
 }
@@ -100,6 +181,13 @@ func (p *Poller) PollAll(ctx context.Context) (*PollSummary, error) {
 	groups := make(map[regionKey]*regionGroup)
 	for i := range watches {
 		w := &watches[i]
+		// Scope to this poller's filter (#47): a local daemon only services its own
+		// project/owner/watch-ids, so it never expires, polls, or launches another
+		// project's watch in a shared account. An unscoped poller (hosted Lambda)
+		// sees every watch.
+		if !p.filter.matches(w) {
+			continue
+		}
 		if !w.ExpiresAt.IsZero() && now.After(w.ExpiresAt) {
 			if err := p.store.UpdateWatchStatus(ctx, w.WatchID, StatusExpired); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to expire watch %s: %v\n", w.WatchID, err)
@@ -319,6 +407,26 @@ func (p *Poller) pollGroup(ctx context.Context, regions []string, pattern string
 					w.WatchID, bestMatch.InstanceType, bestMatch.Region, bestMatch.Price)
 			}
 
+			// Double-poller guard (#47): claim a short lease before acting so two
+			// pollers (two daemons, or a daemon + the hosted Lambda) can't both fire
+			// the same watch — the duplicate-RunInstances / double-launch class.
+			// Skip this watch if another poller holds a live lease; we'll re-evaluate
+			// next cycle. Released after the action so a still-active (retrying) watch
+			// is immediately claimable. No-op when leasing is disabled.
+			if p.leaseOwner != "" {
+				if err := p.store.ClaimLease(ctx, w.WatchID, p.leaseOwner, time.Now().Add(leaseTTL)); err != nil {
+					if errors.Is(err, ErrLeaseHeld) {
+						if p.verbose {
+							fmt.Fprintf(os.Stderr, "Watch %s: lease held by another poller; skipping this cycle\n", w.WatchID)
+						}
+						summary.Retrying++
+						continue
+					}
+					fmt.Fprintf(os.Stderr, "Warning: could not claim lease on %s: %v\n", w.WatchID, err)
+					continue
+				}
+			}
+
 			// Execute the action. The launch IS the capacity test: cheap signals
 			// (offerings, spot price) only decide it's worth attempting — they
 			// never prove capacity. So a capacity failure here is expected and
@@ -350,6 +458,16 @@ func (p *Poller) pollGroup(ctx context.Context, regions []string, pattern string
 			}
 
 			p.recordOutcome(ctx, w, bestMatch, failure, summary)
+
+			// Release the lease now (#47): a capacity-retrying watch stays active, so
+			// freeing the lease lets the next cycle (this poller or another) re-claim
+			// it immediately rather than waiting out leaseTTL. A matched/failed watch
+			// is no longer active, so this is just tidy-up.
+			if p.leaseOwner != "" {
+				if err := p.store.ReleaseLease(ctx, w.WatchID, p.leaseOwner); err != nil && p.verbose {
+					fmt.Fprintf(os.Stderr, "Warning: could not release lease on %s: %v\n", w.WatchID, err)
+				}
+			}
 		} else {
 			_ = p.store.UpdateLastPolled(ctx, w.WatchID)
 		}

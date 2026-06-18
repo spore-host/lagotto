@@ -2,6 +2,7 @@ package watcher_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -235,5 +236,84 @@ func TestExtendWatch_Reactivate(t *testing.T) {
 	got, _ := store.GetWatch(ctx, "w-reactivate")
 	if got.Status != watcher.StatusActive {
 		t.Errorf("Status = %q, want active", got.Status)
+	}
+}
+
+// TestClaimLease_DoublePollerGuard covers the #47 lease: one poller claims it,
+// a second poller is refused (ErrLeaseHeld), the owner can re-claim/extend, and
+// once released the watch is claimable by anyone.
+func TestClaimLease_DoublePollerGuard(t *testing.T) {
+	store := setupStore(t)
+	ctx := context.Background()
+	w := newTestWatch("w-lease", "arn:alice")
+	if err := store.PutWatch(ctx, w); err != nil {
+		t.Fatalf("PutWatch: %v", err)
+	}
+
+	future := time.Now().Add(2 * time.Minute)
+
+	// Poller A claims it.
+	if err := store.ClaimLease(ctx, "w-lease", "pollerA", future); err != nil {
+		t.Fatalf("pollerA ClaimLease: %v", err)
+	}
+	// Poller B is refused while A's lease is live.
+	if err := store.ClaimLease(ctx, "w-lease", "pollerB", future); !errors.Is(err, watcher.ErrLeaseHeld) {
+		t.Fatalf("pollerB ClaimLease err = %v, want ErrLeaseHeld", err)
+	}
+	// Poller A can re-claim (extend) its own lease.
+	if err := store.ClaimLease(ctx, "w-lease", "pollerA", future); err != nil {
+		t.Fatalf("pollerA re-claim: %v", err)
+	}
+	// A releases; now B can claim.
+	if err := store.ReleaseLease(ctx, "w-lease", "pollerA"); err != nil {
+		t.Fatalf("pollerA ReleaseLease: %v", err)
+	}
+	if err := store.ClaimLease(ctx, "w-lease", "pollerB", future); err != nil {
+		t.Fatalf("pollerB ClaimLease after release: %v", err)
+	}
+}
+
+// TestClaimLease_StaleLeaseReclaimable confirms an expired lease (a crashed
+// poller) doesn't block the watch forever — another poller can re-claim it.
+func TestClaimLease_StaleLeaseReclaimable(t *testing.T) {
+	store := setupStore(t)
+	ctx := context.Background()
+	w := newTestWatch("w-stale", "arn:alice")
+	if err := store.PutWatch(ctx, w); err != nil {
+		t.Fatalf("PutWatch: %v", err)
+	}
+
+	// Poller A claims with an already-expired lease (simulating a crash mid-cycle).
+	past := time.Now().Add(-1 * time.Minute)
+	if err := store.ClaimLease(ctx, "w-stale", "pollerA", past); err != nil {
+		t.Fatalf("pollerA ClaimLease: %v", err)
+	}
+	// Poller B claims it because A's lease is stale.
+	if err := store.ClaimLease(ctx, "w-stale", "pollerB", time.Now().Add(2*time.Minute)); err != nil {
+		t.Fatalf("pollerB ClaimLease on stale lease err = %v, want success", err)
+	}
+}
+
+// TestReleaseLease_OnlyOwnerClears confirms a non-owner's release is a no-op
+// (doesn't steal the lease) — release is scoped to the holder.
+func TestReleaseLease_OnlyOwnerClears(t *testing.T) {
+	store := setupStore(t)
+	ctx := context.Background()
+	w := newTestWatch("w-rel", "arn:alice")
+	if err := store.PutWatch(ctx, w); err != nil {
+		t.Fatalf("PutWatch: %v", err)
+	}
+
+	future := time.Now().Add(2 * time.Minute)
+	if err := store.ClaimLease(ctx, "w-rel", "pollerA", future); err != nil {
+		t.Fatalf("pollerA ClaimLease: %v", err)
+	}
+	// B tries to release A's lease — no-op, no error.
+	if err := store.ReleaseLease(ctx, "w-rel", "pollerB"); err != nil {
+		t.Fatalf("pollerB ReleaseLease (non-owner) should be a no-op, got %v", err)
+	}
+	// A's lease must still hold against a B claim.
+	if err := store.ClaimLease(ctx, "w-rel", "pollerB", future); !errors.Is(err, watcher.ErrLeaseHeld) {
+		t.Fatalf("after non-owner release, pollerB claim err = %v, want ErrLeaseHeld (A still holds)", err)
 	}
 }

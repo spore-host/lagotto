@@ -29,6 +29,7 @@ var (
 	watchSpawnConfig     string
 	watchSageMakerConfig string
 	watchService         string
+	watchProject         string
 )
 
 var watchCmd = &cobra.Command{
@@ -61,6 +62,7 @@ func init() {
 	watchCmd.Flags().StringVar(&watchSpawnConfig, "spawn-config", "", "YAML file with spawn LaunchConfig (required for --action spawn)")
 	watchCmd.Flags().StringVar(&watchSageMakerConfig, "sagemaker-config", "", "YAML/JSON file with the SageMaker job definition (required for --service sagemaker)")
 	watchCmd.Flags().StringVar(&watchService, "service", "ec2", "Capacity service: ec2, or sagemaker (submits your SageMaker job for ml.* types)")
+	watchCmd.Flags().StringVar(&watchProject, "project", "", "Project label for scoping a local 'poll --daemon --project' in a shared account (default: $LAGOTTO_PROJECT)")
 }
 
 func runWatch(cmd *cobra.Command, args []string) error {
@@ -145,9 +147,15 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	now := time.Now().UTC()
 	expiresAt := now.Add(ttl)
 
+	project := watchProject
+	if project == "" {
+		project = os.Getenv("LAGOTTO_PROJECT")
+	}
+
 	w := &watcher.Watch{
 		WatchID:             "w-" + uuid.New().String()[:8],
 		UserID:              *identity.Arn,
+		Project:             project,
 		Status:              watcher.StatusActive,
 		Service:             service,
 		InstanceTypePattern: pattern,

@@ -62,6 +62,10 @@ func init() {
 		Notifier:  notifier,
 		Spawner:   spawner,
 		SageMaker: watcher.NewSageMakerLauncher(cfg),
+		// Lease each watch before acting (#47) so the hosted poller and any local
+		// `poll --daemon` can't both fire the same watch. No Filter — the hosted
+		// poller is the one account-wide poller and services every watch.
+		LeaseOwner: "hosted-lambda",
 	})
 
 	schedulerClient = scheduler.NewFromConfig(cfg)
