@@ -36,6 +36,12 @@ type Options struct {
 	Environment string // SAM Environment param (default "production")
 	Bucket      string // S3 bucket for the Lambda zip; empty → derive lagotto-lambda-<account>-<region>
 	AccountID   string // caller account (for the derived bucket name + messaging)
+	// The CLI-owned DynamoDB table names the stack wires the poller to (#59). The
+	// stack references them by name and never creates them; empty falls back to
+	// the template defaults (lagotto-watches / -match-history / -scheduled-launches).
+	WatchesTable   string
+	HistoryTable   string
+	ScheduledTable string
 }
 
 // LambdaArtifactURL returns the GitHub Release download URL for the poller Lambda
@@ -98,6 +104,17 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) (map[string]string,
 		{ParameterKey: aws.String("Environment"), ParameterValue: aws.String(env)},
 		{ParameterKey: aws.String("LambdaCodeBucket"), ParameterValue: aws.String(bucket)},
 		{ParameterKey: aws.String("LambdaCodeKey"), ParameterValue: aws.String(key)},
+	}
+	// Wire the poller to the CLI-owned tables by name (#59). Only set a param when
+	// non-empty so the template's defaults still apply for the standard names.
+	if opts.WatchesTable != "" {
+		params = append(params, cfntypes.Parameter{ParameterKey: aws.String("WatchesTableName"), ParameterValue: aws.String(opts.WatchesTable)})
+	}
+	if opts.HistoryTable != "" {
+		params = append(params, cfntypes.Parameter{ParameterKey: aws.String("HistoryTableName"), ParameterValue: aws.String(opts.HistoryTable)})
+	}
+	if opts.ScheduledTable != "" {
+		params = append(params, cfntypes.Parameter{ParameterKey: aws.String("ScheduledTableName"), ParameterValue: aws.String(opts.ScheduledTable)})
 	}
 	caps := []cfntypes.Capability{cfntypes.CapabilityCapabilityIam, cfntypes.CapabilityCapabilityAutoExpand}
 
@@ -163,10 +180,30 @@ func (d *Deployer) uploadArtifact(ctx context.Context, bucket, key, version stri
 	return nil
 }
 
+// failedCreateStates are terminal states a stack can be left in by a failed
+// CreateStack. Such a stack can never be updated — it must be deleted and
+// recreated. `lagotto deploy` does this automatically so a prior failure (e.g.
+// the #59 AlreadyExists rollback) doesn't wedge every subsequent retry.
+var failedCreateStates = map[cfntypes.StackStatus]bool{
+	cfntypes.StackStatusRollbackComplete: true,
+	cfntypes.StackStatusRollbackFailed:   true,
+	cfntypes.StackStatusReviewInProgress: true,
+	cfntypes.StackStatusCreateFailed:     true,
+	cfntypes.StackStatusDeleteFailed:     true,
+}
+
 func (d *Deployer) createOrUpdate(ctx context.Context, stackName string, params []cfntypes.Parameter, caps []cfntypes.Capability) error {
-	exists, err := d.stackExists(ctx, stackName)
+	exists, status, err := d.stackState(ctx, stackName)
 	if err != nil {
 		return err
+	}
+	// A stack stranded in a failed-create state can't be updated; delete it first
+	// so the CreateStack below starts clean (#59).
+	if exists && failedCreateStates[status] {
+		if err := d.Teardown(ctx, stackName); err != nil {
+			return fmt.Errorf("delete prior failed stack %s (status %s) before redeploy: %w", stackName, status, err)
+		}
+		exists = false
 	}
 	if exists {
 		_, err := d.cfn.UpdateStack(ctx, &cloudformation.UpdateStackInput{
@@ -204,24 +241,24 @@ func (d *Deployer) createOrUpdate(ctx context.Context, stackName string, params 
 	return nil
 }
 
-func (d *Deployer) stackExists(ctx context.Context, stackName string) (bool, error) {
+// stackState reports whether the stack exists and, if so, its current status.
+// A failed-create status (see failedCreateStates) tells createOrUpdate to delete
+// and recreate rather than attempt an impossible UpdateStack (#59).
+func (d *Deployer) stackState(ctx context.Context, stackName string) (bool, cfntypes.StackStatus, error) {
 	out, err := d.cfn.DescribeStacks(ctx, &cloudformation.DescribeStacksInput{StackName: aws.String(stackName)})
 	if err != nil {
 		// CloudFormation returns a ValidationError "does not exist" for an absent stack.
 		if strings.Contains(err.Error(), "does not exist") {
-			return false, nil
+			return false, "", nil
 		}
-		return false, fmt.Errorf("describe stack %s: %w", stackName, err)
+		return false, "", fmt.Errorf("describe stack %s: %w", stackName, err)
 	}
 	for _, s := range out.Stacks {
-		// A stack in REVIEW_IN_PROGRESS or *_ROLLBACK_COMPLETE from a failed create
-		// can't be updated — but treat any present stack as existing; the waiter/AWS
-		// surfaces the specific lifecycle error.
 		if aws.ToString(s.StackName) == stackName {
-			return true, nil
+			return true, s.StackStatus, nil
 		}
 	}
-	return false, nil
+	return false, "", nil
 }
 
 // StackOutputs returns the deployed stack's outputs (e.g. the poller function

@@ -40,6 +40,12 @@ func (s *Store) SetScheduledTable(name string) {
 	}
 }
 
+// ScheduledTable returns the scheduled-launches table name this store uses, so
+// callers (e.g. `lagotto deploy`) can wire the poller to the same table (#59).
+func (s *Store) ScheduledTable() string {
+	return s.scheduledTable
+}
+
 // PutWatch creates or updates a watch record.
 func (s *Store) PutWatch(ctx context.Context, w *Watch) error {
 	w.UpdatedAt = time.Now().UTC()

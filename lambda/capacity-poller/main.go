@@ -36,10 +36,12 @@ func init() {
 
 	watchesTable := getEnv("WATCHES_TABLE", "lagotto-watches")
 	historyTable := getEnv("HISTORY_TABLE", "lagotto-match-history")
+	scheduledTable := getEnv("SCHEDULED_TABLE", "lagotto-scheduled-launches")
 	snsTopicArn := os.Getenv("SNS_TOPIC_ARN")
 	scheduleName = getEnv("SCHEDULE_NAME", "lagotto-capacity-poller")
 
 	store = watcher.NewStore(cfg, watchesTable, historyTable)
+	store.SetScheduledTable(scheduledTable)
 
 	truffleClient, err := truffleaws.NewClient(ctx)
 	if err != nil {
@@ -165,26 +167,28 @@ func handlePoll(ctx context.Context) error {
 			log.Printf("Warning: failed to disable schedule: %v", err)
 		}
 
-		// No litter: once there are no active watches AND the tables have fully
-		// drained (resolved watches + match history aged out via DynamoDB TTL),
-		// delete the tables so lagotto leaves nothing behind. A future
-		// `lagotto watch` recreates them. We only delete when EMPTY, so no
-		// history is destroyed prematurely (#12).
-		empty, err := store.TablesEmpty(ctx)
-		if err != nil {
-			log.Printf("Warning: could not check whether tables are empty: %v", err)
-		} else if empty {
-			log.Println("Tables empty, deleting CLI-managed lagotto tables (no litter)")
-			// Only deletes tables tagged lagotto:managed=cli — CloudFormation-
-			// managed tables are left for the stack to own.
-			deleted, err := store.DeleteManagedTables(ctx)
+		// Table auto-deletion is opt-in via AUTO_DELETE_TABLES (#59). A poller
+		// deployed by `lagotto deploy` is deliberate, persistent infra and now
+		// REFERENCES the CLI-owned tables by name — it must not delete them out from
+		// under itself when they idle to empty (the user tears down explicitly with
+		// `lagotto deploy --teardown` / `lagotto teardown`). The env var is left
+		// unset by the stack, so a deployed poller disables its schedule (no cost
+		// when idle) but never deletes data tables.
+		if getEnv("AUTO_DELETE_TABLES", "") == "true" {
+			empty, err := store.TablesEmpty(ctx)
 			if err != nil {
-				log.Printf("Warning: failed to delete tables: %v", err)
-			} else if len(deleted) > 0 {
-				log.Printf("Deleted tables: %v", deleted)
+				log.Printf("Warning: could not check whether tables are empty: %v", err)
+			} else if empty {
+				log.Println("Tables empty, deleting CLI-managed lagotto tables (no litter)")
+				deleted, err := store.DeleteManagedTables(ctx)
+				if err != nil {
+					log.Printf("Warning: failed to delete tables: %v", err)
+				} else if len(deleted) > 0 {
+					log.Printf("Deleted tables: %v", deleted)
+				}
+			} else {
+				log.Println("Tables still hold records (history retained until TTL); not deleting")
 			}
-		} else {
-			log.Println("Tables still hold records (history retained until TTL); not deleting")
 		}
 	} else {
 		log.Printf("%d active watches, pendingScheduledLaunches=%v — leaving infra armed", len(active), pendingLaunches)
