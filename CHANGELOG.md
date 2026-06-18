@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.47.1] - 2026-06-17
+
 ### Fixed
 - **`lagotto deploy` no longer fails when the DynamoDB tables already exist** from
   prior CLI use (#59). The CLI auto-creates the tables on first `watch`/`launch`
@@ -252,7 +254,8 @@ Initial tagged release from the standalone `spore-host/lagotto` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/lagotto/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.47.0...HEAD
+[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.47.1...HEAD
+[0.47.1]: https://github.com/spore-host/lagotto/compare/v0.47.0...v0.47.1
 [0.47.0]: https://github.com/spore-host/lagotto/compare/v0.46.0...v0.47.0
 [0.46.0]: https://github.com/spore-host/lagotto/compare/v0.45.0...v0.46.0
 [0.45.0]: https://github.com/spore-host/lagotto/compare/v0.44.0...v0.45.0
