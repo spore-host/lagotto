@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`poll --daemon` can be scoped to your own watches** in a shared account
+  (#47): `--project NAME` (or `$LAGOTTO_PROJECT`), `--mine` (only watches you
+  created), or `--watch w-aaa,w-bbb`. Previously a local daemon polled and acted
+  on *every* watch in the account, so one operator's daemon could launch another
+  project's `--action spawn` instance. A scoped daemon also exits when *its*
+  watches are done, not the whole account's. `lagotto watch --project NAME` tags
+  a watch for this scoping (also from `$LAGOTTO_PROJECT`).
+
+### Fixed
+- **Two pollers can no longer double-fire the same watch** (#47): before acting
+  on a match, a poller now claims a short processing lease, so a second daemon —
+  or a local daemon racing the hosted Lambda — skips a watch already being
+  handled instead of duplicating the `RunInstances`/FSx-create. A crashed
+  poller's lease ages out (it never blocks the watch). Disable with
+  `poll --no-lease`. The hosted poller leases too.
+
 ## [0.46.0] - 2026-06-17
 
 ### Added

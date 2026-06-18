@@ -60,6 +60,27 @@ lagotto poll
 extra infrastructure. The hosted, multi-tenant Lambda poller (deployed via
 CloudFormation) remains the option for teams — see [DEPLOYMENT.md](DEPLOYMENT.md).
 
+### Scoping a daemon in a shared account
+
+By default `poll --daemon` services **every** active watch in the account. In an
+account shared across projects/people, scope it to your own watches so it doesn't
+drive (and launch) someone else's (#47):
+
+```bash
+lagotto watch "g5.12xlarge" --action spawn --spawn-config job.yaml --project fieldwork
+lagotto poll --daemon --project fieldwork   # only fieldwork's watches
+lagotto poll --daemon --mine                # only watches you created
+lagotto poll --daemon --watch w-aaa,w-bbb   # only these watch IDs
+```
+
+`--project` defaults to `$LAGOTTO_PROJECT` (on both `watch` and `poll`). A scoped
+daemon exits when *its* watches are done, not the whole account's.
+
+Before acting on a match, a poller claims a short **processing lease** on the
+watch, so two daemons — or a local daemon racing the hosted Lambda — can't both
+launch the same watch. A crashed poller's lease ages out automatically. Disable
+with `--no-lease` (not recommended when more than one poller runs).
+
 ## Scheduled launches
 
 Where `watch` fires when *capacity* appears, `lagotto launch` fires at a *time* —

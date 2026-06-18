@@ -214,6 +214,67 @@ func (s *Store) UpdateWatchStatus(ctx context.Context, watchID string, status Wa
 	return nil
 }
 
+// ErrLeaseHeld is returned by ClaimLease when another poller holds an unexpired
+// lease on the watch — the caller should skip it this cycle (#47).
+var ErrLeaseHeld = errors.New("watch lease held by another poller")
+
+// ClaimLease atomically claims a processing lease on a watch for owner, valid
+// until expiresAt (#47). It succeeds only if no lease is held or the existing
+// lease is stale (expired) — so two pollers can't both act on the same watch,
+// while a crashed poller's lease ages out and never blocks the watch forever.
+// Returns ErrLeaseHeld if a live lease is held by someone else.
+func (s *Store) ClaimLease(ctx context.Context, watchID, owner string, expiresAt time.Time) error {
+	_, err := s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: &s.watchesTable,
+		Key: map[string]types.AttributeValue{
+			"watch_id": &types.AttributeValueMemberS{Value: watchID},
+		},
+		// Claim if: no lease owner, OR we already own it, OR the lease has expired.
+		// Both timestamps are stored/compared in UTC so RFC3339 lexical ordering is
+		// valid — a non-UTC offset (e.g. "-07:00") would sort wrong against a "Z".
+		ConditionExpression: aws.String("attribute_not_exists(lease_owner) OR lease_owner = :me OR lease_expires_at < :now"),
+		UpdateExpression:    aws.String("SET lease_owner = :me, lease_expires_at = :exp, updated_at = :now"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":me":  &types.AttributeValueMemberS{Value: owner},
+			":exp": &types.AttributeValueMemberS{Value: expiresAt.UTC().Format(time.RFC3339)},
+			":now": &types.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)},
+		},
+	})
+	if err != nil {
+		var cond *types.ConditionalCheckFailedException
+		if errors.As(err, &cond) {
+			return ErrLeaseHeld
+		}
+		return fmt.Errorf("claim lease on %q: %w", watchID, err)
+	}
+	return nil
+}
+
+// ReleaseLease clears the lease a poller holds on a watch (best-effort, only if
+// still ours), so a watch that stays active (capacity-retrying) is immediately
+// claimable next cycle rather than waiting for the lease to expire (#47).
+func (s *Store) ReleaseLease(ctx context.Context, watchID, owner string) error {
+	_, err := s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: &s.watchesTable,
+		Key: map[string]types.AttributeValue{
+			"watch_id": &types.AttributeValueMemberS{Value: watchID},
+		},
+		ConditionExpression: aws.String("lease_owner = :me"),
+		UpdateExpression:    aws.String("REMOVE lease_owner, lease_expires_at"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":me": &types.AttributeValueMemberS{Value: owner},
+		},
+	})
+	if err != nil {
+		var cond *types.ConditionalCheckFailedException
+		if errors.As(err, &cond) {
+			return nil // someone else owns it (or it's already cleared) — nothing to do
+		}
+		return fmt.Errorf("release lease on %q: %w", watchID, err)
+	}
+	return nil
+}
+
 // RecordMatch updates the watch with match info and writes a history record.
 func (s *Store) RecordMatch(ctx context.Context, w *Watch, m *MatchResult) error {
 	// Update the watch record
