@@ -61,8 +61,12 @@ func init() {
 	}
 
 	poller = watcher.NewPoller(truffleClient, store, true, watcher.PollerOpts{
-		Notifier:  notifier,
-		Spawner:   spawner,
+		Notifier: notifier,
+		Spawner:  spawner,
+		// Without a Holder, --action hold silently degraded to notify in the
+		// deployed poller (#39). Wire it so a hold watch actually reserves
+		// capacity (CreateCapacityReservation).
+		Holder:    watcher.NewHolder(cfg),
 		SageMaker: watcher.NewSageMakerLauncher(cfg),
 		// Lease each watch before acting (#47) so the hosted poller and any local
 		// `poll --daemon` can't both fire the same watch. No Filter — the hosted

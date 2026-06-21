@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The deployed (hosted) poller can now actually service `--action hold` and
+  `--service sagemaker` watches (#39). The poller never wired a `Holder`, so
+  `hold` silently degraded to notify; and the CloudFormation policy lacked the
+  IAM for both paths. Wire the `Holder`, and grant the poller
+  `ec2:CreateCapacityReservation` (+ cancel/describe) for holds and
+  `sagemaker:CreateTrainingJob` (+ a SageMaker-scoped `iam:PassRole`) for
+  SageMaker jobs. (`--action spawn` IAM was already granted in #51.)
+
 ### Security
 - Closed an SSRF hole in webhook delivery (#40). `ValidateWebhookURL` vetted the
   resolved IPs, but `http.Client` re-resolved the host at connect time, so a

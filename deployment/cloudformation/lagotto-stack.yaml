@@ -159,6 +159,34 @@ Resources:
               Condition:
                 StringEquals:
                   iam:PassedToService: ec2.amazonaws.com
+        # An --action hold watch reserves capacity via CreateCapacityReservation;
+        # without this the deployed poller's Holder failed UnauthorizedOperation
+        # (and, before #39, hold silently degraded to notify because no Holder was
+        # wired at all).
+        - Statement:
+            - Effect: Allow
+              Action:
+                - ec2:CreateCapacityReservation
+                - ec2:CancelCapacityReservation
+                - ec2:DescribeCapacityReservations
+              Resource: '*'
+        # A --service sagemaker watch submits the user's training job via
+        # CreateTrainingJob. The job spec carries its own SageMaker execution
+        # RoleArn, so the Lambda must PassRole it — scoped to the SageMaker
+        # service so it can't pass arbitrary roles elsewhere.
+        - Statement:
+            - Effect: Allow
+              Action:
+                - sagemaker:CreateTrainingJob
+                - sagemaker:AddTags
+                - sagemaker:DescribeTrainingJob
+              Resource: '*'
+            - Effect: Allow
+              Action: iam:PassRole
+              Resource: '*'
+              Condition:
+                StringEquals:
+                  iam:PassedToService: sagemaker.amazonaws.com
       Tags:
         Environment: !Ref Environment
         Application: lagotto
