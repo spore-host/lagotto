@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spf13/cobra"
 	"github.com/spore-host/lagotto/pkg/watcher"
 )
@@ -33,12 +34,9 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 	store := watcher.NewStore(cfg, watchesTable, historyTable)
 
-	w, err := store.GetWatch(ctx, watchID)
+	w, err := getWatchOwned(ctx, store, sts.NewFromConfig(cfg), watchID)
 	if err != nil {
-		return fmt.Errorf("get watch: %w", err)
-	}
-	if w == nil {
-		return fmt.Errorf("watch %s not found", watchID)
+		return err
 	}
 
 	if getOutputFormat() == "json" {

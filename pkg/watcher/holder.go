@@ -62,3 +62,23 @@ func (h *Holder) Hold(ctx context.Context, w *Watch, m *MatchResult) error {
 	m.ActionTaken = "held"
 	return nil
 }
+
+// Release cancels a capacity reservation created by Hold. Cancelling a watch
+// must release any still-active ODCR so it stops billing, rather than waiting
+// out the 30-minute auto-expiry (#41). It is a no-op for an empty id.
+func (h *Holder) Release(ctx context.Context, region, reservationID string) error {
+	if reservationID == "" {
+		return nil
+	}
+	cfg := h.cfg.Copy()
+	cfg.Region = region
+	client := ec2.NewFromConfig(cfg)
+
+	_, err := client.CancelCapacityReservation(ctx, &ec2.CancelCapacityReservationInput{
+		CapacityReservationId: aws.String(reservationID),
+	})
+	if err != nil {
+		return fmt.Errorf("cancel capacity reservation %s: %w", reservationID, err)
+	}
+	return nil
+}

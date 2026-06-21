@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spf13/cobra"
 	"github.com/spore-host/lagotto/pkg/watcher"
 )
@@ -39,13 +40,10 @@ func runCancel(cmd *cobra.Command, args []string) error {
 
 	store := watcher.NewStore(cfg, watchesTable, historyTable)
 
-	// Verify watch exists
-	w, err := store.GetWatch(ctx, watchID)
+	// Verify the watch exists AND the caller owns it (#41).
+	w, err := getWatchOwned(ctx, store, sts.NewFromConfig(cfg), watchID)
 	if err != nil {
-		return fmt.Errorf("get watch: %w", err)
-	}
-	if w == nil {
-		return fmt.Errorf("watch %s not found", watchID)
+		return err
 	}
 	if w.Status != watcher.StatusActive {
 		return fmt.Errorf("watch %s is not active (status: %s)", watchID, w.Status)
@@ -54,6 +52,18 @@ func runCancel(cmd *cobra.Command, args []string) error {
 	if !cancelYes && !confirmCancel(fmt.Sprintf("Cancel watch %s (%s)?", watchID, w.InstanceTypePattern)) {
 		fmt.Fprintln(cmd.OutOrStdout(), "Aborted.")
 		return nil
+	}
+
+	// Release a held capacity reservation so it stops billing instead of waiting
+	// out its 30-minute auto-expiry (#41). Best-effort: a failure here (e.g. the
+	// reservation already expired) must not block cancelling the watch.
+	if w.LastMatch != nil && w.LastMatch.ReservationID != "" {
+		holder := watcher.NewHolder(cfg)
+		if rerr := holder.Release(ctx, w.LastMatch.Region, w.LastMatch.ReservationID); rerr != nil {
+			fmt.Fprintf(os.Stderr, "Note: could not release capacity reservation %s: %v\n", w.LastMatch.ReservationID, rerr)
+		} else {
+			fmt.Fprintf(cmd.OutOrStdout(), "Released capacity reservation %s\n", w.LastMatch.ReservationID)
+		}
 	}
 
 	if err := store.UpdateWatchStatus(ctx, watchID, watcher.StatusCancelled); err != nil {

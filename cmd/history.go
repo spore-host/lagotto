@@ -38,6 +38,10 @@ func runHistory(cmd *cobra.Command, args []string) error {
 	var matches []watcher.MatchResult
 
 	if historyWatchID != "" {
+		// Authorize: only the watch's owner may read its history by ID (#41).
+		if _, oerr := getWatchOwned(ctx, store, sts.NewFromConfig(cfg), historyWatchID); oerr != nil {
+			return oerr
+		}
 		matches, err = store.ListMatchHistory(ctx, historyWatchID)
 	} else {
 		// Get user's history

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spf13/cobra"
 	"github.com/spore-host/lagotto/pkg/watcher"
 	"github.com/spore-host/libs/i18n"
@@ -47,14 +48,11 @@ func runExtend(cmd *cobra.Command, args []string) error {
 
 	store := watcher.NewStore(cfg, watchesTable, historyTable)
 
-	w, err := store.GetWatch(ctx, watchID)
+	// Resolve the watch and authorize the caller as its owner (#41). A mismatch
+	// (or missing watch) surfaces the same not-found message.
+	w, err := getWatchOwned(ctx, store, sts.NewFromConfig(cfg), watchID)
 	if err != nil {
-		return fmt.Errorf("get watch: %w", err)
-	}
-	if w == nil {
-		return fmt.Errorf("%s", i18n.T("lagotto.error.watch_not_found", map[string]interface{}{
-			"WatchID": watchID,
-		}))
+		return err
 	}
 
 	// Only active or expired watches can be extended

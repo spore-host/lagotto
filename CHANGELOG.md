@@ -7,7 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- `cancel`, `extend`, `status`, and `history --watch-id` now authorize the caller
+  as the watch's owner (#41). Watches are addressable by a guessable ID and the
+  tables can be shared across an account, so previously anyone could cancel,
+  extend, or read any watch by ID. The caller ARN is compared to the watch's
+  recorded owner; a mismatch returns the same "not found" as a missing watch (no
+  existence oracle).
+
 ### Fixed
+- Cancelling a `--action hold` watch now releases its capacity reservation
+  (#41). A held ODCR previously billed until its 30-minute auto-expiry even after
+  the watch was cancelled; `cancel` now calls `CancelCapacityReservation`
+  (best-effort) for the recorded reservation.
 - The deployed (hosted) poller can now actually service `--action hold` and
   `--service sagemaker` watches (#39). The poller never wired a `Holder`, so
   `hold` silently degraded to notify; and the CloudFormation policy lacked the

@@ -99,7 +99,9 @@ func TestParseNotifyChannels(t *testing.T) {
 	})
 
 	t.Run("valid https webhook", func(t *testing.T) {
-		ch, err := parseNotifyChannels([]string{"webhook:https://hooks.example.com/x"})
+		// example.com resolves to a public IP; webhook validation is now
+		// fail-closed on unresolvable hosts (#40), so the fixture must resolve.
+		ch, err := parseNotifyChannels([]string{"webhook:https://example.com/x"})
 		if err != nil {
 			t.Fatalf("https webhook should be valid: %v", err)
 		}
