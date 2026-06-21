@@ -6,12 +6,50 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 )
+
+// newSafeHTTPClient returns an http.Client whose dialer re-validates the actual
+// IP it is about to connect to. ValidateWebhookURL resolves+vets the host at
+// validation time, but the default transport performs its OWN DNS resolution at
+// connect time — so a DNS-rebinding attacker can return a public IP during
+// validation and 169.254.169.254 (the EC2/Lambda metadata endpoint, which holds
+// the function's credentials) at dial time. Vetting the post-resolution dial IP
+// closes that TOCTOU window regardless of what DNS returns (#40).
+func newSafeHTTPClient(timeout time.Duration) *http.Client {
+	baseDialer := &net.Dialer{Timeout: timeout}
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, err
+			}
+			ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+			if err != nil {
+				return nil, fmt.Errorf("resolve %q: %w", host, err)
+			}
+			if len(ips) == 0 {
+				return nil, fmt.Errorf("host %q resolved to no addresses", host)
+			}
+			// Every resolved IP must pass — reject if any is internal, so a
+			// multi-record response can't slip a blocked address past us.
+			for _, ipAddr := range ips {
+				if err := checkIP(ipAddr.IP); err != nil {
+					return nil, fmt.Errorf("refusing to dial %q: %w", host, err)
+				}
+			}
+			// Pin the connection to a vetted IP so the kernel can't re-resolve to
+			// a different (blocked) address between this check and connect.
+			return baseDialer.DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), port))
+		},
+	}
+	return &http.Client{Timeout: timeout, Transport: transport}
+}
 
 // Notifier dispatches match notifications to configured channels.
 type Notifier struct {
@@ -24,7 +62,7 @@ type Notifier struct {
 func NewNotifier(cfg aws.Config, topicArn string) *Notifier {
 	return &Notifier{
 		snsClient:  sns.NewFromConfig(cfg),
-		httpClient: &http.Client{Timeout: 10 * time.Second},
+		httpClient: newSafeHTTPClient(10 * time.Second),
 		topicArn:   topicArn,
 	}
 }

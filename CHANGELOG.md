@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- Closed an SSRF hole in webhook delivery (#40). `ValidateWebhookURL` vetted the
+  resolved IPs, but `http.Client` re-resolved the host at connect time, so a
+  DNS-rebinding attacker could pass validation with a public IP and then have the
+  Lambda connect to `169.254.169.254` (the metadata endpoint holding the
+  function's credentials). The notifier's HTTP client now re-validates the actual
+  dial IP in a custom `DialContext` and pins the connection to it. Also,
+  `ValidateWebhookURL` no longer fails open when a host can't be resolved — an
+  unresolvable host is now rejected.
+
 ## [0.47.1] - 2026-06-17
 
 ### Fixed

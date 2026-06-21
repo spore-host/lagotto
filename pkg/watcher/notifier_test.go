@@ -56,6 +56,24 @@ func TestSendWebhook_Payload(t *testing.T) {
 	}
 }
 
+// TestSafeHTTPClient_RefusesInternalDialIP verifies the dial-time SSRF guard:
+// even if a request reaches the HTTP client, the custom DialContext re-validates
+// the resolved IP and refuses to connect to internal addresses — the defense
+// against DNS rebinding past ValidateWebhookURL (#40). An httptest server binds
+// to 127.0.0.1 (loopback), which checkIP rejects.
+func TestSafeHTTPClient_RefusesInternalDialIP(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	client := newSafeHTTPClient(5 * time.Second)
+	_, err := client.Get(ts.URL) // ts.URL is http://127.0.0.1:<port>
+	if err == nil {
+		t.Fatal("expected dial to a loopback address to be refused, got nil error")
+	}
+}
+
 // TestNotifyWebhook_RejectsHTTP verifies that Notify blocks http:// webhook targets.
 func TestNotifyWebhook_RejectsHTTP(t *testing.T) {
 	n := &Notifier{httpClient: http.DefaultClient}

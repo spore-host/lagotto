@@ -27,11 +27,17 @@ func ValidateWebhookURL(raw string) error {
 		return checkIP(ip)
 	}
 
-	// Resolve hostname and check all resolved IPs
-	// Skip resolution errors at storage time — the notifier re-validates at send time
+	// Resolve hostname and check all resolved IPs. A resolution failure is a
+	// rejection, not a pass: failing open here let an unresolvable (or
+	// intermittently-resolving) host through to the dialer (#40). The dial-time
+	// guard in the notifier's HTTP client is the authoritative defense against
+	// DNS rebinding; this is the storage-time gate.
 	ips, err := net.LookupHost(host)
 	if err != nil {
-		return nil
+		return fmt.Errorf("webhook host %q could not be resolved: %w", host, err)
+	}
+	if len(ips) == 0 {
+		return fmt.Errorf("webhook host %q resolved to no addresses", host)
 	}
 	for _, ipStr := range ips {
 		ip := net.ParseIP(ipStr)

@@ -5,15 +5,26 @@ import (
 )
 
 func TestValidateWebhookURL_AcceptsHTTPS(t *testing.T) {
+	// Use hosts that reliably resolve to public IPs. Validation now requires a
+	// host to resolve (fail-closed, #40), so unresolvable example.org fixtures
+	// are no longer valid stand-ins.
 	urls := []string{
-		"https://webhook.example.com/notify/abc123",
 		"https://example.com/webhook",
-		"https://my-server.example.org:8443/notify",
+		"https://example.com:8443/notify/abc123",
 	}
 	for _, u := range urls {
 		if err := ValidateWebhookURL(u); err != nil {
 			t.Errorf("expected %q to be accepted, got error: %v", u, err)
 		}
+	}
+}
+
+func TestValidateWebhookURL_RejectsUnresolvableHost(t *testing.T) {
+	// Fail-closed: a host that does not resolve is rejected, not passed through
+	// (the old behavior returned nil on LookupHost error) (#40).
+	err := ValidateWebhookURL("https://nonexistent.invalid/webhook")
+	if err == nil {
+		t.Error("expected an unresolvable host to be rejected (fail-closed)")
 	}
 }
 
