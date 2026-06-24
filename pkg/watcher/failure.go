@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/aws/smithy-go"
+	"github.com/spore-host/spawn/pkg/launcher"
 )
 
 // FailureKind classifies why a launch/hold attempt failed, which decides whether
@@ -74,6 +75,16 @@ func failureLabel(k FailureKind) string {
 func ClassifyFailure(err error) FailureKind {
 	if err == nil {
 		return FailureNone
+	}
+
+	// A post-launch failure (spawn#220): RunInstances already SUCCEEDED, and spawn's
+	// Provision tore the instance back down because a downstream step (ephemeral FSx
+	// setup) failed. The launch itself worked — capacity exists — so retrying other
+	// AZs can't help and would just churn launch+terminate cycles, orphaning a
+	// filesystem per attempt under the old behavior. Treat as terminal so the AZ
+	// sweep stops immediately.
+	if errors.Is(err, launcher.ErrPostLaunch) {
+		return FailureTerminal
 	}
 
 	var apiErr smithy.APIError

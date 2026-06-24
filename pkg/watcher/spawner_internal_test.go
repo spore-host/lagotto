@@ -3,6 +3,7 @@ package watcher
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/aws/smithy-go"
@@ -121,6 +122,28 @@ func TestSpawn_TerminalStopsImmediately(t *testing.T) {
 	}
 	if attempts != 1 {
 		t.Errorf("attempts = %d, want 1 (terminal error must stop the AZ sweep immediately)", attempts)
+	}
+}
+
+// TestSpawn_PostLaunchStopsImmediately is the lagotto half of spawn#220: when
+// Provision returns ErrPostLaunch (RunInstances SUCCEEDED, then a downstream step
+// failed and Provision tore the instance down), the AZ sweep must STOP — not march
+// to the next AZ launching another instance+FSx per attempt. The launch worked;
+// capacity exists; the problem is downstream, so retrying other AZs only churns.
+func TestSpawn_PostLaunchStopsImmediately(t *testing.T) {
+	var attempts int
+	sp := newSpawnerWithProvision(func(ctx context.Context, _ *spawnaws.Client, _ spawnaws.LaunchConfig, _ launcher.Options) (*spawnaws.LaunchResult, error) {
+		attempts++
+		// Mirror spawn's wrapping: ErrPostLaunch inside an fmt.Errorf chain.
+		return nil, fmt.Errorf("provision: %w: FSx setup failed, terminated instance i-x", launcher.ErrPostLaunch)
+	})
+
+	m := &MatchResult{Region: "us-east-1", CandidateAZs: []string{"us-east-1a", "us-east-1b", "us-east-1c"}}
+	if err := sp.Spawn(context.Background(), minimalWatch(t), m); err == nil {
+		t.Fatal("expected post-launch error to fail the spawn")
+	}
+	if attempts != 1 {
+		t.Errorf("attempts = %d, want 1 (a post-launch failure must NOT retry other AZs — spawn#220)", attempts)
 	}
 }
 

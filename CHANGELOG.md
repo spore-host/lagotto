@@ -14,6 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   extend, or read any watch by ID. The caller ARN is compared to the watch's
   recorded owner; a mismatch returns the same "not found" as a missing watch (no
   existence oracle).
+- Closed an SSRF hole in webhook delivery (#40). `ValidateWebhookURL` vetted the
+  resolved IPs, but `http.Client` re-resolved the host at connect time, so a
+  DNS-rebinding attacker could pass validation with a public IP and then have the
+  Lambda connect to `169.254.169.254` (the metadata endpoint holding the
+  function's credentials). The notifier's HTTP client now re-validates the actual
+  dial IP in a custom `DialContext` and pins the connection to it. Also,
+  `ValidateWebhookURL` no longer fails open when a host can't be resolved — an
+  unresolvable host is now rejected.
 
 ### Fixed
 - Cancelling a `--action hold` watch now releases its capacity reservation
@@ -27,16 +35,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ec2:CreateCapacityReservation` (+ cancel/describe) for holds and
   `sagemaker:CreateTrainingJob` (+ a SageMaker-scoped `iam:PassRole`) for
   SageMaker jobs. (`--action spawn` IAM was already granted in #51.)
-
-### Security
-- Closed an SSRF hole in webhook delivery (#40). `ValidateWebhookURL` vetted the
-  resolved IPs, but `http.Client` re-resolved the host at connect time, so a
-  DNS-rebinding attacker could pass validation with a public IP and then have the
-  Lambda connect to `169.254.169.254` (the metadata endpoint holding the
-  function's credentials). The notifier's HTTP client now re-validates the actual
-  dial IP in a custom `DialContext` and pins the connection to it. Also,
-  `ValidateWebhookURL` no longer fails open when a host can't be resolved — an
-  unresolvable host is now rejected.
+- **A post-launch failure no longer makes the AZ sweep launch (and orphan) an
+  instance per AZ** (spawn#220). When a `--action spawn` launch succeeded at
+  `RunInstances` but a downstream step failed, spawn now tears the instance down
+  and reports it as a post-launch failure; lagotto's per-AZ retry (`launchAcrossAZs`)
+  now classifies that as **terminal** and stops, instead of marching to the next
+  AZ and launching another instance (each leaking an instance + ephemeral FSx).
+  Bumps the spawn dependency to v0.63.1 (which adds the `ErrPostLaunch` sentinel
+  and the instance-teardown-on-post-launch-failure fix).
 
 ## [0.47.1] - 2026-06-17
 
