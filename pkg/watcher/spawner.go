@@ -21,6 +21,9 @@ type Spawner struct {
 	// Default to the client's methods.
 	listInstances     func(ctx context.Context, region, stateFilter string) ([]spawnaws.InstanceInfo, error)
 	terminateInstance func(ctx context.Context, region, instanceID string) error
+	// describeReservation backs the #62 Capacity-Block start-time gate (verify the
+	// reservation is launchable before firing). Indirected for testing.
+	describeReservation func(ctx context.Context, region, reservationID string) (*spawnaws.CapacityReservation, error)
 }
 
 // NewSpawner creates a Spawner that uses spawn's EC2 launch library.
@@ -30,11 +33,54 @@ func NewSpawner(ctx context.Context) (*Spawner, error) {
 		return nil, fmt.Errorf("create spawn client: %w", err)
 	}
 	return &Spawner{
-		client:            client,
-		provision:         launcher.Provision,
-		listInstances:     client.ListInstances,
-		terminateInstance: client.Terminate,
+		client:              client,
+		provision:           launcher.Provision,
+		listInstances:       client.ListInstances,
+		terminateInstance:   client.Terminate,
+		describeReservation: client.DescribeCapacityReservation,
 	}, nil
+}
+
+// reservationGate is the outcome of checking a Capacity Block reservation's
+// state before a start-time launch (#62).
+type reservationGate int
+
+const (
+	// reservationLaunchable — scheduled/active; go ahead and launch now.
+	reservationLaunchable reservationGate = iota
+	// reservationNotYet — payment-pending or scheduled-but-not-open; retry at the
+	// boundary (transient, will become launchable).
+	reservationNotYet
+	// reservationDead — expired / payment-failed / cancelled; never launchable,
+	// fail loudly (don't burn retries on a block that can't be used).
+	reservationDead
+)
+
+// checkReservation classifies whether a Capacity Block reservation can accept a
+// launch right now (#62). A describe error is treated as reservationNotYet (a
+// transient API blip near the boundary shouldn't be terminal — the retry budget
+// bounds it).
+func (s *Spawner) checkReservation(ctx context.Context, region, reservationID string) (reservationGate, string) {
+	cr, err := s.describeReservation(ctx, region, reservationID)
+	if err != nil {
+		return reservationNotYet, fmt.Sprintf("describe reservation %s: %v", reservationID, err)
+	}
+	switch cr.State {
+	case "active":
+		return reservationLaunchable, cr.State
+	case "scheduled":
+		// "scheduled" means payment cleared but the window may not be open yet;
+		// the launch attempt itself is the real test (RunInstances tells us). Treat
+		// as launchable — a not-yet-open block fails RunInstances and we retry.
+		return reservationLaunchable, cr.State
+	case "payment-pending":
+		return reservationNotYet, cr.State
+	case "expired", "payment-failed", "cancelled":
+		return reservationDead, cr.State
+	default:
+		// Unknown/transitional state — retry, bounded by the deadline.
+		return reservationNotYet, cr.State
+	}
 }
 
 // Spawn deserializes the stored spawn config and launches a fully-functional
@@ -201,6 +247,60 @@ func (s *Spawner) LaunchScheduled(ctx context.Context, sl *ScheduledLaunch) (str
 	}
 	instanceID, _, err := s.launchAcrossAZs(ctx, cfg, attempts)
 	return instanceID, err
+}
+
+// ScheduledOutcome is the result of a single firing of RunScheduled (#62).
+type ScheduledOutcome int
+
+const (
+	// OutcomeLaunched — an instance is running (or the IfExists policy resolved to
+	// an existing one). Done.
+	OutcomeLaunched ScheduledOutcome = iota
+	// OutcomeRetry — a retryable boundary condition (reservation not yet active, or
+	// transient capacity at RunInstances). The caller should re-arm a tight-interval
+	// retry if still within the deadline.
+	OutcomeRetry
+	// OutcomeFailed — a terminal failure (dead reservation, bad config, or retry
+	// budget exhausted). Do not retry.
+	OutcomeFailed
+)
+
+// RunScheduled fires a scheduled launch, applying the Capacity-Block start-time
+// semantics (#62) when the launch carries a ReservationID:
+//   - Gate on the reservation state: a dead reservation (expired/payment-failed)
+//     fails immediately; payment-pending retries; scheduled/active proceeds.
+//   - On a launch failure, classify it: a capacity failure at the boundary is
+//     retryable (the window may not be fully open yet); a terminal launch error
+//     (bad AMI/IAM/quota) or post-launch failure is not.
+//
+// It returns the outcome, the instance id (on launch), and a human message. The
+// caller (the Lambda handler) owns re-arming the EventBridge retry for OutcomeRetry.
+// A launch with no ReservationID behaves exactly like LaunchScheduled wrapped as
+// launched/failed (no boundary retry) — preserving the plain #49 path.
+func (s *Spawner) RunScheduled(ctx context.Context, sl *ScheduledLaunch) (ScheduledOutcome, string, error) {
+	if sl.ReservationID != "" {
+		gate, state := s.checkReservation(ctx, sl.Region, sl.ReservationID)
+		switch gate {
+		case reservationDead:
+			return OutcomeFailed, "", fmt.Errorf("reservation %s is %s — not launchable, giving up", sl.ReservationID, state)
+		case reservationNotYet:
+			return OutcomeRetry, fmt.Sprintf("reservation %s is %s; will retry at the window boundary", sl.ReservationID, state), nil
+		}
+		// reservationLaunchable → fall through to launch.
+	}
+
+	instanceID, err := s.LaunchScheduled(ctx, sl)
+	if err != nil {
+		// A capacity failure right at the window open is retryable (#62): the
+		// reservation is active but RunInstances can transiently report no capacity
+		// for a short period. A terminal error (bad config) or a post-launch failure
+		// is not — retrying can't help.
+		if sl.ReservationID != "" && ClassifyFailure(err) == FailureCapacity {
+			return OutcomeRetry, fmt.Sprintf("launch hit transient capacity at the boundary: %v", err), nil
+		}
+		return OutcomeFailed, "", err
+	}
+	return OutcomeLaunched, instanceID, nil
 }
 
 // findRunningByName returns the id of a non-terminated instance carrying the given

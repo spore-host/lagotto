@@ -24,6 +24,10 @@ const (
 	ScheduledFailed ScheduledLaunchStatus = "failed"
 	// ScheduledCancelled — the user cancelled it before firing.
 	ScheduledCancelled ScheduledLaunchStatus = "cancelled"
+	// ScheduledRetrying — fired, but the launch hit a *retryable* boundary failure
+	// (reservation not yet active / transient capacity) and the handler has
+	// re-armed a tight-interval retry to keep trying through the window open (#62).
+	ScheduledRetrying ScheduledLaunchStatus = "retrying"
 )
 
 // IfExists policies decide what a scheduled launch does when an instance with the
@@ -71,6 +75,23 @@ type ScheduledLaunch struct {
 	// TTLTimestamp ages the record out of DynamoDB long after it has fired/failed
 	// so the table self-cleans (mirrors watches/history).
 	TTLTimestamp int64 `json:"ttl_timestamp,omitempty" dynamodbav:"ttl_timestamp,omitempty"`
+
+	// ── Capacity Block start-time launch (#62) ───────────────────────────────
+	// ReservationID, when set, makes this a "fire at the reservation's window
+	// open" launch: the start time is derived from the reservation (not --at), the
+	// handler verifies the reservation is launchable, and a retryable failure at
+	// the boundary re-arms a tight-interval retry instead of failing.
+	ReservationID string `json:"reservation_id,omitempty" dynamodbav:"reservation_id,omitempty"`
+	// RetryUntil bounds the boundary-retry loop: once now > RetryUntil the launch
+	// gives up (failed) rather than re-arming. Zero = no boundary retry (the
+	// plain #49 one-shot behavior). All Capacity Blocks end 11:30 UTC, so this is
+	// set well before the window close so a doomed launch doesn't churn forever.
+	RetryUntil time.Time `json:"retry_until,omitempty" dynamodbav:"retry_until,omitempty"`
+	// RetryIntervalSeconds is how long the handler waits before the next boundary
+	// retry (default 30s) — tight, to catch the window open promptly.
+	RetryIntervalSeconds int `json:"retry_interval_seconds,omitempty" dynamodbav:"retry_interval_seconds,omitempty"`
+	// Attempts counts boundary-retry firings, for observability.
+	Attempts int `json:"attempts,omitempty" dynamodbav:"attempts,omitempty"`
 }
 
 // PutScheduledLaunch creates or updates a scheduled launch.
@@ -138,12 +159,18 @@ func (s *Store) UpdateScheduledLaunchStatus(ctx context.Context, id string, stat
 // part of its teardown refcount (#49): infra must stay alive while a future
 // launch is armed, even when zero watches remain. A missing table = none.
 func (s *Store) HasPendingScheduledLaunches(ctx context.Context) (bool, error) {
+	// Both "pending" (armed, not yet fired) and "retrying" (#62, mid boundary
+	// retry) keep the infra alive — tearing the poller down under a retrying
+	// Capacity-Block launch would abandon it right at the window open.
 	out, err := s.client.Scan(ctx, &dynamodb.ScanInput{
-		TableName:                 &s.scheduledTable,
-		FilterExpression:          aws.String("#s = :p"),
-		ExpressionAttributeNames:  map[string]string{"#s": "status"},
-		ExpressionAttributeValues: map[string]types.AttributeValue{":p": &types.AttributeValueMemberS{Value: string(ScheduledPending)}},
-		Select:                    types.SelectCount,
+		TableName:                aws.String(s.scheduledTable),
+		FilterExpression:         aws.String("#s = :p OR #s = :r"),
+		ExpressionAttributeNames: map[string]string{"#s": "status"},
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":p": &types.AttributeValueMemberS{Value: string(ScheduledPending)},
+			":r": &types.AttributeValueMemberS{Value: string(ScheduledRetrying)},
+		},
+		Select: types.SelectCount,
 	})
 	if err != nil {
 		var notFound *types.ResourceNotFoundException
