@@ -16,18 +16,23 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spore-host/lagotto/pkg/deploy"
 	"github.com/spore-host/lagotto/pkg/watcher"
+	spawnaws "github.com/spore-host/spawn/pkg/aws"
 )
 
 var (
-	launchAt          string
-	launchAfter       string
-	launchCron        string
-	launchSpawnConfig string
-	launchRegion      string
-	launchAZ          string
-	launchStackName   string
-	launchName        string
-	launchIfExists    string
+	launchAt             string
+	launchAfter          string
+	launchCron           string
+	launchSpawnConfig    string
+	launchRegion         string
+	launchAZ             string
+	launchStackName      string
+	launchName           string
+	launchIfExists       string
+	launchReservationID  string
+	launchAtReserveStart bool
+	launchFireEarly      time.Duration
+	launchRetryInterval  time.Duration
 )
 
 var launchCmd = &cobra.Command{
@@ -60,6 +65,11 @@ func init() {
 	f.StringVar(&launchStackName, "stack-name", "lagotto", "Deployed lagotto stack name (provides the poller target)")
 	f.StringVar(&launchName, "name", "", "Instance Name tag (the overlap dedup key); defaults to the spawn config's name")
 	f.StringVar(&launchIfExists, "if-exists", "", "If an instance with this Name already exists at fire time: skip|launch|replace (default: skip for --at/--after, launch for --cron)")
+	// #62 Capacity-Block start-time launch.
+	f.StringVar(&launchReservationID, "reservation-id", "", "Capacity Block reservation id (cr-…) to launch into")
+	f.BoolVar(&launchAtReserveStart, "at-reservation-start", false, "Fire at the reservation's start time (derived from the reservation), retrying through the window open until the instance runs (requires --reservation-id)")
+	f.DurationVar(&launchFireEarly, "fire-early", 2*time.Minute, "With --at-reservation-start: fire this long before the window open so a Scheduler delay doesn't burn paid time")
+	f.DurationVar(&launchRetryInterval, "retry-interval", 30*time.Second, "With --at-reservation-start: how often to retry through the boundary until the launch succeeds")
 }
 
 func runLaunch(cmd *cobra.Command, args []string) error {
@@ -69,11 +79,22 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 	if launchSpawnConfig == "" {
 		return fmt.Errorf("--spawn-config is required")
 	}
-	// Resolve the schedule expression up front so a bad time/cron fails before any
-	// AWS calls. Reuses the watcher resolver (one-of validation, --after = now+d).
-	expr, oneShot, err := watcher.ScheduleExpression(launchAt, launchAfter, launchCron, time.Now())
-	if err != nil {
-		return err
+	if launchAtReserveStart && launchReservationID == "" {
+		return fmt.Errorf("--at-reservation-start requires --reservation-id")
+	}
+
+	// Resolve the schedule expression. Two modes:
+	//   - default (#49): from --at/--after/--cron (one-of, validated up front).
+	//   - --at-reservation-start (#62): derived from the Capacity Block reservation
+	//     below, after the AWS client is available. expr stays empty until then.
+	var expr string
+	oneShot := true
+	if !launchAtReserveStart {
+		var err error
+		expr, oneShot, err = watcher.ScheduleExpression(launchAt, launchAfter, launchCron, time.Now())
+		if err != nil {
+			return err
+		}
 	}
 
 	// Load + validate the spawn config (this applies the #38 TTL guarantee).
@@ -110,6 +131,53 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 	region := cfg.Region
 	if region == "" {
 		return fmt.Errorf("no AWS region set; pass --region or configure one")
+	}
+
+	// --at-reservation-start (#62): derive the schedule + boundary-retry window from
+	// the Capacity Block reservation itself, so the user never transcribes a time.
+	var retryUntil time.Time
+	if launchAtReserveStart {
+		spawnClient := spawnaws.NewClientFromConfig(cfg)
+		cr, cerr := spawnClient.DescribeCapacityReservation(ctx, region, launchReservationID)
+		if cerr != nil {
+			return fmt.Errorf("describe reservation %s: %w", launchReservationID, cerr)
+		}
+		switch cr.State {
+		case "expired", "payment-failed", "cancelled":
+			return fmt.Errorf("reservation %s is %s — not launchable", launchReservationID, cr.State)
+		}
+		if cr.StartDate == "" {
+			return fmt.Errorf("reservation %s has no start date; cannot derive a launch time", launchReservationID)
+		}
+		start, perr := time.Parse(time.RFC3339, cr.StartDate)
+		if perr != nil {
+			return fmt.Errorf("parse reservation start %q: %w", cr.StartDate, perr)
+		}
+		// Fire a touch before the window so Scheduler latency doesn't burn paid time;
+		// never schedule in the past (a reservation that already opened fires now).
+		fireAt := start.Add(-launchFireEarly)
+		if fireAt.Before(time.Now()) {
+			fireAt = time.Now().Add(15 * time.Second)
+		}
+		expr = fmt.Sprintf("at(%s)", fireAt.UTC().Format("2006-01-02T15:04:05"))
+		oneShot = true
+		// Retry through the window open, but stop well before the block END (all CBs
+		// end 11:30 UTC; AWS reclaims from 11:00). Default deadline: the block end
+		// minus 1h if known, else 1h of retrying from the open.
+		if cr.EndDate != "" {
+			if end, eerr := time.Parse(time.RFC3339, cr.EndDate); eerr == nil {
+				retryUntil = end.Add(-1 * time.Hour)
+			}
+		}
+		if retryUntil.IsZero() {
+			retryUntil = start.Add(1 * time.Hour)
+		}
+		// Pin the launch AZ to the reservation's AZ if the user didn't.
+		if launchAZ == "" {
+			launchAZ = cr.AvailabilityZone
+		}
+		fmt.Fprintf(out, "Reservation %s: state=%s window %s → %s; firing %s (retry until %s)\n",
+			launchReservationID, cr.State, cr.StartDate, cr.EndDate, expr, retryUntil.UTC().Format(time.RFC3339))
 	}
 
 	userID := ""
@@ -149,7 +217,11 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 		ScheduleName:     scheduleName,
 		InstanceName:     instanceName,
 		IfExists:         ifExists,
-		CreatedAt:        time.Now().UTC(),
+		// #62 Capacity-Block start-time fields (zero when not --at-reservation-start).
+		ReservationID:        launchReservationID,
+		RetryUntil:           retryUntil,
+		RetryIntervalSeconds: int(launchRetryInterval.Seconds()),
+		CreatedAt:            time.Now().UTC(),
 		// Age the record out ~30 days after creation (one-shots fire long before).
 		TTLTimestamp: time.Now().Add(30 * 24 * time.Hour).Unix(),
 	}

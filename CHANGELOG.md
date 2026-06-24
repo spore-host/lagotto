@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`lagotto launch --reservation-id cr-… --at-reservation-start`** fires a launch
+  reliably at a Capacity Block for ML's window open (#62). It derives the start
+  time from the reservation itself (no transcription), fires a touch early
+  (`--fire-early`, default 2m) so EventBridge latency doesn't burn paid GPU time,
+  and **retries through the boundary** (`--retry-interval`, default 30s) until the
+  instance is running — absorbing the transient `InsufficientInstanceCapacity` /
+  not-yet-active conditions right at the open. It gates on the reservation state
+  (a dead/expired/payment-failed reservation fails fast; payment-pending retries),
+  pins the launch to the reservation's AZ, and bounds the retry to end ~1h before
+  the block closes (all Capacity Blocks end 11:30 UTC). Since EventBridge one-shots
+  don't retry themselves, the hosted poller **self-reschedules** a fresh
+  tight-interval schedule per attempt until success or the deadline. Requires
+  `lagotto deploy`; bumps the spawn dependency to v0.65.0.
+
 ## [0.47.2] - 2026-06-24
 
 ### Security

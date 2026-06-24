@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -23,7 +24,15 @@ var (
 	spawner         *watcher.Spawner
 	schedulerClient *scheduler.Client
 	scheduleName    string
+	// pollerFunctionArn / schedulerInvokeRoleArn let a #62 boundary retry re-arm a
+	// fresh EventBridge schedule targeting this same Lambda. Sourced from env (the
+	// stack passes its own CapacityPollerFunctionArn / SchedulerInvokeRoleArn).
+	pollerFunctionArn      string
+	schedulerInvokeRoleArn string
 )
+
+// nowUTC returns the current time in UTC (wrapped for testability/consistency).
+func nowUTC() time.Time { return time.Now().UTC() }
 
 func init() {
 	ctx := context.Background()
@@ -39,6 +48,8 @@ func init() {
 	scheduledTable := getEnv("SCHEDULED_TABLE", "lagotto-scheduled-launches")
 	snsTopicArn := os.Getenv("SNS_TOPIC_ARN")
 	scheduleName = getEnv("SCHEDULE_NAME", "lagotto-capacity-poller")
+	pollerFunctionArn = os.Getenv("POLLER_FUNCTION_ARN")
+	schedulerInvokeRoleArn = os.Getenv("SCHEDULER_INVOKE_ROLE_ARN")
 
 	store = watcher.NewStore(cfg, watchesTable, historyTable)
 	store.SetScheduledTable(scheduledTable)
@@ -98,10 +109,14 @@ func handler(ctx context.Context, raw json.RawMessage) error {
 	return handlePoll(ctx)
 }
 
-// handleScheduledLaunch fires a time-triggered launch (#49). It loads the
-// ScheduledLaunch, launches via the shared spawner, and records the outcome.
-// For a one-shot the EventBridge schedule self-deletes (ActionAfterCompletion);
-// a cron schedule stays armed and fires again.
+// handleScheduledLaunch fires a time-triggered launch (#49/#62). It loads the
+// ScheduledLaunch and runs it through the spawner's RunScheduled, which applies
+// Capacity-Block start-time semantics when the launch carries a ReservationID:
+//   - launched  → record the instance, done (one-shot schedule self-deletes).
+//   - retry     → re-arm a tight-interval EventBridge schedule to try again at
+//     the window boundary, until RetryUntil — the #62 "fire reliably the moment
+//     the window opens" behavior, since EventBridge one-shots don't retry.
+//   - failed    → mark failed (dead reservation, bad config, or budget exhausted).
 func handleScheduledLaunch(ctx context.Context, id string) error {
 	log.Printf("Scheduled launch %s firing", id)
 	sl, err := store.GetScheduledLaunch(ctx, id)
@@ -115,17 +130,85 @@ func handleScheduledLaunch(ctx context.Context, id string) error {
 	if spawner == nil {
 		return fmt.Errorf("scheduled launch %s: spawner unavailable", id)
 	}
-	instanceID, lerr := spawner.LaunchScheduled(ctx, sl)
-	if lerr != nil {
+
+	outcome, instanceID, lerr := spawner.RunScheduled(ctx, sl)
+	switch outcome {
+	case watcher.OutcomeLaunched:
+		if uerr := store.UpdateScheduledLaunchStatus(ctx, id, watcher.ScheduledLaunched, instanceID); uerr != nil {
+			log.Printf("warning: launched %s but could not record it on scheduled launch %s: %v", instanceID, id, uerr)
+		}
+		log.Printf("Scheduled launch %s launched instance %s", id, instanceID)
+		return nil
+
+	case watcher.OutcomeRetry:
+		return rearmBoundaryRetry(ctx, sl)
+
+	default: // OutcomeFailed
 		if uerr := store.UpdateScheduledLaunchStatus(ctx, id, watcher.ScheduledFailed, ""); uerr != nil {
 			log.Printf("warning: could not mark scheduled launch %s failed: %v", id, uerr)
 		}
 		return fmt.Errorf("scheduled launch %s: %w", id, lerr)
 	}
-	if uerr := store.UpdateScheduledLaunchStatus(ctx, id, watcher.ScheduledLaunched, instanceID); uerr != nil {
-		log.Printf("warning: launched %s but could not record it on scheduled launch %s: %v", instanceID, id, uerr)
+}
+
+// rearmBoundaryRetry re-arms a tight-interval EventBridge schedule for a #62
+// Capacity-Block launch that hit a retryable boundary condition, unless the retry
+// deadline (RetryUntil) has passed. EventBridge one-shots don't retry themselves,
+// so we self-reschedule: create a fresh at(now+interval) schedule targeting this
+// same Lambda with the same routing payload. The schedule uses
+// ActionAfterCompletion=DELETE so each attempt's schedule self-removes after it
+// fires. State is moved to "retrying" so the teardown refcount keeps the infra up.
+func rearmBoundaryRetry(ctx context.Context, sl *watcher.ScheduledLaunch) error {
+	now := nowUTC()
+	if sl.RetryUntil.IsZero() || now.After(sl.RetryUntil) {
+		log.Printf("Scheduled launch %s: retry deadline passed (until %s), giving up", sl.ScheduleID, sl.RetryUntil.Format(time.RFC3339))
+		if uerr := store.UpdateScheduledLaunchStatus(ctx, sl.ScheduleID, watcher.ScheduledFailed, ""); uerr != nil {
+			log.Printf("warning: could not mark scheduled launch %s failed: %v", sl.ScheduleID, uerr)
+		}
+		return fmt.Errorf("scheduled launch %s: boundary retry budget exhausted (deadline %s)", sl.ScheduleID, sl.RetryUntil.Format(time.RFC3339))
 	}
-	log.Printf("Scheduled launch %s launched instance %s", id, instanceID)
+
+	if pollerFunctionArn == "" || schedulerInvokeRoleArn == "" {
+		return fmt.Errorf("scheduled launch %s: cannot re-arm boundary retry — POLLER_FUNCTION_ARN/SCHEDULER_INVOKE_ROLE_ARN not configured", sl.ScheduleID)
+	}
+
+	interval := sl.RetryIntervalSeconds
+	if interval <= 0 {
+		interval = 30
+	}
+	next := now.Add(time.Duration(interval) * time.Second)
+	// Don't overshoot the deadline — if the next tick would land past RetryUntil,
+	// clamp to the deadline so we get one last attempt right at the edge.
+	if next.After(sl.RetryUntil) {
+		next = sl.RetryUntil
+	}
+
+	sl.Attempts++
+	sl.Status = watcher.ScheduledRetrying
+	if uerr := store.PutScheduledLaunch(ctx, sl); uerr != nil {
+		log.Printf("warning: could not persist retry state for %s: %v", sl.ScheduleID, uerr)
+	}
+
+	// A fresh schedule name per attempt so the prior one's pending DELETE can't
+	// collide with the new create.
+	retryName := fmt.Sprintf("lagotto-launch-%s-r%d", sl.ScheduleID, sl.Attempts)
+	expr := fmt.Sprintf("at(%s)", next.Format("2006-01-02T15:04:05"))
+	payload := fmt.Sprintf(`{"scheduled_launch_id":%q}`, sl.ScheduleID)
+	_, err := schedulerClient.CreateSchedule(ctx, &scheduler.CreateScheduleInput{
+		Name:                  aws.String(retryName),
+		ScheduleExpression:    aws.String(expr),
+		FlexibleTimeWindow:    &schedulertypes.FlexibleTimeWindow{Mode: schedulertypes.FlexibleTimeWindowModeOff},
+		ActionAfterCompletion: schedulertypes.ActionAfterCompletionDelete,
+		Target: &schedulertypes.Target{
+			Arn:     aws.String(pollerFunctionArn),
+			RoleArn: aws.String(schedulerInvokeRoleArn),
+			Input:   aws.String(payload),
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("scheduled launch %s: re-arm boundary retry: %w", sl.ScheduleID, err)
+	}
+	log.Printf("Scheduled launch %s: re-armed boundary retry #%d at %s (deadline %s)", sl.ScheduleID, sl.Attempts, expr, sl.RetryUntil.Format(time.RFC3339))
 	return nil
 }
 

@@ -282,3 +282,123 @@ func TestLaunchScheduled_SkipLaunchesWhenAbsent(t *testing.T) {
 		t.Errorf("id = %q, want i-first (no overlap → launch)", id)
 	}
 }
+
+// TestCheckReservation classifies CB reservation states into the #62 gate.
+func TestCheckReservation(t *testing.T) {
+	cases := []struct {
+		state string
+		want  reservationGate
+	}{
+		{"active", reservationLaunchable},
+		{"scheduled", reservationLaunchable},
+		{"payment-pending", reservationNotYet},
+		{"expired", reservationDead},
+		{"payment-failed", reservationDead},
+		{"cancelled", reservationDead},
+		{"some-new-state", reservationNotYet}, // unknown → retry, bounded by deadline
+	}
+	for _, c := range cases {
+		t.Run(c.state, func(t *testing.T) {
+			sp := &Spawner{describeReservation: func(context.Context, string, string) (*spawnaws.CapacityReservation, error) {
+				return &spawnaws.CapacityReservation{State: c.state}, nil
+			}}
+			got, _ := sp.checkReservation(context.Background(), "us-east-1", "cr-x")
+			if got != c.want {
+				t.Errorf("state %q → gate %d, want %d", c.state, got, c.want)
+			}
+		})
+	}
+
+	// A describe error is retryable (transient blip near the boundary), not terminal.
+	t.Run("describe error → retry", func(t *testing.T) {
+		sp := &Spawner{describeReservation: func(context.Context, string, string) (*spawnaws.CapacityReservation, error) {
+			return nil, fmt.Errorf("throttled")
+		}}
+		if got, _ := sp.checkReservation(context.Background(), "us-east-1", "cr-x"); got != reservationNotYet {
+			t.Errorf("describe error → gate %d, want reservationNotYet", got)
+		}
+	})
+}
+
+// TestRunScheduled_ReservationGate covers the #62 outcomes driven by reservation state.
+func TestRunScheduled_ReservationGate(t *testing.T) {
+	mkSL := func() *ScheduledLaunch {
+		raw, _ := json.Marshal(SpawnConfigFile{InstanceType: "p5.48xlarge", Region: "us-east-1", TTL: "24h"})
+		return &ScheduledLaunch{ScheduleID: "sl-1", Region: "us-east-1", ReservationID: "cr-x", LaunchConfigJSON: raw}
+	}
+
+	t.Run("dead reservation → failed, no launch", func(t *testing.T) {
+		launched := false
+		sp := newSpawnerWithProvision(func(context.Context, *spawnaws.Client, spawnaws.LaunchConfig, launcher.Options) (*spawnaws.LaunchResult, error) {
+			launched = true
+			return &spawnaws.LaunchResult{InstanceID: "i-x"}, nil
+		})
+		sp.describeReservation = func(context.Context, string, string) (*spawnaws.CapacityReservation, error) {
+			return &spawnaws.CapacityReservation{State: "expired"}, nil
+		}
+		out, _, err := sp.RunScheduled(context.Background(), mkSL())
+		if out != OutcomeFailed || err == nil {
+			t.Errorf("dead reservation → outcome %d err %v, want OutcomeFailed+err", out, err)
+		}
+		if launched {
+			t.Error("must not launch into a dead reservation")
+		}
+	})
+
+	t.Run("payment-pending → retry, no launch", func(t *testing.T) {
+		launched := false
+		sp := newSpawnerWithProvision(func(context.Context, *spawnaws.Client, spawnaws.LaunchConfig, launcher.Options) (*spawnaws.LaunchResult, error) {
+			launched = true
+			return &spawnaws.LaunchResult{InstanceID: "i-x"}, nil
+		})
+		sp.describeReservation = func(context.Context, string, string) (*spawnaws.CapacityReservation, error) {
+			return &spawnaws.CapacityReservation{State: "payment-pending"}, nil
+		}
+		out, _, _ := sp.RunScheduled(context.Background(), mkSL())
+		if out != OutcomeRetry {
+			t.Errorf("payment-pending → outcome %d, want OutcomeRetry", out)
+		}
+		if launched {
+			t.Error("must not launch while payment-pending")
+		}
+	})
+
+	t.Run("active + transient capacity → retry", func(t *testing.T) {
+		sp := newSpawnerWithProvision(func(context.Context, *spawnaws.Client, spawnaws.LaunchConfig, launcher.Options) (*spawnaws.LaunchResult, error) {
+			return nil, &capErr{"InsufficientInstanceCapacity"}
+		})
+		sp.describeReservation = func(context.Context, string, string) (*spawnaws.CapacityReservation, error) {
+			return &spawnaws.CapacityReservation{State: "active"}, nil
+		}
+		out, _, _ := sp.RunScheduled(context.Background(), mkSL())
+		if out != OutcomeRetry {
+			t.Errorf("active+capacity-fail → outcome %d, want OutcomeRetry", out)
+		}
+	})
+
+	t.Run("active + launch success → launched", func(t *testing.T) {
+		sp := newSpawnerWithProvision(func(context.Context, *spawnaws.Client, spawnaws.LaunchConfig, launcher.Options) (*spawnaws.LaunchResult, error) {
+			return &spawnaws.LaunchResult{InstanceID: "i-ok"}, nil
+		})
+		sp.describeReservation = func(context.Context, string, string) (*spawnaws.CapacityReservation, error) {
+			return &spawnaws.CapacityReservation{State: "active"}, nil
+		}
+		out, id, _ := sp.RunScheduled(context.Background(), mkSL())
+		if out != OutcomeLaunched || id != "i-ok" {
+			t.Errorf("active+success → outcome %d id %q, want OutcomeLaunched/i-ok", out, id)
+		}
+	})
+
+	t.Run("active + terminal launch error → failed (no retry)", func(t *testing.T) {
+		sp := newSpawnerWithProvision(func(context.Context, *spawnaws.Client, spawnaws.LaunchConfig, launcher.Options) (*spawnaws.LaunchResult, error) {
+			return nil, &capErr{"AuthFailure"} // terminal per ClassifyFailure
+		})
+		sp.describeReservation = func(context.Context, string, string) (*spawnaws.CapacityReservation, error) {
+			return &spawnaws.CapacityReservation{State: "active"}, nil
+		}
+		out, _, err := sp.RunScheduled(context.Background(), mkSL())
+		if out != OutcomeFailed || err == nil {
+			t.Errorf("active+terminal → outcome %d err %v, want OutcomeFailed+err", out, err)
+		}
+	})
+}

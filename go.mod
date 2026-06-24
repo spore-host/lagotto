@@ -20,7 +20,7 @@ require (
 	github.com/scttfrdmn/substrate v0.71.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spore-host/libs v0.37.0
-	github.com/spore-host/spawn v0.63.1
+	github.com/spore-host/spawn v0.65.0
 	github.com/spore-host/truffle v0.38.1
 	gopkg.in/yaml.v3 v3.0.1
 )

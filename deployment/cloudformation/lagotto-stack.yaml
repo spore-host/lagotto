@@ -86,6 +86,11 @@ Resources:
           SCHEDULED_TABLE: !Ref ScheduledTableName
           SNS_TOPIC_ARN: !Ref LagottoCapacityAlertsTopic
           SCHEDULE_NAME: lagotto-capacity-poller
+          # For the #62 Capacity-Block boundary retry: the poller re-arms a fresh
+          # EventBridge schedule targeting itself. Construct its own ARN by name
+          # (a !GetAtt self-reference would be a CFN circular dependency).
+          POLLER_FUNCTION_ARN: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:lagotto-capacity-poller'
+          SCHEDULER_INVOKE_ROLE_ARN: !GetAtt SchedulerInvokeRole.Arn
       Policies:
         # The tables are CLI-owned (#59), so scope CRUD by name rather than !Ref a
         # stack-managed resource. The scheduled-launches table (#49) is included —
@@ -116,6 +121,7 @@ Resources:
                 - ec2:DescribeSecurityGroups
                 - ec2:DescribeKeyPairs
                 - ec2:DescribeInstances
+                - ec2:DescribeCapacityReservations
                 - ssm:GetParameter
                 - ssm:GetParameters
               Resource: '*'
@@ -124,6 +130,20 @@ Resources:
                 - scheduler:UpdateSchedule
                 - scheduler:GetSchedule
               Resource: !Sub 'arn:aws:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/default/lagotto-capacity-poller'
+            # The #62 boundary retry re-arms a fresh per-launch schedule
+            # (lagotto-launch-*) targeting this poller, and passes the scheduler
+            # role. Scoped to the lagotto-launch-* schedule name prefix + that role.
+            - Effect: Allow
+              Action:
+                - scheduler:CreateSchedule
+                - scheduler:DeleteSchedule
+              Resource: !Sub 'arn:aws:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/default/lagotto-launch-*'
+            - Effect: Allow
+              Action: iam:PassRole
+              Resource: !GetAtt SchedulerInvokeRole.Arn
+              Condition:
+                StringEquals:
+                  iam:PassedToService: scheduler.amazonaws.com
         # An --action spawn watch launches via spawn's headless launcher, which
         # runs RunInstances, tags the instance, and (re)uses the spored IAM
         # instance profile. Without these the hosted poller can only NOTIFY, never

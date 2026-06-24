@@ -89,8 +89,12 @@ is launching into an [EC2 Capacity Block for ML](https://docs.aws.amazon.com/AWS
 at its reserved start time.
 
 ```bash
-# Launch into a Capacity Block at its reserved start time (block.yaml sets
-# reservation_id + capacity_block; --az matches the block's AZ)
+# Launch into a Capacity Block reliably at its window open — derives the start
+# time from the reservation, fires slightly early, and retries through the
+# boundary until the instance runs (block.yaml sets reservation_id + capacity_block)
+lagotto launch --reservation-id cr-0abc123 --at-reservation-start --spawn-config block.yaml
+
+# Launch at an explicit clock time
 lagotto launch --at 2026-07-01T08:00:00Z --az us-east-1a --spawn-config block.yaml
 
 # Launch 6 hours from now
@@ -99,6 +103,14 @@ lagotto launch --after 6h --spawn-config job.yaml
 # Recurring: every weekday at 09:00 UTC
 lagotto launch --cron "0 9 ? * MON-FRI *" --spawn-config nightly.yaml
 ```
+
+For a Capacity Block, prefer **`--reservation-id … --at-reservation-start`** over a
+hand-typed `--at`: you've paid up front for a non-refundable window that ends at a
+fixed 11:30 UTC, so every minute of late start is wasted. This mode derives the
+open time from the reservation, fires `--fire-early` (default 2m) ahead so
+EventBridge latency doesn't cost you, and retries on `--retry-interval` (default
+30s) through the open — absorbing the transient capacity / not-yet-active blips at
+the boundary — until an instance is running, then stops.
 
 Scheduled launches are driven by EventBridge Scheduler in the hosted poller
 stack, so they require `lagotto deploy` first (the schedule targets the poller
