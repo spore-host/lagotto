@@ -2,10 +2,12 @@ package watcher_test
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/aws/smithy-go"
 	"github.com/spore-host/lagotto/pkg/watcher"
+	"github.com/spore-host/spawn/pkg/launcher"
 )
 
 // apiErr is a minimal smithy.APIError for exercising ClassifyFailure.
@@ -37,6 +39,12 @@ func TestClassifyFailure(t *testing.T) {
 		{"capacity substring", &apiErr{"FooInsufficientCapacityBar"}, watcher.FailureCapacity},
 		// Non-AWS error → transient retry.
 		{"plain error", errors.New("dial tcp: timeout"), watcher.FailureCapacity},
+		// spawn#220: a post-launch failure (RunInstances succeeded, downstream FSx
+		// setup failed and the instance was torn down) is terminal — retrying other
+		// AZs can't help and would orphan a filesystem per attempt. Wrapped, to
+		// confirm errors.Is unwrapping works through the AZ-loop's fmt.Errorf chain.
+		{"post-launch sentinel", launcher.ErrPostLaunch, watcher.FailureTerminal},
+		{"post-launch wrapped", fmt.Errorf("launch instance (tried 1 AZ): %w", launcher.ErrPostLaunch), watcher.FailureTerminal},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
