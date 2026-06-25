@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`lagotto deploy` no longer rolls back with a CloudFormation circular
+  dependency** (#67). The v0.48.0 (#62) additions made the poller Lambda (and its
+  auto-generated role) reference `SchedulerInvokeRole` (via the
+  `SCHEDULER_INVOKE_ROLE_ARN` env var and the `iam:PassRole` grant), while that
+  role still referenced the function by `!GetAtt` — closing a cycle among
+  `[CapacityPollerFunction, CapacityPollerFunctionRole, SchedulerInvokeRole,
+  CapacityPollerSchedule]` so the stack couldn't create in a clean account.
+  `SchedulerInvokeRole` now references the poller by its **constructed ARN**
+  (`!Sub`, the function name is fixed) instead of `!GetAtt`, breaking the cycle.
+  Unblocks the hosted/autonomous poller (`lagotto deploy`).
+
 ## [0.48.0] - 2026-06-24
 
 ### Added

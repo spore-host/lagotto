@@ -246,7 +246,16 @@ Resources:
             Statement:
               - Effect: Allow
                 Action: lambda:InvokeFunction
-                Resource: !GetAtt CapacityPollerFunction.Arn
+                # Reference the poller by CONSTRUCTED ARN, not !GetAtt, to break a
+                # CloudFormation circular dependency (#67). The function (and its
+                # auto-generated role) reference SchedulerInvokeRole via the #62
+                # SCHEDULER_INVOKE_ROLE_ARN env var + iam:PassRole; if this role
+                # also !GetAtt'd the function, the four resources
+                # [Function, FunctionRole, SchedulerInvokeRole, Schedule] form a
+                # cycle and the stack rolls back on a clean create. The function
+                # name is fixed (lagotto-capacity-poller), so its ARN is derivable
+                # without a dependency edge — making the graph a DAG.
+                Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:lagotto-capacity-poller'
 
 Outputs:
   WatchesTableName:
