@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- New leaf package **`pkg/failure`** holds the launch-failure classifier
+  (`FailureKind`, `ClassifyFailure`, the capacity/terminal code sets), importing
+  only `errors`/`strings`/`smithy-go` + spawn's dependency-free `launchererr`
+  sentinel — **zero AWS service SDKs**. `pkg/watcher` now aliases these, so every
+  existing caller is unchanged, but a stateless consumer that only wants "is this
+  launch error retryable?" (e.g. a block-and-wait acquire loop) can import the
+  classifier without pulling the poller's 70+ AWS-SDK dependency tree (#75).
+  Requires spawn ≥ v0.75.0.
 - **`watcher.Snipe(ctx, target, opts)`** — a stateless, blocking, single-target
   capacity acquire for library consumers (#73). It wraps spawn's
   `launcher.Provision` with the capacity classify + backoff-retry loop
