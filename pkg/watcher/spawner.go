@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/launcher"
@@ -24,6 +25,9 @@ type Spawner struct {
 	// describeReservation backs the #62 Capacity-Block start-time gate (verify the
 	// reservation is launchable before firing). Indirected for testing.
 	describeReservation func(ctx context.Context, region, reservationID string) (*spawnaws.CapacityReservation, error)
+	// sleep backs Snipe's inter-round backoff (#73), indirected so tests drive the
+	// retry loop without real waits. Nil = the default context-aware sleep.
+	sleep func(ctx context.Context, d time.Duration) error
 }
 
 // NewSpawner creates a Spawner that uses spawn's EC2 launch library.

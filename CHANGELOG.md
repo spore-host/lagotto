@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`watcher.Snipe(ctx, target, opts)`** — a stateless, blocking, single-target
+  capacity acquire for library consumers (#73). It wraps spawn's
+  `launcher.Provision` with the capacity classify + backoff-retry loop
+  (`ClassifyFailure`), so an embedding consumer that just wants "acquire this
+  type here, block until it lands or the deadline passes" no longer needs the
+  persisted-`Watch` / DynamoDB machinery or a reimplementation of the retry
+  policy. Terminal failures (bad AMI/IAM, quota, post-launch teardown) return
+  immediately; capacity failures back off (capped exponential, deadline-bounded).
+  Returns a `MatchResult` with the launched instance id/region/AZ. The stateful
+  `pkg/watcher` poller remains the path for multi-candidate, scheduled watches.
+
 ### Security
 - **Pinned the CI/release Go toolchain to 1.26.5** to clear GO-2026-5856, a
   `crypto/tls` standard-library advisory present in go1.26.4. Builds now link the
