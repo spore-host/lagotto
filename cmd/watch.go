@@ -121,7 +121,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		if watchSageMakerConfig == "" {
 			return fmt.Errorf("--sagemaker-config is required for --service sagemaker (the job lagotto submits); use --action notify to only be told")
 		}
-		sageMakerJobJSON, err = loadSpawnConfig(watchSageMakerConfig)
+		sageMakerJobJSON, err = loadSageMakerConfig(watchSageMakerConfig)
 		if err != nil {
 			return fmt.Errorf("load sagemaker config: %w", err)
 		}
@@ -260,20 +260,30 @@ func loadEC2SpawnConfig(path string) ([]byte, error) {
 	return jsonBytes, nil
 }
 
-// loadSpawnConfig reads a YAML file and converts it to JSON bytes for storage.
-func loadSpawnConfig(path string) ([]byte, error) {
+// loadSageMakerConfig reads a SageMaker job YAML file and converts it to JSON
+// bytes for storage. Unlike loadEC2SpawnConfig, it deliberately does NOT apply
+// the EC2 spawn-config key normalization or TTL defaulting (#41): a SageMaker
+// config is a CreateTrainingJobInput-shaped document with an entirely different
+// schema (TrainingJobName, AlgorithmSpecification, ResourceConfig, …), not
+// spawn's instance_type/on_complete/ttl fields — normalizing its keys would
+// corrupt them. SageMaker validates the job shape server-side at
+// CreateTrainingJob (see pkg/watcher/sagemaker.go), and StoppingCondition bounds
+// the runtime there, so this loader only checks the YAML is well-formed and
+// passes it through.
+func loadSageMakerConfig(path string) ([]byte, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 
-	// Parse YAML to validate structure
+	// Validate the YAML is well-formed (the SageMaker API validates the job
+	// contents at submit time).
 	var configMap map[string]interface{}
 	if err := yaml.Unmarshal(data, &configMap); err != nil {
 		return nil, fmt.Errorf("parse YAML: %w", err)
 	}
 
-	// Re-marshal as JSON for DynamoDB storage
+	// Re-marshal as JSON for DynamoDB storage.
 	jsonBytes, err := json.Marshal(configMap)
 	if err != nil {
 		return nil, fmt.Errorf("marshal to JSON: %w", err)
