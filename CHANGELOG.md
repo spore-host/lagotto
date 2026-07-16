@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`parseDuration` now accepts `w` (weeks) and `s` (seconds)** in addition to
+  d/h/m, and gives clearer errors naming the offending input and the valid units
+  (#41). `1w` / `45s` now work anywhere a short duration is accepted (watch TTL,
+  extend).
+
+### Changed
+- Internal: renamed the SageMaker config loader to `loadSageMakerConfig` and
+  documented why it intentionally skips the EC2 spawn-config key-normalization/TTL
+  defaulting — a SageMaker job is a `CreateTrainingJobInput`-shaped document with a
+  different schema, validated server-side at submit (#41).
+
 ## [0.49.0] - 2026-07-15
 
 ### Added

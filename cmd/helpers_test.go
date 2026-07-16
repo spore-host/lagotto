@@ -137,9 +137,9 @@ func TestLoadSpawnConfig(t *testing.T) {
 		if err := os.WriteFile(path, []byte("name: test\ninstance_type: g5.xlarge\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		data, err := loadSpawnConfig(path)
+		data, err := loadSageMakerConfig(path)
 		if err != nil {
-			t.Fatalf("loadSpawnConfig valid yaml: %v", err)
+			t.Fatalf("loadSageMakerConfig valid yaml: %v", err)
 		}
 		// Re-marshaled as JSON for DynamoDB storage.
 		if len(data) == 0 || data[0] != '{' {
@@ -148,7 +148,7 @@ func TestLoadSpawnConfig(t *testing.T) {
 	})
 
 	t.Run("missing file", func(t *testing.T) {
-		if _, err := loadSpawnConfig(filepath.Join(dir, "nope.yaml")); err == nil {
+		if _, err := loadSageMakerConfig(filepath.Join(dir, "nope.yaml")); err == nil {
 			t.Error("expected error for missing file")
 		}
 	})
@@ -158,7 +158,7 @@ func TestLoadSpawnConfig(t *testing.T) {
 		if err := os.WriteFile(path, []byte("\tnot: : valid: yaml:"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := loadSpawnConfig(path); err == nil {
+		if _, err := loadSageMakerConfig(path); err == nil {
 			t.Error("expected error for invalid yaml")
 		}
 	})
