@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/spore-host/lagotto/pkg/awscfg"
 	"github.com/spore-host/libs/i18n"
 )
 
@@ -18,6 +19,11 @@ var (
 	verbose      bool
 	watchesTable string
 	historyTable string
+
+	// Shared spore.host config flags (see libs/sporeconfig).
+	sharedProfile string
+	sharedRegion  string
+	sharedAccount string
 
 	// i18n flags
 	flagLang          string
@@ -46,12 +52,20 @@ func Execute() {
 func init() {
 	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
 		ensureI18nInitialized()
+		// Record shared-config flag values for pkg/awscfg (flag > env > file > default).
+		awscfg.SetFlags(sharedProfile, sharedRegion)
 		return nil
 	}
 
 	rootCmd.PersistentFlags().StringVar(&flagLang, "lang", "", "Language for output (en, es, fr, de, ja, pt)")
 	rootCmd.PersistentFlags().BoolVar(&flagNoEmoji, "no-emoji", false, "Disable emoji in output")
 	rootCmd.PersistentFlags().BoolVar(&flagAccessibility, "accessibility", false, "Enable accessibility mode (implies --no-emoji)")
+
+	// Shared spore.host config: AWS profile/region/account, resolved
+	// flag > env (SPORE_*/AWS_*) > ~/.config/spore/config.toml > default.
+	rootCmd.PersistentFlags().StringVar(&sharedProfile, "profile", "", "AWS named profile (overrides SPORE_PROFILE/AWS_PROFILE and the shared config)")
+	rootCmd.PersistentFlags().StringVar(&sharedRegion, "region", "", "Default AWS region (overrides SPORE_REGION/AWS_REGION and the shared config)")
+	rootCmd.PersistentFlags().StringVar(&sharedAccount, "account", "", "Expected AWS account ID (optional guard)")
 
 	rootCmd.PersistentFlags().StringVarP(&outputFormat, "output", "o", "table", "Output format (table, json)")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose output")

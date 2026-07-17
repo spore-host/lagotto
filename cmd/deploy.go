@@ -6,9 +6,9 @@ import (
 	"os"
 	"sort"
 
-	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spf13/cobra"
+	"github.com/spore-host/lagotto/pkg/awscfg"
 	"github.com/spore-host/lagotto/pkg/deploy"
 	"github.com/spore-host/lagotto/pkg/watcher"
 )
@@ -56,11 +56,8 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 	out := cmd.OutOrStdout()
 
-	var optFns []func(*config.LoadOptions) error
-	if deployRegion != "" {
-		optFns = append(optFns, config.WithRegion(deployRegion))
-	}
-	cfg, err := config.LoadDefaultConfig(ctx, optFns...)
+	// --region wins; otherwise the shared config's region (then ambient).
+	cfg, err := awscfg.Load(ctx, deployRegion)
 	if err != nil {
 		return fmt.Errorf("load AWS config: %w", err)
 	}

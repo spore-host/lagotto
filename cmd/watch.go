@@ -8,12 +8,12 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/scheduler"
 	schedulertypes "github.com/aws/aws-sdk-go-v2/service/scheduler/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
+	"github.com/spore-host/lagotto/pkg/awscfg"
 	"github.com/spore-host/lagotto/pkg/watcher"
 	"gopkg.in/yaml.v3"
 )
@@ -134,7 +134,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	}
 
 	// Get caller identity for user_id
-	cfg, err := awsconfig.LoadDefaultConfig(ctx)
+	cfg, err := awscfg.Load(ctx, "")
 	if err != nil {
 		return fmt.Errorf("load AWS config: %w", err)
 	}
