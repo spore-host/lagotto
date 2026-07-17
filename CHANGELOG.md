@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Shared spore.host config base.** lagotto now honors the suite-wide
+  `libs/sporeconfig` settings: new persistent `--profile`, `--region`, and
+  `--account` flags, the `SPORE_PROFILE`/`SPORE_REGION`/`SPORE_ACCOUNT` env vars,
+  and the `[spore]` table of `~/.config/spore/config.toml`, resolved
+  flag > env > file > default. Every command's AWS config now loads through a
+  shared `pkg/awscfg` helper, so a suite-wide profile/region applies consistently
+  (previously lagotto used the bare ambient chain with no profile concept — and
+  could point at a different account than spawn when reading spawn's infra tables).
+  Unset = unchanged (ambient AWS chain); `launch`/`deploy` keep their own
+  `--region` which still wins for that command.
+
 ### Fixed
 - **`parseDuration` now accepts `w` (weeks) and `s` (seconds)** in addition to
   d/h/m, and gives clearer errors naming the offending input and the valid units

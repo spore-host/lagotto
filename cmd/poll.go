@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spf13/cobra"
+	"github.com/spore-host/lagotto/pkg/awscfg"
 	"github.com/spore-host/lagotto/pkg/watcher"
 	truffleaws "github.com/spore-host/truffle/pkg/aws"
 )
@@ -83,7 +83,7 @@ func runPoll(cmd *cobra.Command, args []string) error {
 // resolves the watch-scoping filter and lease owner (#47) from the --project /
 // --mine / --watch flags, returning the filter so the daemon can scope its exit.
 func buildPoller(ctx context.Context) (*watcher.Poller, *watcher.WatchFilter, error) {
-	cfg, err := config.LoadDefaultConfig(ctx)
+	cfg, err := awscfg.Load(ctx, "")
 	if err != nil {
 		return nil, nil, fmt.Errorf("load AWS config: %w", err)
 	}

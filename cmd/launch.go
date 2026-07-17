@@ -8,12 +8,12 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/scheduler"
 	schedulertypes "github.com/aws/aws-sdk-go-v2/service/scheduler/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
+	"github.com/spore-host/lagotto/pkg/awscfg"
 	"github.com/spore-host/lagotto/pkg/deploy"
 	"github.com/spore-host/lagotto/pkg/watcher"
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
@@ -120,11 +120,8 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	var optFns []func(*config.LoadOptions) error
-	if launchRegion != "" {
-		optFns = append(optFns, config.WithRegion(launchRegion))
-	}
-	cfg, err := config.LoadDefaultConfig(ctx, optFns...)
+	// --region wins; otherwise the shared config's region (then ambient).
+	cfg, err := awscfg.Load(ctx, launchRegion)
 	if err != nil {
 		return fmt.Errorf("load AWS config: %w", err)
 	}

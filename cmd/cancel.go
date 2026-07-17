@@ -8,9 +8,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spf13/cobra"
+	"github.com/spore-host/lagotto/pkg/awscfg"
 	"github.com/spore-host/lagotto/pkg/watcher"
 )
 
@@ -33,7 +33,7 @@ func runCancel(cmd *cobra.Command, args []string) error {
 	watchID := args[0]
 	ctx := context.Background()
 
-	cfg, err := config.LoadDefaultConfig(ctx)
+	cfg, err := awscfg.Load(ctx, "")
 	if err != nil {
 		return fmt.Errorf("load AWS config: %w", err)
 	}
