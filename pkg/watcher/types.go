@@ -34,6 +34,13 @@ const (
 	StatusFailed WatchStatus = "failed"
 )
 
+// MaxConsecutiveFailures caps consecutive *unclassified* launch/hold failures
+// (FailureUnknown) before a watch is stopped as failed. It's a poll-count
+// backstop — distinct from genuine capacity waits (FailureCapacity), which are
+// uncapped — so a persistently-broken watch (bad IAM/region, sustained non-AWS
+// fault) doesn't burn a launch attempt every poll for its whole TTL (#41).
+const MaxConsecutiveFailures = 10
+
 // Watch represents a user's request to monitor for instance capacity.
 type Watch struct {
 	WatchID string `json:"watch_id" dynamodbav:"watch_id"`
@@ -71,6 +78,12 @@ type Watch struct {
 	LastPolledAt     time.Time    `json:"last_polled_at,omitempty" dynamodbav:"last_polled_at,omitempty"`
 	MatchCount       int          `json:"match_count" dynamodbav:"match_count"`
 	LastMatch        *MatchResult `json:"last_match,omitempty" dynamodbav:"last_match,omitempty"`
+	// ConsecutiveFailures counts back-to-back unclassified launch/hold failures
+	// (FailureUnknown) on this watch; it's incremented per failing poll and reset
+	// to zero on a capacity failure or a successful launch. Once it reaches
+	// MaxConsecutiveFailures the watch is stopped as failed (#41). Genuine
+	// capacity failures never touch it, so a real capacity wait stays uncapped.
+	ConsecutiveFailures int `json:"consecutive_failures,omitempty" dynamodbav:"consecutive_failures,omitempty"`
 	// LeaseOwner / LeaseExpiresAt guard the double-poller race (#47): before a
 	// poller acts on a match it claims a short lease, so two daemons (or a daemon
 	// + the hosted Lambda) can't both fire the same watch. A lease past its expiry

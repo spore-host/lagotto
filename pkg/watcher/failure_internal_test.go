@@ -10,6 +10,7 @@ func TestFailureLabel(t *testing.T) {
 		FailureNone:     "none",
 		FailureCapacity: "retry",
 		FailureTerminal: "stopping",
+		FailureUnknown:  "capped",
 	}
 	for kind, want := range cases {
 		if got := failureLabel(kind); !strings.Contains(got, want) {

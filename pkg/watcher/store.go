@@ -281,6 +281,12 @@ func (s *Store) ReleaseLease(ctx context.Context, watchID, owner string) error {
 	return nil
 }
 
+// retentionWindow is how long a resolved (matched or terminal) record is kept
+// before DynamoDB TTL deletes it. Match history and — since #41 — the watch
+// record itself both use it, so a matched/launched watch record isn't deleted
+// early at its original watch-expiry TTL.
+const retentionWindow = 90 * 24 * time.Hour
+
 // RecordMatch updates the watch with match info and writes a history record.
 func (s *Store) RecordMatch(ctx context.Context, w *Watch, m *MatchResult) error {
 	// Update the watch record
@@ -288,12 +294,19 @@ func (s *Store) RecordMatch(ctx context.Context, w *Watch, m *MatchResult) error
 	w.MatchCount++
 	w.LastMatch = m
 	w.UpdatedAt = now
+	// Reset the watch record's own TTL to the retention window (#41): it was set
+	// to the watch expiry at creation and never reset, so a matched/launched (or
+	// terminally-failed) watch record would otherwise be DynamoDB-TTL-deleted at
+	// the original expiry — losing the record while its match history survives.
+	// RecordMatch is the single chokepoint for both the matched and terminal
+	// transitions, so setting it here covers every resolved watch.
+	w.TTLTimestamp = now.Add(retentionWindow).Unix()
 	if err := s.PutWatch(ctx, w); err != nil {
 		return fmt.Errorf("update watch with match: %w", err)
 	}
 
 	// Write to match history
-	m.TTLTimestamp = now.Add(90 * 24 * time.Hour).Unix() // 90-day retention
+	m.TTLTimestamp = now.Add(retentionWindow).Unix() // 90-day retention
 	item, err := attributevalue.MarshalMap(m)
 	if err != nil {
 		return fmt.Errorf("marshal match: %w", err)
@@ -322,6 +335,56 @@ func (s *Store) UpdateLastPolled(ctx context.Context, watchID string) error {
 	})
 	if err != nil {
 		return fmt.Errorf("update last polled: %w", err)
+	}
+	return nil
+}
+
+// IncrementConsecutiveFailures atomically bumps the watch's unclassified-failure
+// counter (also touching last_polled_at) and returns the new value (#41). The
+// atomic ADD is race-safe against two pollers acting on the same watch and treats
+// an absent attribute as zero, so pre-#41 watch records need no migration.
+func (s *Store) IncrementConsecutiveFailures(ctx context.Context, watchID string) (int, error) {
+	out, err := s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: &s.watchesTable,
+		Key: map[string]types.AttributeValue{
+			"watch_id": &types.AttributeValueMemberS{Value: watchID},
+		},
+		UpdateExpression: aws.String("SET last_polled_at = :now ADD consecutive_failures :one"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":now": &types.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)},
+			":one": &types.AttributeValueMemberN{Value: "1"},
+		},
+		ReturnValues: types.ReturnValueUpdatedNew,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("increment consecutive failures: %w", err)
+	}
+	var updated struct {
+		ConsecutiveFailures int `dynamodbav:"consecutive_failures"`
+	}
+	if err := attributevalue.UnmarshalMap(out.Attributes, &updated); err != nil {
+		return 0, fmt.Errorf("unmarshal updated failure count: %w", err)
+	}
+	return updated.ConsecutiveFailures, nil
+}
+
+// ResetConsecutiveFailures zeroes the watch's unclassified-failure counter (also
+// touching last_polled_at), used on a genuine capacity failure or a successful
+// launch so an unknown-failure streak only counts *consecutive* faults (#41).
+func (s *Store) ResetConsecutiveFailures(ctx context.Context, watchID string) error {
+	_, err := s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: &s.watchesTable,
+		Key: map[string]types.AttributeValue{
+			"watch_id": &types.AttributeValueMemberS{Value: watchID},
+		},
+		UpdateExpression: aws.String("SET last_polled_at = :now, consecutive_failures = :zero"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":now":  &types.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)},
+			":zero": &types.AttributeValueMemberN{Value: "0"},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("reset consecutive failures: %w", err)
 	}
 	return nil
 }

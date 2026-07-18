@@ -10,6 +10,7 @@
 package failure
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 
@@ -33,6 +34,14 @@ const (
 	// AMI/IAM, exhausted quota, malformed request). Retrying wastes poll cycles,
 	// so the watch stops and the user is notified.
 	FailureTerminal
+	// FailureUnknown means the error is unrecognized but plausibly transient (an
+	// unlisted AWS code, or a non-AWS network/client-init blip). It's retried like
+	// capacity — a single blip must not kill a watch — but unlike FailureCapacity
+	// it counts toward a per-watch consecutive-failure cap, so a persistently
+	// broken watch stops after a bounded number of polls instead of burning launch
+	// attempts for its whole TTL (lagotto#41). Genuine capacity waits stay
+	// FailureCapacity and remain uncapped.
+	FailureUnknown
 )
 
 // capacityErrorCodes are AWS API error codes that indicate a transient lack of
@@ -72,15 +81,23 @@ func Label(k FailureKind) string {
 		return "capacity, will retry"
 	case FailureTerminal:
 		return "terminal, stopping watch"
+	case FailureUnknown:
+		return "unknown, will retry (capped)"
 	default:
 		return "none"
 	}
 }
 
 // ClassifyFailure inspects a spawn/hold error and decides whether to retry.
-// Unknown AWS errors and non-AWS errors default to FailureCapacity (retry):
-// transient infrastructure blips should not permanently kill a watch, and the
-// watch TTL bounds any retry loop regardless.
+// The taxonomy (lagotto#41):
+//   - recognized capacity codes -> FailureCapacity (retry, uncapped — a watch may
+//     legitimately wait out scarce capacity for days).
+//   - recognized terminal codes, a post-launch teardown, or a deterministic
+//     serialization error (a malformed stored config) -> FailureTerminal (stop).
+//   - anything else — an unlisted AWS code or a non-AWS network/client blip ->
+//     FailureUnknown (retry, but bounded by a per-watch consecutive-failure cap,
+//     so a single blip never kills a watch while a persistent fault eventually
+//     does).
 func ClassifyFailure(err error) FailureKind {
 	if err == nil {
 		return FailureNone
@@ -111,11 +128,21 @@ func ClassifyFailure(err error) FailureKind {
 			strings.Contains(code, "InsufficientCapacity") {
 			return FailureCapacity
 		}
-		// A recognized-but-unlisted AWS error: be conservative and retry, bounded
-		// by the watch TTL.
-		return FailureCapacity
+		// A recognized-but-unlisted AWS error: retry, but count it toward the cap
+		// so a persistent unknown fault doesn't retry for the whole watch TTL.
+		return FailureUnknown
 	}
 
-	// Non-AWS error (network, marshalling, client init). Treat as transient.
-	return FailureCapacity
+	// A deterministic serialization error (a malformed stored launch/job config)
+	// will never succeed on retry — treat as terminal so the watch stops instead
+	// of re-failing every poll.
+	var syntaxErr *json.SyntaxError
+	var unmarshalErr *json.UnmarshalTypeError
+	if errors.As(err, &syntaxErr) || errors.As(err, &unmarshalErr) {
+		return FailureTerminal
+	}
+
+	// Other non-AWS errors (network, client init): plausibly transient. Retry,
+	// but count toward the cap so a persistent blip eventually stops the watch.
+	return FailureUnknown
 }

@@ -33,12 +33,12 @@ func TestClassifyFailure(t *testing.T) {
 		{"bad ami", &apiErr{"InvalidAMIID.NotFound"}, watcher.FailureTerminal},
 		{"unauthorized", &apiErr{"UnauthorizedOperation"}, watcher.FailureTerminal},
 		{"unsupported type", &apiErr{"Unsupported"}, watcher.FailureTerminal},
-		// Unknown AWS code → conservative retry.
-		{"unknown aws code", &apiErr{"SomeNewErrorCode"}, watcher.FailureCapacity},
+		// Unknown AWS code → retry, but capped (#41).
+		{"unknown aws code", &apiErr{"SomeNewErrorCode"}, watcher.FailureUnknown},
 		// Substring fallback for an unlisted capacity variant.
 		{"capacity substring", &apiErr{"FooInsufficientCapacityBar"}, watcher.FailureCapacity},
-		// Non-AWS error → transient retry.
-		{"plain error", errors.New("dial tcp: timeout"), watcher.FailureCapacity},
+		// Non-AWS error → retry, but capped (#41).
+		{"plain error", errors.New("dial tcp: timeout"), watcher.FailureUnknown},
 		// spawn#220: a post-launch failure (RunInstances succeeded, downstream FSx
 		// setup failed and the instance was torn down) is terminal — retrying other
 		// AZs can't help and would orphan a filesystem per attempt. Wrapped, to

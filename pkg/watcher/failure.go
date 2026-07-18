@@ -23,6 +23,9 @@ const (
 	FailureCapacity = failure.FailureCapacity
 	// FailureTerminal means the attempt can never succeed as configured.
 	FailureTerminal = failure.FailureTerminal
+	// FailureUnknown means an unrecognized-but-plausibly-transient error: retried
+	// like capacity, but counted toward the per-watch consecutive-failure cap.
+	FailureUnknown = failure.FailureUnknown
 )
 
 // ClassifyFailure inspects a spawn/hold error and decides whether to retry.

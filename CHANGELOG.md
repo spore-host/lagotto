@@ -24,6 +24,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   d/h/m, and gives clearer errors naming the offending input and the valid units
   (#41). `1w` / `45s` now work anywhere a short duration is accepted (watch TTL,
   extend).
+- **A persistently-broken watch now stops after a bounded number of polls**
+  instead of retrying every cycle until its TTL (#41). Launch/hold errors are now
+  classified three ways: genuine capacity failures retry uncapped (a watch may
+  wait days for scarce GPUs), deterministic serialization errors (a malformed
+  stored config) fail immediately, and any other unrecognized error retries but
+  counts toward a per-watch cap of 10 consecutive failures — so a single blip
+  never kills a watch, but a sustained bad-IAM/region fault does.
+- **A matched or launched watch record is now retained for 90 days** rather than
+  being deleted at its original watch-expiry TTL (#41). Its `ttl_timestamp` is
+  reset to the retention window on the matched/failed transition, mirroring the
+  match-history retention, so a resolved watch and its history age out together.
 
 ### Changed
 - Internal: renamed the SageMaker config loader to `loadSageMakerConfig` and

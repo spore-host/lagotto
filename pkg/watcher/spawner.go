@@ -297,9 +297,10 @@ func (s *Spawner) RunScheduled(ctx context.Context, sl *ScheduledLaunch) (Schedu
 	if err != nil {
 		// A capacity failure right at the window open is retryable (#62): the
 		// reservation is active but RunInstances can transiently report no capacity
-		// for a short period. A terminal error (bad config) or a post-launch failure
-		// is not — retrying can't help.
-		if sl.ReservationID != "" && ClassifyFailure(err) == FailureCapacity {
+		// for a short period. An unclassified blip near the boundary is likewise
+		// worth a retry. A terminal error (bad config) or a post-launch failure is
+		// not — retrying can't help.
+		if fk := ClassifyFailure(err); sl.ReservationID != "" && (fk == FailureCapacity || fk == FailureUnknown) {
 			return OutcomeRetry, fmt.Sprintf("launch hit transient capacity at the boundary: %v", err), nil
 		}
 		return OutcomeFailed, "", err
