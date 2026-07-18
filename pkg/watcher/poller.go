@@ -285,17 +285,49 @@ func (p *Poller) pollSageMakerWatch(ctx context.Context, w *Watch, summary *Poll
 	p.recordOutcome(ctx, w, m, outcome.Kind, summary)
 }
 
-// recordOutcome applies the shared capacity/terminal/success state machine: a
-// capacity failure keeps the watch active (retry next cycle); a terminal failure
-// stops it as failed; success records the match, notifies, and marks matched.
+// recordOutcome applies the shared capacity/unknown/terminal/success state
+// machine: a capacity failure keeps the watch active (retry next cycle, uncapped)
+// and resets its unknown-failure streak; an unknown failure also retries but
+// increments the per-watch cap, stopping the watch once it reaches
+// MaxConsecutiveFailures; a terminal failure stops it as failed; success records
+// the match, notifies, marks matched, and clears the streak.
 func (p *Poller) recordOutcome(ctx context.Context, w *Watch, m *MatchResult, failure FailureKind, summary *PollSummary) {
 	if failure == FailureCapacity {
 		if p.verbose {
 			fmt.Fprintf(os.Stderr, "Watch %s: capacity unavailable; will retry next cycle\n", w.WatchID)
 		}
 		summary.Retrying++
-		_ = p.store.UpdateLastPolled(ctx, w.WatchID)
+		// A genuine capacity failure clears any prior unknown-failure streak: the
+		// cap only counts *consecutive* unclassified faults.
+		w.ConsecutiveFailures = 0
+		_ = p.store.ResetConsecutiveFailures(ctx, w.WatchID)
 		return
+	}
+
+	if failure == FailureUnknown {
+		n, err := p.store.IncrementConsecutiveFailures(ctx, w.WatchID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to record failure count for %s: %v\n", w.WatchID, err)
+			n = w.ConsecutiveFailures + 1 // best-effort local estimate
+		}
+		w.ConsecutiveFailures = n
+		if n < MaxConsecutiveFailures {
+			if p.verbose {
+				fmt.Fprintf(os.Stderr, "Watch %s: unclassified failure %d/%d; will retry next cycle\n", w.WatchID, n, MaxConsecutiveFailures)
+			}
+			summary.Retrying++
+			return
+		}
+		// Cap reached — stop the watch as failed instead of retrying forever.
+		if p.verbose {
+			fmt.Fprintf(os.Stderr, "Watch %s: %d consecutive unclassified failures; stopping watch\n", w.WatchID, n)
+		}
+		failure = FailureTerminal
+	}
+
+	// Success clears the streak so it persists via RecordMatch's PutWatch.
+	if failure == FailureNone {
+		w.ConsecutiveFailures = 0
 	}
 
 	if err := p.store.RecordMatch(ctx, w, m); err != nil {

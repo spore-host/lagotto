@@ -188,6 +188,75 @@ func TestRecordMatch(t *testing.T) {
 	}
 }
 
+// TestRecordMatch_ResetsWatchTTL verifies #41.4: a matched watch's own
+// ttl_timestamp is bumped to the retention window (~90d out), not left at its
+// original short expiry — so the record isn't DynamoDB-TTL-deleted early.
+func TestRecordMatch_ResetsWatchTTL(t *testing.T) {
+	store := setupStore(t)
+	ctx := context.Background()
+
+	user := "arn:aws:iam::123456789012:user/test"
+	w := newTestWatch("w-ttl", user) // ExpiresAt/TTLTimestamp = now+24h
+	origTTL := w.TTLTimestamp
+	if err := store.PutWatch(ctx, w); err != nil {
+		t.Fatalf("PutWatch: %v", err)
+	}
+
+	m := &watcher.MatchResult{
+		WatchID: "w-ttl", UserID: user, Region: "us-east-1",
+		InstanceType: "g5.xlarge", MatchedAt: time.Now().UTC(), ActionTaken: "spawned",
+	}
+	if err := store.RecordMatch(ctx, w, m); err != nil {
+		t.Fatalf("RecordMatch: %v", err)
+	}
+
+	got, _ := store.GetWatch(ctx, "w-ttl")
+	// New TTL should be far past the original 24h expiry (retention is 90 days).
+	if got.TTLTimestamp <= origTTL {
+		t.Errorf("watch TTLTimestamp = %d, want > original %d (retention window)", got.TTLTimestamp, origTTL)
+	}
+	minExpected := time.Now().UTC().Add(60 * 24 * time.Hour).Unix()
+	if got.TTLTimestamp < minExpected {
+		t.Errorf("watch TTLTimestamp = %d, want at least ~90d out (>= %d)", got.TTLTimestamp, minExpected)
+	}
+}
+
+// TestConsecutiveFailures covers #41.3's counter: Increment returns a running
+// total and persists it; Reset zeroes it; an absent attribute starts at 0.
+func TestConsecutiveFailures(t *testing.T) {
+	store := setupStore(t)
+	ctx := context.Background()
+
+	w := newTestWatch("w-fail", "arn:aws:iam::123456789012:user/test")
+	if err := store.PutWatch(ctx, w); err != nil {
+		t.Fatalf("PutWatch: %v", err)
+	}
+
+	// Absent attribute (pre-#41 record) increments from 0 → 1, 2, 3.
+	for want := 1; want <= 3; want++ {
+		n, err := store.IncrementConsecutiveFailures(ctx, "w-fail")
+		if err != nil {
+			t.Fatalf("IncrementConsecutiveFailures: %v", err)
+		}
+		if n != want {
+			t.Errorf("Increment returned %d, want %d", n, want)
+		}
+	}
+	got, _ := store.GetWatch(ctx, "w-fail")
+	if got.ConsecutiveFailures != 3 {
+		t.Errorf("persisted ConsecutiveFailures = %d, want 3", got.ConsecutiveFailures)
+	}
+
+	// Reset zeroes it.
+	if err := store.ResetConsecutiveFailures(ctx, "w-fail"); err != nil {
+		t.Fatalf("ResetConsecutiveFailures: %v", err)
+	}
+	got, _ = store.GetWatch(ctx, "w-fail")
+	if got.ConsecutiveFailures != 0 {
+		t.Errorf("after reset ConsecutiveFailures = %d, want 0", got.ConsecutiveFailures)
+	}
+}
+
 func TestUpdateLastPolled(t *testing.T) {
 	store := setupStore(t)
 	ctx := context.Background()
