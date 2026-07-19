@@ -21,7 +21,7 @@ lagotto deploy [flags]
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
 | `--environment` |  | string | `production` | Environment tag (production, staging, development) |
-| `--lambda-bucket` |  | string |  | S3 bucket for the Lambda artifact (default: lagotto-lambda-<account>-<region>, created if absent) |
+| `--lambda-bucket` |  | string |  | S3 bucket for the Lambda artifact (default: lagotto-lambda-&lt;account&gt;-&lt;region&gt;, created if absent) |
 | `--region` |  | string |  | AWS region (default: from your AWS config) |
 | `--stack-name` |  | string | `lagotto` | CloudFormation stack name |
 | `--teardown` |  | bool |  | Delete the stack instead of deploying it |

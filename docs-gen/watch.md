@@ -25,5 +25,5 @@ lagotto watch <instance-type-pattern> [flags]
 | `--spawn-config` |  | string |  | YAML file with spawn LaunchConfig (required for --action spawn) |
 | `--spot` |  | bool |  | Watch for Spot capacity (default: On-Demand) |
 | `--ttl` |  | string | `24h` | How long to keep watching (e.g., 24h, 7d) |
-| `--until` |  | string |  | Fleet completion condition, re-checked each poll: 's3-empty: s3://b/manifest minus s3://b/done/', 'http-200: https://…', or 'shell: <cmd>' (shell = local daemon only). When true the fleet retires. |
+| `--until` |  | string |  | Fleet completion condition, re-checked each poll: 's3-empty: s3://b/manifest minus s3://b/done/', 'http-200: https://…', or 'shell: &lt;cmd&gt;' (shell = local daemon only). When true the fleet retires. |
 
