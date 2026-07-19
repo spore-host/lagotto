@@ -129,6 +129,14 @@ type MatchResult struct {
 	TTLTimestamp  int64     `json:"ttl_timestamp" dynamodbav:"ttl_timestamp"`
 }
 
+// clone returns a shallow copy of the match, so each worker in a fleet top-up
+// gets its own MatchResult for Spawn to stamp with a distinct InstanceID/AZ
+// (#70). CandidateAZs is shared read-only (Spawn only reads it).
+func (m *MatchResult) clone() *MatchResult {
+	c := *m
+	return &c
+}
+
 // NotifyChannel specifies how to reach the user on a match.
 type NotifyChannel struct {
 	Type   string `json:"type" dynamodbav:"type"`     // "email", "webhook", "sns"

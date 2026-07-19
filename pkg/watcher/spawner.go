@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/launcher"
 )
@@ -28,7 +29,14 @@ type Spawner struct {
 	// sleep backs Snipe's inter-round backoff (#73), indirected so tests drive the
 	// retry loop without real waits. Nil = the default context-aware sleep.
 	sleep func(ctx context.Context, d time.Duration) error
+	// s3 backs s3-empty completion conditions (#70). Nil in tests that inject a
+	// condition directly; set from the client's config in NewSpawner.
+	s3 S3Lister
 }
+
+// S3Client returns the S3 lister for s3-empty completion conditions (#70), or
+// nil if the spawner has no AWS client (test spawners).
+func (s *Spawner) S3Client() S3Lister { return s.s3 }
 
 // NewSpawner creates a Spawner that uses spawn's EC2 launch library.
 func NewSpawner(ctx context.Context) (*Spawner, error) {
@@ -42,6 +50,7 @@ func NewSpawner(ctx context.Context) (*Spawner, error) {
 		listInstances:       client.ListInstances,
 		terminateInstance:   client.Terminate,
 		describeReservation: client.DescribeCapacityReservation,
+		s3:                  s3.NewFromConfig(client.Config()),
 	}, nil
 }
 

@@ -36,6 +36,9 @@ type Poller struct {
 	// before acting (#47) so two pollers can't double-fire the same watch. Empty
 	// = no leasing (the single hosted Lambda needs none).
 	leaseOwner string
+	// hosted marks the in-account Lambda poller, which has no shell/sandbox and so
+	// refuses shell completion conditions on fleet watches (#70). False = CLI daemon.
+	hosted bool
 }
 
 // WatchFilter scopes a poll sweep to a subset of watches (#47). A zero-value
@@ -107,6 +110,9 @@ type PollerOpts struct {
 	Filter *WatchFilter
 	// LeaseOwner enables the double-poller guard (#47); empty = no leasing.
 	LeaseOwner string
+	// Hosted marks the in-account Lambda poller (refuses shell completion
+	// conditions — no sandbox). False = CLI daemon (#70).
+	Hosted bool
 }
 
 // NewPoller creates a Poller backed by a truffle client and DynamoDB store.
@@ -123,6 +129,7 @@ func NewPoller(truffle *truffleaws.Client, store *Store, verbose bool, opts ...P
 		p.sagemaker = opts[0].SageMaker
 		p.filter = opts[0].Filter
 		p.leaseOwner = opts[0].LeaseOwner
+		p.hosted = opts[0].Hosted
 	}
 	return p
 }
@@ -200,6 +207,15 @@ func (p *Poller) PollAll(ctx context.Context) (*PollSummary, error) {
 			continue
 		}
 		summary.Watched++
+
+		// Goal-driven fleet (#70): maintain ~DesiredCount workers until the
+		// completion condition holds — a distinct reconcile, not the single-shot
+		// match→act→retire path. Handled per-watch (it does its own search + gap
+		// fill and must stay active across cycles).
+		if w.DesiredCount > 0 {
+			p.pollFleetWatch(ctx, w, summary)
+			continue
+		}
 
 		// SageMaker: submit/track the user's job directly, no EC2 search.
 		if normalizeService(w.Service) == ServiceSageMaker {
@@ -283,6 +299,182 @@ func (p *Poller) pollSageMakerWatch(ctx context.Context, w *Watch, summary *Poll
 	}
 
 	p.recordOutcome(ctx, w, m, outcome.Kind, summary)
+}
+
+// pollFleetWatch reconciles a goal-driven fleet watch (#70): evaluate the
+// completion condition; if met, retire the watch as StatusCompleted; otherwise
+// count running workers and (re)launch to fill the gap toward DesiredCount,
+// keeping the watch active across cycles (including relaunch from zero after a
+// correlated total-loss). Capacity failure just means "topped up less this
+// cycle" — the watch stays active and retries next poll.
+func (p *Poller) pollFleetWatch(ctx context.Context, w *Watch, summary *PollSummary) {
+	if p.spawner == nil {
+		// No launcher wired (e.g. notify-only poller) — nothing to maintain.
+		_ = p.store.UpdateLastPolled(ctx, w.WatchID)
+		return
+	}
+
+	// 1. Completion condition. Shell conditions are CLI-daemon only; the hosted
+	// Lambda has no sandbox, so it refuses them (fail loud, don't silently spin).
+	if w.CompletionCondition != "" {
+		if p.hosted && IsShellCondition(w.CompletionCondition) {
+			fmt.Fprintf(os.Stderr, "Watch %s: shell completion conditions are not supported on the hosted poller; skipping\n", w.WatchID)
+			_ = p.store.UpdateLastPolled(ctx, w.WatchID)
+			return
+		}
+		cond, err := ParseCondition(w.CompletionCondition, p.spawner.S3Client())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: watch %s has an invalid --until %q: %v\n", w.WatchID, w.CompletionCondition, err)
+			_ = p.store.UpdateLastPolled(ctx, w.WatchID)
+			return
+		}
+		done, err := cond.Done(ctx)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: watch %s completion check failed: %v (will retry)\n", w.WatchID, err)
+			_ = p.store.UpdateLastPolled(ctx, w.WatchID)
+			return
+		}
+		if done {
+			if p.verbose {
+				fmt.Fprintf(os.Stderr, "Watch %s: completion condition met; retiring fleet\n", w.WatchID)
+			}
+			if err := p.store.UpdateWatchStatus(ctx, w.WatchID, StatusCompleted); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to mark watch %s completed: %v\n", w.WatchID, err)
+			}
+			return
+		}
+	}
+
+	// 2. Count the live fleet and compute the gap to DesiredCount.
+	running, err := p.spawner.countRunningFleet(ctx, w)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: watch %s fleet count failed: %v (will retry)\n", w.WatchID, err)
+		_ = p.store.UpdateLastPolled(ctx, w.WatchID)
+		return
+	}
+	gap := w.DesiredCount - running
+	if gap <= 0 {
+		if p.verbose {
+			fmt.Fprintf(os.Stderr, "Watch %s: fleet at %d/%d; nothing to top up\n", w.WatchID, running, w.DesiredCount)
+		}
+		_ = p.store.UpdateLastPolled(ctx, w.WatchID)
+		return
+	}
+
+	// 3. Find capacity, then fill the gap this cycle (launch up to `gap` workers).
+	// Lease-guard so two pollers don't both top up the same fleet.
+	if p.leaseOwner != "" {
+		if err := p.store.ClaimLease(ctx, w.WatchID, p.leaseOwner, time.Now().Add(leaseTTL)); err != nil {
+			if errors.Is(err, ErrLeaseHeld) {
+				summary.Retrying++
+				return
+			}
+			fmt.Fprintf(os.Stderr, "Warning: could not claim lease on %s: %v\n", w.WatchID, err)
+			return
+		}
+		defer func() {
+			if err := p.store.ReleaseLease(ctx, w.WatchID, p.leaseOwner); err != nil && p.verbose {
+				fmt.Fprintf(os.Stderr, "Warning: could not release lease on %s: %v\n", w.WatchID, err)
+			}
+		}()
+	}
+
+	bestMatch, err := p.searchBestMatch(ctx, w)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: watch %s capacity search failed: %v\n", w.WatchID, err)
+		_ = p.store.UpdateLastPolled(ctx, w.WatchID)
+		return
+	}
+	if bestMatch == nil {
+		// No capacity offered this cycle; stay active, retry next poll.
+		summary.Retrying++
+		_ = p.store.UpdateLastPolled(ctx, w.WatchID)
+		return
+	}
+
+	launched := p.fillFleetGap(ctx, w, bestMatch, gap, summary)
+	if p.verbose {
+		fmt.Fprintf(os.Stderr, "Watch %s: topped up %d/%d workers (fleet now ~%d/%d)\n",
+			w.WatchID, launched, gap, running+launched, w.DesiredCount)
+	}
+	// The watch stays active (never flips to matched) — it only retires when the
+	// completion condition holds (step 1) or its TTL elapses.
+	_ = p.store.UpdateLastPolled(ctx, w.WatchID)
+}
+
+// fillFleetGap launches up to `gap` workers into the found capacity, each a
+// cloned MatchResult so Spawn stamps a distinct instance. It stops early on the
+// first launch failure (capacity ran out mid-fill, or a terminal fault): the
+// watch stays active and retries next cycle, so a partial fill is fine — the
+// completion condition and TTL bound the watch. Returns how many launched.
+func (p *Poller) fillFleetGap(ctx context.Context, w *Watch, bestMatch *MatchResult, gap int, summary *PollSummary) int {
+	launched := 0
+	for i := 0; i < gap; i++ {
+		m := bestMatch.clone()
+		if err := p.spawner.Spawn(ctx, w, m); err != nil {
+			failure := ClassifyFailure(err)
+			fmt.Fprintf(os.Stderr, "Warning: fleet top-up launch %d/%d for %s failed (%s): %v\n",
+				i+1, gap, w.WatchID, failureLabel(failure), err)
+			break
+		}
+		launched++
+		summary.Launched++
+		summary.Matches = append(summary.Matches, *m)
+		if err := p.store.RecordMatch(ctx, w, m); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to record fleet match for %s: %v\n", w.WatchID, err)
+		}
+	}
+	return launched
+}
+
+// searchBestMatch runs a single-watch truffle capacity search and returns the
+// best matching MatchResult, or nil if nothing is offered this cycle. Shared
+// search/evaluate logic with pollGroup, scoped to one watch (the fleet path).
+func (p *Poller) searchBestMatch(ctx context.Context, w *Watch) (*MatchResult, error) {
+	matcher, err := regexp.Compile(wildcardToRegex(w.InstanceTypePattern))
+	if err != nil {
+		return nil, fmt.Errorf("compile pattern %q: %w", w.InstanceTypePattern, err)
+	}
+	results, err := p.truffle.SearchInstanceTypes(ctx, w.Regions, matcher, truffleaws.FilterOptions{IncludeAZs: true, Verbose: p.verbose})
+	if err != nil {
+		return nil, fmt.Errorf("search instance types: %w", err)
+	}
+	if len(results) == 0 {
+		return nil, nil
+	}
+	now := time.Now().UTC()
+	var best *MatchResult
+	if w.Spot {
+		spotResults, err := p.truffle.GetSpotPricing(ctx, results, truffleaws.SpotOptions{OnlyActive: true, Verbose: p.verbose})
+		if err != nil {
+			return nil, fmt.Errorf("get spot pricing: %w", err)
+		}
+		for i := range spotResults {
+			candidate := MatchCandidate{SpotPrice: &spotResults[i]}
+			for j := range results {
+				if results[j].InstanceType == spotResults[i].InstanceType && results[j].Region == spotResults[i].Region {
+					candidate.InstanceType = results[j]
+					break
+				}
+			}
+			if m := Evaluate(w, candidate); m != nil {
+				m.MatchedAt = now
+				if best == nil || m.Price < best.Price {
+					best = m
+				}
+			}
+		}
+	} else {
+		for i := range results {
+			if m := Evaluate(w, MatchCandidate{InstanceType: results[i]}); m != nil {
+				m.MatchedAt = now
+				if best == nil || m.Price < best.Price {
+					best = m
+				}
+			}
+		}
+	}
+	return best, nil
 }
 
 // recordOutcome applies the shared capacity/unknown/terminal/success state
