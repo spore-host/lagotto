@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.50.0] - 2026-07-19
+
 ### Documentation
 - **`lagotto setup` help now describes that it also grants the hosted poller's
   runtime IAM policy** (#16), not just the DynamoDB tables — so the generated
@@ -445,7 +447,8 @@ Initial tagged release from the standalone `spore-host/lagotto` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/lagotto/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.49.0...HEAD
+[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.50.0...HEAD
+[0.50.0]: https://github.com/spore-host/lagotto/compare/v0.49.0...v0.50.0
 [0.49.0]: https://github.com/spore-host/lagotto/compare/v0.48.1...v0.49.0
 [0.48.1]: https://github.com/spore-host/lagotto/compare/v0.48.0...v0.48.1
 [0.48.0]: https://github.com/spore-host/lagotto/compare/v0.47.2...v0.48.0
