@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Command/flag reference is now generated from the CLI and drift-gated.** A
+  hidden `lagotto gen-docs` command (via `libs/docgen`) emits the exhaustive
+  per-command reference to `docs-gen/`; `make gen-docs` regenerates it and a CI
+  `check-docs` gate fails if the committed reference drifts from the code, so the
+  docs site's reference can no longer go stale (2026-07 docs audit). The
+  previously-missing `setup`/`deploy`/`teardown` commands and the goal-driven
+  `--maintain`/`--until` fleet flags are now covered automatically. Run `make
+  gen-docs` after changing a command or flag.
+
 ### Changed
 - **The hosted poller's runtime IAM permissions are now owned by `lagotto setup`,
   not the CloudFormation template** (#16). lagotto codifies the poller's policy in

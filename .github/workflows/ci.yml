@@ -59,6 +59,12 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      # Docs drift gate: the committed command/flag reference (docs-gen/) is
+      # generated from the CLI via `gen-docs`. Regenerate and fail if it's stale,
+      # so a flag/command change can't merge without its reference update.
+      - name: Docs reference drift gate
+        run: make check-docs
+
       # The capacity-poller Lambda is a separate Go module (own go.mod with a
       # replace → root), so `go build ./...` above doesn't cover it. Build/vet/
       # test it explicitly so changes to the shared poller wiring (e.g. the

@@ -1,4 +1,4 @@
-.PHONY: build clean install test lint fmt deps run help vuln
+.PHONY: build clean install test lint fmt deps run help vuln gen-docs check-docs
 
 # Variables
 BINARY_NAME=lagotto
@@ -18,6 +18,14 @@ LDFLAGS=-ldflags "-X github.com/spore-host/lagotto/cmd.Version=$(VERSION) -s -w"
 
 # Default target
 all: test build
+
+## gen-docs: Regenerate the committed command/flag reference (docs-gen/) from the CLI.
+gen-docs:
+	$(GOCMD) run . gen-docs --out docs-gen
+
+## check-docs: Drift gate — regenerate and fail if the committed reference is stale.
+check-docs: gen-docs
+	git diff --exit-code docs-gen/ || { echo "::error::docs-gen/ is stale — run 'make gen-docs' and commit"; exit 1; }
 
 ## build: Build the binary
 build:
