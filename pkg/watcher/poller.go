@@ -19,9 +19,17 @@ import (
 // watch within one cycle.
 const leaseTTL = 2 * time.Minute
 
+// capacitySearcher is the slice of truffle the poller uses to discover capacity —
+// an interface so tests inject a fake without a live truffle client. *truffleaws.Client
+// satisfies it.
+type capacitySearcher interface {
+	SearchInstanceTypes(ctx context.Context, regions []string, matcher *regexp.Regexp, opts truffleaws.FilterOptions) ([]truffleaws.InstanceTypeResult, error)
+	GetSpotPricing(ctx context.Context, instances []truffleaws.InstanceTypeResult, opts truffleaws.SpotOptions) ([]truffleaws.SpotPriceResult, error)
+}
+
 // Poller checks instance capacity for active watches.
 type Poller struct {
-	truffle   *truffleaws.Client
+	truffle   capacitySearcher
 	store     *Store
 	notifier  *Notifier          // nil = skip notifications
 	spawner   *Spawner           // nil = skip auto-spawn

@@ -58,3 +58,14 @@ jobs:
 
       - name: Vet
         run: go vet ./...
+
+      # The capacity-poller Lambda is a separate Go module (own go.mod with a
+      # replace → root), so `go build ./...` above doesn't cover it. Build/vet/
+      # test it explicitly so changes to the shared poller wiring (e.g. the
+      # hosted-poller options) are guarded in CI, not just locally.
+      - name: Build + test lambda module
+        working-directory: lambda/capacity-poller
+        run: |
+          go build ./...
+          go vet ./...
+          go test -short ./...
