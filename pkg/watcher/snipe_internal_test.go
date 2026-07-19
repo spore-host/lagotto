@@ -164,6 +164,76 @@ func TestSnipe_GuaranteesTTL(t *testing.T) {
 	}
 }
 
+// TestSnipe_FallbackRegionWithinRound verifies the multi-region extension (#76):
+// when the primary region has no capacity, Snipe tries the fallback region within
+// the SAME round (before any backoff) and returns the fallback's result.
+func TestSnipe_FallbackRegionWithinRound(t *testing.T) {
+	sp := newSpawnerWithProvision(func(_ context.Context, _ *spawnaws.Client, cfg spawnaws.LaunchConfig, _ launcher.Options) (*spawnaws.LaunchResult, error) {
+		if cfg.Region == "us-west-2" {
+			return &spawnaws.LaunchResult{InstanceID: "i-west"}, nil // capacity only in the fallback
+		}
+		return nil, &capErr{"InsufficientInstanceCapacity"}
+	})
+	var slept int
+	sp.sleep = func(context.Context, time.Duration) error { slept++; return nil }
+
+	primary := snipeTarget() // us-east-1
+	primary.AZs = []string{"us-east-1a"}
+	fallback := SnipeTarget{InstanceType: "g7e.2xlarge", Region: "us-west-2", AZs: []string{"us-west-2a"}}
+
+	m, err := sp.Snipe(context.Background(), primary, SnipeOptions{Fallbacks: []SnipeTarget{fallback}})
+	if err != nil {
+		t.Fatalf("Snipe: %v", err)
+	}
+	if m.InstanceID != "i-west" || m.Region != "us-west-2" {
+		t.Errorf("got id=%q region=%q, want i-west/us-west-2 (fallback region acquired)", m.InstanceID, m.Region)
+	}
+	if slept != 0 {
+		t.Errorf("slept = %d, want 0 (fallback succeeded in the first round, no backoff)", slept)
+	}
+}
+
+// TestSnipe_FallbackTerminalStops verifies a terminal failure on a fallback target
+// stops immediately — a bad AMI/IAM in a region isn't a capacity issue to retry.
+func TestSnipe_FallbackTerminalStops(t *testing.T) {
+	var attempts int
+	sp := newSpawnerWithProvision(func(_ context.Context, _ *spawnaws.Client, cfg spawnaws.LaunchConfig, _ launcher.Options) (*spawnaws.LaunchResult, error) {
+		attempts++
+		if cfg.Region == "us-west-2" {
+			return nil, &capErr{"AuthFailure"} // terminal in the fallback region
+		}
+		return nil, &capErr{"InsufficientInstanceCapacity"} // capacity-fail primary
+	})
+	sp.sleep = func(context.Context, time.Duration) error {
+		t.Fatal("must not back off before the terminal fallback")
+		return nil
+	}
+
+	primary := snipeTarget()
+	primary.AZs = []string{"us-east-1a"}
+	fallback := SnipeTarget{InstanceType: "g7e.2xlarge", Region: "us-west-2", AZs: []string{"us-west-2a"}}
+	_, err := sp.Snipe(context.Background(), primary, SnipeOptions{Fallbacks: []SnipeTarget{fallback}})
+	if err == nil {
+		t.Fatal("expected the fallback's terminal failure to stop Snipe")
+	}
+	if attempts != 2 {
+		t.Errorf("attempts = %d, want 2 (primary capacity-fail, then terminal fallback)", attempts)
+	}
+}
+
+// TestSnipe_FallbackValidated verifies fallback targets are validated too.
+func TestSnipe_FallbackValidated(t *testing.T) {
+	sp := newSpawnerWithProvision(func(context.Context, *spawnaws.Client, spawnaws.LaunchConfig, launcher.Options) (*spawnaws.LaunchResult, error) {
+		return nil, &capErr{"InsufficientInstanceCapacity"}
+	})
+	primary := snipeTarget()
+	primary.AZs = []string{"us-east-1a"}
+	bad := SnipeTarget{Region: "us-west-2"} // missing InstanceType
+	if _, err := sp.Snipe(context.Background(), primary, SnipeOptions{Fallbacks: []SnipeTarget{bad}}); err == nil {
+		t.Error("want error for a fallback with missing InstanceType")
+	}
+}
+
 // TestBackoffFor verifies the capped exponential schedule.
 func TestBackoffFor(t *testing.T) {
 	base, max := time.Second, 8*time.Second
