@@ -190,8 +190,12 @@ func (c *shellCondition) String() string { return c.spec }
 func (c *shellCondition) Done(ctx context.Context) (bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	// #nosec G204 -- the command is an operator-supplied --until spec on their own
-	// machine (CLI daemon only), equivalent to what they'd type in a shell.
+	// The command is an operator-supplied `--until shell:` spec, run on the
+	// operator's own machine by the CLI daemon (never the hosted Lambda — see
+	// IsShellCondition), equivalent to what they'd type in their own shell. Not
+	// attacker-controlled input.
+	// #nosec G204 -- see above (gosec)
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- operator-supplied --until spec, CLI-daemon only; not attacker input.
 	cmd := exec.CommandContext(ctx, "sh", "-c", c.command)
 	if err := cmd.Run(); err != nil {
 		var exit *exec.ExitError
