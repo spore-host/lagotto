@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Goal-driven fleet mode: `lagotto watch --maintain N --until <condition>`** (#70).
+  Instead of firing an action once and retiring, a fleet watch **maintains ~N
+  running workers until an external completion condition is true** — relaunching
+  toward the goal each poll, **including from zero** after a correlated total
+  reclaim. This is the missing primitive for idempotent, spot-friendly batch:
+  pull-model workers + scale-out handle independent loss, and this durable
+  supervisor handles the correlated-total-loss tail, so a spot batch job becomes
+  genuinely fire-and-forget. Requires `--action spawn`. The `--until` condition
+  is one of: `s3-empty: s3://b/wanted minus s3://b/done/` (done when every wanted
+  key has a done key), `http-200: <url>`, or `shell: <cmd>` (shell runs only on a
+  local `poll --daemon` — the hosted poller has no sandbox). Workers are tracked
+  by a `lagotto:watch=<id>` tag and counted live each poll (reflecting real
+  reclaim). Runs on both `poll --daemon` and the hosted Lambda poller; `list`
+  shows `spawn×N` and `status` shows the fleet target + condition.
 - **`watcher.Snipe` supports optional multi-region fallback** (#76). The
   block-and-wait acquire loop (`SnipeOptions.Fallbacks`) can now take an ordered
   list of additional targets — each a full `SnipeTarget` with its own region, AZs,

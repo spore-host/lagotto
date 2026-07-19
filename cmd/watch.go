@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -30,6 +31,8 @@ var (
 	watchSageMakerConfig string
 	watchService         string
 	watchProject         string
+	watchMaintain        int
+	watchUntil           string
 )
 
 var watchCmd = &cobra.Command{
@@ -63,6 +66,8 @@ func init() {
 	watchCmd.Flags().StringVar(&watchSageMakerConfig, "sagemaker-config", "", "YAML/JSON file with the SageMaker job definition (required for --service sagemaker)")
 	watchCmd.Flags().StringVar(&watchService, "service", "ec2", "Capacity service: ec2, or sagemaker (submits your SageMaker job for ml.* types)")
 	watchCmd.Flags().StringVar(&watchProject, "project", "", "Project label for scoping a local 'poll --daemon --project' in a shared account (default: $LAGOTTO_PROJECT)")
+	watchCmd.Flags().IntVar(&watchMaintain, "maintain", 0, "Goal-driven fleet: maintain this many workers (relaunching toward the goal, even from zero) until --until holds. Requires --action spawn. 0 = single-shot (default).")
+	watchCmd.Flags().StringVar(&watchUntil, "until", "", "Fleet completion condition, re-checked each poll: 's3-empty: s3://b/manifest minus s3://b/done/', 'http-200: https://…', or 'shell: <cmd>' (shell = local daemon only). When true the fleet retires.")
 }
 
 func runWatch(cmd *cobra.Command, args []string) error {
@@ -127,6 +132,15 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Goal-driven fleet validation (#70): --maintain/--until make this a fleet
+	// watch, which only makes sense for the spawn action (it launches workers).
+	if err := validateFleetFlags(action, watchMaintain, watchUntil); err != nil {
+		return err
+	}
+	if watchUntil != "" && watcher.IsShellCondition(watchUntil) {
+		fmt.Fprintln(os.Stderr, "note: shell completion conditions run only on the local 'poll --daemon' (the hosted poller has no shell sandbox).")
+	}
+
 	// Parse notify channels
 	channels, err := parseNotifyChannels(watchNotify)
 	if err != nil {
@@ -167,6 +181,8 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		NotifyChannels:      channels,
 		LaunchConfigJSON:    launchConfigJSON,
 		SageMakerJobJSON:    sageMakerJobJSON,
+		DesiredCount:        watchMaintain,
+		CompletionCondition: watchUntil,
 		CreatedAt:           now,
 		UpdatedAt:           now,
 		ExpiresAt:           expiresAt,
@@ -331,6 +347,29 @@ func displayRegions(regions []string) string {
 		return "(all enabled)"
 	}
 	return fmt.Sprintf("%v", regions)
+}
+
+// validateFleetFlags checks the goal-driven fleet flags (#70): --maintain must
+// be non-negative and, when set, requires --action spawn; --until requires
+// --maintain and must be a well-formed completion spec. A nil-client ParseCondition
+// on s3-empty reports "needs an S3 client" — that means the spec parsed fine, so
+// it's not a validation error here (the poller supplies the client at run time).
+func validateFleetFlags(action watcher.ActionMode, maintain int, until string) error {
+	if maintain < 0 {
+		return fmt.Errorf("--maintain must be >= 0")
+	}
+	if maintain > 0 && action != watcher.ActionSpawn {
+		return fmt.Errorf("--maintain requires --action spawn (a fleet maintains launched workers)")
+	}
+	if until != "" && maintain == 0 {
+		return fmt.Errorf("--until requires --maintain (it's the fleet's completion condition)")
+	}
+	if until != "" {
+		if _, err := watcher.ParseCondition(until, nil); err != nil && !strings.Contains(err.Error(), "needs an S3 client") {
+			return fmt.Errorf("invalid --until: %w", err)
+		}
+	}
+	return nil
 }
 
 func parseNotifyChannels(raw []string) ([]watcher.NotifyChannel, error) {

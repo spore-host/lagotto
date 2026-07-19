@@ -83,6 +83,9 @@ func init() {
 		// `poll --daemon` can't both fire the same watch. No Filter — the hosted
 		// poller is the one account-wide poller and services every watch.
 		LeaseOwner: "hosted-lambda",
+		// Hosted: this poller has no shell sandbox, so it refuses shell-based
+		// fleet completion conditions (#70); those run only on a local daemon.
+		Hosted: true,
 	})
 
 	schedulerClient = scheduler.NewFromConfig(cfg)
