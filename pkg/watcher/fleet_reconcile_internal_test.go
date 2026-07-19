@@ -3,11 +3,13 @@ package watcher
 import (
 	"context"
 	"encoding/json"
+	"regexp"
 	"testing"
 
 	"github.com/spore-host/lagotto/pkg/testutil"
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/launcher"
+	truffleaws "github.com/spore-host/truffle/pkg/aws"
 )
 
 const (
@@ -158,6 +160,82 @@ func TestFillFleetGap_StopsOnCapacityFailure(t *testing.T) {
 	got := p.fillFleetGap(context.Background(), w, best, 4, summary)
 	if got != 2 {
 		t.Errorf("filled %d, want 2 (capacity failed on the 3rd)", got)
+	}
+}
+
+// fakeSearcher is an in-memory capacitySearcher: returns canned on-demand
+// results (no spot pricing needed for these tests).
+type fakeSearcher struct {
+	results []truffleaws.InstanceTypeResult
+}
+
+func (f *fakeSearcher) SearchInstanceTypes(context.Context, []string, *regexp.Regexp, truffleaws.FilterOptions) ([]truffleaws.InstanceTypeResult, error) {
+	return f.results, nil
+}
+func (f *fakeSearcher) GetSpotPricing(context.Context, []truffleaws.InstanceTypeResult, truffleaws.SpotOptions) ([]truffleaws.SpotPriceResult, error) {
+	return nil, nil
+}
+
+func TestSearchBestMatch(t *testing.T) {
+	w := &Watch{WatchID: "w-s", Regions: []string{"us-east-1"}, InstanceTypePattern: "m8g.8xlarge"}
+
+	// Nothing offered → nil match.
+	p := &Poller{truffle: &fakeSearcher{}}
+	if m, err := p.searchBestMatch(context.Background(), w); err != nil || m != nil {
+		t.Errorf("no capacity → got m=%v err=%v, want nil/nil", m, err)
+	}
+
+	// One offered type → matched.
+	p = &Poller{truffle: &fakeSearcher{results: []truffleaws.InstanceTypeResult{
+		{InstanceType: "m8g.8xlarge", Region: "us-east-1", AvailableAZs: []string{"us-east-1a"}, OnDemandPrice: 1.23},
+	}}}
+	m, err := p.searchBestMatch(context.Background(), w)
+	if err != nil {
+		t.Fatalf("searchBestMatch: %v", err)
+	}
+	if m == nil || m.InstanceType != "m8g.8xlarge" || m.Region != "us-east-1" {
+		t.Errorf("got %+v, want an m8g.8xlarge/us-east-1 match", m)
+	}
+}
+
+// TestPollFleetWatch_LaunchesFromZero drives the full reconcile launch path:
+// condition unmet, zero running, capacity available → launches the full
+// DesiredCount and the watch stays active.
+func TestPollFleetWatch_LaunchesFromZero(t *testing.T) {
+	store := fleetStore(t)
+	w := &Watch{
+		WatchID: "w-zero", Status: StatusActive, DesiredCount: 3,
+		Regions: []string{"us-east-1"}, InstanceTypePattern: "m8g.8xlarge",
+		LaunchConfigJSON: mustConfigJSON(t),
+		// no --until → never "done", proceeds to count+fill
+	}
+	if err := store.PutWatch(context.Background(), w); err != nil {
+		t.Fatalf("PutWatch: %v", err)
+	}
+	launches := 0
+	sp := newSpawnerWithProvision(func(_ context.Context, _ *spawnaws.Client, _ spawnaws.LaunchConfig, _ launcher.Options) (*spawnaws.LaunchResult, error) {
+		launches++
+		return &spawnaws.LaunchResult{InstanceID: "i-new"}, nil
+	})
+	// listInstances returns nothing → zero running, gap == DesiredCount.
+	sp.listInstances = func(context.Context, string, string) ([]spawnaws.InstanceInfo, error) { return nil, nil }
+	p := &Poller{
+		store:   store,
+		spawner: sp,
+		truffle: &fakeSearcher{results: []truffleaws.InstanceTypeResult{
+			{InstanceType: "m8g.8xlarge", Region: "us-east-1", AvailableAZs: []string{"us-east-1a"}, OnDemandPrice: 1.0},
+		}},
+	}
+	summary := &PollSummary{}
+
+	p.pollFleetWatch(context.Background(), w, summary)
+
+	if launches != 3 {
+		t.Errorf("launched %d, want 3 (fill from zero to DesiredCount)", launches)
+	}
+	got, _ := store.GetWatch(context.Background(), "w-zero")
+	if got.Status != StatusActive {
+		t.Errorf("status = %q, want active (fleet not done, keeps maintaining)", got.Status)
 	}
 }
 
