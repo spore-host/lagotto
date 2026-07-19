@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+- **`lagotto setup` help now describes that it also grants the hosted poller's
+  runtime IAM policy** (#16), not just the DynamoDB tables — so the generated
+  command reference reflects what `setup` actually does after `lagotto deploy`.
+
 ### Added
 - **Command/flag reference is now generated from the CLI and drift-gated.** A
   hidden `lagotto gen-docs` command (via `libs/docgen`) emits the exhaustive

@@ -18,15 +18,20 @@ import (
 
 var setupCmd = &cobra.Command{
 	Use:   "setup",
-	Short: "Create the DynamoDB tables lagotto needs",
-	Long: `Create the DynamoDB tables lagotto uses to store watches and match history
-(lagotto-watches and lagotto-match-history by default; override with
---watches-table / --history-table).
+	Short: "Create lagotto's DynamoDB tables and grant the hosted poller its runtime IAM policy",
+	Long: `Provision lagotto's backend: the DynamoDB tables it uses to store watches and
+match history (lagotto-watches and lagotto-match-history by default; override with
+--watches-table / --history-table), and — if the hosted poller has been deployed
+('lagotto deploy') — the runtime IAM policy that lets the poller spawn/hold/submit.
 
-This is idempotent — existing tables are left untouched. You don't normally need
-to run it: 'lagotto watch' creates the tables automatically on first use. Run it
-explicitly when you want to provision the backend ahead of time or confirm what
-will be created.`,
+The table creation is idempotent (existing tables are left untouched) and normally
+automatic: 'lagotto watch' creates the tables on first use. Run 'setup' explicitly
+to provision the backend ahead of time, or — importantly — after 'lagotto deploy'
+to grant the poller its permissions. 'deploy' creates only a minimal execution
+role (so the runtime Lambda can never self-escalate); 'setup', run by you, attaches
+the spawn/hold/SageMaker/scheduler policy. Until then the poller can only notify.
+If the poller role doesn't exist yet, setup creates the tables and prints a
+next-step note instead of failing.`,
 	RunE: runSetup,
 }
 
