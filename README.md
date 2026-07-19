@@ -42,6 +42,37 @@ lagotto cancel <watch-id>          # prompts for confirmation; -y/--yes to skip
 lagotto history
 ```
 
+## Goal-driven fleets
+
+By default a watch fires its action **once** and retires. A **fleet watch**
+instead maintains a target number of workers until an external completion
+condition is true — relaunching toward the goal each poll, **including from zero**
+if the whole fleet is reclaimed:
+
+```bash
+lagotto watch m8g.8xlarge --action spawn --spawn-config prep.yaml \
+  --maintain 4 \                                            # keep ~4 workers alive…
+  --until 's3-empty: s3://bucket/manifest minus s3://bucket/prepared/' \  # …until done
+  --regions us-west-2 --spot
+```
+
+Each poll: if `--until` holds, the fleet retires (`completed`); otherwise lagotto
+counts the running workers (by a `lagotto:watch=<id>` tag) and launches enough to
+reach `--maintain`. This makes idempotent, spot-friendly batch fire-and-forget:
+pull-model workers absorb independent reclaim, and the supervisor revives the
+fleet after a correlated total loss.
+
+`--until` conditions:
+- **`s3-empty: <wanted-prefix> minus <done-prefix>`** — done when every wanted S3
+  key has a corresponding done key (the durable, compute-independent completion
+  state for a pull-model job).
+- **`http-200: <url>`** — done when a GET returns 2xx.
+- **`shell: <cmd>`** — done when the command exits 0. Runs only on a local
+  `poll --daemon` (the hosted poller has no shell sandbox).
+
+Requires `--action spawn`. Bound cost with a TTL in the spawn config; workers
+still get spored's TTL/idle lifecycle.
+
 ## Polling
 
 A watch only fires when something polls it. Two ways:

@@ -55,6 +55,12 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(out, "Max price: $%.4f/hr\n", w.MaxPrice)
 	}
 	fmt.Fprintf(out, "Action:   %s\n", w.Action)
+	if w.DesiredCount > 0 {
+		fmt.Fprintf(out, "Fleet:    maintain %d worker(s)\n", w.DesiredCount)
+		if w.CompletionCondition != "" {
+			fmt.Fprintf(out, "Until:    %s\n", w.CompletionCondition)
+		}
+	}
 	fmt.Fprintf(out, "Created:  %s\n", w.CreatedAt.Format(time.RFC3339))
 	fmt.Fprintf(out, "Expires:  %s\n", w.ExpiresAt.Format(time.RFC3339))
 	if !w.LastPolledAt.IsZero() {

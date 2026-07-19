@@ -69,13 +69,19 @@ func runList(cmd *cobra.Command, args []string) error {
 		if len(regions) > 25 {
 			regions = regions[:22] + "..."
 		}
+		// A goal-driven fleet watch (#70) shows its target as "spawn×N" so the
+		// maintain count is visible in the list without a new column.
+		actionCol := string(w.Action)
+		if w.DesiredCount > 0 {
+			actionCol = fmt.Sprintf("%s×%d", w.Action, w.DesiredCount)
+		}
 		fmt.Fprintf(cmd.OutOrStdout(), "%-12s %-10s %-20s %-25s %-6v %-10s %s\n",
 			w.WatchID,
 			w.Status,
 			truncate(w.InstanceTypePattern, 20),
 			regions,
 			w.Spot,
-			w.Action,
+			actionCol,
 			w.ExpiresAt.Format(time.RFC3339),
 		)
 	}
