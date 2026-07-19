@@ -392,6 +392,22 @@ func (p *Poller) pollFleetWatch(ctx context.Context, w *Watch, summary *PollSumm
 		return
 	}
 
+	launched := p.fillFleetGap(ctx, w, bestMatch, gap, summary)
+	if p.verbose {
+		fmt.Fprintf(os.Stderr, "Watch %s: topped up %d/%d workers (fleet now ~%d/%d)\n",
+			w.WatchID, launched, gap, running+launched, w.DesiredCount)
+	}
+	// The watch stays active (never flips to matched) — it only retires when the
+	// completion condition holds (step 1) or its TTL elapses.
+	_ = p.store.UpdateLastPolled(ctx, w.WatchID)
+}
+
+// fillFleetGap launches up to `gap` workers into the found capacity, each a
+// cloned MatchResult so Spawn stamps a distinct instance. It stops early on the
+// first launch failure (capacity ran out mid-fill, or a terminal fault): the
+// watch stays active and retries next cycle, so a partial fill is fine — the
+// completion condition and TTL bound the watch. Returns how many launched.
+func (p *Poller) fillFleetGap(ctx context.Context, w *Watch, bestMatch *MatchResult, gap int, summary *PollSummary) int {
 	launched := 0
 	for i := 0; i < gap; i++ {
 		m := bestMatch.clone()
@@ -399,9 +415,6 @@ func (p *Poller) pollFleetWatch(ctx context.Context, w *Watch, summary *PollSumm
 			failure := ClassifyFailure(err)
 			fmt.Fprintf(os.Stderr, "Warning: fleet top-up launch %d/%d for %s failed (%s): %v\n",
 				i+1, gap, w.WatchID, failureLabel(failure), err)
-			// Capacity ran out mid-fill (common) → stop this cycle, keep the watch
-			// active, retry next poll. A terminal failure also just stops this
-			// cycle's fill; the completion condition + TTL still bound the watch.
 			break
 		}
 		launched++
@@ -411,13 +424,7 @@ func (p *Poller) pollFleetWatch(ctx context.Context, w *Watch, summary *PollSumm
 			fmt.Fprintf(os.Stderr, "Warning: failed to record fleet match for %s: %v\n", w.WatchID, err)
 		}
 	}
-	if p.verbose {
-		fmt.Fprintf(os.Stderr, "Watch %s: topped up %d/%d workers (fleet now ~%d/%d)\n",
-			w.WatchID, launched, gap, running+launched, w.DesiredCount)
-	}
-	// The watch stays active (never flips to matched) — it only retires when the
-	// completion condition holds (step 1) or its TTL elapses.
-	_ = p.store.UpdateLastPolled(ctx, w.WatchID)
+	return launched
 }
 
 // searchBestMatch runs a single-watch truffle capacity search and returns the

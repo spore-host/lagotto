@@ -2,6 +2,7 @@ package watcher
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/spore-host/lagotto/pkg/testutil"
@@ -104,4 +105,67 @@ func TestPollFleetWatch_AtCapacity_NoLaunch(t *testing.T) {
 	if launches != 0 {
 		t.Errorf("launched %d, want 0 (already at DesiredCount)", launches)
 	}
+}
+
+// TestFillFleetGap_LaunchesGap: fills the whole gap when capacity holds, and each
+// worker gets a distinct recorded match.
+func TestFillFleetGap_LaunchesGap(t *testing.T) {
+	store := fleetStore(t)
+	w := &Watch{WatchID: "w-fill", Status: StatusActive, DesiredCount: 3, Regions: []string{"us-east-1"}}
+	if err := store.PutWatch(context.Background(), w); err != nil {
+		t.Fatalf("PutWatch: %v", err)
+	}
+	n := 0
+	sp := newSpawnerWithProvision(func(_ context.Context, _ *spawnaws.Client, _ spawnaws.LaunchConfig, _ launcher.Options) (*spawnaws.LaunchResult, error) {
+		n++
+		return &spawnaws.LaunchResult{InstanceID: "i-" + string(rune('0'+n))}, nil
+	})
+	// Spawn needs a launch config on the watch.
+	w.LaunchConfigJSON = mustConfigJSON(t)
+	p := &Poller{store: store, spawner: sp}
+	summary := &PollSummary{}
+
+	best := &MatchResult{Region: "us-east-1", InstanceType: "m8g.8xlarge", CandidateAZs: []string{"us-east-1a"}}
+	got := p.fillFleetGap(context.Background(), w, best, 3, summary)
+	if got != 3 {
+		t.Errorf("filled %d, want 3", got)
+	}
+	if summary.Launched != 3 {
+		t.Errorf("summary.Launched = %d, want 3", summary.Launched)
+	}
+}
+
+// TestFillFleetGap_StopsOnCapacityFailure: a launch failure mid-fill stops the
+// cycle; the watch stays active (retry next poll), partial fill returned.
+func TestFillFleetGap_StopsOnCapacityFailure(t *testing.T) {
+	store := fleetStore(t)
+	w := &Watch{WatchID: "w-partial", Status: StatusActive, DesiredCount: 4, Regions: []string{"us-east-1"}, LaunchConfigJSON: mustConfigJSON(t)}
+	if err := store.PutWatch(context.Background(), w); err != nil {
+		t.Fatalf("PutWatch: %v", err)
+	}
+	n := 0
+	sp := newSpawnerWithProvision(func(_ context.Context, _ *spawnaws.Client, _ spawnaws.LaunchConfig, _ launcher.Options) (*spawnaws.LaunchResult, error) {
+		n++
+		if n >= 3 { // first two succeed, capacity runs out on the third
+			return nil, &capErr{"InsufficientInstanceCapacity"}
+		}
+		return &spawnaws.LaunchResult{InstanceID: "i-ok"}, nil
+	})
+	p := &Poller{store: store, spawner: sp}
+	summary := &PollSummary{}
+
+	best := &MatchResult{Region: "us-east-1", InstanceType: "m8g.8xlarge", CandidateAZs: []string{"us-east-1a"}}
+	got := p.fillFleetGap(context.Background(), w, best, 4, summary)
+	if got != 2 {
+		t.Errorf("filled %d, want 2 (capacity failed on the 3rd)", got)
+	}
+}
+
+func mustConfigJSON(t *testing.T) []byte {
+	t.Helper()
+	raw, err := json.Marshal(SpawnConfigFile{Name: "worker", InstanceType: "m8g.8xlarge", Region: "us-east-1", TTL: "4h"})
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	return raw
 }
