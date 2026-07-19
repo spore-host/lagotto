@@ -10,6 +10,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/cloudformation v1.72.1
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.57.3
 	github.com/aws/aws-sdk-go-v2/service/ec2 v1.301.0
+	github.com/aws/aws-sdk-go-v2/service/iam v1.53.10
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.104.0
 	github.com/aws/aws-sdk-go-v2/service/sagemaker v1.250.2
 	github.com/aws/aws-sdk-go-v2/service/scheduler v1.17.24
@@ -19,7 +20,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/scttfrdmn/substrate v0.71.0
 	github.com/spf13/cobra v1.10.2
-	github.com/spore-host/libs v0.43.0
+	github.com/spore-host/libs v0.43.2
 	github.com/spore-host/spawn v0.75.0
 	github.com/spore-host/truffle v0.38.1
 	gopkg.in/yaml.v3 v3.0.1
@@ -39,7 +40,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/dynamodbstreams v1.32.16 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ebs v1.34.7 // indirect
 	github.com/aws/aws-sdk-go-v2/service/fsx v1.65.10 // indirect
-	github.com/aws/aws-sdk-go-v2/service/iam v1.53.10 // indirect
 	github.com/aws/aws-sdk-go-v2/service/imagebuilder v1.55.6 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.12 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/checksum v1.9.22 // indirect
