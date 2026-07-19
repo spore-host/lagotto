@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **The hosted poller's runtime IAM permissions are now owned by `lagotto setup`,
+  not the CloudFormation template** (#16). lagotto codifies the poller's policy in
+  Go (`pkg/runtimeiam`) as the single source of truth — the same way it already
+  owns its DynamoDB tables — so adding a permission is a one-file code change
+  instead of a template edit, and code (what it calls) and grant (what it may
+  call) no longer drift apart. The stack now creates only a **minimal** execution
+  role (Lambda trust + CloudWatch Logs); `setup` attaches the permissions policy.
+  Crucially, the privilege-escalation surface (`iam:CreateRole`/`PutRolePolicy`)
+  stays with the human/CI identity running `setup` — the runtime Lambda never
+  self-escalates. **After a fresh `lagotto deploy`, run `lagotto setup`** to grant
+  the poller its spawn/hold/SageMaker/scheduler permissions; until then it can
+  only send notifications.
+
 ### Added
 - **Goal-driven fleet mode: `lagotto watch --maintain N --until <condition>`** (#70).
   Instead of firing an action once and retiring, a fleet watch **maintains ~N

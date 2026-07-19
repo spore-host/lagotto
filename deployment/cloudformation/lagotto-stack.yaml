@@ -91,122 +91,16 @@ Resources:
           # (a !GetAtt self-reference would be a CFN circular dependency).
           POLLER_FUNCTION_ARN: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:lagotto-capacity-poller'
           SCHEDULER_INVOKE_ROLE_ARN: !GetAtt SchedulerInvokeRole.Arn
-      Policies:
-        # The tables are CLI-owned (#59), so scope CRUD by name rather than !Ref a
-        # stack-managed resource. The scheduled-launches table (#49) is included —
-        # the poller's handleScheduledLaunch / HasPendingScheduledLaunches read and
-        # write it, and its IAM was missing before (silent AccessDenied).
-        - DynamoDBCrudPolicy:
-            TableName: !Ref WatchesTableName
-        - DynamoDBCrudPolicy:
-            TableName: !Ref HistoryTableName
-        - DynamoDBCrudPolicy:
-            TableName: !Ref ScheduledTableName
-        - Statement:
-            - Effect: Allow
-              Action: sns:Publish
-              Resource: !Ref LagottoCapacityAlertsTopic
-        - Statement:
-            # Capacity discovery (truffle) + the read APIs spawn's launcher needs
-            # to resolve an AMI, VPC/subnet, security group, and key pair.
-            - Effect: Allow
-              Action:
-                - ec2:DescribeInstanceTypes
-                - ec2:DescribeInstanceTypeOfferings
-                - ec2:DescribeSpotPriceHistory
-                - ec2:DescribeRegions
-                - ec2:DescribeImages
-                - ec2:DescribeVpcs
-                - ec2:DescribeSubnets
-                - ec2:DescribeSecurityGroups
-                - ec2:DescribeKeyPairs
-                - ec2:DescribeInstances
-                - ec2:DescribeCapacityReservations
-                - ssm:GetParameter
-                - ssm:GetParameters
-              Resource: '*'
-            - Effect: Allow
-              Action:
-                - scheduler:UpdateSchedule
-                - scheduler:GetSchedule
-              Resource: !Sub 'arn:aws:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/default/lagotto-capacity-poller'
-            # The #62 boundary retry re-arms a fresh per-launch schedule
-            # (lagotto-launch-*) targeting this poller, and passes the scheduler
-            # role. Scoped to the lagotto-launch-* schedule name prefix + that role.
-            - Effect: Allow
-              Action:
-                - scheduler:CreateSchedule
-                - scheduler:DeleteSchedule
-              Resource: !Sub 'arn:aws:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/default/lagotto-launch-*'
-            - Effect: Allow
-              Action: iam:PassRole
-              Resource: !GetAtt SchedulerInvokeRole.Arn
-              Condition:
-                StringEquals:
-                  iam:PassedToService: scheduler.amazonaws.com
-        # An --action spawn watch launches via spawn's headless launcher, which
-        # runs RunInstances, tags the instance, and (re)uses the spored IAM
-        # instance profile. Without these the hosted poller can only NOTIFY, never
-        # spawn — the gap that made hosted --action spawn silently a no-op.
-        - Statement:
-            - Effect: Allow
-              Action:
-                - ec2:RunInstances
-                - ec2:CreateTags
-                - ec2:CreateSecurityGroup
-                - ec2:AuthorizeSecurityGroupIngress
-              Resource: '*'
-            # spored IAM instance profile + role setup (launcher.SetupSporedIAMRole
-            # / CreateOrGetInstanceProfile). Scoped to the spored* name prefix.
-            - Effect: Allow
-              Action:
-                - iam:GetRole
-                - iam:CreateRole
-                - iam:PutRolePolicy
-                - iam:AttachRolePolicy
-                - iam:GetInstanceProfile
-                - iam:CreateInstanceProfile
-                - iam:AddRoleToInstanceProfile
-              Resource:
-                - !Sub 'arn:aws:iam::${AWS::AccountId}:role/spored*'
-                - !Sub 'arn:aws:iam::${AWS::AccountId}:instance-profile/spored*'
-            # PassRole is required for RunInstances to attach the spored instance
-            # profile to the launched instance; scoped to the spored role + the EC2
-            # service so it can't be used to pass arbitrary roles elsewhere.
-            - Effect: Allow
-              Action: iam:PassRole
-              Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/spored*'
-              Condition:
-                StringEquals:
-                  iam:PassedToService: ec2.amazonaws.com
-        # An --action hold watch reserves capacity via CreateCapacityReservation;
-        # without this the deployed poller's Holder failed UnauthorizedOperation
-        # (and, before #39, hold silently degraded to notify because no Holder was
-        # wired at all).
-        - Statement:
-            - Effect: Allow
-              Action:
-                - ec2:CreateCapacityReservation
-                - ec2:CancelCapacityReservation
-                - ec2:DescribeCapacityReservations
-              Resource: '*'
-        # A --service sagemaker watch submits the user's training job via
-        # CreateTrainingJob. The job spec carries its own SageMaker execution
-        # RoleArn, so the Lambda must PassRole it — scoped to the SageMaker
-        # service so it can't pass arbitrary roles elsewhere.
-        - Statement:
-            - Effect: Allow
-              Action:
-                - sagemaker:CreateTrainingJob
-                - sagemaker:AddTags
-                - sagemaker:DescribeTrainingJob
-              Resource: '*'
-            - Effect: Allow
-              Action: iam:PassRole
-              Resource: '*'
-              Condition:
-                StringEquals:
-                  iam:PassedToService: sagemaker.amazonaws.com
+      # The runtime PERMISSIONS policy is owned by `lagotto setup`, not this
+      # template (#16): lagotto codifies "what the poller may call" in Go
+      # (pkg/runtimeiam) as the single source of truth, the same way it owns its
+      # DynamoDB tables, so a new SDK call is a one-file code change rather than a
+      # template edit. CFN only creates the MINIMAL execution role below (Lambda
+      # trust + basic-execution logging); `setup` attaches the lagotto-runtime-policy
+      # to it. NOTE: after a fresh `lagotto deploy`, run `lagotto setup` (or create
+      # a watch — the CLI applies it) so the poller gains its spawn/hold/sagemaker
+      # permissions; until then it can only send notifications.
+      Role: !GetAtt CapacityPollerRole.Arn
       Tags:
         Environment: !Ref Environment
         Application: lagotto
@@ -228,10 +122,36 @@ Resources:
         RoleArn: !GetAtt SchedulerInvokeRole.Arn
       State: DISABLED
 
+  # Minimal execution role for the poller Lambda. Its PERMISSIONS policy
+  # (DynamoDB/EC2/SNS/scheduler/spawn/hold/sagemaker) is attached by
+  # `lagotto setup` (pkg/runtimeiam), not here (#16) — CFN only provides the
+  # Lambda trust relationship + CloudWatch Logs basic execution. Named so the
+  # function can reference it and `setup` can find it by a stable name.
+  CapacityPollerRole:
+    Type: AWS::IAM::Role
+    Condition: DeployLambda
+    Properties:
+      RoleName: lagotto-capacity-poller-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Tags:
+        - Key: Application
+          Value: lagotto
+        - Key: Component
+          Value: capacity-poller
+
   SchedulerInvokeRole:
     Type: AWS::IAM::Role
     Condition: DeployLambda
     Properties:
+      RoleName: lagotto-capacity-poller-scheduler-invoke
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -247,14 +167,13 @@ Resources:
               - Effect: Allow
                 Action: lambda:InvokeFunction
                 # Reference the poller by CONSTRUCTED ARN, not !GetAtt, to break a
-                # CloudFormation circular dependency (#67). The function (and its
-                # auto-generated role) reference SchedulerInvokeRole via the #62
-                # SCHEDULER_INVOKE_ROLE_ARN env var + iam:PassRole; if this role
-                # also !GetAtt'd the function, the four resources
-                # [Function, FunctionRole, SchedulerInvokeRole, Schedule] form a
-                # cycle and the stack rolls back on a clean create. The function
-                # name is fixed (lagotto-capacity-poller), so its ARN is derivable
-                # without a dependency edge — making the graph a DAG.
+                # CloudFormation circular dependency (#67). The function references
+                # SchedulerInvokeRole via the #62 SCHEDULER_INVOKE_ROLE_ARN env var
+                # + iam:PassRole; if this role also !GetAtt'd the function, the
+                # resources [Function, SchedulerInvokeRole, Schedule] form a cycle
+                # and the stack rolls back on a clean create. The function name is
+                # fixed (lagotto-capacity-poller), so its ARN is derivable without a
+                # dependency edge — making the graph a DAG.
                 Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:lagotto-capacity-poller'
 
 Outputs:
