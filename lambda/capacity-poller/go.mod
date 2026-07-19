@@ -11,7 +11,7 @@ require (
 	github.com/spore-host/truffle v0.38.1
 )
 
-require github.com/spore-host/libs v0.42.0 // indirect
+require github.com/spore-host/libs v0.43.0 // indirect
 
 require (
 	github.com/Microsoft/hcsshim v0.14.1 // indirect
