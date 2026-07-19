@@ -15,9 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   docs site's reference can no longer go stale (2026-07 docs audit). The
   previously-missing `setup`/`deploy`/`teardown` commands and the goal-driven
   `--maintain`/`--until` fleet flags are now covered automatically. Run `make
-  gen-docs` after changing a command or flag. Uses `libs/docgen` v0.43.1, which
-  HTML-escapes bare `<…>` placeholders (e.g. `shell: <cmd>`) so the reference
-  renders on the VitePress docs site.
+  gen-docs` after changing a command or flag. Uses `libs/docgen` v0.43.2, which
+  HTML-escapes bare `<…>` and Vue `{{ … }}` tokens (e.g. `shell: <cmd>`) so the
+  reference renders on the VitePress docs site.
 
 ### Changed
 - **The hosted poller's runtime IAM permissions are now owned by `lagotto setup`,
