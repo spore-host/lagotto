@@ -1,0 +1,25 @@
+cff-version: 1.2.0
+message: "If you use lagotto in your research, please cite it as below."
+title: "lagotto: an AWS EC2 capacity watcher"
+abstract: >-
+  lagotto is the spore.host capacity watcher: it polls for EC2 capacity (via
+  truffle) and acts when a match appears — notify, hold, or launch via spawn —
+  and can maintain goal-driven fleets of spot workers until an external
+  completion condition is met. It runs as a CLI and as a hosted capacity-poller
+  Lambda. Part of the spore.host suite.
+type: software
+authors:
+  - given-names: Scott
+    family-names: Friedman
+    orcid: "https://orcid.org/0000-0003-1480-765X"
+    affiliation: "Amazon Web Services"
+repository-code: "https://github.com/spore-host/lagotto"
+url: "https://spore.host"
+license: Apache-2.0
+keywords:
+  - cloud computing
+  - AWS
+  - EC2
+  - research computing
+  - spot instances
+  - capacity management
