@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`watcher.Snipe` supports optional multi-region fallback** (#76). The
+  block-and-wait acquire loop (`SnipeOptions.Fallbacks`) can now take an ordered
+  list of additional targets — each a full `SnipeTarget` with its own region, AZs,
+  and launch config — tried in order within each round after the primary region's
+  AZ sweep hits `InsufficientInstanceCapacity`, before backing off. GPU capacity is
+  bursty and region-uneven, so the zone with capacity is often in a different
+  region than the one you picked. Opt-in and off by default: cross-region is not
+  free like AZ-breadth (each region needs its own AMI id, in-region launch
+  artifacts, SG/subnet/IAM), so the caller supplies a complete target per region.
+  A terminal failure on any target still stops immediately.
 - **Shared spore.host config base.** lagotto now honors the suite-wide
   `libs/sporeconfig` settings: new persistent `--profile`, `--region`, and
   `--account` flags, the `SPORE_PROFILE`/`SPORE_REGION`/`SPORE_ACCOUNT` env vars,

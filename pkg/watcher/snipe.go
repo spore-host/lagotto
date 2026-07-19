@@ -60,6 +60,16 @@ type SnipeOptions struct {
 	RetryInterval time.Duration
 	// MaxInterval caps the backoff. Zero = DefaultSnipeMaxInterval.
 	MaxInterval time.Duration
+	// Fallbacks is an optional ordered list of ADDITIONAL targets to try, in
+	// order, within each round after the primary target's AZ sweep capacity-fails
+	// — before backing off. This is the multi-region extension (#76): capacity is
+	// bursty and region-uneven, and the AZ with capacity is often in a different
+	// region than the one you picked. Each fallback is a full SnipeTarget because
+	// cross-region is NOT free like AZ-breadth: it needs a region-specific AMI id,
+	// in-region launch artifacts/SG/subnet, etc. — all of which the caller expresses
+	// per-target. Off by default (empty); opt-in only. A terminal failure on any
+	// target still stops immediately.
+	Fallbacks []SnipeTarget
 }
 
 // Snipe blocks until it acquires the target instance, the deadline passes, or a
@@ -78,13 +88,6 @@ type SnipeOptions struct {
 // InstanceID (spawn's LaunchResult already exposes PublicIP on launch, and the
 // (region, instanceID) methods cover state/terminate).
 func (s *Spawner) Snipe(ctx context.Context, target SnipeTarget, opts SnipeOptions) (*MatchResult, error) {
-	if strings.TrimSpace(target.InstanceType) == "" {
-		return nil, fmt.Errorf("snipe: target InstanceType is required")
-	}
-	if strings.TrimSpace(target.Region) == "" {
-		return nil, fmt.Errorf("snipe: target Region is required")
-	}
-
 	interval := opts.RetryInterval
 	if interval <= 0 {
 		interval = DefaultSnipeRetryInterval
@@ -98,70 +101,72 @@ func (s *Spawner) Snipe(ctx context.Context, target SnipeTarget, opts SnipeOptio
 		sleep = sleepCtx
 	}
 
-	// Build the launch config once: guarantee a TTL (#38 — no unbounded instance
-	// can escape) and pin type/region/spot. AZ is set per-attempt in the sweep.
-	cfg := target.LaunchConfig.ToLaunchConfig()
-	if strings.TrimSpace(cfg.TTL) == "" {
-		cfg.TTL = DefaultInstanceTTL
-	}
-	cfg.Region = target.Region
-	cfg.InstanceType = target.InstanceType
-	cfg.Spot = target.Spot
-
-	// Provision the IAM instance profile from iam_policy shorthands, mirroring the
-	// watch-match path. When none are given, Provision sets up the default spored
-	// profile itself, so we leave IamInstanceProfile empty. Skipped when there's no
-	// spawn client (unit tests inject a fake provision and no client).
-	if len(target.LaunchConfig.IAMPolicies) > 0 && s.client != nil {
-		profile, err := s.client.CreateOrGetInstanceProfile(ctx, spawnaws.IAMRoleConfig{
-			Policies: target.LaunchConfig.IAMPolicies,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("snipe: set up IAM instance profile: %w", err)
+	// Build the per-target launch config(s) once. The primary target plus any
+	// opt-in Fallbacks (#76) are each resolved to a (target, cfg) pair; each round
+	// tries them in order before backing off.
+	targets := append([]SnipeTarget{target}, opts.Fallbacks...)
+	built := make([]builtTarget, 0, len(targets))
+	for _, t := range targets {
+		if strings.TrimSpace(t.InstanceType) == "" {
+			return nil, fmt.Errorf("snipe: target InstanceType is required")
 		}
-		cfg.IamInstanceProfile = profile
+		if strings.TrimSpace(t.Region) == "" {
+			return nil, fmt.Errorf("snipe: target Region is required")
+		}
+		cfg, err := s.buildSnipeConfig(ctx, t)
+		if err != nil {
+			return nil, err
+		}
+		built = append(built, builtTarget{target: t, cfg: cfg})
 	}
-
-	attempts := target.AZs
 
 	var lastErr error
 	for round := 0; ; round++ {
-		// Stop before an attempt if the deadline has already passed.
-		if !opts.Deadline.IsZero() && !nowBefore(opts.Deadline) {
-			return nil, fmt.Errorf("snipe: deadline reached without acquiring %s in %s: %w",
-				target.InstanceType, target.Region, lastErr)
-		}
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		// Try the primary then each fallback in order before backing off.
+		for _, bt := range built {
+			// Stop before an attempt if the deadline has already passed.
+			if !opts.Deadline.IsZero() && !nowBefore(opts.Deadline) {
+				return nil, fmt.Errorf("snipe: deadline reached without acquiring %s: %w",
+					bt.target.InstanceType, lastErr)
+			}
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 
-		instanceID, az, err := s.launchAcrossAZs(ctx, cfg, attempts)
-		if err == nil {
-			return &MatchResult{
-				Region:           target.Region,
-				AvailabilityZone: az,
-				CandidateAZs:     attempts,
-				InstanceType:     target.InstanceType,
-				IsSpot:           target.Spot,
-				MatchedAt:        now(),
-				InstanceID:       instanceID,
-				ActionTaken:      "sniped",
-			}, nil
+			instanceID, az, err := s.launchAcrossAZs(ctx, bt.cfg, bt.target.AZs)
+			if err == nil {
+				return &MatchResult{
+					Region:           bt.target.Region,
+					AvailabilityZone: az,
+					CandidateAZs:     bt.target.AZs,
+					InstanceType:     bt.target.InstanceType,
+					IsSpot:           bt.target.Spot,
+					MatchedAt:        now(),
+					InstanceID:       instanceID,
+					ActionTaken:      "sniped",
+				}, nil
+			}
+
+			lastErr = err
+			// A terminal failure on this target will never resolve by waiting.
+			// Stop now — a bad AMI/IAM/quota isn't a capacity problem another
+			// region can paper over.
+			if ClassifyFailure(err) == FailureTerminal {
+				return nil, fmt.Errorf("snipe: terminal failure acquiring %s in %s: %w",
+					bt.target.InstanceType, bt.target.Region, err)
+			}
+			// Capacity failure on this target → fall through to the next target.
 		}
 
-		lastErr = err
-		// A terminal failure will never resolve by waiting — stop now.
-		if ClassifyFailure(err) == FailureTerminal {
-			return nil, fmt.Errorf("snipe: terminal failure acquiring %s in %s: %w",
-				target.InstanceType, target.Region, err)
-		}
-
-		// Capacity failure: back off (bounded by the deadline), then retry.
+		// Every target capacity-failed this round: back off, then retry the sweep.
 		wait := backoffFor(round, interval, maxInterval)
 		if !opts.Deadline.IsZero() {
 			if remaining := until(opts.Deadline); remaining <= 0 {
-				return nil, fmt.Errorf("snipe: deadline reached without acquiring %s in %s: %w",
-					target.InstanceType, target.Region, lastErr)
+				return nil, fmt.Errorf("snipe: deadline reached without acquiring %s: %w",
+					target.InstanceType, lastErr)
 			} else if wait > remaining {
 				wait = remaining // don't sleep past the deadline
 			}
@@ -170,6 +175,40 @@ func (s *Spawner) Snipe(ctx context.Context, target SnipeTarget, opts SnipeOptio
 			return nil, err // ctx cancelled/expired during the wait
 		}
 	}
+}
+
+// builtTarget pairs a SnipeTarget with its resolved launch config.
+type builtTarget struct {
+	target SnipeTarget
+	cfg    spawnaws.LaunchConfig
+}
+
+// buildSnipeConfig resolves a SnipeTarget into a launch config: guarantee a TTL
+// (#38 — no unbounded instance can escape), pin type/region/spot, and provision
+// the IAM instance profile from iam_policy shorthands (mirroring the watch-match
+// path). AZ is set per-attempt in the sweep.
+func (s *Spawner) buildSnipeConfig(ctx context.Context, target SnipeTarget) (spawnaws.LaunchConfig, error) {
+	cfg := target.LaunchConfig.ToLaunchConfig()
+	if strings.TrimSpace(cfg.TTL) == "" {
+		cfg.TTL = DefaultInstanceTTL
+	}
+	cfg.Region = target.Region
+	cfg.InstanceType = target.InstanceType
+	cfg.Spot = target.Spot
+
+	// When no iam_policy shorthands are given, Provision sets up the default spored
+	// profile itself, so we leave IamInstanceProfile empty. Skipped when there's no
+	// spawn client (unit tests inject a fake provision and no client).
+	if len(target.LaunchConfig.IAMPolicies) > 0 && s.client != nil {
+		profile, err := s.client.CreateOrGetInstanceProfile(ctx, spawnaws.IAMRoleConfig{
+			Policies: target.LaunchConfig.IAMPolicies,
+		})
+		if err != nil {
+			return spawnaws.LaunchConfig{}, fmt.Errorf("snipe: set up IAM instance profile: %w", err)
+		}
+		cfg.IamInstanceProfile = profile
+	}
+	return cfg, nil
 }
 
 // Snipe is the package-level convenience: it constructs a Spawner from ambient
