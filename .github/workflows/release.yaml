@@ -22,6 +22,11 @@ jobs:
         with:
           go-version: '1.26.5'
 
+      # Hard-fail the tag if the committed reference (docs-gen/) is stale, so a
+      # release can never ship a reference that lags the code.
+      - name: Docs reference drift guard
+        run: make check-docs
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
         with:
@@ -32,3 +37,22 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
           SCOOP_BUCKET_GITHUB_TOKEN: ${{ secrets.SCOOP_BUCKET_GITHUB_TOKEN }}
+
+      # Nudge the umbrella docs repo to vendor this release's generated reference
+      # (docs/gen/lagotto/). Needs a cross-repo PAT (DOCS_SYNC_TOKEN); skips
+      # cleanly when absent — the weekly sync schedule is the backstop.
+      - name: Notify docs site of new release
+        if: ${{ !cancelled() }}
+        env:
+          DOCS_SYNC_TOKEN: ${{ secrets.DOCS_SYNC_TOKEN }}
+        run: |
+          if [ -z "${DOCS_SYNC_TOKEN:-}" ]; then
+            echo "DOCS_SYNC_TOKEN not set — skipping docs dispatch (weekly sync will catch up)."
+            exit 0
+          fi
+          curl -fsS -X POST \
+            -H "Authorization: Bearer ${DOCS_SYNC_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/spore-host/spore-host/dispatches \
+            -d '{"event_type":"cli-docs-updated","client_payload":{"cli":"lagotto"}}'
+          echo "✅ Dispatched cli-docs-updated (lagotto) to the docs repo"
