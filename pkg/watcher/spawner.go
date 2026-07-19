@@ -125,6 +125,17 @@ func (s *Spawner) Spawn(ctx context.Context, w *Watch, m *MatchResult) error {
 	cfg.InstanceType = m.InstanceType
 	cfg.Spot = m.IsSpot
 
+	// Goal-driven fleet watch: stamp the fleet tag so the supervisor can count
+	// running members and top up toward DesiredCount (#70). Harmless for
+	// single-shot watches, but only set it when this is actually a fleet so we
+	// don't tag every launch.
+	if w.DesiredCount > 0 {
+		if cfg.Tags == nil {
+			cfg.Tags = map[string]string{}
+		}
+		cfg.Tags[FleetTagKey] = w.WatchID
+	}
+
 	// Build a custom IAM instance profile from the config's iam_policy shorthands
 	// (e.g. "s3:ReadWrite") before launching, mirroring `spawn launch
 	// --iam-policy`. When none are given, Provision sets up the default spored
@@ -160,6 +171,41 @@ func (s *Spawner) Spawn(ctx context.Context, w *Watch, m *MatchResult) error {
 	m.AvailabilityZone = az
 	m.ActionTaken = "spawned"
 	return nil
+}
+
+// FleetTagKey is the EC2 tag stamped on every worker launched for a goal-driven
+// fleet watch, valued with the WatchID. The supervisor counts running instances
+// carrying this tag to decide how many to (re)launch toward DesiredCount (#70).
+const FleetTagKey = "lagotto:watch"
+
+// countRunningFleet returns how many of a fleet watch's workers are currently
+// running (pending or running state), counted by the FleetTagKey=WatchID tag
+// across the watch's regions. This is the authoritative live count — it reflects
+// real reclaim/termination, so the supervisor tops up the true gap.
+func (s *Spawner) countRunningFleet(ctx context.Context, w *Watch) (int, error) {
+	regions := w.Regions
+	if len(regions) == 0 {
+		return 0, fmt.Errorf("watch %s has no regions", w.WatchID)
+	}
+	seen := map[string]struct{}{}
+	for _, region := range regions {
+		// "" state filter → all states; we keep pending+running (a just-launched
+		// worker is pending and still counts toward the goal).
+		insts, err := s.listInstances(ctx, region, "")
+		if err != nil {
+			return 0, fmt.Errorf("list instances in %s: %w", region, err)
+		}
+		for _, in := range insts {
+			if in.Tags[FleetTagKey] != w.WatchID {
+				continue
+			}
+			if in.State != "running" && in.State != "pending" {
+				continue
+			}
+			seen[in.InstanceID] = struct{}{}
+		}
+	}
+	return len(seen), nil
 }
 
 // launchAcrossAZs provisions an instance from a resolved LaunchConfig, trying

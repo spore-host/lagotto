@@ -32,6 +32,12 @@ const (
 	// StatusFailed means a launch/hold hit a terminal error (bad AMI/IAM,
 	// exhausted quota) that retrying cannot resolve. The watch stops polling.
 	StatusFailed WatchStatus = "failed"
+	// StatusCompleted means a goal-driven fleet watch's completion condition
+	// (--until) became true: the work is done, so the watch stops maintaining the
+	// fleet and retires. Distinct from StatusMatched (a single-shot watch that
+	// fired its action once) — a fleet watch relaunches toward its goal across
+	// many polls and only reaches Completed when the external condition holds (#70).
+	StatusCompleted WatchStatus = "completed"
 )
 
 // MaxConsecutiveFailures caps consecutive *unclassified* launch/hold failures
@@ -63,6 +69,16 @@ type Watch struct {
 	Action            ActionMode      `json:"action" dynamodbav:"action"`
 	NotifyChannels    []NotifyChannel `json:"notify_channels,omitempty" dynamodbav:"notify_channels,omitempty"`
 	LaunchConfigJSON  []byte          `json:"launch_config_json,omitempty" dynamodbav:"launch_config_json,omitempty"`
+	// DesiredCount, when > 0, makes this a GOAL-DRIVEN fleet watch (#70): instead
+	// of firing --action once and retiring, the supervisor maintains ~DesiredCount
+	// running workers (relaunching toward the goal, even from zero) until
+	// CompletionCondition holds. 0 = legacy single-shot behavior. Requires
+	// --action spawn.
+	DesiredCount int `json:"desired_count,omitempty" dynamodbav:"desired_count,omitempty"`
+	// CompletionCondition is the --until spec (see ParseCondition: s3-empty /
+	// http-200 / shell) evaluated each poll; when it's Done the fleet watch
+	// retires as StatusCompleted. Only meaningful when DesiredCount > 0.
+	CompletionCondition string `json:"completion_condition,omitempty" dynamodbav:"completion_condition,omitempty"`
 	// SageMakerJobJSON is the user's SageMaker job definition (training/processing
 	// job spec), submitted on each attempt for a --service sagemaker watch.
 	// Symmetric to LaunchConfigJSON for EC2.
