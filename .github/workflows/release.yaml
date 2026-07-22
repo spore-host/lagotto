@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write   # keyless cosign signing (Fulcio/Rekor) + build provenance
+  attestations: write   # actions/attest-build-provenance (SLSA)
 
 jobs:
   goreleaser:
@@ -21,6 +23,11 @@ jobs:
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: '1.26.5'
+
+      # cosign for keyless artifact signing (the .goreleaser signs: block invokes
+      # `cosign sign-blob --bundle` over checksums.txt using this job's OIDC identity).
+      - name: Install cosign
+        uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
 
       # Hard-fail the tag if the committed reference (docs-gen/) is stale, so a
       # release can never ship a reference that lags the code.
@@ -37,6 +44,13 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
           SCOOP_BUCKET_GITHUB_TOKEN: ${{ secrets.SCOOP_BUCKET_GITHUB_TOKEN }}
+
+      # SLSA build provenance for the release archives (complements the cosign
+      # signature). Attests checksums.txt, which covers every artifact by hash.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: 'dist/checksums.txt'
 
       # Nudge the umbrella docs repo to vendor this release's generated reference
       # (docs/gen/lagotto/). Needs a cross-repo PAT (DOCS_SYNC_TOKEN); skips
