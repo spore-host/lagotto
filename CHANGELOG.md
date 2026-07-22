@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Release artifacts are now signed** with keyless cosign (Sigstore) + SLSA build
+  provenance (#93). The release signs `checksums.txt` (which lists every
+  archive/package hash) with the workflow's GitHub OIDC identity — no long-lived
+  key — publishing `checksums.txt.bundle`, and attests build provenance. Verify a
+  download with `cosign verify-blob --bundle` (see docs: "Verify a download").
+  Takes effect from the next tagged release.
+
 ### Added
 - **`CITATION.cff`** — machine-readable citation metadata so the repo is citable
   (GitHub "Cite this repository"); base for Zenodo DOI minting.
