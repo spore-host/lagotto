@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- Bumped `golang.org/x/text` to v0.39.0 (root + `lambda/capacity-poller`) to clear
+  CVE-2026-56852 (a `norm.Iter` infinite loop on crafted input; HIGH). Indirect
+  dependency; no API change.
+
+### Documentation
+- Added the project hero image to the top of the README.
+
 ## [0.51.0] - 2026-07-22
 
 ### Security
