@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/lagotto-hero.png" alt="lagotto — watch for EC2 capacity and launch when it appears" width="820">
+</p>
+
 # lagotto
 
 [![CI](https://github.com/spore-host/lagotto/actions/workflows/ci.yml/badge.svg)](https://github.com/spore-host/lagotto/actions/workflows/ci.yml)
