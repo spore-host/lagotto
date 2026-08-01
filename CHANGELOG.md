@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Bumped the `substrate` test dependency v0.71.0 → v0.81.0 (root +
+  `lambda/capacity-poller`). Test-only; no runtime or API change. Most relevant to
+  lagotto: EC2 `describe_*` calls naming an explicit ID that does not exist now
+  raise `Invalid*ID.NotFound` instead of returning an empty list (substrate#391),
+  and each service serializes errors in its own wire protocol so `Error.Code` is
+  the symbolic AWS code rather than an HTTP status (substrate#392) — the watcher
+  classifies terminal-vs-retryable failures on exactly those codes, so those
+  branches were previously unreachable offline. `RunInstances` also now rejects a
+  launch that resolves no AMI (substrate#412), which is the failure mode a
+  `--action spawn` watch must not silently succeed on.
+
 ### Security
 - Bumped `golang.org/x/text` to v0.39.0 (root + `lambda/capacity-poller`) to clear
   CVE-2026-56852 (a `norm.Iter` infinite loop on crafted input; HIGH). Indirect
