@@ -18,7 +18,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sts v1.42.1
 	github.com/aws/smithy-go v1.27.1
 	github.com/google/uuid v1.6.0
-	github.com/scttfrdmn/substrate v0.81.0
+	github.com/scttfrdmn/substrate v0.85.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spore-host/libs v0.43.2
 	github.com/spore-host/spawn v0.75.0
