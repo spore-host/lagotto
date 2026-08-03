@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Added a Dependabot config, so the SHA-pinned actions and Go deps get bumped (#101).**
+  Every action here is pinned to a commit SHA, which closes the mutable-tag hole
+  but opens a staleness one: a SHA never moves — including past a security fix —
+  and unlike `@v6` nothing updates it for you. Pinning is only safe if something
+  bumps the pins, and nothing did. `actions/checkout@v6` had already moved
+  upstream while this repo went on pinning the older commit, silently.
+
+  This matters most for `release.yaml`, which pins the release-signing actions
+  (`goreleaser-action`, `cosign-installer`, `attest-build-provenance`) — the
+  supply-chain machinery. A frozen `cosign-installer` means releases keep getting
+  signed by an old cosign, and cosign 3.x already changed its CLI surface.
+
+  Weekly, grouped, with a 7-day cooldown so a freshly-published tag isn't proposed
+  the day it ships. The actions group pattern is `*` rather than `actions/*`
+  precisely because those signing actions aren't under `actions/`. The `gomod`
+  entry watches **both** modules — root and `lambda/capacity-poller` — since the
+  Lambda module pins its own deps; that split is exactly what #43 was about, where
+  a stale nested `go.mod` failed govulncheck with an error naming neither the
+  module nor the cause. Tests enforce both kinds of coverage. CI-only; no change
+  to the tool.
+
 ### Changed
 - **CI now fails on unformatted code (#99).** Nothing did before: CI had no
   formatting step, and `make fmt` rewrites files and always succeeds — convenient
