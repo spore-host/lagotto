@@ -1,4 +1,4 @@
-.PHONY: build clean install test lint fmt deps run help vuln gen-docs check-docs
+.PHONY: build clean install test lint fmt check-fmt deps run help vuln gen-docs check-docs
 
 # Variables
 BINARY_NAME=lagotto
@@ -73,6 +73,26 @@ fmt:
 	@echo "Formatting code..."
 	@$(GOCMD) fmt ./...
 	@echo "Format complete"
+
+## check-fmt: Formatting gate — REPORT drift, don't fix it. Run in CI.
+#
+# Distinct from `fmt`, which rewrites files and always exits 0. That is
+# convenient locally but it cannot fail a build, so it never gated anything.
+# This tree was clean when the gate landed; the gate is what keeps it that way
+# (the siblings drifted for months without one — spawn#484, truffle#122).
+#
+# Excludes vendor/ and lists offenders with a diff, so the fix is obvious.
+# gofmt walks paths rather than modules, so this covers lambda/capacity-poller
+# too, which the per-module CI step does not format.
+check-fmt:
+	@files=$$(gofmt -l . 2>/dev/null | grep -v '^vendor/' || true); \
+	if [ -n "$$files" ]; then \
+	  echo "::error::these files are not gofmt-clean — run 'gofmt -w' on them:"; \
+	  echo "$$files" | sed 's/^/  /'; \
+	  echo; gofmt -d $$files; \
+	  exit 1; \
+	fi; \
+	echo "✓ gofmt clean"
 
 ## deps: Download dependencies
 deps:
