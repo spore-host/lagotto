@@ -33,6 +33,18 @@ jobs:
           # any code runs. Go reuses the on-disk module cache directly.
           cache: false
 
+      # Formatting gate (#99). Runs first because it's the cheapest check and the
+      # fastest to act on. Nothing gated formatting before: CI had no formatting
+      # step, and `make fmt` rewrites files and always succeeds, so it could only
+      # ever report success. The tree happened to be clean when this landed — the
+      # gate is what keeps it that way, which is the lesson from the siblings
+      # (spawn#484 had 3 files drifted, truffle#122 had 7).
+      #
+      # gofmt walks paths rather than modules, so this also covers
+      # lambda/capacity-poller, which the per-module step below does not format.
+      - name: Format gate
+        run: make check-fmt
+
       - name: Build
         run: go build ./...
 

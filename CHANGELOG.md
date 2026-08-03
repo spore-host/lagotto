@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **CI now fails on unformatted code (#99).** Nothing did before: CI had no
+  formatting step, and `make fmt` rewrites files and always succeeds — convenient
+  locally, but it cannot fail a build, so it could only ever report success. This
+  tree happened to be clean; the gate is what keeps it that way. (The sibling
+  repos drifted for months under the same configuration — spawn had 3 files
+  unformatted on `main`, truffle 7.)
+
+  `make check-fmt` reports drift instead of fixing it, with offenders listed and
+  diffed, and now runs in CI. One invocation also covers
+  `lambda/capacity-poller`, since `gofmt` walks paths rather than modules.
 - Bumped the `substrate` test dependency v0.71.0 → v0.85.0 (root +
   `lambda/capacity-poller`). Test-only; no runtime or API change. Most relevant to
   lagotto: EC2 `describe_*` calls naming an explicit ID that does not exist now
