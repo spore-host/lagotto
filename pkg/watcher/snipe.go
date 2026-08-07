@@ -73,11 +73,21 @@ type SnipeOptions struct {
 }
 
 // Snipe blocks until it acquires the target instance, the deadline passes, or a
-// terminal failure occurs. It is the library primitive for "block-and-wait,
-// single-target acquire" (#73): a thin, stateless wrapper over spawn's
-// launcher.Provision that owns the capacity classify + retry loop, so an
-// embedding consumer needs neither the persisted-Watch/DynamoDB machinery nor a
-// reimplementation of the ClassifyFailure retry policy.
+// terminal failure occurs. It is the ORIGINAL library primitive for
+// "block-and-wait, single-target acquire" (#73): a thin, stateless wrapper over
+// spawn's launcher.Provision that owns the capacity classify + retry loop, so
+// an embedding consumer needs neither the persisted-Watch/DynamoDB machinery
+// nor a reimplementation of the ClassifyFailure retry policy.
+//
+// pkg/snipe (#106) is now the RECOMMENDED entry point for new callers: it is a
+// leaf package (no DynamoDB/S3/SageMaker/SNS in its import graph), and adds
+// per-AZ subnet placement, a live progress callback, and a bounded-unknown-
+// failure fail-fast that this method does not have. This method is kept as-is,
+// unchanged, rather than rewired to delegate — there are no callers of it in
+// this repo today (grep confirms), so keeping its existing tests exact and its
+// behavior stable costs nothing, while forcing pkg/snipe's minimal Options
+// through this type's white-box test seams would have widened its surface
+// for no user. New code should call pkg/snipe.Snipe directly.
 //
 // Each round is one full AZ sweep (launchAcrossAZs): on InsufficientInstance
 // Capacity across all candidate AZs it backs off and retries; on a terminal

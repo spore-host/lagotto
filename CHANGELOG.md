@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`pkg/snipe` — a dependency-light leaf package for block-and-wait,
+  single-target capacity acquire** (#106), extracted from `pkg/watcher.Snipe`.
+  Its import graph is `spawn/pkg/aws` + `spawn/pkg/launcher` + this repo's
+  `pkg/failure` only — no DynamoDB/S3/SageMaker/SNS, so a consumer that just
+  wants "acquire this instance type here, blocking, and hand me the result"
+  (calque's original #73 ask) no longer needs the persisted-Watch/poll-cycle
+  machinery to get it. Adds three things `watcher.Snipe` didn't have:
+  - **Per-AZ subnet placement** (`Placement{AZ, Subnet}`) — some AZs have no
+    default subnet (observed: `us-west-2d` for g7e), which `watcher.Snipe`'s
+    AZ-only list can't express and would regress into.
+  - **A live progress callback** (`Options.Progress`), so a caller can drive a
+    "waiting for capacity..." status line without polling anything itself.
+  - **A bounded-unknown-failure fail-fast** (`Options.MaxConsecutiveUnknown`,
+    default 3): a persistent but unrecognized error no longer retries silently
+    for the whole deadline, masquerading as a capacity wait — it gives up after
+    a bounded number of consecutive `FailureUnknown` results. A recognized
+    capacity failure resets the counter, so genuine capacity waits stay
+    uncapped.
+
+  `watcher.Snipe` / `watcher.Spawner.Snipe` are unchanged — there were no
+  callers of them in this repo, so they're kept as-is rather than rewired to
+  delegate; new code should call `pkg/snipe.Snipe` directly.
+
 ### Fixed
 - **`pkg/failure`'s terminal-error taxonomy was missing 5 misconfig codes**
   (#105): `ParameterNotFound`, `AccessDenied`, `AccessDeniedException`,
