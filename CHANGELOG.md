@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.52.0] - 2026-08-07
+
 ### Added
 - **`pkg/snipe` — a dependency-light leaf package for block-and-wait,
   single-target capacity acquire** (#106), extracted from `pkg/watcher.Snipe`.
@@ -96,6 +98,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "succeeded" with an instance that was not the one asked for), and EC2 rejects
   reserved `aws:`-prefixed tag keys (substrate#452). Lagotto writes only
   `lagotto:`-prefixed tags, so the latter is coverage gained, not behavior changed.
+- Bumped `spore-host/libs` v0.43.2 → v0.43.3, `spore-host/spawn` v0.75.0 →
+  v0.98.0, and `spore-host/truffle` v0.38.1 → v0.48.1 (root +
+  `lambda/capacity-poller`), picking up each tool's latest fixes/features.
 
 ### Security
 - Bumped `golang.org/x/text` to v0.39.0 (root + `lambda/capacity-poller`) to clear
@@ -561,7 +566,8 @@ Initial tagged release from the standalone `spore-host/lagotto` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/lagotto/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.51.0...HEAD
+[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.52.0...HEAD
+[0.52.0]: https://github.com/spore-host/lagotto/compare/v0.51.0...v0.52.0
 [0.51.0]: https://github.com/spore-host/lagotto/compare/v0.50.0...v0.51.0
 [0.50.0]: https://github.com/spore-host/lagotto/compare/v0.49.0...v0.50.0
 [0.49.0]: https://github.com/spore-host/lagotto/compare/v0.48.1...v0.49.0
