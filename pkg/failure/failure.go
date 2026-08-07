@@ -72,6 +72,16 @@ var terminalErrorCodes = map[string]bool{
 	"InvalidSubnetID.NotFound":     true,
 	"InvalidGroup.NotFound":        true,
 	"Unsupported":                  true, // type not supported in this AZ/config
+	// Config/setup errors surfaced by a pre-launch step (AMI resolution via SSM,
+	// IAM) rather than by RunInstances itself. These never resolve by waiting;
+	// retrying just masks a misconfiguration as a capacity wait (observed: a GPU
+	// AL2023 SSM parameter that doesn't exist yields ParameterNotFound on every
+	// attempt). lagotto#105.
+	"ParameterNotFound":     true,
+	"AccessDenied":          true,
+	"AccessDeniedException": true,
+	"ValidationError":       true,
+	"ValidationException":   true,
 }
 
 // Label returns a short human label for log lines.

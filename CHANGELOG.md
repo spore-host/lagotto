@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`pkg/failure`'s terminal-error taxonomy was missing 5 misconfig codes**
+  (#105): `ParameterNotFound`, `AccessDenied`, `AccessDeniedException`,
+  `ValidationError`, `ValidationException`. These are surfaced by a pre-launch
+  step (SSM param lookup, IAM check) rather than by `RunInstances` itself, and
+  will never resolve by waiting — without this fix they classified as
+  `FailureUnknown` (retry, capped) rather than `FailureTerminal` (stop), so a
+  real misconfiguration (observed: a GPU AL2023 SSM parameter that doesn't
+  exist) retried silently instead of failing fast with a clear signal.
+
 ### Changed
 - CI moved off the self-hosted orion runner fleet onto `ubuntu-latest`. The
   fleet (colima/Docker on orion.local) is being decommissioned org-wide; no

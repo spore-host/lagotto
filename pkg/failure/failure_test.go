@@ -50,6 +50,14 @@ func TestClassifyFailure(t *testing.T) {
 		{"bad ami", &apiErr{"InvalidAMIID.NotFound"}, failure.FailureTerminal},
 		{"unauthorized", &apiErr{"UnauthorizedOperation"}, failure.FailureTerminal},
 		{"unsupported type", &apiErr{"Unsupported"}, failure.FailureTerminal},
+		// #105: config/setup errors (SSM param missing, IAM denial, bad request
+		// shape) surfaced by a pre-launch step — terminal, not capacity, so a
+		// misconfiguration doesn't retry silently for the whole watch TTL.
+		{"missing ssm param", &apiErr{"ParameterNotFound"}, failure.FailureTerminal},
+		{"access denied", &apiErr{"AccessDenied"}, failure.FailureTerminal},
+		{"access denied exception", &apiErr{"AccessDeniedException"}, failure.FailureTerminal},
+		{"validation error", &apiErr{"ValidationError"}, failure.FailureTerminal},
+		{"validation exception", &apiErr{"ValidationException"}, failure.FailureTerminal},
 		// #41: an unlisted AWS code and a plain non-AWS blip are retryable but
 		// capped — FailureUnknown, not FailureCapacity (which is uncapped).
 		{"unknown aws code", &apiErr{"SomeNewErrorCode"}, failure.FailureUnknown},
