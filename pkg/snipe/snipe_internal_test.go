@@ -26,6 +26,29 @@ func newAcquirerWithProvide(fn func(ctx context.Context, client *spawnaws.Client
 	return &acquirer{provide: fn}
 }
 
+// newAcquirerWithRegionSpy builds an *acquirer that records every region
+// clientFor is asked to resolve (#111 regression guard) and hands provide a
+// distinct, non-nil *spawnaws.Client per region, so a test can assert both
+// WHICH region was resolved and that the RIGHT client for that region reached
+// provide (not a client built for a different target).
+func newAcquirerWithRegionSpy(t *testing.T, fn func(ctx context.Context, client *spawnaws.Client, cfg spawnaws.LaunchConfig, opts launcher.Options) (*spawnaws.LaunchResult, error)) (*acquirer, *[]string) {
+	t.Helper()
+	var requested []string
+	clients := map[string]*spawnaws.Client{}
+	return &acquirer{
+		provide: fn,
+		clientFor: func(_ context.Context, region string) (*spawnaws.Client, error) {
+			requested = append(requested, region)
+			c, ok := clients[region]
+			if !ok {
+				c = &spawnaws.Client{} // distinct pointer identity per region
+				clients[region] = c
+			}
+			return c, nil
+		},
+	}, &requested
+}
+
 // target is a minimal valid single-target request.
 func target() Target {
 	return Target{
@@ -370,6 +393,50 @@ func TestSnipe_FallbackValidated(t *testing.T) {
 	bad := Target{Region: "us-west-2"} // missing InstanceType
 	if _, err := snipeWith(context.Background(), a, primary, Options{Fallbacks: []Target{bad}}); err == nil {
 		t.Error("want error for a fallback with missing InstanceType")
+	}
+}
+
+// TestSnipe_ClientResolvedForTargetRegion is the #111 regression guard: Snipe
+// must resolve its AWS client PINNED TO the target's region, not the ambient
+// default-credential-chain region — spawn#276 is exactly the bug this avoids
+// (AMI/AZ/identity resolution silently happening in the wrong region).
+func TestSnipe_ClientResolvedForTargetRegion(t *testing.T) {
+	a, requested := newAcquirerWithRegionSpy(t, func(_ context.Context, _ *spawnaws.Client, cfg spawnaws.LaunchConfig, _ launcher.Options) (*spawnaws.LaunchResult, error) {
+		return &spawnaws.LaunchResult{InstanceID: "i-ok"}, nil
+	})
+	tgt := Target{InstanceType: "g7e.2xlarge", Region: "eu-west-1", Placements: []Placement{{AZ: "eu-west-1a"}}}
+	if _, err := snipeWith(context.Background(), a, tgt, Options{}); err != nil {
+		t.Fatalf("Snipe: %v", err)
+	}
+	if len(*requested) != 1 || (*requested)[0] != "eu-west-1" {
+		t.Errorf("clientFor requested regions = %v, want [eu-west-1]", *requested)
+	}
+}
+
+// TestSnipe_FallbackUsesItsOwnRegionClient is the multi-region half of #111:
+// a Fallback target in a DIFFERENT region from the primary must get a client
+// resolved for ITS OWN region, not the primary's (or a single shared ambient
+// client) — the exact scenario Options.Fallbacks (#76) exists for.
+func TestSnipe_FallbackUsesItsOwnRegionClient(t *testing.T) {
+	a, requested := newAcquirerWithRegionSpy(t, func(_ context.Context, client *spawnaws.Client, cfg spawnaws.LaunchConfig, _ launcher.Options) (*spawnaws.LaunchResult, error) {
+		if cfg.Region == "us-west-2" {
+			return &spawnaws.LaunchResult{InstanceID: "i-west"}, nil // capacity only in the fallback region
+		}
+		return nil, &capErr{"InsufficientInstanceCapacity"}
+	})
+	primary := target() // us-east-1
+	primary.Placements = []Placement{{AZ: "us-east-1a"}}
+	fallback := Target{InstanceType: "g7e.2xlarge", Region: "us-west-2", Placements: []Placement{{AZ: "us-west-2a"}}}
+
+	r, err := snipeWith(context.Background(), a, primary, Options{Fallbacks: []Target{fallback}})
+	if err != nil {
+		t.Fatalf("Snipe: %v", err)
+	}
+	if r.InstanceID != "i-west" || r.Region != "us-west-2" {
+		t.Fatalf("got id=%q region=%q, want i-west/us-west-2", r.InstanceID, r.Region)
+	}
+	if len(*requested) != 2 || (*requested)[0] != "us-east-1" || (*requested)[1] != "us-west-2" {
+		t.Errorf("clientFor requested regions = %v, want [us-east-1 us-west-2] (each target resolved against ITS OWN region)", *requested)
 	}
 }
 

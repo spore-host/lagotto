@@ -164,13 +164,40 @@ type Result struct {
 // poller's overlap/reservation/completion-condition features, none of which
 // Snipe needs.
 type acquirer struct {
-	client  *spawnaws.Client
-	provide func(ctx context.Context, client *spawnaws.Client, cfg spawnaws.LaunchConfig, opts launcher.Options) (*spawnaws.LaunchResult, error)
-	sleep   func(ctx context.Context, d time.Duration) error
+	// clientFor resolves the *spawnaws.Client to launch a given region with,
+	// cached per region for the retry loop's whole run (#111). Region-pinned,
+	// not ambient-default: spawnaws.NewClient's default-credential-chain region
+	// can resolve AMIs/AZs/identity in the WRONG region if it differs from the
+	// caller's ambient AWS_REGION/profile (spawn#276) — every Target already
+	// carries the region it wants, so there is no reason to ask the ambient
+	// chain instead. Each Fallback (#76) may be in a DIFFERENT region, so this
+	// is a function of region, not a single client.
+	clientFor func(ctx context.Context, region string) (*spawnaws.Client, error)
+	provide   func(ctx context.Context, client *spawnaws.Client, cfg spawnaws.LaunchConfig, opts launcher.Options) (*spawnaws.LaunchResult, error)
+	sleep     func(ctx context.Context, d time.Duration) error
 }
 
-func newAcquirer(client *spawnaws.Client) *acquirer {
-	return &acquirer{client: client, provide: launcher.Provision, sleep: sleepCtx}
+func newAcquirer() *acquirer {
+	return &acquirer{clientFor: cachedClientFor(), provide: launcher.Provision, sleep: sleepCtx}
+}
+
+// cachedClientFor returns a clientFor function that builds one
+// region-pinned *spawnaws.Client per distinct region on first use and reuses
+// it for the rest of the run — a multi-region Snipe (Options.Fallbacks) can
+// revisit the same region many times across retry rounds.
+func cachedClientFor() func(ctx context.Context, region string) (*spawnaws.Client, error) {
+	clients := make(map[string]*spawnaws.Client)
+	return func(ctx context.Context, region string) (*spawnaws.Client, error) {
+		if c, ok := clients[region]; ok {
+			return c, nil
+		}
+		c, err := spawnaws.NewClientWithRegion(ctx, region)
+		if err != nil {
+			return nil, err
+		}
+		clients[region] = c
+		return c, nil
+	}
 }
 
 // Snipe blocks until it acquires the target instance, the deadline passes, or a
@@ -189,11 +216,7 @@ func newAcquirer(client *spawnaws.Client) *acquirer {
 // wait. On success it returns a *Result carrying the launched InstanceID,
 // Region, AZ, and Subnet.
 func Snipe(ctx context.Context, target Target, opts Options) (*Result, error) {
-	client, err := spawnaws.NewClient(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("snipe: create spawn client: %w", err)
-	}
-	return snipeWith(ctx, newAcquirer(client), target, opts)
+	return snipeWith(ctx, newAcquirer(), target, opts)
 }
 
 func snipeWith(ctx context.Context, l *acquirer, target Target, opts Options) (*Result, error) {
@@ -333,11 +356,22 @@ func launchAcrossPlacements(ctx context.Context, l *acquirer, cfg spawnaws.Launc
 	if provide == nil {
 		provide = launcher.Provision
 	}
+	// A test-constructed acquirer (see newAcquirerWithProvide) has no need for a
+	// real client — its fake provide ignores the argument — so nil clientFor is
+	// valid there and simply passes nil through.
+	var client *spawnaws.Client
+	if l.clientFor != nil {
+		var err error
+		client, err = l.clientFor(ctx, cfg.Region)
+		if err != nil {
+			return "", "", "", fmt.Errorf("snipe: create spawn client for %s: %w", cfg.Region, err)
+		}
+	}
 	var lastErr error
 	for _, p := range attempts {
 		cfg.AvailabilityZone = p.AZ
 		cfg.SubnetID = p.Subnet
-		result, perr := provide(ctx, l.client, cfg, launcher.Options{
+		result, perr := provide(ctx, client, cfg, launcher.Options{
 			// Keyless: a library caller typically has no SSH key. SSM-only launch.
 		})
 		if perr == nil {
