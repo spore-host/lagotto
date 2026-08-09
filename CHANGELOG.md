@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.52.1] - 2026-08-09
+
 ### Fixed
 - **`pkg/snipe.Snipe` now resolves its AWS client pinned to each target's
   region, instead of the ambient default-credential-chain region** (#111).
@@ -578,7 +580,8 @@ Initial tagged release from the standalone `spore-host/lagotto` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/lagotto/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.52.0...HEAD
+[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.52.1...HEAD
+[0.52.1]: https://github.com/spore-host/lagotto/compare/v0.52.0...v0.52.1
 [0.52.0]: https://github.com/spore-host/lagotto/compare/v0.51.0...v0.52.0
 [0.51.0]: https://github.com/spore-host/lagotto/compare/v0.50.0...v0.51.0
 [0.50.0]: https://github.com/spore-host/lagotto/compare/v0.49.0...v0.50.0
