@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`pkg/snipe.Snipe` now resolves its AWS client pinned to each target's
+  region, instead of the ambient default-credential-chain region** (#111).
+  `spawnaws.NewClient`'s default region (env/profile/shared-config) can
+  differ from the region a `Target` actually asks to launch in — exactly the
+  bug spawn#276 fixed for the CLI (`spawn launch --region`), which `Snipe`
+  had silently regressed on. `Target.Region` is already required, so there
+  was never a reason to consult the ambient chain instead. A `Fallback`
+  target (#76) in a *different* region now gets its own region-pinned
+  client too — one client per distinct region, cached for the run, not one
+  client shared across every target regardless of region.
+
 ## [0.52.0] - 2026-08-07
 
 ### Added
