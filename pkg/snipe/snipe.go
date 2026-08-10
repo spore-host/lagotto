@@ -101,6 +101,17 @@ type Status struct {
 	// Kind classifies LastErr (zero value failure.FailureNone on the first
 	// attempt).
 	Kind failure.FailureKind
+	// QuotaExceeded is true when LastErr is specifically an exhausted account
+	// quota/limit (#116) — a finer-grained signal than Kind==FailureTerminal,
+	// which also covers bad AMI/IAM/malformed-request errors this reports false
+	// for. Snipe's own retry behavior is unchanged either way (a quota error
+	// still stops the round like any other FailureTerminal); this field exists
+	// so a caller building its own backoff/reduce-concurrency logic on top of
+	// Options.Progress (e.g. running several concurrent Snipe calls against the
+	// same account, where the quota might be the caller's OWN other in-flight
+	// requests rather than a hard account wall) doesn't need to separately
+	// import pkg/failure and re-classify LastErr itself.
+	QuotaExceeded bool
 	// Wait is how long Snipe will sleep before the next round, or zero if this
 	// Status precedes an attempt rather than a backoff.
 	Wait time.Duration
@@ -280,7 +291,10 @@ func snipeWith(ctx context.Context, l *acquirer, target Target, opts Options) (*
 
 			lastErr = err
 			kind := failure.ClassifyFailure(err)
-			report(opts.Progress, Status{Round: round, Target: bt.target.InstanceType, Region: bt.target.Region, LastErr: err, Kind: kind})
+			report(opts.Progress, Status{
+				Round: round, Target: bt.target.InstanceType, Region: bt.target.Region,
+				LastErr: err, Kind: kind, QuotaExceeded: failure.IsQuotaExceeded(err),
+			})
 
 			if kind == failure.FailureTerminal {
 				return nil, fmt.Errorf("snipe: terminal failure acquiring %s in %s: %w",
@@ -309,7 +323,10 @@ func snipeWith(ctx context.Context, l *acquirer, target Target, opts Options) (*
 				wait = remaining
 			}
 		}
-		report(opts.Progress, Status{Round: round, Target: target.InstanceType, Region: target.Region, LastErr: lastErr, Wait: wait})
+		report(opts.Progress, Status{
+			Round: round, Target: target.InstanceType, Region: target.Region,
+			LastErr: lastErr, QuotaExceeded: failure.IsQuotaExceeded(lastErr), Wait: wait,
+		})
 		if err := sleep(ctx, wait); err != nil {
 			return nil, err
 		}

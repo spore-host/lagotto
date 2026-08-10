@@ -55,6 +55,17 @@ func TestClassifyFailure(t *testing.T) {
 	}
 }
 
+// TestIsQuotaExceeded confirms the watcher.IsQuotaExceeded alias (#116)
+// reaches the real classifier in pkg/failure.
+func TestIsQuotaExceeded(t *testing.T) {
+	if !watcher.IsQuotaExceeded(&apiErr{"MaxSpotInstanceCountExceeded"}) {
+		t.Error("want true for a Spot quota error")
+	}
+	if watcher.IsQuotaExceeded(&apiErr{"InvalidAMIID.NotFound"}) {
+		t.Error("want false for a non-quota terminal error")
+	}
+}
+
 // TestClassifySageMakerFailure covers the async SageMaker job-status mapping
 // used by the SageMaker launcher (#14).
 func TestClassifySageMakerFailure(t *testing.T) {

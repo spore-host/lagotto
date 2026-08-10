@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`pkg/failure.IsQuotaExceeded` — an exhausted account quota/limit is now
+  distinguishable from the rest of the `FailureTerminal` bucket** (#116).
+  Previously every terminal error (bad AMI, IAM denial, malformed request,
+  *and* an exhausted quota) looked identical to a caller: an immediate
+  give-up with no further signal. `pkg/snipe.Status` gains a
+  `QuotaExceeded bool` field (set via `Options.Progress`), and
+  `pkg/watcher.IsQuotaExceeded` aliases the same function. Does NOT change
+  any default retry behavior — a quota error still classifies as
+  `FailureTerminal` and `Snipe` still returns immediately on it, exactly as
+  before. This is a purely additive signal for a caller building its own
+  backoff/reduce-concurrency logic on top: e.g. several concurrent
+  `pkg/snipe.Snipe` calls against the same account, where a quota ceiling
+  saturated by the caller's OWN other in-flight requests may free up shortly
+  — unlike a hard account wall that genuinely needs a support ticket, and
+  which now reports `QuotaExceeded=false` instead of looking identical.
+
 ## [0.52.1] - 2026-08-09
 
 ### Fixed
