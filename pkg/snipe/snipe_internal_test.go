@@ -149,6 +149,67 @@ func TestSnipe_TerminalStopsImmediately(t *testing.T) {
 	}
 }
 
+// TestSnipe_ProgressReportsQuotaExceeded is the #116 regression guard:
+// Status.QuotaExceeded must be true for a quota-exhausted terminal failure
+// and false for any other terminal failure — the whole point of #116 is that
+// a caller building backoff/reduce-concurrency logic on Options.Progress can
+// tell "this account ceiling might free up" apart from "nothing here will
+// ever work" without separately importing pkg/failure. Snipe's own behavior
+// (return immediately, no retry) is unchanged in both cases.
+func TestSnipe_ProgressReportsQuotaExceeded(t *testing.T) {
+	a := newAcquirerWithProvide(func(context.Context, *spawnaws.Client, spawnaws.LaunchConfig, launcher.Options) (*spawnaws.LaunchResult, error) {
+		return nil, &capErr{"MaxSpotInstanceCountExceeded"}
+	})
+
+	var statuses []Status
+	tgt := target()
+	tgt.Placements = []Placement{{AZ: "us-east-1a"}}
+	_, err := snipeWith(context.Background(), a, tgt, Options{
+		Progress: func(s Status) { statuses = append(statuses, s) },
+	})
+	if err == nil {
+		t.Fatal("expected a quota-exceeded failure to return an error")
+	}
+
+	sawQuotaReport := false
+	for _, s := range statuses {
+		if s.LastErr != nil {
+			sawQuotaReport = true
+			if !s.QuotaExceeded {
+				t.Errorf("Status.QuotaExceeded = false for MaxSpotInstanceCountExceeded, want true")
+			}
+			if s.Kind != failure.FailureTerminal {
+				t.Errorf("Status.Kind = %v, want FailureTerminal (unchanged classification)", s.Kind)
+			}
+		}
+	}
+	if !sawQuotaReport {
+		t.Fatal("Progress was never called with the failure")
+	}
+}
+
+// TestSnipe_ProgressDoesNotReportQuotaForOrdinaryTerminal is the negative half
+// of the #116 guard: an ordinary terminal failure (not a quota error) must
+// report QuotaExceeded=false, or the signal would be meaningless.
+func TestSnipe_ProgressDoesNotReportQuotaForOrdinaryTerminal(t *testing.T) {
+	a := newAcquirerWithProvide(func(context.Context, *spawnaws.Client, spawnaws.LaunchConfig, launcher.Options) (*spawnaws.LaunchResult, error) {
+		return nil, &capErr{"AuthFailure"}
+	})
+
+	var statuses []Status
+	tgt := target()
+	tgt.Placements = []Placement{{AZ: "us-east-1a"}}
+	_, _ = snipeWith(context.Background(), a, tgt, Options{
+		Progress: func(s Status) { statuses = append(statuses, s) },
+	})
+
+	for _, s := range statuses {
+		if s.LastErr != nil && s.QuotaExceeded {
+			t.Errorf("Status.QuotaExceeded = true for AuthFailure, want false")
+		}
+	}
+}
+
 // TestSnipe_UnknownFailureCappedThenGivesUp verifies #106: a persistent
 // unrecognized failure retries up to MaxConsecutiveUnknown times, then Snipe
 // gives up rather than retrying it as a capacity wait for the whole deadline.

@@ -56,22 +56,37 @@ var capacityErrorCodes = map[string]bool{
 	"SpotMaxPriceTooLow":                   true, // spot bid below market — clears when price drops
 }
 
-// terminalErrorCodes are AWS API error codes that will never resolve by waiting.
-// Quota limits count as terminal: the user must request a quota increase or
-// change the watch; polling will not help.
-var terminalErrorCodes = map[string]bool{
+// quotaErrorCodes are AWS API error codes specifically for an exhausted
+// account quota/limit (#116). They classify as FailureTerminal like any other
+// terminal code — retrying an exhausted quota wastes poll cycles just as
+// retrying a bad AMI does — but are distinguishable via IsQuotaExceeded for a
+// caller that wants to react differently to "this quota ceiling might free up
+// soon" than to "nothing about this will ever work." E.g. a caller running
+// several concurrent pkg/snipe.Snipe calls against the SAME account, where the
+// quota being hit might be the caller's OWN other in-flight requests rather
+// than a hard account wall needing a support ticket. ClassifyFailure checks
+// this map FIRST (before terminalErrorCodes) precisely so a code only needs
+// to be listed once — see the "not double-counted" assertion in the tests.
+var quotaErrorCodes = map[string]bool{
 	"InstanceLimitExceeded":        true, // On-Demand vCPU/instance quota
 	"VcpuLimitExceeded":            true,
 	"MaxSpotInstanceCountExceeded": true, // Spot quota
-	"InvalidAMIID.NotFound":        true,
-	"InvalidAMIID.Malformed":       true,
-	"UnauthorizedOperation":        true,
-	"AuthFailure":                  true,
-	"InvalidParameterValue":        true,
-	"InvalidParameterCombination":  true,
-	"InvalidSubnetID.NotFound":     true,
-	"InvalidGroup.NotFound":        true,
-	"Unsupported":                  true, // type not supported in this AZ/config
+}
+
+// terminalErrorCodes are AWS API error codes that will never resolve by
+// waiting, EXCLUDING the quota-specific codes above (they're checked
+// separately in ClassifyFailure so quotaErrorCodes stays the single source of
+// truth for "is this a quota error" — see IsQuotaExceeded).
+var terminalErrorCodes = map[string]bool{
+	"InvalidAMIID.NotFound":       true,
+	"InvalidAMIID.Malformed":      true,
+	"UnauthorizedOperation":       true,
+	"AuthFailure":                 true,
+	"InvalidParameterValue":       true,
+	"InvalidParameterCombination": true,
+	"InvalidSubnetID.NotFound":    true,
+	"InvalidGroup.NotFound":       true,
+	"Unsupported":                 true, // type not supported in this AZ/config
 	// Config/setup errors surfaced by a pre-launch step (AMI resolution via SSM,
 	// IAM) rather than by RunInstances itself. These never resolve by waiting;
 	// retrying just masks a misconfiguration as a capacity wait (observed: a GPU
@@ -130,7 +145,7 @@ func ClassifyFailure(err error) FailureKind {
 		if capacityErrorCodes[code] {
 			return FailureCapacity
 		}
-		if terminalErrorCodes[code] {
+		if quotaErrorCodes[code] || terminalErrorCodes[code] {
 			return FailureTerminal
 		}
 		// Substring fallback for code variants AWS may namespace differently.
@@ -155,4 +170,26 @@ func ClassifyFailure(err error) FailureKind {
 	// Other non-AWS errors (network, client init): plausibly transient. Retry,
 	// but count toward the cap so a persistent blip eventually stops the watch.
 	return FailureUnknown
+}
+
+// IsQuotaExceeded reports whether err is specifically an exhausted account
+// quota/limit (#116) — a finer-grained question than ClassifyFailure's
+// FailureTerminal, which also covers bad AMI/IAM/malformed-request errors
+// that IsQuotaExceeded correctly reports false for. Does NOT change the
+// default retry behavior of ClassifyFailure/FailureTerminal callers (a quota
+// error still classifies as terminal there, unchanged); this is purely an
+// additional, optional signal for a caller that wants to build its own
+// backoff-and-retry or reduce-concurrency logic on top — e.g. several
+// concurrent pkg/snipe.Snipe calls against the same account, where a quota
+// ceiling saturated by the caller's OWN other in-flight requests may free up
+// shortly, unlike a hard account wall that genuinely needs a support ticket.
+func IsQuotaExceeded(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		return quotaErrorCodes[apiErr.ErrorCode()]
+	}
+	return false
 }

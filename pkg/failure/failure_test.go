@@ -82,6 +82,60 @@ func TestClassifyFailure(t *testing.T) {
 	}
 }
 
+// TestIsQuotaExceeded is the #116 regression guard: a quota error must be
+// distinguishable from the rest of the FailureTerminal bucket via
+// IsQuotaExceeded, while a non-quota terminal error (bad AMI, IAM denial,
+// malformed request) must report false — the whole point is that "terminal"
+// and "quota-exceeded" are not the same question.
+func TestIsQuotaExceeded(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"instance limit (on-demand quota)", &apiErr{"InstanceLimitExceeded"}, true},
+		{"vcpu limit (on-demand quota)", &apiErr{"VcpuLimitExceeded"}, true},
+		{"spot quota", &apiErr{"MaxSpotInstanceCountExceeded"}, true},
+		// Every other FailureTerminal code must NOT read as a quota error —
+		// this is the actual thing #116 asks to distinguish.
+		{"bad ami (terminal, not quota)", &apiErr{"InvalidAMIID.NotFound"}, false},
+		{"unauthorized (terminal, not quota)", &apiErr{"UnauthorizedOperation"}, false},
+		{"missing ssm param (terminal, not quota)", &apiErr{"ParameterNotFound"}, false},
+		{"access denied (terminal, not quota)", &apiErr{"AccessDenied"}, false},
+		// Non-terminal codes must also report false.
+		{"insufficient capacity (not terminal at all)", &apiErr{"InsufficientInstanceCapacity"}, false},
+		{"unknown aws code", &apiErr{"SomeNewErrorCode"}, false},
+		{"plain non-AWS error", errors.New("dial tcp: timeout"), false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := failure.IsQuotaExceeded(c.err); got != c.want {
+				t.Errorf("IsQuotaExceeded(%v) = %v, want %v", c.err, got, c.want)
+			}
+		})
+	}
+}
+
+// TestIsQuotaExceeded_StillClassifiesTerminal confirms #116 changed NOTHING
+// about ClassifyFailure's existing behavior for quota codes — they still
+// classify as FailureTerminal exactly as before. IsQuotaExceeded is a purely
+// additive signal, not a behavior change to the default retry loop.
+func TestIsQuotaExceeded_StillClassifiesTerminal(t *testing.T) {
+	quotaCodes := []string{"InstanceLimitExceeded", "VcpuLimitExceeded", "MaxSpotInstanceCountExceeded"}
+	for _, code := range quotaCodes {
+		t.Run(code, func(t *testing.T) {
+			err := &apiErr{code}
+			if got := failure.ClassifyFailure(err); got != failure.FailureTerminal {
+				t.Errorf("ClassifyFailure(%s) = %v, want FailureTerminal (unchanged)", code, got)
+			}
+			if !failure.IsQuotaExceeded(err) {
+				t.Errorf("IsQuotaExceeded(%s) = false, want true", code)
+			}
+		})
+	}
+}
+
 func TestLabel(t *testing.T) {
 	cases := map[failure.FailureKind]string{
 		failure.FailureNone:     "none",

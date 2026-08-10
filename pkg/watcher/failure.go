@@ -32,6 +32,11 @@ const (
 // Alias of [failure.ClassifyFailure].
 var ClassifyFailure = failure.ClassifyFailure
 
+// IsQuotaExceeded reports whether err is specifically an exhausted account
+// quota/limit (#116), a finer-grained signal than ClassifyFailure's
+// FailureTerminal. Alias of [failure.IsQuotaExceeded].
+var IsQuotaExceeded = failure.IsQuotaExceeded
+
 // failureLabel returns a short human label for log lines.
 func failureLabel(k FailureKind) string {
 	return failure.Label(k)
