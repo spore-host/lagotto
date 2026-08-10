@@ -8,7 +8,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.32.20
 	github.com/aws/aws-sdk-go-v2/service/scheduler v1.17.24
 	github.com/spore-host/lagotto v0.0.0-00010101000000-000000000000
-	github.com/spore-host/truffle v0.48.1
+	github.com/spore-host/truffle v0.49.0
 )
 
 require github.com/spore-host/libs v0.43.3 // indirect

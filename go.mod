@@ -22,7 +22,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/spore-host/libs v0.43.3
 	github.com/spore-host/spawn v0.98.0
-	github.com/spore-host/truffle v0.48.1
+	github.com/spore-host/truffle v0.49.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 

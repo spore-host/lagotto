@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.53.0] - 2026-08-10
+
 ### Added
 - **`pkg/failure.IsQuotaExceeded` — an exhausted account quota/limit is now
   distinguishable from the rest of the `FailureTerminal` bucket** (#116).
@@ -23,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   saturated by the caller's OWN other in-flight requests may free up shortly
   — unlike a hard account wall that genuinely needs a support ticket, and
   which now reports `QuotaExceeded=false` instead of looking identical.
+- Bumped `spore-host/truffle` v0.48.1 → v0.49.0 (root + `lambda/capacity-poller`),
+  picking up truffle's latest fixes.
 
 ## [0.52.1] - 2026-08-09
 
@@ -597,7 +601,8 @@ Initial tagged release from the standalone `spore-host/lagotto` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/lagotto/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.52.1...HEAD
+[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.53.0...HEAD
+[0.53.0]: https://github.com/spore-host/lagotto/compare/v0.52.1...v0.53.0
 [0.52.1]: https://github.com/spore-host/lagotto/compare/v0.52.0...v0.52.1
 [0.52.0]: https://github.com/spore-host/lagotto/compare/v0.51.0...v0.52.0
 [0.51.0]: https://github.com/spore-host/lagotto/compare/v0.50.0...v0.51.0
