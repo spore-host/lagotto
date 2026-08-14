@@ -5,10 +5,10 @@
 # lagotto
 
 [![CI](https://github.com/spore-host/lagotto/actions/workflows/ci.yml/badge.svg)](https://github.com/spore-host/lagotto/actions/workflows/ci.yml)
-[![Go Report Card](https://goreportcard.com/badge/github.com/spore-host/lagotto)](https://goreportcard.com/report/github.com/spore-host/lagotto)
 [![codecov](https://codecov.io/gh/spore-host/lagotto/branch/main/graph/badge.svg)](https://codecov.io/gh/spore-host/lagotto)
 [![Go Reference](https://pkg.go.dev/badge/github.com/spore-host/lagotto.svg)](https://pkg.go.dev/github.com/spore-host/lagotto)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21483804.svg)](https://doi.org/10.5281/zenodo.21483804)
 
 Watch for EC2 instance capacity and act when it appears.
 

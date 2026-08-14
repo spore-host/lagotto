@@ -1,6 +1,7 @@
 cff-version: 1.2.0
 message: "If you use lagotto in your research, please cite it as below."
 title: "lagotto: an AWS EC2 capacity watcher"
+doi: "10.5281/zenodo.21483804"
 abstract: >-
   lagotto is the spore.host capacity watcher: it polls for EC2 capacity (via
   truffle) and acts when a match appears — notify, hold, or launch via spawn —
