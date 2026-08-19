@@ -34,6 +34,16 @@ jobs:
       - name: Docs reference drift guard
         run: make check-docs
 
+      # Hard-fail the tag if the -X ldflag that carries the release version
+      # into the binary is broken. `-X pkg.Var=value` is accepted silently by
+      # the Go linker even when pkg.Var no longer exists — a renamed
+      # variable, a moved package, or a renamed module path would build fine,
+      # release fine, and publish a binary that reports "dev" forever with no
+      # other signal (#98). Also refuses to publish while CHANGELOG.md still
+      # says [Unreleased] for this tag.
+      - name: Release version guard
+        run: scripts/check-release-version.sh "${GITHUB_REF_NAME}"
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
         with:
