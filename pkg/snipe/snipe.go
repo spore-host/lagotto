@@ -153,6 +153,20 @@ type Options struct {
 	// id, in-region launch artifacts/SG/subnet, etc. Off by default; opt-in only.
 	// A terminal failure on any target still stops immediately.
 	Fallbacks []Target
+	// ClientFor, if set, overrides how Snipe resolves the *spawnaws.Client for a
+	// given region — the same shape as acquirer's internal clientFor (#113). By
+	// default Snipe builds one via spawnaws.NewClientWithRegion, which loads AWS
+	// config through the default credential chain with no way to point it at a
+	// custom endpoint. A caller that wants Snipe's real request-building/
+	// response-parsing/error-classification code exercised against a fake EC2
+	// endpoint (e.g. github.com/scttfrdmn/substrate/emulator) sets ClientFor to
+	// something built via spawnaws.NewClientFromConfig with
+	// config.WithBaseEndpoint pointed at that endpoint — mirroring
+	// NewClientFromConfig's own doc comment ("Used in tests to point all SDK
+	// calls at an emulator such as Substrate"), which pkg/snipe had no way to
+	// reach before this field existed. Snipe still calls this once per distinct
+	// region and caches the result for the run, exactly like the default.
+	ClientFor func(ctx context.Context, region string) (*spawnaws.Client, error)
 }
 
 // Result is what Snipe returns on success — the launched instance's identity
@@ -188,21 +202,31 @@ type acquirer struct {
 	sleep     func(ctx context.Context, d time.Duration) error
 }
 
-func newAcquirer() *acquirer {
-	return &acquirer{clientFor: cachedClientFor(), provide: launcher.Provision, sleep: sleepCtx}
+// newAcquirer builds an *acquirer using build to construct a client for each
+// distinct region on first use, cached for the rest of the run — a
+// multi-region Snipe (Options.Fallbacks) can revisit the same region many
+// times across retry rounds. build defaults to spawnaws.NewClientWithRegion
+// (the real-AWS default-credential-chain path); a caller-supplied
+// Options.ClientFor (#113) is threaded in here instead, so a test can point
+// every client this acquirer ever builds at an emulator such as Substrate.
+func newAcquirer(build func(ctx context.Context, region string) (*spawnaws.Client, error)) *acquirer {
+	if build == nil {
+		build = spawnaws.NewClientWithRegion
+	}
+	return &acquirer{clientFor: cachedClientFor(build), provide: launcher.Provision, sleep: sleepCtx}
 }
 
-// cachedClientFor returns a clientFor function that builds one
-// region-pinned *spawnaws.Client per distinct region on first use and reuses
-// it for the rest of the run — a multi-region Snipe (Options.Fallbacks) can
-// revisit the same region many times across retry rounds.
-func cachedClientFor() func(ctx context.Context, region string) (*spawnaws.Client, error) {
+// cachedClientFor wraps build so it is called at most once per distinct
+// region for the lifetime of the returned function, regardless of how many
+// times a multi-round, possibly-multi-region (Options.Fallbacks) Snipe run
+// asks for it.
+func cachedClientFor(build func(ctx context.Context, region string) (*spawnaws.Client, error)) func(ctx context.Context, region string) (*spawnaws.Client, error) {
 	clients := make(map[string]*spawnaws.Client)
 	return func(ctx context.Context, region string) (*spawnaws.Client, error) {
 		if c, ok := clients[region]; ok {
 			return c, nil
 		}
-		c, err := spawnaws.NewClientWithRegion(ctx, region)
+		c, err := build(ctx, region)
 		if err != nil {
 			return nil, err
 		}
@@ -227,7 +251,7 @@ func cachedClientFor() func(ctx context.Context, region string) (*spawnaws.Clien
 // wait. On success it returns a *Result carrying the launched InstanceID,
 // Region, AZ, and Subnet.
 func Snipe(ctx context.Context, target Target, opts Options) (*Result, error) {
-	return snipeWith(ctx, newAcquirer(), target, opts)
+	return snipeWith(ctx, newAcquirer(opts.ClientFor), target, opts)
 }
 
 func snipeWith(ctx context.Context, l *acquirer, target Target, opts Options) (*Result, error) {
