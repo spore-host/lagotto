@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Release-time guard verifying the published binary reports its own tag**
+  (#98). `.goreleaser.yaml` injects the version via a `-X
+  github.com/spore-host/lagotto/cmd.Version={{.Version}}` ldflag, and the Go
+  linker accepts `-X` for a symbol that no longer exists with no error or
+  warning — a renamed variable, a moved package, or a renamed module path
+  would build fine, release fine, and publish binaries that report `dev`
+  forever, with no signal anywhere until a user pastes `lagotto version`
+  into a bug report. `scripts/check-release-version.sh` (new, run
+  automatically by the release workflow, or by hand via `make
+  check-release-version TAG=vX.Y.Z`) builds with the real release ldflag —
+  read out of `.goreleaser.yaml` rather than restated, so it exercises the
+  actual wiring — and fails the tag unless the binary reports back the same
+  version. It also refuses to publish while `CHANGELOG.md` still says
+  `[Unreleased]`. Two companion unit tests
+  (`cmd/release_version_guard_test.go`) catch the same drift earlier, in
+  ordinary PR CI: one asserts `.goreleaser.yaml`'s ldflag still names the
+  `cmd.Version` variable this package actually declares, the other asserts
+  the release workflow still invokes the guard script.
+
 ## [0.53.2] - 2026-08-17
 
 ## [0.53.1] - 2026-08-11
