@@ -27,6 +27,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cmd.Version` variable this package actually declares, the other asserts
   the release workflow still invokes the guard script.
 
+### Fixed
+- **`pkg/snipe.Result.AvailabilityZone` now reports the AZ the instance
+  actually landed in, not the requested placement AZ** (#114). When a
+  `Target` has no `Placements` (letting EC2 choose the AZ, per
+  `Target.Placements`'s own doc), `Result.AvailabilityZone` came back empty
+  even though the instance genuinely launched into a specific AZ —
+  `launchAcrossPlacements` was returning the loop's requested-placement `AZ`
+  instead of `spawnaws.LaunchResult.AvailabilityZone`, which already carries
+  the actual landed AZ from the `RunInstances` response. Invisible whenever a
+  `Placement` pins a specific AZ (the request forces the two to match), so it
+  only surfaced for the common unpinned case. Any caller logging or reporting
+  on `Result.AvailabilityZone` for a non-placement-pinned `Snipe` now gets the
+  real value instead of `""`.
+
 ## [0.53.2] - 2026-08-17
 
 ## [0.53.1] - 2026-08-11

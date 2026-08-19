@@ -392,7 +392,15 @@ func launchAcrossPlacements(ctx context.Context, l *acquirer, cfg spawnaws.Launc
 			// Keyless: a library caller typically has no SSH key. SSM-only launch.
 		})
 		if perr == nil {
-			return result.InstanceID, p.AZ, p.Subnet, nil
+			// result.AvailabilityZone is the ACTUAL AZ RunInstances placed the
+			// instance in (spawnaws.newLaunchResult reads it straight off the
+			// response's Placement field) — not p.AZ, the REQUESTED placement
+			// from this loop variable. The two coincide when a Placement pins a
+			// specific AZ (the request forces it), which is why this only
+			// surfaces when Placements is empty and EC2 chooses the AZ itself
+			// (#114): p.AZ is "" there, so returning it silently reports no AZ
+			// for an instance that genuinely landed in one.
+			return result.InstanceID, result.AvailabilityZone, p.Subnet, nil
 		}
 		lastErr = perr
 		if failure.ClassifyFailure(perr) == failure.FailureTerminal {
