@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.54.0] - 2026-08-19
+
 ### Added
 - **Release-time guard verifying the published binary reports its own tag**
   (#98). `.goreleaser.yaml` injects the version via a `-X
@@ -668,7 +670,8 @@ Initial tagged release from the standalone `spore-host/lagotto` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/lagotto/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.53.2...HEAD
+[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.54.0...HEAD
+[0.54.0]: https://github.com/spore-host/lagotto/compare/v0.53.2...v0.54.0
 [0.53.2]: https://github.com/spore-host/lagotto/compare/v0.53.1...v0.53.2
 [0.53.1]: https://github.com/spore-host/lagotto/compare/v0.53.0...v0.53.1
 [0.53.0]: https://github.com/spore-host/lagotto/compare/v0.52.1...v0.53.0
