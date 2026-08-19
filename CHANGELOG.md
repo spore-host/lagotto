@@ -26,6 +26,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ordinary PR CI: one asserts `.goreleaser.yaml`'s ldflag still names the
   `cmd.Version` variable this package actually declares, the other asserts
   the release workflow still invokes the guard script.
+- **`pkg/snipe.Options.ClientFor` — inject a pre-configured `*spawnaws.Client`
+  builder, e.g. one pointed at a test emulator like Substrate** (#113).
+  `Snipe` previously always resolved its AWS client via
+  `spawnaws.NewClientWithRegion`, which loads config through the default AWS
+  credential chain with no way to point it at a custom endpoint — so a
+  consumer wanting to exercise `Snipe`'s real request-building/response-
+  parsing/error-classification code against a fake EC2 endpoint (as calque's
+  own `Acquirer` could, via `github.com/scttfrdmn/substrate/emulator`, before
+  migrating to `Snipe`) had no way to do so. `Options.ClientFor`, if set,
+  overrides the client-resolution function Snipe calls once per distinct
+  region (cached for the run, same as the default); a caller sets it to
+  something built via `spawnaws.NewClientFromConfig` with
+  `config.WithBaseEndpoint` pointed at an emulator. Zero value is unchanged:
+  the default AWS credential chain, same as before this field existed.
 
 ### Fixed
 - **`pkg/snipe.Result.AvailabilityZone` now reports the AZ the instance
