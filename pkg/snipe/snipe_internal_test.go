@@ -68,7 +68,10 @@ func TestSnipe_AcquiresAfterCapacityRetries(t *testing.T) {
 			rounds++
 		}
 		if rounds >= 3 {
-			return &spawnaws.LaunchResult{InstanceID: "i-sniped"}, nil
+			// A real RunInstances response reports the AZ it actually placed the
+			// instance in via Placement.AvailabilityZone; since this Placement
+			// pinned one, the fake's landed AZ matches the request.
+			return &spawnaws.LaunchResult{InstanceID: "i-sniped", AvailabilityZone: cfg.AvailabilityZone}, nil
 		}
 		return nil, &capErr{"InsufficientInstanceCapacity"}
 	})
@@ -102,7 +105,7 @@ func TestSnipe_SubnetPerPlacement(t *testing.T) {
 			if cfg.SubnetID != "subnet-only-in-2d" {
 				t.Errorf("SubnetID = %q, want subnet-only-in-2d", cfg.SubnetID)
 			}
-			return &spawnaws.LaunchResult{InstanceID: "i-2d"}, nil
+			return &spawnaws.LaunchResult{InstanceID: "i-2d", AvailabilityZone: cfg.AvailabilityZone}, nil
 		}
 		return nil, &capErr{"InsufficientInstanceCapacity"}
 	})
@@ -498,6 +501,37 @@ func TestSnipe_FallbackUsesItsOwnRegionClient(t *testing.T) {
 	}
 	if len(*requested) != 2 || (*requested)[0] != "us-east-1" || (*requested)[1] != "us-west-2" {
 		t.Errorf("clientFor requested regions = %v, want [us-east-1 us-west-2] (each target resolved against ITS OWN region)", *requested)
+	}
+}
+
+// TestSnipe_ReportsActualLandedAZWhenEC2Chooses is the #114 regression guard.
+//
+// When a Target has no Placements, launchAcrossPlacements makes a single
+// AZ-unpinned attempt (per Target.Placements's own doc: "EC2 chooses the AZ
+// and its default subnet"). Before the fix, Result.AvailabilityZone echoed
+// the REQUESTED placement's AZ (here, ""), not the ACTUAL AZ RunInstances
+// placed the instance in — which spawnaws.LaunchResult already carries as
+// AvailabilityZone from the real API response. The bug was invisible in
+// every other test because a pinned Placement's requested AZ and the landed
+// AZ are the same value by construction; it only surfaces here, where EC2
+// (simulated by the fake) picks an AZ the request never named.
+func TestSnipe_ReportsActualLandedAZWhenEC2Chooses(t *testing.T) {
+	a := newAcquirerWithProvide(func(_ context.Context, _ *spawnaws.Client, cfg spawnaws.LaunchConfig, _ launcher.Options) (*spawnaws.LaunchResult, error) {
+		if cfg.AvailabilityZone != "" {
+			t.Errorf("cfg.AvailabilityZone = %q, want \"\" (no Placement pinned one)", cfg.AvailabilityZone)
+		}
+		// Simulates EC2 choosing an AZ the request never specified — exactly
+		// what a real RunInstances response's Placement field reports.
+		return &spawnaws.LaunchResult{InstanceID: "i-ec2-chose", AvailabilityZone: "us-east-1c"}, nil
+	})
+
+	tgt := Target{InstanceType: "g7e.2xlarge", Region: "us-east-1"} // no Placements
+	r, err := snipeWith(context.Background(), a, tgt, Options{})
+	if err != nil {
+		t.Fatalf("Snipe: %v", err)
+	}
+	if r.AvailabilityZone != "us-east-1c" {
+		t.Errorf("AvailabilityZone = %q, want us-east-1c (the ACTUAL landed AZ, not the empty requested placement)", r.AvailabilityZone)
 	}
 }
 
