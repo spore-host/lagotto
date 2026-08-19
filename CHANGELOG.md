@@ -55,6 +55,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on `Result.AvailabilityZone` for a non-placement-pinned `Snipe` now gets the
   real value instead of `""`.
 
+### Changed
+- Test-only: `pkg/deploy` (the `lagotto deploy`/`teardown` stack manager)
+  gains a Substrate-backed test suite covering `Deploy`, `Teardown`,
+  `StackOutputs`, `ensureBucket`, and `uploadArtifact` — previously 4.1%
+  covered, now 75.5% (#1). No behavior change; exercises the real
+  CloudFormation create/update/delete and S3 bucket/upload paths against
+  `github.com/scttfrdmn/substrate/emulator` instead of only the four pure
+  helper functions (`LambdaArtifactURL`, `DefaultBucketName`,
+  `LambdaObjectKey`, `failedCreateStates`) that had tests before.
+
 ## [0.53.2] - 2026-08-17
 
 ## [0.53.1] - 2026-08-11
