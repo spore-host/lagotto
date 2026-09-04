@@ -46,6 +46,30 @@ lagotto cancel <watch-id>          # prompts for confirmation; -y/--yes to skip
 lagotto history
 ```
 
+`my-job.yaml` is the same shape `spawn launch` reads, with lagotto's own
+lifecycle fields layered on top (snake_case, kebab-case, and CamelCase keys all
+work):
+
+```yaml
+instance_type: g5.xlarge
+region: us-west-2
+ttl: 24h
+command: "bash /opt/run.sh"
+on_complete: terminate
+completion_file: /tmp/JOB_DONE   # spored watches this path for the completion signal
+volume_size: 100                 # root EBS volume size, in GiB
+spot_max_price: "0.90"           # cap the Spot bid; omit for on-demand-price default
+iam_policy: s3:ReadWrite
+tags:                             # extra EC2 tags, alongside spawn's own spawn:* tags
+  project: fieldwork
+  owner: buckai
+```
+
+`user_data` (inline, or `@path` to read a script from disk) / `user_data_file`
+add a custom bootstrap payload appended after spored installs; `iam_role` /
+`iam_policy_file` grant a pre-built role or a scoped custom policy document
+instead of (or alongside) `iam_policy`'s built-in shorthands.
+
 ## Goal-driven fleets
 
 By default a watch fires its action **once** and retires. A **fleet watch**

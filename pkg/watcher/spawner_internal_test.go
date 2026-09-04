@@ -178,6 +178,125 @@ func TestSpawn_GuaranteesTTL(t *testing.T) {
 	}
 }
 
+// TestSpawn_UserDataReachesProvisionOptions is the lagotto#129 regression: a
+// resolved user_data payload must reach launcher.Provision as
+// Options.CustomUserData — NOT LaunchConfig.UserData directly, which would
+// skip Provision's own spored-bootstrap-building step (Provision only builds
+// one when config.UserData is empty; see pkg/launcher/provision.go step 3).
+func TestSpawn_UserDataReachesProvisionOptions(t *testing.T) {
+	var gotCustomUserData string
+	var gotConfigUserData string
+	sp := newSpawnerWithProvision(func(ctx context.Context, _ *spawnaws.Client, cfg spawnaws.LaunchConfig, opts launcher.Options) (*spawnaws.LaunchResult, error) {
+		gotCustomUserData = opts.CustomUserData
+		gotConfigUserData = cfg.UserData
+		return &spawnaws.LaunchResult{InstanceID: "i-ok"}, nil
+	})
+
+	cfg := SpawnConfigFile{InstanceType: "g5.12xlarge", Region: "us-east-1", TTL: "24h", UserData: "echo custom"}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	w := &Watch{WatchID: "w-ud", LaunchConfigJSON: raw}
+	m := &MatchResult{Region: "us-east-1", CandidateAZs: []string{"us-east-1a"}}
+
+	if err := sp.Spawn(context.Background(), w, m); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if gotCustomUserData != "echo custom" {
+		t.Errorf("Options.CustomUserData = %q, want %q", gotCustomUserData, "echo custom")
+	}
+	if gotConfigUserData != "" {
+		t.Errorf("LaunchConfig.UserData = %q, want empty (must go through Options.CustomUserData so Provision still builds the spored bootstrap)", gotConfigUserData)
+	}
+}
+
+// TestSpawn_UserDataOmitted confirms no user_data set means an empty
+// Options.CustomUserData, unchanged from pre-#129 behavior.
+func TestSpawn_UserDataOmitted(t *testing.T) {
+	var gotCustomUserData string
+	sp := newSpawnerWithProvision(func(ctx context.Context, _ *spawnaws.Client, cfg spawnaws.LaunchConfig, opts launcher.Options) (*spawnaws.LaunchResult, error) {
+		gotCustomUserData = opts.CustomUserData
+		return &spawnaws.LaunchResult{InstanceID: "i-ok"}, nil
+	})
+
+	raw, err := json.Marshal(SpawnConfigFile{InstanceType: "g5.12xlarge", Region: "us-east-1", TTL: "24h"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	w := &Watch{WatchID: "w-no-ud", LaunchConfigJSON: raw}
+	m := &MatchResult{Region: "us-east-1", CandidateAZs: []string{"us-east-1a"}}
+
+	if err := sp.Spawn(context.Background(), w, m); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if gotCustomUserData != "" {
+		t.Errorf("Options.CustomUserData = %q, want empty", gotCustomUserData)
+	}
+}
+
+// TestSpawn_BadUserDataFileFailsFast verifies a nonexistent user_data_file
+// fails the Spawn call before any launch attempt (not deep inside the AZ
+// retry loop) rather than silently proceeding with no bootstrap payload.
+func TestSpawn_BadUserDataFileFailsFast(t *testing.T) {
+	var attempted bool
+	sp := newSpawnerWithProvision(func(ctx context.Context, _ *spawnaws.Client, cfg spawnaws.LaunchConfig, opts launcher.Options) (*spawnaws.LaunchResult, error) {
+		attempted = true
+		return &spawnaws.LaunchResult{InstanceID: "i-ok"}, nil
+	})
+
+	raw, err := json.Marshal(SpawnConfigFile{
+		InstanceType: "g5.12xlarge", Region: "us-east-1", TTL: "24h",
+		UserDataFile: "/nonexistent/path/nope.sh",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	w := &Watch{WatchID: "w-bad-ud", LaunchConfigJSON: raw}
+	m := &MatchResult{Region: "us-east-1", CandidateAZs: []string{"us-east-1a"}}
+
+	if err := sp.Spawn(context.Background(), w, m); err == nil {
+		t.Fatal("expected an error for a missing user_data_file")
+	}
+	if attempted {
+		t.Error("must not attempt a launch when user_data_file can't be read")
+	}
+	if m.ActionTaken != "spawn_failed" {
+		t.Errorf("ActionTaken = %q, want spawn_failed", m.ActionTaken)
+	}
+}
+
+// TestBuildIAMProfile_NoClientSkipsAWSCall verifies buildIAMProfile returns ""
+// (no error) when the Spawner has no AWS client (unit-test spawners), even
+// when iam_role/iam_policy_file are set — mirroring the pre-#129 IAMPolicies
+// guard in buildSnipeConfig, so a config carrying these fields is still usable
+// in tests that inject a fake provision.
+func TestBuildIAMProfile_NoClientSkipsAWSCall(t *testing.T) {
+	sp := &Spawner{}
+	file := &SpawnConfigFile{IAMRole: "some-role", IAMPolicyFile: "/some/policy.json"}
+	profile, err := sp.buildIAMProfile(context.Background(), file)
+	if err != nil {
+		t.Fatalf("buildIAMProfile: %v", err)
+	}
+	if profile != "" {
+		t.Errorf("profile = %q, want empty (no AWS client to call)", profile)
+	}
+}
+
+// TestBuildIAMProfile_NoneSetReturnsEmpty verifies buildIAMProfile is a no-op
+// when none of iam_role/iam_policy/iam_policy_file are set, leaving
+// LaunchConfig.IamInstanceProfile for Provision's own default spored profile.
+func TestBuildIAMProfile_NoneSetReturnsEmpty(t *testing.T) {
+	sp := &Spawner{}
+	profile, err := sp.buildIAMProfile(context.Background(), &SpawnConfigFile{})
+	if err != nil {
+		t.Fatalf("buildIAMProfile: %v", err)
+	}
+	if profile != "" {
+		t.Errorf("profile = %q, want empty", profile)
+	}
+}
+
 // scheduledLaunch builds a one-AZ ScheduledLaunch with the given Name + IfExists.
 func scheduledLaunch(t *testing.T, name, ifExists string) *ScheduledLaunch {
 	t.Helper()

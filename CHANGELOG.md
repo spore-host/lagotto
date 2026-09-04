@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Six previously-missing `--spawn-config` YAML keys, closing the gap between
+  what `lagotto watch --action spawn` / `lagotto launch` accept and what
+  `spawn launch` itself supports (#129):
+  - `user_data` (inline string, or `@path` to read a script from disk) and
+    `user_data_file` (a path) — a custom bootstrap payload appended after
+    spored installs. `user_data_file` takes precedence when both are set,
+    matching spawn CLI's own behavior. Previously there was no way to express
+    this at all.
+  - `iam_role` (a role name to create/reuse) and `iam_policy_file` (a path to
+    a custom IAM policy JSON document), composing with the existing
+    `iam_policy` shorthands into one instance profile — mirroring `spawn
+    launch --iam-role/--iam-policy/--iam-policy-file`.
+  - `tags` — extra EC2 tags on the launched instance, as either a YAML map
+    (`{env: prod}`) or a list of `key=value` strings (mirroring spawn's
+    repeatable `--tag` flag).
+  - `volume_size` — override the root EBS volume size in GiB.
+  - `spot_max_price` — cap the Spot bid price (accepts a quoted string or a
+    bare YAML number); previously only the `spot` bool was carried through,
+    with no price ceiling.
+  - `completion_file` — override the path spored watches for the on-complete
+    signal.
+
 ## [0.54.1] - 2026-08-29
 
 ### Security

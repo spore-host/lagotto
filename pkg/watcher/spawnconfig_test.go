@@ -2,6 +2,8 @@ package watcher
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -251,5 +253,301 @@ capacity_block: true
 	}
 	if !lc.CapacityBlock {
 		t.Error("CapacityBlock not forwarded")
+	}
+}
+
+// --- lagotto#129: the six previously-missing config-file keys ---
+
+// TestToLaunchConfig_VolumeSize verifies volume_size maps to
+// LaunchConfig.RootVolumeSizeGiB, and that an absent field leaves the
+// LaunchConfig field at its zero value (spawn's own default: use the AMI's
+// registered root size).
+func TestToLaunchConfig_VolumeSize(t *testing.T) {
+	t.Run("set", func(t *testing.T) {
+		cfg, err := ParseSpawnConfigYAML([]byte("volume_size: 200\n"))
+		if err != nil {
+			t.Fatalf("ParseSpawnConfigYAML: %v", err)
+		}
+		if cfg.VolumeSize != 200 {
+			t.Fatalf("VolumeSize = %d, want 200", cfg.VolumeSize)
+		}
+		lc := cfg.ToLaunchConfig()
+		if lc.RootVolumeSizeGiB != 200 {
+			t.Errorf("RootVolumeSizeGiB = %d, want 200", lc.RootVolumeSizeGiB)
+		}
+	})
+	t.Run("omitted stays zero", func(t *testing.T) {
+		cfg, err := ParseSpawnConfigYAML([]byte("instance_type: m7i.large\n"))
+		if err != nil {
+			t.Fatalf("ParseSpawnConfigYAML: %v", err)
+		}
+		lc := cfg.ToLaunchConfig()
+		if lc.RootVolumeSizeGiB != 0 {
+			t.Errorf("RootVolumeSizeGiB = %d, want 0 (spawn's own default)", lc.RootVolumeSizeGiB)
+		}
+	})
+}
+
+// TestToLaunchConfig_SpotMaxPrice verifies spot_max_price maps to
+// LaunchConfig.SpotMaxPrice, accepting both a quoted string and a bare YAML
+// number (the latter would otherwise decode to a JSON number, not a string).
+func TestToLaunchConfig_SpotMaxPrice(t *testing.T) {
+	t.Run("string form", func(t *testing.T) {
+		cfg, err := ParseSpawnConfigYAML([]byte(`spot_max_price: "0.50"` + "\n"))
+		if err != nil {
+			t.Fatalf("ParseSpawnConfigYAML: %v", err)
+		}
+		if got := cfg.ToLaunchConfig().SpotMaxPrice; got != "0.50" {
+			t.Errorf("SpotMaxPrice = %q, want %q", got, "0.50")
+		}
+	})
+	t.Run("bare number form", func(t *testing.T) {
+		cfg, err := ParseSpawnConfigYAML([]byte("spot_max_price: 0.5\n"))
+		if err != nil {
+			t.Fatalf("ParseSpawnConfigYAML: %v", err)
+		}
+		if got := cfg.ToLaunchConfig().SpotMaxPrice; got != "0.5" {
+			t.Errorf("SpotMaxPrice = %q, want %q", got, "0.5")
+		}
+	})
+	t.Run("omitted stays empty", func(t *testing.T) {
+		cfg, err := ParseSpawnConfigYAML([]byte("instance_type: m7i.large\n"))
+		if err != nil {
+			t.Fatalf("ParseSpawnConfigYAML: %v", err)
+		}
+		if got := cfg.ToLaunchConfig().SpotMaxPrice; got != "" {
+			t.Errorf("SpotMaxPrice = %q, want empty", got)
+		}
+	})
+}
+
+// TestToLaunchConfig_CompletionFile verifies completion_file maps to
+// LaunchConfig.CompletionFile, and is empty (spawn's own default,
+// /tmp/SPAWN_COMPLETE) when omitted.
+func TestToLaunchConfig_CompletionFile(t *testing.T) {
+	cfg, err := ParseSpawnConfigYAML([]byte("completion_file: /tmp/my-job-done\n"))
+	if err != nil {
+		t.Fatalf("ParseSpawnConfigYAML: %v", err)
+	}
+	if got := cfg.ToLaunchConfig().CompletionFile; got != "/tmp/my-job-done" {
+		t.Errorf("CompletionFile = %q, want /tmp/my-job-done", got)
+	}
+
+	empty, err := ParseSpawnConfigYAML([]byte("instance_type: m7i.large\n"))
+	if err != nil {
+		t.Fatalf("ParseSpawnConfigYAML: %v", err)
+	}
+	if got := empty.ToLaunchConfig().CompletionFile; got != "" {
+		t.Errorf("CompletionFile = %q, want empty (omitted case)", got)
+	}
+}
+
+// TestToLaunchConfig_Tags_Map verifies the tags field accepts a YAML map and
+// maps to LaunchConfig.Tags.
+func TestToLaunchConfig_Tags_Map(t *testing.T) {
+	cfg, err := ParseSpawnConfigYAML([]byte("tags:\n  env: prod\n  team: fieldwork\n"))
+	if err != nil {
+		t.Fatalf("ParseSpawnConfigYAML: %v", err)
+	}
+	lc := cfg.ToLaunchConfig()
+	if lc.Tags["env"] != "prod" || lc.Tags["team"] != "fieldwork" {
+		t.Errorf("Tags = %v, want env=prod team=fieldwork", lc.Tags)
+	}
+}
+
+// TestToLaunchConfig_Tags_KVList verifies the tags field also accepts a list of
+// "key=value" strings, mirroring spawn's repeatable --tag flag shape.
+func TestToLaunchConfig_Tags_KVList(t *testing.T) {
+	cfg, err := ParseSpawnConfigYAML([]byte("tags:\n  - env=prod\n  - team=fieldwork\n"))
+	if err != nil {
+		t.Fatalf("ParseSpawnConfigYAML: %v", err)
+	}
+	lc := cfg.ToLaunchConfig()
+	if lc.Tags["env"] != "prod" || lc.Tags["team"] != "fieldwork" {
+		t.Errorf("Tags = %v, want env=prod team=fieldwork", lc.Tags)
+	}
+}
+
+// TestToLaunchConfig_Tags_Omitted verifies an absent tags field leaves
+// LaunchConfig.Tags at its zero value (nil), not an empty-but-non-nil map that
+// would change buildTags' behavior downstream.
+func TestToLaunchConfig_Tags_Omitted(t *testing.T) {
+	cfg, err := ParseSpawnConfigYAML([]byte("instance_type: m7i.large\n"))
+	if err != nil {
+		t.Fatalf("ParseSpawnConfigYAML: %v", err)
+	}
+	if got := cfg.ToLaunchConfig().Tags; got != nil {
+		t.Errorf("Tags = %v, want nil", got)
+	}
+}
+
+func TestToLaunchConfig_Tags_KVList_BadEntry(t *testing.T) {
+	if _, err := ParseSpawnConfigYAML([]byte("tags:\n  - noequalssign\n")); err == nil {
+		t.Error("expected an error for a tags list entry with no '='")
+	}
+}
+
+// TestResolveUserData_Inline verifies a plain user_data string is returned
+// verbatim.
+func TestResolveUserData_Inline(t *testing.T) {
+	cfg := &SpawnConfigFile{UserData: "#!/bin/bash\necho hi\n"}
+	got, err := cfg.ResolveUserData()
+	if err != nil {
+		t.Fatalf("ResolveUserData: %v", err)
+	}
+	if got != "#!/bin/bash\necho hi\n" {
+		t.Errorf("ResolveUserData = %q", got)
+	}
+}
+
+// TestResolveUserData_AtFile verifies a "@path" user_data value is read from
+// disk, mirroring spawn CLI's --user-data @file form.
+func TestResolveUserData_AtFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "script.sh")
+	if err := os.WriteFile(path, []byte("#!/bin/bash\necho from-file\n"), 0o600); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+	cfg := &SpawnConfigFile{UserData: "@" + path}
+	got, err := cfg.ResolveUserData()
+	if err != nil {
+		t.Fatalf("ResolveUserData: %v", err)
+	}
+	if got != "#!/bin/bash\necho from-file\n" {
+		t.Errorf("ResolveUserData = %q", got)
+	}
+}
+
+// TestResolveUserData_FilePrecedence verifies user_data_file takes precedence
+// over user_data when both are set, matching spawn CLI's own buildUserData
+// order (userDataFile checked first).
+func TestResolveUserData_FilePrecedence(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "winner.sh")
+	if err := os.WriteFile(path, []byte("winner\n"), 0o600); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+	cfg := &SpawnConfigFile{
+		UserData:     "loser",
+		UserDataFile: path,
+	}
+	got, err := cfg.ResolveUserData()
+	if err != nil {
+		t.Fatalf("ResolveUserData: %v", err)
+	}
+	if got != "winner\n" {
+		t.Errorf("ResolveUserData = %q, want the user_data_file content (%q takes precedence)", got, "user_data_file")
+	}
+}
+
+// TestResolveUserData_Omitted verifies no user_data/user_data_file set
+// resolves to an empty string with no error.
+func TestResolveUserData_Omitted(t *testing.T) {
+	cfg := &SpawnConfigFile{}
+	got, err := cfg.ResolveUserData()
+	if err != nil {
+		t.Fatalf("ResolveUserData: %v", err)
+	}
+	if got != "" {
+		t.Errorf("ResolveUserData = %q, want empty", got)
+	}
+}
+
+// TestResolveUserData_MissingFile verifies a nonexistent user_data_file path
+// surfaces as an error rather than silently launching with no bootstrap
+// payload.
+func TestResolveUserData_MissingFile(t *testing.T) {
+	cfg := &SpawnConfigFile{UserDataFile: "/nonexistent/path/does-not-exist.sh"}
+	if _, err := cfg.ResolveUserData(); err == nil {
+		t.Error("expected an error for a missing user_data_file")
+	}
+}
+
+// TestSpawnConfigFile_IAMRoleAndPolicyFile verifies iam_role and
+// iam_policy_file parse into their new fields (not into the existing
+// IAMPolicies shorthand list).
+func TestSpawnConfigFile_IAMRoleAndPolicyFile(t *testing.T) {
+	cfg, err := ParseSpawnConfigYAML([]byte(`
+iam_role: my-custom-role
+iam_policy_file: /path/to/policy.json
+`))
+	if err != nil {
+		t.Fatalf("ParseSpawnConfigYAML: %v", err)
+	}
+	if cfg.IAMRole != "my-custom-role" {
+		t.Errorf("IAMRole = %q", cfg.IAMRole)
+	}
+	if cfg.IAMPolicyFile != "/path/to/policy.json" {
+		t.Errorf("IAMPolicyFile = %q", cfg.IAMPolicyFile)
+	}
+	// Neither is a LaunchConfig field directly — like IAMPolicies, the spawner
+	// composes them into an IAMRoleConfig via buildIAMProfile, not ToLaunchConfig.
+}
+
+// TestFullExampleConfig_AllSixNewFields exercises all six #129 fields together
+// from one YAML document, to catch any interaction/parsing issue not visible
+// from isolated field tests (e.g. normalizeKey collisions, ordering).
+func TestFullExampleConfig_AllSixNewFields(t *testing.T) {
+	yaml := []byte(`
+instance_type: g5.12xlarge
+region: us-west-2
+ttl: 48h
+command: "bash /tmp/run.sh"
+user_data: |
+  #!/bin/bash
+  echo "custom bootstrap"
+iam_role: fieldwork-worker
+iam_policy_file: policies/fieldwork.json
+tags:
+  project: fieldwork
+  owner: buckai
+volume_size: 500
+spot_max_price: "0.75"
+completion_file: /tmp/FIELDWORK_DONE
+`)
+	cfg, err := ParseSpawnConfigYAML(yaml)
+	if err != nil {
+		t.Fatalf("ParseSpawnConfigYAML: %v", err)
+	}
+
+	if cfg.UserData == "" {
+		t.Error("UserData not parsed")
+	}
+	if cfg.IAMRole != "fieldwork-worker" {
+		t.Errorf("IAMRole = %q", cfg.IAMRole)
+	}
+	if cfg.IAMPolicyFile != "policies/fieldwork.json" {
+		t.Errorf("IAMPolicyFile = %q", cfg.IAMPolicyFile)
+	}
+	if cfg.VolumeSize != 500 {
+		t.Errorf("VolumeSize = %d", cfg.VolumeSize)
+	}
+	if cfg.SpotMaxPrice != "0.75" {
+		t.Errorf("SpotMaxPrice = %q", cfg.SpotMaxPrice)
+	}
+	if cfg.CompletionFile != "/tmp/FIELDWORK_DONE" {
+		t.Errorf("CompletionFile = %q", cfg.CompletionFile)
+	}
+
+	lc := cfg.ToLaunchConfig()
+	if lc.RootVolumeSizeGiB != 500 {
+		t.Errorf("RootVolumeSizeGiB = %d", lc.RootVolumeSizeGiB)
+	}
+	if lc.SpotMaxPrice != "0.75" {
+		t.Errorf("SpotMaxPrice = %q", lc.SpotMaxPrice)
+	}
+	if lc.CompletionFile != "/tmp/FIELDWORK_DONE" {
+		t.Errorf("CompletionFile = %q", lc.CompletionFile)
+	}
+	if lc.Tags["project"] != "fieldwork" || lc.Tags["owner"] != "buckai" {
+		t.Errorf("Tags = %v", lc.Tags)
+	}
+
+	userData, err := cfg.ResolveUserData()
+	if err != nil {
+		t.Fatalf("ResolveUserData: %v", err)
+	}
+	if userData == "" {
+		t.Error("ResolveUserData returned empty for a set user_data field")
 	}
 }
