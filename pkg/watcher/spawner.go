@@ -145,19 +145,24 @@ func (s *Spawner) Spawn(ctx context.Context, w *Watch, m *MatchResult) error {
 		cfg.Tags[FleetTagKey] = w.WatchID
 	}
 
-	// Build a custom IAM instance profile from the config's iam_policy shorthands
-	// (e.g. "s3:ReadWrite") before launching, mirroring `spawn launch
-	// --iam-policy`. When none are given, Provision sets up the default spored
-	// profile itself, so we leave IamInstanceProfile empty.
-	if len(file.IAMPolicies) > 0 {
-		profile, err := s.client.CreateOrGetInstanceProfile(ctx, spawnaws.IAMRoleConfig{
-			Policies: file.IAMPolicies,
-		})
-		if err != nil {
-			m.ActionTaken = "spawn_failed"
-			return fmt.Errorf("set up IAM instance profile: %w", err)
-		}
+	// Build a custom IAM instance profile from the config's iam_role/iam_policy/
+	// iam_policy_file settings before launching, mirroring `spawn launch
+	// --iam-role/--iam-policy/--iam-policy-file` (#129). When none are given,
+	// Provision sets up the default spored profile itself, so we leave
+	// IamInstanceProfile empty.
+	if profile, err := s.buildIAMProfile(ctx, &file); err != nil {
+		m.ActionTaken = "spawn_failed"
+		return err
+	} else if profile != "" {
 		cfg.IamInstanceProfile = profile
+	}
+
+	// Resolve user_data / user_data_file (#129) once, up front, so a bad path
+	// fails before any launch attempt rather than deep inside the AZ retry loop.
+	customUserData, err := file.ResolveUserData()
+	if err != nil {
+		m.ActionTaken = "spawn_failed"
+		return fmt.Errorf("resolve user data: %w", err)
 	}
 
 	// Try each candidate AZ in preference order, falling through to the next on a
@@ -171,7 +176,7 @@ func (s *Spawner) Spawn(ctx context.Context, w *Watch, m *MatchResult) error {
 		attempts = []string{m.AvailabilityZone} // may be "" → let EC2 choose the AZ
 	}
 
-	instanceID, az, err := s.launchAcrossAZs(ctx, cfg, attempts)
+	instanceID, az, err := s.launchAcrossAZs(ctx, cfg, attempts, customUserData)
 	if err != nil {
 		m.ActionTaken = "spawn_failed"
 		return err
@@ -180,6 +185,33 @@ func (s *Spawner) Spawn(ctx context.Context, w *Watch, m *MatchResult) error {
 	m.AvailabilityZone = az
 	m.ActionTaken = "spawned"
 	return nil
+}
+
+// buildIAMProfile creates a custom IAM instance profile from a spawn config's
+// iam_role / iam_policy / iam_policy_file settings (#129), mirroring `spawn
+// launch --iam-role/--iam-policy/--iam-policy-file`. Returns "" (no error) when
+// none of the three are set, so callers leave LaunchConfig.IamInstanceProfile
+// empty and let launcher.Provision set up the default spored profile itself —
+// the same behavior as the original iam_policy-only path.
+func (s *Spawner) buildIAMProfile(ctx context.Context, file *SpawnConfigFile) (string, error) {
+	if file.IAMRole == "" && len(file.IAMPolicies) == 0 && file.IAMPolicyFile == "" {
+		return "", nil
+	}
+	if s.client == nil {
+		// Unit tests exercise buildSnipeConfig/LaunchScheduled with a fake provision
+		// and no real AWS client; skip IAM setup exactly as the pre-#129 iam_policy
+		// path already did (see buildSnipeConfig's own s.client != nil guard).
+		return "", nil
+	}
+	profile, err := s.client.CreateOrGetInstanceProfile(ctx, spawnaws.IAMRoleConfig{
+		RoleName:   file.IAMRole,
+		Policies:   file.IAMPolicies,
+		PolicyFile: file.IAMPolicyFile,
+	})
+	if err != nil {
+		return "", fmt.Errorf("set up IAM instance profile: %w", err)
+	}
+	return profile, nil
 }
 
 // FleetTagKey is the EC2 tag stamped on every worker launched for a goal-driven
@@ -223,7 +255,14 @@ func (s *Spawner) countRunningFleet(ctx context.Context, w *Watch) (int, error) 
 // (bad AMI/IAM/quota) stops immediately; retrying other AZs can't help. Returns
 // the launched instance id and the AZ it landed in. Shared by the watch-match
 // path (Spawn) and the scheduled-launch path (LaunchScheduled, #49).
-func (s *Spawner) launchAcrossAZs(ctx context.Context, cfg spawnaws.LaunchConfig, attempts []string) (instanceID, az string, err error) {
+//
+// customUserData (#129) is the config's resolved user_data/user_data_file
+// payload, if any; it's passed through as launcher.Options.CustomUserData so
+// launcher.Provision still builds and installs the spored bootstrap (TTL/
+// idle/on-complete enforcement) and appends the user's script after it —
+// setting cfg.UserData directly here would skip Provision's bootstrap-building
+// step entirely (it only builds one when config.UserData is empty).
+func (s *Spawner) launchAcrossAZs(ctx context.Context, cfg spawnaws.LaunchConfig, attempts []string, customUserData string) (instanceID, az string, err error) {
 	if len(attempts) == 0 {
 		attempts = []string{""} // let EC2 choose the AZ
 	}
@@ -236,6 +275,7 @@ func (s *Spawner) launchAcrossAZs(ctx context.Context, cfg spawnaws.LaunchConfig
 		cfg.AvailabilityZone = a
 		result, perr := provision(ctx, s.client, cfg, launcher.Options{
 			// Keyless: the poller Lambda has no SSH key. SSM-only launch.
+			CustomUserData: customUserData,
 		})
 		if perr == nil {
 			return result.InstanceID, a, nil
@@ -268,12 +308,14 @@ func (s *Spawner) LaunchScheduled(ctx context.Context, sl *ScheduledLaunch) (str
 	if sl.Region != "" {
 		cfg.Region = sl.Region
 	}
-	if len(file.IAMPolicies) > 0 {
-		profile, err := s.client.CreateOrGetInstanceProfile(ctx, spawnaws.IAMRoleConfig{Policies: file.IAMPolicies})
-		if err != nil {
-			return "", fmt.Errorf("set up IAM instance profile: %w", err)
-		}
+	if profile, err := s.buildIAMProfile(ctx, &file); err != nil {
+		return "", err
+	} else if profile != "" {
 		cfg.IamInstanceProfile = profile
+	}
+	customUserData, err := file.ResolveUserData()
+	if err != nil {
+		return "", fmt.Errorf("resolve user data: %w", err)
 	}
 
 	// Overlap policy (#49): if a live instance with this launch's Name tag already
@@ -304,7 +346,7 @@ func (s *Spawner) LaunchScheduled(ctx context.Context, sl *ScheduledLaunch) (str
 	if sl.AvailabilityZone != "" {
 		attempts = []string{sl.AvailabilityZone}
 	}
-	instanceID, _, err := s.launchAcrossAZs(ctx, cfg, attempts)
+	instanceID, _, err := s.launchAcrossAZs(ctx, cfg, attempts, customUserData)
 	return instanceID, err
 }
 

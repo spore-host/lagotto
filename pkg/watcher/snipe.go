@@ -123,11 +123,11 @@ func (s *Spawner) Snipe(ctx context.Context, target SnipeTarget, opts SnipeOptio
 		if strings.TrimSpace(t.Region) == "" {
 			return nil, fmt.Errorf("snipe: target Region is required")
 		}
-		cfg, err := s.buildSnipeConfig(ctx, t)
+		cfg, customUserData, err := s.buildSnipeConfig(ctx, t)
 		if err != nil {
 			return nil, err
 		}
-		built = append(built, builtTarget{target: t, cfg: cfg})
+		built = append(built, builtTarget{target: t, cfg: cfg, customUserData: customUserData})
 	}
 
 	var lastErr error
@@ -146,7 +146,7 @@ func (s *Spawner) Snipe(ctx context.Context, target SnipeTarget, opts SnipeOptio
 				return nil, err
 			}
 
-			instanceID, az, err := s.launchAcrossAZs(ctx, bt.cfg, bt.target.AZs)
+			instanceID, az, err := s.launchAcrossAZs(ctx, bt.cfg, bt.target.AZs, bt.customUserData)
 			if err == nil {
 				return &MatchResult{
 					Region:           bt.target.Region,
@@ -187,17 +187,20 @@ func (s *Spawner) Snipe(ctx context.Context, target SnipeTarget, opts SnipeOptio
 	}
 }
 
-// builtTarget pairs a SnipeTarget with its resolved launch config.
+// builtTarget pairs a SnipeTarget with its resolved launch config and any
+// resolved user_data/user_data_file payload (#129).
 type builtTarget struct {
-	target SnipeTarget
-	cfg    spawnaws.LaunchConfig
+	target         SnipeTarget
+	cfg            spawnaws.LaunchConfig
+	customUserData string
 }
 
 // buildSnipeConfig resolves a SnipeTarget into a launch config: guarantee a TTL
-// (#38 — no unbounded instance can escape), pin type/region/spot, and provision
-// the IAM instance profile from iam_policy shorthands (mirroring the watch-match
-// path). AZ is set per-attempt in the sweep.
-func (s *Spawner) buildSnipeConfig(ctx context.Context, target SnipeTarget) (spawnaws.LaunchConfig, error) {
+// (#38 — no unbounded instance can escape), pin type/region/spot, provision the
+// IAM instance profile from iam_role/iam_policy/iam_policy_file (mirroring the
+// watch-match path), and resolve user_data/user_data_file (#129). AZ is set
+// per-attempt in the sweep.
+func (s *Spawner) buildSnipeConfig(ctx context.Context, target SnipeTarget) (spawnaws.LaunchConfig, string, error) {
 	cfg := target.LaunchConfig.ToLaunchConfig()
 	if strings.TrimSpace(cfg.TTL) == "" {
 		cfg.TTL = DefaultInstanceTTL
@@ -206,19 +209,23 @@ func (s *Spawner) buildSnipeConfig(ctx context.Context, target SnipeTarget) (spa
 	cfg.InstanceType = target.InstanceType
 	cfg.Spot = target.Spot
 
-	// When no iam_policy shorthands are given, Provision sets up the default spored
-	// profile itself, so we leave IamInstanceProfile empty. Skipped when there's no
-	// spawn client (unit tests inject a fake provision and no client).
-	if len(target.LaunchConfig.IAMPolicies) > 0 && s.client != nil {
-		profile, err := s.client.CreateOrGetInstanceProfile(ctx, spawnaws.IAMRoleConfig{
-			Policies: target.LaunchConfig.IAMPolicies,
-		})
-		if err != nil {
-			return spawnaws.LaunchConfig{}, fmt.Errorf("snipe: set up IAM instance profile: %w", err)
-		}
+	// When none of iam_role/iam_policy/iam_policy_file are given, Provision sets
+	// up the default spored profile itself, so we leave IamInstanceProfile empty.
+	// buildIAMProfile itself skips AWS calls when there's no spawn client (unit
+	// tests inject a fake provision and no client).
+	profile, err := s.buildIAMProfile(ctx, &target.LaunchConfig)
+	if err != nil {
+		return spawnaws.LaunchConfig{}, "", fmt.Errorf("snipe: %w", err)
+	}
+	if profile != "" {
 		cfg.IamInstanceProfile = profile
 	}
-	return cfg, nil
+
+	customUserData, err := target.LaunchConfig.ResolveUserData()
+	if err != nil {
+		return spawnaws.LaunchConfig{}, "", fmt.Errorf("snipe: resolve user data: %w", err)
+	}
+	return cfg, customUserData, nil
 }
 
 // Snipe is the package-level convenience: it constructs a Spawner from ambient

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -113,6 +115,78 @@ type SpawnConfigFile struct {
 	// (JSON keys are lowercase-no-separator because normalizeKey strips _/-.)
 	ReservationID string `json:"reservationid"`
 	CapacityBlock bool   `json:"capacityblock"`
+
+	// Custom user-data (#129): the entire bootstrap payload, mirroring spawn's
+	// --user-data (inline, or "@path") / --user-data-file pair. UserDataFile takes
+	// precedence when both are set (matching spawn CLI's own userDataFile-then-
+	// userData order in buildUserData); the resolved text becomes
+	// LaunchConfig.UserData verbatim, so ToLaunchConfig alone can't produce it —
+	// see ResolveUserData, which the config loader must call once at load time.
+	UserData     string `json:"userdata"`
+	UserDataFile string `json:"userdatafile"`
+
+	// IAM role/policy passthrough (#129): a role name and/or a path to a scoped
+	// JSON policy document, alongside the existing IAMPolicies shorthands. All
+	// three compose into one spawnaws.IAMRoleConfig, matching `spawn launch
+	// --iam-role/--iam-policy/--iam-policy-file`.
+	IAMRole       string `json:"iamrole"`
+	IAMPolicyFile string `json:"iampolicyfile"`
+
+	// Tags (#129): extra EC2 tags applied to the instance (and its created
+	// volumes), on top of spawn's own spawn:* lifecycle tags. Accepts either a
+	// YAML map or a list of "key=value" strings (mirroring spawn's repeatable
+	// --tag key=value flag) — see stringOrMapTags.UnmarshalJSON.
+	Tags stringOrMapTags `json:"tags"`
+
+	// VolumeSize (#129) overrides the root EBS volume size in GiB; 0 = spawn's
+	// own default (the AMI's registered root size). Maps to
+	// LaunchConfig.RootVolumeSizeGiB.
+	VolumeSize int32 `json:"volumesize"`
+
+	// SpotMaxPrice (#129) caps the Spot bid price in $/hr (e.g. "0.50" or 0.50);
+	// empty means no cap (spawn's on-demand-price ceiling default). Accepts a YAML
+	// string or a bare number — LaunchConfig.SpotMaxPrice itself is a string
+	// (spawn's --spot-max-price flag is a StringVar), and an unquoted YAML number
+	// like `0.50` decodes to a JSON number, not a string, so a plain string field
+	// would reject it; flexSpotPrice re-stringifies either shape.
+	SpotMaxPrice flexSpotPrice `json:"spotmaxprice"`
+
+	// CompletionFile (#129) overrides the path spored watches for the
+	// on-complete signal; empty = spawn's own default (/tmp/SPAWN_COMPLETE).
+	CompletionFile string `json:"completionfile"`
+}
+
+// ResolveUserData returns the effective inline user-data payload for this
+// config, mirroring the exact precedence spawn's own CLI uses in
+// buildUserData (cmd/launch_config.go): UserDataFile, if set, wins outright
+// (spawn's CLI never errors when both are set — it just silently prefers the
+// file — so lagotto matches that rather than inventing a stricter rule);
+// otherwise UserData is used, and a leading "@" means "read this path"
+// (matching --user-data's own @file form). Paths are resolved relative to the
+// process's current working directory — the same convention spawn's CLI
+// applies to --user-data-file/@path, and the one lagotto's own --spawn-config
+// flag already uses; there is no existing "relative to the config file"
+// convention in this repo to follow instead.
+func (s *SpawnConfigFile) ResolveUserData() (string, error) {
+	if s.UserDataFile != "" {
+		data, err := os.ReadFile(s.UserDataFile)
+		if err != nil {
+			return "", fmt.Errorf("read user_data_file %q: %w", s.UserDataFile, err)
+		}
+		return string(data), nil
+	}
+	if s.UserData != "" {
+		if strings.HasPrefix(s.UserData, "@") {
+			path := s.UserData[1:]
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return "", fmt.Errorf("read user_data %q: %w", s.UserData, err)
+			}
+			return string(data), nil
+		}
+		return s.UserData, nil
+	}
+	return "", nil
 }
 
 // stringList accepts either a scalar string ("s3:ReadWrite") or a sequence
@@ -144,6 +218,63 @@ func (s *stringList) UnmarshalJSON(data []byte) error {
 		}
 	}
 	*s = out
+	return nil
+}
+
+// stringOrMapTags accepts either a YAML/JSON map ({env: prod, team: fieldwork})
+// or a list of "key=value" strings (mirroring spawn's repeatable --tag
+// key=value flag; see cmd/utils.go parseKVTags), for the config's tags field
+// (#129). A map reads more naturally in YAML than a flag-shaped list, but the
+// list form is supported too so a config can be built mechanically from
+// spawn's own --tag arguments without reshaping them.
+type stringOrMapTags map[string]string
+
+func (s *stringOrMapTags) UnmarshalJSON(data []byte) error {
+	// Try a map first — the natural YAML shape for tags.
+	var m map[string]string
+	if err := json.Unmarshal(data, &m); err == nil {
+		*s = m
+		return nil
+	}
+	// Fall back to a list of "key=value" strings, matching --tag's own shape.
+	var list []string
+	if err := json.Unmarshal(data, &list); err != nil {
+		return fmt.Errorf("tags must be a map or a list of key=value strings: %w", err)
+	}
+	out := make(map[string]string, len(list))
+	for _, kv := range list {
+		i := strings.IndexByte(kv, '=')
+		if i <= 0 {
+			return fmt.Errorf("invalid tag %q: expected key=value", kv)
+		}
+		key := strings.TrimSpace(kv[:i])
+		if key == "" {
+			return fmt.Errorf("invalid tag %q: empty key", kv)
+		}
+		out[key] = kv[i+1:]
+	}
+	*s = out
+	return nil
+}
+
+// flexSpotPrice holds spot_max_price as a string, accepting either a quoted
+// YAML string ("0.50") or a bare YAML number (0.50) — the latter decodes to a
+// JSON number, which a plain string field can't unmarshal (#129).
+// LaunchConfig.SpotMaxPrice is itself a string (spawn's --spot-max-price flag
+// is a StringVar), so this re-stringifies a numeric input to match.
+type flexSpotPrice string
+
+func (p *flexSpotPrice) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		*p = flexSpotPrice(s)
+		return nil
+	}
+	var f float64
+	if err := json.Unmarshal(data, &f); err != nil {
+		return fmt.Errorf("spot_max_price must be a string or a number: %w", err)
+	}
+	*p = flexSpotPrice(strconv.FormatFloat(f, 'f', -1, 64))
 	return nil
 }
 
@@ -220,5 +351,16 @@ func (s *SpawnConfigFile) ToLaunchConfig() spawnaws.LaunchConfig {
 		// Capacity Reservation / Capacity Block passthrough (#49, spawn#216).
 		ReservationID: s.ReservationID,
 		CapacityBlock: s.CapacityBlock,
+
+		// #129 straightforward passthroughs. UserData and the IAM role/policy
+		// fields are deliberately NOT set here — like IAMPolicies above, they
+		// require extra work (file I/O / instance-profile creation) that the
+		// spawner performs separately after calling ToLaunchConfig (see
+		// SpawnConfigFile.ResolveUserData and Spawner.buildIAMProfile in
+		// spawner.go).
+		Tags:              map[string]string(s.Tags),
+		RootVolumeSizeGiB: s.VolumeSize,
+		SpotMaxPrice:      string(s.SpotMaxPrice),
+		CompletionFile:    s.CompletionFile,
 	}
 }
