@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.55.0] - 2026-09-04
+
 ### Added
 - Six previously-missing `--spawn-config` YAML keys, closing the gap between
   what `lagotto watch --action spawn` / `lagotto launch` accept and what
@@ -29,6 +31,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     with no price ceiling.
   - `completion_file` — override the path spored watches for the on-complete
     signal.
+
+### Security
+- Bumped `golang.org/x/crypto` v0.53.0 → v0.55.0 and `google.golang.org/grpc`
+  v1.82.1 → v1.83.1 (both indirect, root module + `lambda/capacity-poller`'s
+  own nested module), fixing CVE-2026-56854 (CRITICAL) and CVE-2026-84304
+  (HIGH) per Trivy — Dependabot's own bump landed one patch version short of
+  the versions that actually fix these.
+
+### Changed
+- Dependency maintenance: 18 Go module updates across the root module and
+  `lambda/capacity-poller`'s nested module (#128). No API or behavior change.
 
 ## [0.54.1] - 2026-08-29
 
@@ -702,7 +715,8 @@ Initial tagged release from the standalone `spore-host/lagotto` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/lagotto/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.54.1...HEAD
+[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.55.0...HEAD
+[0.55.0]: https://github.com/spore-host/lagotto/compare/v0.54.1...v0.55.0
 [0.54.1]: https://github.com/spore-host/lagotto/compare/v0.54.0...v0.54.1
 [0.54.0]: https://github.com/spore-host/lagotto/compare/v0.53.2...v0.54.0
 [0.53.2]: https://github.com/spore-host/lagotto/compare/v0.53.1...v0.53.2
