@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.55.2] - 2026-09-09
+
 ### Security
 - Bumped `google.golang.org/grpc` v1.83.1 → v1.83.2 (indirect, root module +
   `lambda/capacity-poller`), fixing CVE-2026-84445 (HIGH) — a gRPC-Go xDS-server
@@ -734,7 +736,8 @@ Initial tagged release from the standalone `spore-host/lagotto` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/lagotto/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.55.1...HEAD
+[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.55.2...HEAD
+[0.55.2]: https://github.com/spore-host/lagotto/compare/v0.55.1...v0.55.2
 [0.55.1]: https://github.com/spore-host/lagotto/compare/v0.55.0...v0.55.1
 [0.55.0]: https://github.com/spore-host/lagotto/compare/v0.54.1...v0.55.0
 [0.54.1]: https://github.com/spore-host/lagotto/compare/v0.54.0...v0.54.1
