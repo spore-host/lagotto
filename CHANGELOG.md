@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Adapted the managed-table safety tests to the Substrate emulator bump
+  (v0.107.0 → v0.109.0, in the Dependabot minor-and-patch group). Substrate now
+  emulates DynamoDB `ListTagsOfResource`, so `DeleteManagedTables`' tag guard can
+  finally confirm the `lagotto:managed=cli` tag it always relied on. Production
+  behavior is unchanged; the "never delete a table whose managed tag can't be
+  confirmed" invariant is now exercised with a table that genuinely lacks the tag
+  (plus a new positive-path test that a tagged, CLI-owned table is deleted).
+- Tidied `lambda/capacity-poller/go.sum` so its Substrate checksum tracks the
+  root module's bump (recurring nested-module drift, lagotto#43).
+
 ## [0.55.1] - 2026-09-05
 
 ## [0.55.0] - 2026-09-04
