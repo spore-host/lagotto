@@ -167,9 +167,43 @@ func ClassifyFailure(err error) FailureKind {
 		return FailureTerminal
 	}
 
+	// Raw-message capacity fallback (lagotto#140): a capacity failure that reached
+	// us WITHOUT a discoverable smithy.APIError in its chain — flattened somewhere
+	// in wrapping (a `%v`/`%s`-formatted layer, an aggregation, a non-SDK relay) —
+	// must still be recognized, or the flagship "wait out scarce capacity" watch
+	// gives up early: it'd fall to FailureUnknown and hit the consecutive-failure
+	// cap instead of retrying to TTL. The message is a strong, specific signal
+	// ("insufficient ... capacity"); quota/terminal errors phrase themselves as
+	// "limit exceeded" and are already caught above, so this doesn't over-match.
+	if messageLooksLikeCapacity(err.Error()) {
+		return FailureCapacity
+	}
+
 	// Other non-AWS errors (network, client init): plausibly transient. Retry,
 	// but count toward the cap so a persistent blip eventually stops the watch.
 	return FailureUnknown
+}
+
+// messageLooksLikeCapacity reports whether an error message carries a strong
+// AWS "no capacity right now" signal, for the case the underlying
+// smithy.APIError was lost in wrapping (lagotto#140). Matched case-insensitively
+// against the specific capacity phrasings — not the generic word "capacity",
+// which appears in unrelated messages (e.g. EBS volume capacity).
+func messageLooksLikeCapacity(msg string) bool {
+	m := strings.ToLower(msg)
+	for _, s := range []string{
+		"insufficientinstancecapacity",
+		"insufficienthostcapacity",
+		"insufficientreservedinstancecapacity",
+		"insufficientcapacity",
+		"insufficient capacity",
+		"insufficient instance capacity",
+	} {
+		if strings.Contains(m, s) {
+			return true
+		}
+	}
+	return false
 }
 
 // IsQuotaExceeded reports whether err is specifically an exhausted account

@@ -72,6 +72,14 @@ func TestClassifyFailure(t *testing.T) {
 		// leaf, both bare and wrapped through the AZ-loop's fmt.Errorf chain.
 		{"post-launch sentinel", launchererr.ErrPostLaunch, failure.FailureTerminal},
 		{"post-launch wrapped", fmt.Errorf("launch instance (tried 1 AZ): %w", launchererr.ErrPostLaunch), failure.FailureTerminal},
+		// #140: a capacity failure that lost its smithy.APIError type in wrapping
+		// (a `%v`/`%s`-flattened layer) must still be FailureCapacity (uncapped),
+		// or a "wait out scarce capacity" watch gives up at the unknown-failure
+		// cap instead of retrying to TTL. A plain error carrying the phrase counts;
+		// the generic word "capacity" (e.g. EBS volume capacity) must NOT.
+		{"flattened capacity (non-smithy)", errors.New("provision: launch: failed to launch instance: InsufficientInstanceCapacity: Insufficient capacity."), failure.FailureCapacity},
+		{"flattened capacity phrase", errors.New("launch instance (tried 3 AZ(s)): insufficient capacity"), failure.FailureCapacity},
+		{"generic 'capacity' word not matched", errors.New("volume capacity 100 GiB exceeds limit"), failure.FailureUnknown},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
