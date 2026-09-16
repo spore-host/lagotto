@@ -191,9 +191,25 @@ The dedup key is the instance `Name` tag (`--name`, or the spawn config's `name`
 
 | Action | Description |
 |--------|-------------|
-| `notify` | Send email/webhook/SNS notification |
-| `spawn` | Auto-launch instance with config file |
-| `hold` | Record availability without acting |
+| `notify` | Signal only — send an email/webhook/SNS notification; nothing is launched or reserved |
+| `spawn` | Launch an instance from a config file (`RunInstances`) — this is the launchability test |
+| `hold` | Reserve capacity via an On-Demand Capacity Reservation (`CreateCapacityReservation`) — billable once held; stricter than launchability |
+
+The three actions differ in what they *do* when a match appears:
+
+- **`notify`** signals only — it never launches or reserves anything.
+- **`spawn`** launches an instance via `RunInstances`. Because the launch is the
+  actual capacity test, `--action spawn` is the way to check whether a type will
+  really launch right now.
+- **`hold`** creates a targeted On-Demand Capacity Reservation
+  (`CreateCapacityReservation`, 30-minute window) so the capacity is yours to
+  launch into. It **acts**: a successful reservation is **billable from the
+  moment it's held**, even before you launch. It is **not** a lightweight
+  "is capacity available?" probe — capacity-reservation admission is **stricter
+  than launchability**, so `hold` can return `InsufficientInstanceCapacity` and
+  retry indefinitely for a type that `--action spawn` (`RunInstances`) would
+  launch immediately. Use `spawn` to test launchability; use `hold` only when you
+  specifically want reserved capacity.
 
 ## Deployment
 
