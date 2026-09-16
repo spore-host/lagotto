@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`lagotto deploy` no longer fails immediately with a CloudFormation rollback.**
+  The stack creates IAM roles with explicit names
+  (`lagotto-capacity-poller-role`, `lagotto-capacity-poller-scheduler-invoke`),
+  which CloudFormation accepts only under `CAPABILITY_NAMED_IAM` — but `deploy`
+  passed only `CAPABILITY_IAM`, so every `CreateStack` was refused
+  ("Requires capabilities: [CAPABILITY_NAMED_IAM]") and rolled back to
+  `ROLLBACK_COMPLETE`, blocking the hosted poller entirely (#143). `deploy` now
+  passes `CAPABILITY_NAMED_IAM`. A stack already stranded in `ROLLBACK_COMPLETE`
+  by the old bug is cleaned up automatically on the next `deploy` (it is deleted
+  and recreated), so re-running `lagotto deploy` is all that's needed.
+
 ## [0.57.0] - 2026-09-16
 
 ### Added

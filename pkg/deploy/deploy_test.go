@@ -1,10 +1,37 @@
 package deploy
 
 import (
+	"strings"
 	"testing"
 
 	cfntypes "github.com/aws/aws-sdk-go-v2/service/cloudformation/types"
+	cfn "github.com/spore-host/lagotto/deployment/cloudformation"
 )
+
+// TestDeployCapabilities_NamedIAM is the #143 regression: the embedded template
+// creates IAM roles with explicit RoleNames, which CloudFormation accepts only
+// under CAPABILITY_NAMED_IAM (CAPABILITY_IAM is not enough). If a named IAM
+// resource is present, the deploy capabilities MUST include NAMED_IAM — else
+// CreateStack rolls back with "Requires capabilities: [CAPABILITY_NAMED_IAM]".
+func TestDeployCapabilities_NamedIAM(t *testing.T) {
+	has := func(c cfntypes.Capability) bool {
+		for _, x := range deployCapabilities {
+			if x == c {
+				return true
+			}
+		}
+		return false
+	}
+	if !strings.Contains(cfn.StackTemplate, "RoleName:") {
+		t.Fatal("template no longer defines an explicit RoleName; if intentional, revisit whether NAMED_IAM is still required")
+	}
+	if !has(cfntypes.CapabilityCapabilityNamedIam) {
+		t.Error("deployCapabilities missing CAPABILITY_NAMED_IAM — named IAM roles roll back on CreateStack (#143)")
+	}
+	if !has(cfntypes.CapabilityCapabilityAutoExpand) {
+		t.Error("deployCapabilities missing CAPABILITY_AUTO_EXPAND — the AWS::Serverless transform needs it")
+	}
+}
 
 func TestLambdaArtifactURL(t *testing.T) {
 	want := "https://github.com/spore-host/lagotto/releases/download/v0.44.0/capacity-poller_lambda_linux_arm64.zip"
