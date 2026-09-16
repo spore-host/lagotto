@@ -194,7 +194,7 @@ func (s *Spawner) Spawn(ctx context.Context, w *Watch, m *MatchResult) error {
 // empty and let launcher.Provision set up the default spored profile itself —
 // the same behavior as the original iam_policy-only path.
 func (s *Spawner) buildIAMProfile(ctx context.Context, file *SpawnConfigFile) (string, error) {
-	if file.IAMRole == "" && len(file.IAMPolicies) == 0 && file.IAMPolicyFile == "" {
+	if file.IAMRole == "" && len(file.IAMPolicies) == 0 && file.IAMPolicyFile == "" && file.IAMPolicyDocument == "" {
 		return "", nil
 	}
 	if s.client == nil {
@@ -204,9 +204,14 @@ func (s *Spawner) buildIAMProfile(ctx context.Context, file *SpawnConfigFile) (s
 		return "", nil
 	}
 	profile, err := s.client.CreateOrGetInstanceProfile(ctx, spawnaws.IAMRoleConfig{
-		RoleName:   file.IAMRole,
-		Policies:   file.IAMPolicies,
-		PolicyFile: file.IAMPolicyFile,
+		RoleName: file.IAMRole,
+		Policies: file.IAMPolicies,
+		// Prefer the inline document a self-contained watch carries
+		// (IAMPolicyDocument), falling back to a file path for older watches
+		// still stored with iam_policy_file (lagotto#132). Both may be set; spawn
+		// composes them, so passing both is safe.
+		PolicyFile:       file.IAMPolicyFile,
+		InlinePolicyJSON: file.IAMPolicyDocument,
 	})
 	if err != nil {
 		return "", fmt.Errorf("set up IAM instance profile: %w", err)

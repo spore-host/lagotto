@@ -66,7 +66,7 @@ func init() {
 	watchCmd.Flags().StringVar(&watchAction, "action", "notify", "Action on match: notify, spawn, hold")
 	watchCmd.Flags().StringVar(&watchTTL, "ttl", "24h", "How long to keep watching (e.g., 24h, 7d)")
 	watchCmd.Flags().StringSliceVar(&watchNotify, "notify", nil, "Notification channels (e.g., email:user@example.com, webhook:https://...)")
-	watchCmd.Flags().StringVar(&watchSpawnConfig, "spawn-config", "", "YAML file with spawn LaunchConfig (required for --action spawn)")
+	watchCmd.Flags().StringVar(&watchSpawnConfig, "spawn-config", "", "spawn LaunchConfig YAML (required for --action spawn): a local path, an s3://bucket/key URI, or '-' for stdin. Any user_data_file / iam_policy_file it references is read now and stored inline, so a hosted poller can launch it with no access to this machine.")
 	watchCmd.Flags().StringVar(&watchSageMakerConfig, "sagemaker-config", "", "YAML/JSON file with the SageMaker job definition (required for --service sagemaker)")
 	watchCmd.Flags().StringVar(&watchService, "service", "ec2", "Capacity service: ec2, or sagemaker (submits your SageMaker job for ml.* types)")
 	watchCmd.Flags().StringVar(&watchProject, "project", "", "Project label for scoping a local 'poll --daemon --project' in a shared account (default: $LAGOTTO_PROJECT)")
@@ -116,7 +116,10 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		if watchSpawnConfig == "" {
 			return fmt.Errorf("--spawn-config is required when --action=spawn")
 		}
-		launchConfigJSON, err = loadEC2SpawnConfig(watchSpawnConfig)
+		read := watcher.NewConfigReader(func(ctx context.Context) (aws.Config, error) {
+			return awscfg.Load(ctx, "")
+		}, os.Stdin)
+		launchConfigJSON, err = loadEC2SpawnConfig(ctx, read, watchSpawnConfig)
 		if err != nil {
 			return fmt.Errorf("load spawn config: %w", err)
 		}
@@ -251,10 +254,10 @@ func runWatch(cmd *cobra.Command, args []string) error {
 // exactly the fields it will launch with. This is what fixes the "settings
 // silently dropped" gap (lagotto#19 issue #3): a key the struct doesn't know is
 // surfaced here at watch-creation rather than ignored at launch.
-func loadEC2SpawnConfig(path string) ([]byte, error) {
-	data, err := os.ReadFile(path)
+func loadEC2SpawnConfig(ctx context.Context, read watcher.ConfigReader, source string) ([]byte, error) {
+	data, err := read(ctx, source)
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", path, err)
+		return nil, fmt.Errorf("read %s: %w", source, err)
 	}
 	cfg, err := watcher.ParseSpawnConfigYAML(data)
 	if err != nil {
@@ -265,13 +268,19 @@ func loadEC2SpawnConfig(path string) ([]byte, error) {
 		// certainly a mis-keyed file (e.g. the user wrote `instancetype:` under a
 		// nested block). The instance type is overridden by the matched type at
 		// launch, so it's not strictly required — but flag the empty-shell case.
-		return nil, fmt.Errorf("spawn config %s has no recognized fields (check key names: instance_type, on_complete, pre_stop, command, …)", path)
+		return nil, fmt.Errorf("spawn config %s has no recognized fields (check key names: instance_type, on_complete, pre_stop, command, …)", source)
 	}
 	// Guarantee a TTL on the eventual launch (#38): default an empty one to 24h
 	// and reject a malformed one now, at watch-create, so the stored config can
 	// never produce an instance with no death clock.
 	if err := cfg.ValidateAndDefaultTTL(); err != nil {
 		return nil, err
+	}
+	// Resolve any user_data_file / iam_policy_file references to inline content
+	// now, on the creating machine, so the stored watch is self-contained and a
+	// hosted poller with no access to this filesystem can launch it (#132, #140).
+	if err := cfg.MakeSelfContained(ctx, read); err != nil {
+		return nil, fmt.Errorf("resolve spawn config references: %w", err)
 	}
 	jsonBytes, err := json.Marshal(cfg)
 	if err != nil {

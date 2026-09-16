@@ -1,9 +1,12 @@
 package watcher
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -549,5 +552,97 @@ completion_file: /tmp/FIELDWORK_DONE
 	}
 	if userData == "" {
 		t.Error("ResolveUserData returned empty for a set user_data field")
+	}
+}
+
+// stubReader serves canned content per reference, for exercising
+// MakeSelfContained without the filesystem or S3.
+func stubReader(files map[string]string) ConfigReader {
+	return func(_ context.Context, ref string) ([]byte, error) {
+		v, ok := files[ref]
+		if !ok {
+			return nil, fmt.Errorf("stubReader: no content for %q", ref)
+		}
+		return []byte(v), nil
+	}
+}
+
+// TestMakeSelfContained_ResolvesFilesInline is the #132/#140 core: a config with
+// user_data_file / iam_policy_file references is rewritten to carry that content
+// inline, with the path fields cleared, so a hosted poller needs no filesystem.
+func TestMakeSelfContained_ResolvesFilesInline(t *testing.T) {
+	cfg := &SpawnConfigFile{
+		InstanceType:  "g5.xlarge",
+		UserDataFile:  "s3://cfg-bucket/bootstrap.sh",
+		IAMPolicyFile: "policies/fieldwork.json",
+	}
+	read := stubReader(map[string]string{
+		"s3://cfg-bucket/bootstrap.sh": "#!/bin/bash\necho hi\n",
+		"policies/fieldwork.json":      `{"Version":"2012-10-17"}`,
+	})
+	if err := cfg.MakeSelfContained(context.Background(), read); err != nil {
+		t.Fatalf("MakeSelfContained: %v", err)
+	}
+	if cfg.UserData != "#!/bin/bash\necho hi\n" {
+		t.Errorf("UserData = %q, want inline bootstrap", cfg.UserData)
+	}
+	if cfg.UserDataFile != "" {
+		t.Errorf("UserDataFile = %q, want cleared", cfg.UserDataFile)
+	}
+	if cfg.IAMPolicyDocument != `{"Version":"2012-10-17"}` {
+		t.Errorf("IAMPolicyDocument = %q, want inline policy", cfg.IAMPolicyDocument)
+	}
+	if cfg.IAMPolicyFile != "" {
+		t.Errorf("IAMPolicyFile = %q, want cleared", cfg.IAMPolicyFile)
+	}
+
+	// The stored JSON must carry no path references.
+	b, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := string(b); strings.Contains(s, "s3://cfg-bucket") || strings.Contains(s, "policies/fieldwork.json") {
+		t.Errorf("stored JSON still references file paths: %s", s)
+	}
+}
+
+// TestMakeSelfContained_AtPathUserData resolves the "@path" inline-user-data form.
+func TestMakeSelfContained_AtPathUserData(t *testing.T) {
+	cfg := &SpawnConfigFile{InstanceType: "c7g.large", UserData: "@boot.sh"}
+	read := stubReader(map[string]string{"boot.sh": "echo from-at\n"})
+	if err := cfg.MakeSelfContained(context.Background(), read); err != nil {
+		t.Fatalf("MakeSelfContained: %v", err)
+	}
+	if cfg.UserData != "echo from-at\n" {
+		t.Errorf("UserData = %q, want resolved @path content", cfg.UserData)
+	}
+}
+
+// TestMakeSelfContained_FileWinsOverInline mirrors ResolveUserData's precedence:
+// when both user_data_file and user_data are set, the file wins.
+func TestMakeSelfContained_FileWinsOverInline(t *testing.T) {
+	cfg := &SpawnConfigFile{InstanceType: "c7g.large", UserData: "inline-loser", UserDataFile: "win.sh"}
+	read := stubReader(map[string]string{"win.sh": "file-winner\n"})
+	if err := cfg.MakeSelfContained(context.Background(), read); err != nil {
+		t.Fatalf("MakeSelfContained: %v", err)
+	}
+	if cfg.UserData != "file-winner\n" {
+		t.Errorf("UserData = %q, want file content", cfg.UserData)
+	}
+}
+
+// TestMakeSelfContained_Idempotent: a config already fully inline is unchanged,
+// and the reader is never called.
+func TestMakeSelfContained_Idempotent(t *testing.T) {
+	cfg := &SpawnConfigFile{InstanceType: "c7g.large", UserData: "plain", IAMPolicyDocument: `{"x":1}`}
+	read := func(_ context.Context, ref string) ([]byte, error) {
+		t.Fatalf("reader called for inline-only config: %q", ref)
+		return nil, nil
+	}
+	if err := cfg.MakeSelfContained(context.Background(), read); err != nil {
+		t.Fatalf("MakeSelfContained: %v", err)
+	}
+	if cfg.UserData != "plain" || cfg.IAMPolicyDocument != `{"x":1}` {
+		t.Errorf("inline config mutated: %+v", cfg)
 	}
 }

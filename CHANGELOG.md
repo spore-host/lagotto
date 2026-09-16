@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `lagotto watch --action spawn --spawn-config` (and `lagotto launch
+  --spawn-config`) now accept the config from a **local path, an
+  `s3://bucket/key` URI, or `-` (stdin)**, not just a local file. This lets a
+  watch be created from a config that lives in S3 or is piped in, so you don't
+  have to stage a local file first (#140).
+- Spawn configs are now made **self-contained at watch-creation**: any
+  `user_data_file` / `iam_policy_file` (`user_data: "@path"` too) it references
+  is read *now*, on the machine that has the files and credentials, and stored
+  inline in the watch. A hosted poller (from `lagotto deploy`) — which has no
+  access to the creating machine's filesystem — can then service an
+  `--action spawn` watch entirely from the stored config, so unattended
+  auto-spawn no longer requires a foreground daemon on the creating machine
+  (#132). The IAM policy is passed to spawn via its inline-policy path; user data
+  is stored as inline text. Older watches stored with a file path still launch as
+  before when the poller can see the file.
+
 ### Fixed
 - **A spawn watch that hits `InsufficientInstanceCapacity` now reliably keeps
   retrying to its TTL instead of giving up early** (#140). Capacity failures
