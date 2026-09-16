@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `lagotto watch` now accepts a **comma-separated list** of instance-type
+  sub-patterns (e.g. `"g6.8xlarge,g6.4xlarge,g6.2xlarge,g6.xlarge"`); a candidate
+  type matches if it matches ANY listed rung (OR semantics). Each sub-pattern may
+  itself be a wildcard (`p5.*`) or exact type. This is the natural "watch any of
+  these interchangeable sizes" request (#135).
+
 ### Documentation
 - Corrected the README Actions table for `hold` (#136). It previously read
   "Record availability without acting", which was doubly misleading: `hold`
@@ -20,6 +27,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   test.
 
 ### Fixed
+- A comma-separated instance-type pattern is no longer silently treated as one
+  literal (nonexistent) type that can never match. Previously such a watch was
+  accepted, went active, and polled forever with `match_count=0` while capacity
+  was in fact abundant — a silent, costly false negative. Comma-lists now match
+  per-rung (see Added), and if a pattern matches **no instance type your
+  region(s) offer**, the first poll prints a clear warning ("pattern %q matches
+  no known instance type — check for typos") instead of failing silently. The
+  warning does not stop the watch, so a not-yet-offered type isn't blocked (#135).
 - On a `hold` capacity failure, the poller now logs a clarifying note that a
   capacity reservation being refused does not mean the type can't be launched
   (it may still be launchable via `--action spawn`), so the log no longer reads
