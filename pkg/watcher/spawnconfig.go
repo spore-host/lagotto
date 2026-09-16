@@ -2,6 +2,7 @@ package watcher
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -132,6 +133,13 @@ type SpawnConfigFile struct {
 	IAMRole       string `json:"iamrole"`
 	IAMPolicyFile string `json:"iampolicyfile"`
 
+	// IAMPolicyDocument is the scoped IAM policy JSON held inline, the resolved
+	// form of IAMPolicyFile (or set directly, mirroring spawn's InlinePolicyJSON).
+	// MakeSelfContained reads IAMPolicyFile into this at watch-creation and clears
+	// the path, so a hosted poller with no access to the creator's filesystem can
+	// pass the policy via spawn's IAMRoleConfig.InlinePolicyJSON (lagotto#132).
+	IAMPolicyDocument string `json:"iampolicydocument"`
+
 	// Tags (#129): extra EC2 tags applied to the instance (and its created
 	// volumes), on top of spawn's own spawn:* lifecycle tags. Accepts either a
 	// YAML map or a list of "key=value" strings (mirroring spawn's repeatable
@@ -187,6 +195,50 @@ func (s *SpawnConfigFile) ResolveUserData() (string, error) {
 		return s.UserData, nil
 	}
 	return "", nil
+}
+
+// MakeSelfContained resolves every external file reference in the config to
+// inline content, using read to fetch each reference (a local path, an
+// s3://bucket/key URI, or "-" for stdin). It runs once at watch-creation, on
+// the machine that has the files and credentials, so the stored config carries
+// no path references and a hosted poller with no access to the creator's
+// filesystem can launch from it (lagotto#132, #140 part 1). It is idempotent: a
+// config that already has only inline content is left unchanged.
+//
+// Resolved:
+//   - user_data_file  (or user_data: "@path")  -> inline UserData
+//   - iam_policy_file                           -> inline IAMPolicyDocument
+//
+// The path fields are cleared so the stored JSON has no dangling references.
+// User-data precedence matches ResolveUserData: a user_data_file wins over an
+// inline user_data (spawn's own file-then-inline order).
+func (s *SpawnConfigFile) MakeSelfContained(ctx context.Context, read ConfigReader) error {
+	switch {
+	case s.UserDataFile != "":
+		data, err := read(ctx, s.UserDataFile)
+		if err != nil {
+			return fmt.Errorf("read user_data_file %q: %w", s.UserDataFile, err)
+		}
+		s.UserData = string(data)
+		s.UserDataFile = ""
+	case strings.HasPrefix(s.UserData, "@"):
+		ref := s.UserData[1:]
+		data, err := read(ctx, ref)
+		if err != nil {
+			return fmt.Errorf("read user_data %q: %w", s.UserData, err)
+		}
+		s.UserData = string(data)
+	}
+
+	if s.IAMPolicyFile != "" {
+		data, err := read(ctx, s.IAMPolicyFile)
+		if err != nil {
+			return fmt.Errorf("read iam_policy_file %q: %w", s.IAMPolicyFile, err)
+		}
+		s.IAMPolicyDocument = string(data)
+		s.IAMPolicyFile = ""
+	}
+	return nil
 }
 
 // stringList accepts either a scalar string ("s3:ReadWrite") or a sequence

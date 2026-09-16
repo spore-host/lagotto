@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -59,7 +60,7 @@ func init() {
 	f.StringVar(&launchAt, "at", "", "Fire once at this RFC3339 time (e.g. 2026-07-01T08:00:00Z)")
 	f.StringVar(&launchAfter, "after", "", "Fire once after this delay (e.g. 6h, 30m, 2d)")
 	f.StringVar(&launchCron, "cron", "", "Fire on this cron schedule (e.g. '0 9 ? * MON-FRI *')")
-	f.StringVar(&launchSpawnConfig, "spawn-config", "", "YAML file with the spawn LaunchConfig (required)")
+	f.StringVar(&launchSpawnConfig, "spawn-config", "", "spawn LaunchConfig YAML (required): a local path, an s3://bucket/key URI, or '-' for stdin. Referenced user_data_file / iam_policy_file are read now and stored inline.")
 	f.StringVar(&launchRegion, "region", "", "AWS region to launch in (default: from your AWS config)")
 	f.StringVar(&launchAZ, "az", "", "Availability zone (required to match a Capacity Block's AZ)")
 	f.StringVar(&launchStackName, "stack-name", "lagotto", "Deployed lagotto stack name (provides the poller target)")
@@ -97,8 +98,13 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Load + validate the spawn config (this applies the #38 TTL guarantee).
-	launchConfigJSON, err := loadEC2SpawnConfig(launchSpawnConfig)
+	// Load + validate the spawn config (this applies the #38 TTL guarantee) and
+	// resolve its file references to inline content, from a local path, an
+	// s3://bucket/key URI, or '-' for stdin (#132, #140).
+	read := watcher.NewConfigReader(func(ctx context.Context) (aws.Config, error) {
+		return awscfg.Load(ctx, launchRegion)
+	}, os.Stdin)
+	launchConfigJSON, err := loadEC2SpawnConfig(ctx, read, launchSpawnConfig)
 	if err != nil {
 		return fmt.Errorf("load spawn config: %w", err)
 	}
