@@ -680,6 +680,12 @@ func (p *Poller) pollGroup(ctx context.Context, regions []string, pattern string
 					if err := p.holder.Hold(ctx, w, bestMatch); err != nil {
 						failure = ClassifyFailure(err)
 						fmt.Fprintf(os.Stderr, "Warning: hold failed for %s (%s): %v\n", w.WatchID, failureLabel(failure), err)
+						if failure == FailureCapacity {
+							// Capacity-reservation admission is stricter than launchability:
+							// a hold can be refused for a type that RunInstances would launch.
+							// Don't let this read as "the type can't be launched" (#136).
+							fmt.Fprintf(os.Stderr, "  note: capacity reservation not admitted (stricter than launch; the type may still be launchable via --action spawn)\n")
+						}
 						bestMatch.ActionTaken = "hold_failed"
 					}
 				} else {

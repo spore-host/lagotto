@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+- Corrected the README Actions table for `hold` (#136). It previously read
+  "Record availability without acting", which was doubly misleading: `hold`
+  **does** act (it creates an On-Demand Capacity Reservation via
+  `CreateCapacityReservation`, billable from the moment it's held), and
+  capacity-reservation admission is **stricter than launchability** — so `hold`
+  can report `InsufficientInstanceCapacity` for a type that `--action spawn`
+  (`RunInstances`) would launch immediately. The table and new prose now
+  distinguish the three actions (`notify` = signal only, `hold` = reserve
+  capacity, `spawn` = launch) and point at `--action spawn` as the launchability
+  test.
+
+### Fixed
+- On a `hold` capacity failure, the poller now logs a clarifying note that a
+  capacity reservation being refused does not mean the type can't be launched
+  (it may still be launchable via `--action spawn`), so the log no longer reads
+  as a launchability failure (#136). Retry logic is unchanged.
+
 ## [0.55.2] - 2026-09-09
 
 ### Security
