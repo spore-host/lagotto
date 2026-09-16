@@ -40,10 +40,14 @@ var watchCmd = &cobra.Command{
 	Short: "Create a capacity watch for an instance type",
 	Long: `Watch for instance availability across regions and AZs.
 
-The pattern supports wildcards: "p5.*" matches all p5 sizes, "g5.xlarge" is exact.
-lagotto attempts to launch the requested instance and retries until it succeeds
-or the watch TTL expires — the launch itself is the capacity test (neither EC2
-nor SageMaker exposes a capacity API).
+The pattern supports wildcards ("p5.*" matches all p5 sizes), exact types
+("g5.xlarge"), and comma-separated lists ("g6.4xlarge,g6.2xlarge,g6.xlarge") that
+match ANY of the listed rungs. lagotto attempts to launch the requested instance
+and retries until it succeeds or the watch TTL expires — the launch itself is the
+capacity test (neither EC2 nor SageMaker exposes a capacity API).
+
+If the pattern matches no instance type your region(s) offer, the first poll
+prints a warning (a likely typo) but keeps watching in case the type appears.
 
 With --service sagemaker, lagotto submits your SageMaker job (--sagemaker-config)
 directly and retries it on CapacityError until SageMaker provisions it. SageMaker

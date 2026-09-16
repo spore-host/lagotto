@@ -41,20 +41,25 @@ func normalizeService(s Service) Service {
 }
 
 // ValidateWatchPattern checks that a pattern is well-formed for the given
-// service. SageMaker watches must target ml.* instance types; EC2 watches must
-// not.
+// service. A pattern may be a comma-separated list of sub-patterns (e.g.
+// "g6.4xlarge,g6.2xlarge"), each of which must satisfy the service rule:
+// SageMaker watches must target ml.* instance types; EC2 watches must not (#135).
 func ValidateWatchPattern(service Service, pattern string) error {
-	if pattern == "" {
+	subs := splitInstanceTypePatterns(pattern)
+	if len(subs) == 0 {
 		return fmt.Errorf("instance type pattern must not be empty")
 	}
-	switch normalizeService(service) {
-	case ServiceSageMaker:
-		if !strings.HasPrefix(pattern, "ml.") {
-			return fmt.Errorf("SageMaker pattern %q must start with \"ml.\" (e.g. ml.g5.2xlarge)", pattern)
-		}
-	case ServiceEC2:
-		if strings.HasPrefix(pattern, "ml.") {
-			return fmt.Errorf("EC2 pattern %q must not start with \"ml.\"; use --service sagemaker for SageMaker types", pattern)
+	svc := normalizeService(service)
+	for _, p := range subs {
+		switch svc {
+		case ServiceSageMaker:
+			if !strings.HasPrefix(p, "ml.") {
+				return fmt.Errorf("SageMaker pattern %q must start with \"ml.\" (e.g. ml.g5.2xlarge)", p)
+			}
+		case ServiceEC2:
+			if strings.HasPrefix(p, "ml.") {
+				return fmt.Errorf("EC2 pattern %q must not start with \"ml.\"; use --service sagemaker for SageMaker types", p)
+			}
 		}
 	}
 	return nil

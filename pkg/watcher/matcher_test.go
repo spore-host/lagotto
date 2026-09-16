@@ -1,7 +1,12 @@
 package watcher
 
 import (
+	"io"
+	"os"
+	"regexp"
+	"strings"
 	"testing"
+	"time"
 
 	truffleaws "github.com/spore-host/truffle/pkg/aws"
 )
@@ -320,6 +325,119 @@ func TestWildcardToRegex(t *testing.T) {
 		got := wildcardToRegex(tt.pattern)
 		if got != tt.want {
 			t.Errorf("wildcardToRegex(%q) = %q, want %q", tt.pattern, got, tt.want)
+		}
+	}
+}
+
+func TestPatternToRegex_SinglePatternUnchanged(t *testing.T) {
+	// A single (comma-free) pattern must convert exactly as wildcardToRegex did,
+	// so existing wildcard/exact behavior is preserved (#135).
+	for _, p := range []string{"p5.*", "g5.xlarge", "t3.micro", `^p5\..*$`} {
+		if got, want := patternToRegex(p), wildcardToRegex(p); got != want {
+			t.Errorf("patternToRegex(%q) = %q, want %q (single pattern must match wildcardToRegex)", p, got, want)
+		}
+	}
+}
+
+func TestPatternToRegex_CommaListMatchesAnyRung(t *testing.T) {
+	// The comma-list from the #135 repro should compile and match ANY listed
+	// rung, but not an unlisted one.
+	pattern := "g6.8xlarge,g6.4xlarge,g6.2xlarge,g6.xlarge"
+	re, err := regexp.Compile(patternToRegex(pattern))
+	if err != nil {
+		t.Fatalf("compile %q: %v", patternToRegex(pattern), err)
+	}
+	for _, typ := range []string{"g6.8xlarge", "g6.4xlarge", "g6.2xlarge", "g6.xlarge"} {
+		if !re.MatchString(typ) {
+			t.Errorf("comma-list %q should match rung %q", pattern, typ)
+		}
+	}
+	for _, typ := range []string{"g6.16xlarge", "g6.48xlarge", "g5.xlarge", "g6.8xlarge,g6.4xlarge"} {
+		if re.MatchString(typ) {
+			t.Errorf("comma-list %q should NOT match %q", pattern, typ)
+		}
+	}
+}
+
+func TestPatternToRegex_CommaListWithWildcardsAndSpaces(t *testing.T) {
+	// Sub-patterns may be wildcards, and surrounding spaces are trimmed.
+	pattern := " p5.* , g5.xlarge "
+	re, err := regexp.Compile(patternToRegex(pattern))
+	if err != nil {
+		t.Fatalf("compile %q: %v", patternToRegex(pattern), err)
+	}
+	for _, typ := range []string{"p5.48xlarge", "p5.4xlarge", "g5.xlarge"} {
+		if !re.MatchString(typ) {
+			t.Errorf("pattern %q should match %q", pattern, typ)
+		}
+	}
+	for _, typ := range []string{"g5.2xlarge", "p4d.24xlarge"} {
+		if re.MatchString(typ) {
+			t.Errorf("pattern %q should NOT match %q", pattern, typ)
+		}
+	}
+}
+
+func TestWarnUnmatchablePattern(t *testing.T) {
+	capture := func(w *Watch) string {
+		t.Helper()
+		old := os.Stderr
+		r, wr, err := os.Pipe()
+		if err != nil {
+			t.Fatalf("os.Pipe: %v", err)
+		}
+		os.Stderr = wr
+		warnUnmatchablePattern(w)
+		_ = wr.Close()
+		os.Stderr = old
+		out, _ := io.ReadAll(r)
+		return string(out)
+	}
+
+	// First poll (LastPolledAt zero) + unmatchable pattern -> warns, and the
+	// message carries the watch ID and a typo hint (#135).
+	w := &Watch{WatchID: "w-x", InstanceTypePattern: "g6.8xlarge,g6.4xlarge", Regions: []string{"us-east-1"}}
+	if got := capture(w); !strings.Contains(got, "matches no known instance type") ||
+		!strings.Contains(got, "w-x") || !strings.Contains(got, "check for typos") {
+		t.Errorf("first-poll warning missing/incomplete: %q", got)
+	}
+
+	// Already polled -> silent, so a persistently-empty pattern doesn't spam a
+	// warning every cycle.
+	w2 := &Watch{WatchID: "w-y", InstanceTypePattern: "typo", LastPolledAt: time.Now()}
+	if got := capture(w2); got != "" {
+		t.Errorf("expected no warning after first poll, got %q", got)
+	}
+
+	// Nil watch is a no-op.
+	if got := capture(nil); got != "" {
+		t.Errorf("nil watch should produce no warning, got %q", got)
+	}
+}
+
+func TestSplitInstanceTypePatterns(t *testing.T) {
+	tests := []struct {
+		in   string
+		want []string
+	}{
+		{"g5.xlarge", []string{"g5.xlarge"}},
+		{"g6.4xlarge,g6.2xlarge", []string{"g6.4xlarge", "g6.2xlarge"}},
+		{" p5.* , g5.xlarge ", []string{"p5.*", "g5.xlarge"}},
+		{"a,,b,", []string{"a", "b"}}, // empty entries dropped
+		{"", nil},
+		{"   ", nil},
+		{" , ", nil},
+	}
+	for _, tt := range tests {
+		got := splitInstanceTypePatterns(tt.in)
+		if len(got) != len(tt.want) {
+			t.Errorf("splitInstanceTypePatterns(%q) = %v, want %v", tt.in, got, tt.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != tt.want[i] {
+				t.Errorf("splitInstanceTypePatterns(%q)[%d] = %q, want %q", tt.in, i, got[i], tt.want[i])
+			}
 		}
 	}
 }

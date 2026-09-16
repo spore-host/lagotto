@@ -78,6 +78,41 @@ func TestPollAll_WithActiveWatch(t *testing.T) {
 	}
 }
 
+// TestPollAll_CommaListMatchesAnyRung verifies the #135 fix end-to-end: a
+// comma-separated pattern is treated as "any of these rungs" (OR), so a watch
+// listing several sizes matches on a rung substrate offers even though the whole
+// literal comma-string is not itself an instance type.
+func TestPollAll_CommaListMatchesAnyRung(t *testing.T) {
+	p, store, _ := pollerEnv(t, false)
+
+	w := newTestWatch("w-commalist", "arn:aws:iam::123456789012:user/erin")
+	// A list of real t3 rungs plus a bogus one: matching must be per-rung (OR),
+	// not against the whole comma-string literal (which is never an instance
+	// type). The bogus rung proves it's not accidentally matching everything.
+	w.InstanceTypePattern = "t3.micro,t3.small,x9.doesnotexist"
+	listed := map[string]bool{"t3.micro": true, "t3.small": true}
+	w.Spot = false
+	if err := store.PutWatch(context.Background(), w); err != nil {
+		t.Fatalf("PutWatch: %v", err)
+	}
+
+	summary, err := p.PollAll(context.Background())
+	if err != nil {
+		t.Fatalf("PollAll error = %v", err)
+	}
+	if summary.Watched != 1 {
+		t.Errorf("expected 1 watched, got %d", summary.Watched)
+	}
+	if len(summary.Matches) == 0 {
+		t.Fatal("comma-list watch should match an offered listed rung, got no matches")
+	}
+	for _, m := range summary.Matches {
+		if !listed[m.InstanceType] {
+			t.Errorf("matched instance type = %q, want one of the listed rungs %v", m.InstanceType, listed)
+		}
+	}
+}
+
 // TestPollAll_ExpiresPastTTL verifies the poller enforces the watch TTL itself
 // (rather than waiting on lazy DynamoDB deletion): a still-"active" watch whose
 // ExpiresAt has passed is transitioned to expired and not polled.

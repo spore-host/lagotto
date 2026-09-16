@@ -38,6 +38,10 @@ lagotto watch "p5.*" --action notify --ttl 7d
 # Watch and auto-launch when capacity appears
 lagotto watch "g5.xlarge" --action spawn --spawn-config my-job.yaml
 
+# Watch several interchangeable rungs at once — a comma-separated list matches
+# ANY of the listed types (first one with capacity wins)
+lagotto watch "g6.8xlarge,g6.4xlarge,g6.2xlarge,g6.xlarge" --action spawn --spawn-config my-job.yaml
+
 # Manage watches
 lagotto list
 lagotto status <watch-id>

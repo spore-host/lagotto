@@ -439,7 +439,7 @@ func (p *Poller) fillFleetGap(ctx context.Context, w *Watch, bestMatch *MatchRes
 // best matching MatchResult, or nil if nothing is offered this cycle. Shared
 // search/evaluate logic with pollGroup, scoped to one watch (the fleet path).
 func (p *Poller) searchBestMatch(ctx context.Context, w *Watch) (*MatchResult, error) {
-	matcher, err := regexp.Compile(wildcardToRegex(w.InstanceTypePattern))
+	matcher, err := regexp.Compile(patternToRegex(w.InstanceTypePattern))
 	if err != nil {
 		return nil, fmt.Errorf("compile pattern %q: %w", w.InstanceTypePattern, err)
 	}
@@ -448,6 +448,7 @@ func (p *Poller) searchBestMatch(ctx context.Context, w *Watch) (*MatchResult, e
 		return nil, fmt.Errorf("search instance types: %w", err)
 	}
 	if len(results) == 0 {
+		warnUnmatchablePattern(w)
 		return nil, nil
 	}
 	now := time.Now().UTC()
@@ -555,8 +556,9 @@ func (p *Poller) recordOutcome(ctx context.Context, w *Watch, m *MatchResult, fa
 }
 
 func (p *Poller) pollGroup(ctx context.Context, regions []string, pattern string, spot bool, watches []*Watch, summary *PollSummary) error {
-	// Convert pattern to regex (support wildcards like "p5.*")
-	regexPattern := wildcardToRegex(pattern)
+	// Convert pattern to regex (support wildcards like "p5.*" and comma-lists
+	// like "g6.4xlarge,g6.2xlarge", which match ANY listed rung — #135).
+	regexPattern := patternToRegex(pattern)
 	matcher, err := regexp.Compile(regexPattern)
 	if err != nil {
 		return fmt.Errorf("compile pattern %q: %w", pattern, err)
@@ -577,8 +579,12 @@ func (p *Poller) pollGroup(ctx context.Context, regions []string, pattern string
 
 	if len(results) == 0 {
 		// Pre-filter found nothing offered; nothing to attempt. Watches stay
-		// active and are retried next cycle.
+		// active and are retried next cycle. If a watch's pattern matched no
+		// offered instance type on its very first poll, that's the #135 symptom
+		// (a typo or an unmatchable literal) — warn once so a false "capacity
+		// dry" surfaces immediately instead of after hours.
 		for _, w := range watches {
+			warnUnmatchablePattern(w)
 			_ = p.store.UpdateLastPolled(ctx, w.WatchID)
 		}
 		return nil
@@ -712,6 +718,65 @@ func (p *Poller) pollGroup(ctx context.Context, regions []string, pattern string
 	}
 
 	return nil
+}
+
+// warnUnmatchablePattern emits a one-time (first-poll) warning that a watch's
+// pattern matched no offered instance type in its region(s). DescribeInstanceTypes
+// reports every type a region offers regardless of current capacity, so an empty
+// candidate set means the pattern itself resolves to nothing knowable — almost
+// always a typo or unmatchable literal (the #135 symptom), not a capacity dry. It
+// does NOT stop the watch: the type may simply not be offered yet, so we warn and
+// keep watching. Gated on LastPolledAt.IsZero() so it fires once, not every cycle.
+func warnUnmatchablePattern(w *Watch) {
+	if w == nil || !w.LastPolledAt.IsZero() {
+		return
+	}
+	regions := "the requested region(s)"
+	if len(w.Regions) > 0 {
+		regions = strings.Join(w.Regions, ", ")
+	}
+	fmt.Fprintf(os.Stderr,
+		"Warning: watch %s pattern %q matches no known instance type in %s — check for typos; still watching in case it becomes available\n",
+		w.WatchID, w.InstanceTypePattern, regions)
+}
+
+// splitInstanceTypePatterns splits a watch pattern on commas into its sub-patterns,
+// trimming surrounding whitespace and dropping empty entries. A pattern with no
+// comma yields a single-element slice (the trimmed pattern), so single-pattern
+// callers behave exactly as before. Returns nil when nothing usable remains (an
+// all-blank/empty input) (#135).
+func splitInstanceTypePatterns(pattern string) []string {
+	var parts []string
+	for _, p := range strings.Split(pattern, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			parts = append(parts, p)
+		}
+	}
+	return parts
+}
+
+// patternToRegex converts a watch instance-type pattern into a single anchored
+// regex. The pattern may be a comma-separated list of sub-patterns (e.g.
+// "g6.4xlarge,g6.2xlarge"); a candidate type matches if it matches ANY sub-pattern
+// (OR semantics). A single sub-pattern is converted exactly as before via
+// wildcardToRegex, so wildcard/exact behavior is unchanged (#135).
+func patternToRegex(pattern string) string {
+	parts := splitInstanceTypePatterns(pattern)
+	if len(parts) <= 1 {
+		if len(parts) == 1 {
+			return wildcardToRegex(parts[0])
+		}
+		// All-blank input: fall back to the raw pattern so an empty/whitespace
+		// pattern compiles to the same (empty-matching) regex it did before.
+		return wildcardToRegex(pattern)
+	}
+	// Each sub-pattern is independently converted (keeping its wildcard/exact
+	// semantics) and the anchored alternatives are OR'd together.
+	subs := make([]string, len(parts))
+	for i, p := range parts {
+		subs[i] = wildcardToRegex(p)
+	}
+	return strings.Join(subs, "|")
 }
 
 // wildcardToRegex converts shell-style wildcards to regex.
