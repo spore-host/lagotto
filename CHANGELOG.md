@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A spawn watch that hits `InsufficientInstanceCapacity` now reliably keeps
+  retrying to its TTL instead of giving up early** (#140). Capacity failures
+  already classify as `FailureCapacity` (uncapped retry) when the AWS
+  `smithy.APIError` is intact — but if a capacity error reached the classifier
+  with its API-error type flattened out in wrapping (a `%v`/`%s`-formatted layer,
+  an aggregation), it fell through to the capped unknown-failure bucket and the
+  watch could go `failed` well before its TTL — defeating the flagship "arm it
+  and wait out scarce GPU capacity" use case. `ClassifyFailure` now also matches
+  the specific capacity phrasing in the raw error message as a fallback, so a
+  capacity wait is honored regardless of how the error was wrapped. (The generic
+  word "capacity" is deliberately not matched.)
+
 ## [0.56.0] - 2026-09-15
 
 ### Added
