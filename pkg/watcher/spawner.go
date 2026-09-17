@@ -5,8 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/launcher"
@@ -32,6 +36,12 @@ type Spawner struct {
 	// s3 backs s3-empty completion conditions (#70). Nil in tests that inject a
 	// condition directly; set from the client's config in NewSpawner.
 	s3 S3Lister
+	// launchableAZs returns the set of AZ names in a region that have a default
+	// subnet (so a default-VPC RunInstances can place there). Used to drop AZs the
+	// account can't launch in (e.g. us-west-2d with no default subnet) from the AZ
+	// sweep, avoiding a wasted attempt + confusing InvalidInput (#150). Nil in test
+	// spawners → filtering is skipped (fail open). Set (memoized) in NewSpawner.
+	launchableAZs func(ctx context.Context, region string) map[string]bool
 }
 
 // S3Client returns the S3 lister for s3-empty completion conditions (#70), or
@@ -51,7 +61,69 @@ func NewSpawner(ctx context.Context) (*Spawner, error) {
 		terminateInstance:   client.Terminate,
 		describeReservation: client.DescribeCapacityReservation,
 		s3:                  s3.NewFromConfig(client.Config()),
+		launchableAZs:       newDefaultSubnetAZLookup(client.Config()),
 	}, nil
+}
+
+// newDefaultSubnetAZLookup returns a memoized lookup of the AZ names in a region
+// that have a default subnet (default-for-az=true) — the AZs a default-VPC
+// RunInstances (no explicit subnet, as the poller launches) can actually place
+// in. Best-effort: an API error or empty result returns nil, and the caller
+// fails open (tries all AZs) rather than blocking a launch (#150). Requires only
+// ec2:DescribeSubnets, already in the poller runtime policy.
+func newDefaultSubnetAZLookup(cfg aws.Config) func(ctx context.Context, region string) map[string]bool {
+	var mu sync.Mutex
+	cache := map[string]map[string]bool{}
+	return func(ctx context.Context, region string) map[string]bool {
+		if region == "" {
+			return nil
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if set, ok := cache[region]; ok {
+			return set
+		}
+		cl := ec2.NewFromConfig(cfg, func(o *ec2.Options) { o.Region = region })
+		out, err := cl.DescribeSubnets(ctx, &ec2.DescribeSubnetsInput{
+			Filters: []ec2types.Filter{{Name: aws.String("default-for-az"), Values: []string{"true"}}},
+		})
+		if err != nil {
+			return nil // fail open (don't cache — retry next launch)
+		}
+		set := make(map[string]bool, len(out.Subnets))
+		for _, sn := range out.Subnets {
+			if sn.AvailabilityZone != nil {
+				set[*sn.AvailabilityZone] = true
+			}
+		}
+		cache[region] = set
+		return set
+	}
+}
+
+// filterLaunchableAZs drops AZs with no default subnet from the sweep so the
+// launcher never wastes an attempt (or emits InvalidInput) on an AZ the account
+// can't place a default-VPC instance in (#150). Fails open: if the launchable set
+// can't be determined, or filtering would empty the list, the attempts are
+// returned unchanged. "" (let-EC2-choose) is always kept.
+func (s *Spawner) filterLaunchableAZs(ctx context.Context, region string, attempts []string) []string {
+	if s.launchableAZs == nil {
+		return attempts
+	}
+	usable := s.launchableAZs(ctx, region)
+	if len(usable) == 0 {
+		return attempts
+	}
+	filtered := make([]string, 0, len(attempts))
+	for _, a := range attempts {
+		if a == "" || usable[a] {
+			filtered = append(filtered, a)
+		}
+	}
+	if len(filtered) == 0 {
+		return attempts
+	}
+	return filtered
 }
 
 // reservationGate is the outcome of checking a Capacity Block reservation's
@@ -292,6 +364,10 @@ func (s *Spawner) countRunningFleet(ctx context.Context, w *Watch) (int, error) 
 // setting cfg.UserData directly here would skip Provision's bootstrap-building
 // step entirely (it only builds one when config.UserData is empty).
 func (s *Spawner) launchAcrossAZs(ctx context.Context, cfg spawnaws.LaunchConfig, attempts []string, customUserData string) (instanceID, az string, err error) {
+	// Drop AZs the account can't place a default-VPC instance in (no default
+	// subnet, e.g. us-west-2d), so we don't waste an attempt or surface a
+	// confusing InvalidInput mid-sweep (#150). Fails open when undeterminable.
+	attempts = s.filterLaunchableAZs(ctx, cfg.Region, attempts)
 	if len(attempts) == 0 {
 		attempts = []string{""} // let EC2 choose the AZ
 	}

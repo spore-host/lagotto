@@ -584,3 +584,40 @@ func TestRunScheduled_ReservationGate(t *testing.T) {
 		}
 	})
 }
+
+// TestFilterLaunchableAZs covers the #150 subnet-less-AZ filter: AZs without a
+// default subnet are dropped from the sweep, "" (let-EC2-choose) is kept, and the
+// filter fails open (returns attempts unchanged) when the launchable set is
+// unavailable or filtering would empty the list.
+func TestFilterLaunchableAZs(t *testing.T) {
+	usable := map[string]bool{"us-west-2a": true, "us-west-2b": true, "us-west-2c": true}
+	sp := &Spawner{launchableAZs: func(_ context.Context, _ string) map[string]bool { return usable }}
+
+	// us-west-2d (no default subnet) is dropped; the rest and "" are kept.
+	got := sp.filterLaunchableAZs(context.Background(), "us-west-2",
+		[]string{"us-west-2a", "us-west-2d", "us-west-2c"})
+	want := []string{"us-west-2a", "us-west-2c"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("filterLaunchableAZs dropped/kept wrong AZs: got %v, want %v", got, want)
+	}
+	if g := sp.filterLaunchableAZs(context.Background(), "us-west-2", []string{""}); len(g) != 1 || g[0] != "" {
+		t.Errorf(`"" (let-EC2-choose) must be kept, got %v`, g)
+	}
+
+	// Fail open: nil lookup → unchanged.
+	spNil := &Spawner{}
+	in := []string{"us-west-2a", "us-west-2d"}
+	if g := spNil.filterLaunchableAZs(context.Background(), "us-west-2", in); len(g) != 2 {
+		t.Errorf("nil launchableAZs must return attempts unchanged, got %v", g)
+	}
+	// Fail open: empty usable set (couldn't determine) → unchanged.
+	spEmpty := &Spawner{launchableAZs: func(_ context.Context, _ string) map[string]bool { return nil }}
+	if g := spEmpty.filterLaunchableAZs(context.Background(), "us-west-2", in); len(g) != 2 {
+		t.Errorf("empty usable set must fail open, got %v", g)
+	}
+	// Don't over-filter to empty: every attempt unusable → return original.
+	spNone := &Spawner{launchableAZs: func(_ context.Context, _ string) map[string]bool { return map[string]bool{"eu-west-1a": true} }}
+	if g := spNone.filterLaunchableAZs(context.Background(), "us-west-2", in); len(g) != 2 {
+		t.Errorf("all-unusable must fail open (not empty), got %v", g)
+	}
+}

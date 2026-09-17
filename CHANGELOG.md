@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **The launcher no longer wastes an attempt on an availability zone the account
+  can't launch in** (#150). When a watch spans AZs, the AZ sweep dropped into any
+  AZ that offered the instance type — including ones with **no default subnet**
+  (e.g. `us-west-2d` in many accounts), which fail `RunInstances` with
+  `InvalidInput: No default subnet for availability zone`. The sweep now filters
+  to AZs that have a default subnet (via `ec2:DescribeSubnets`, already in the
+  poller's policy; memoized per region) before trying them, so a launch skips
+  un-launchable AZs instead of burning an attempt and logging a confusing error.
+  Fails open — if the launchable set can't be determined, all AZs are tried as
+  before.
+
 ## [0.58.2] - 2026-09-17
 
 ### Fixed
