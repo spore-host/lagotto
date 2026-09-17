@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.58.3] - 2026-09-17
+
 ### Fixed
 - **The launcher no longer wastes an attempt on an availability zone the account
   can't launch in** (#150). When a watch spans AZs, the AZ sweep dropped into any
@@ -904,7 +906,8 @@ Initial tagged release from the standalone `spore-host/lagotto` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/lagotto/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.58.2...HEAD
+[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.58.3...HEAD
+[0.58.3]: https://github.com/spore-host/lagotto/compare/v0.58.2...v0.58.3
 [0.58.2]: https://github.com/spore-host/lagotto/compare/v0.58.1...v0.58.2
 [0.58.1]: https://github.com/spore-host/lagotto/compare/v0.58.0...v0.58.1
 [0.58.0]: https://github.com/spore-host/lagotto/compare/v0.57.2...v0.58.0
