@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.58.1] - 2026-09-17
+
 ### Fixed
 - **Hosted-poller auto-spawn no longer dies instantly on every watch** (#148,
   the retry-to-TTL half of #140). The poller's runtime IAM policy granted the
@@ -875,7 +877,8 @@ Initial tagged release from the standalone `spore-host/lagotto` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/lagotto/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.58.0...HEAD
+[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.58.1...HEAD
+[0.58.1]: https://github.com/spore-host/lagotto/compare/v0.58.0...v0.58.1
 [0.58.0]: https://github.com/spore-host/lagotto/compare/v0.57.2...v0.58.0
 [0.57.2]: https://github.com/spore-host/lagotto/compare/v0.57.1...v0.57.2
 [0.57.1]: https://github.com/spore-host/lagotto/compare/v0.57.0...v0.57.1
