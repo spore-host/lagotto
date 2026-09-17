@@ -7,7 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.58.0] - 2026-09-16
+### Fixed
+- **Hosted-poller auto-spawn no longer dies instantly on every watch** (#148,
+  the retry-to-TTL half of #140). The poller's runtime IAM policy granted the
+  instance-profile setup actions (`iam:GetRole`/`CreateRole`/…/`PassRole`) only on
+  `spored*`, but spawn's launcher names the per-launch role/profile it creates
+  `spawn-instance-<hash>`. So every hosted `--action spawn` failed at "set up IAM
+  instance profile" with `AccessDenied` — which is (correctly) a *terminal* error,
+  so the watch went `failed` in ~46s and never retried, defeating the wait-out-
+  scarce-capacity use case (observed: 12 GPU watches all `failed` on the first
+  poll despite 48h TTLs). The policy now authorizes those actions on
+  `spawn-instance*` (roles + instance-profiles) as well as `spored*`, so the
+  poller can provision the instance profile and a genuine capacity miss classifies
+  as `FailureCapacity` and retries to TTL as intended. **After upgrading, re-run
+  `lagotto setup` (or `lagotto deploy`) to re-apply the poller's runtime policy.**
 
 ### Added
 - **`lagotto list` now shows each watch's project and owner, and can filter by
