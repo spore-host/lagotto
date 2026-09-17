@@ -102,6 +102,10 @@ nfpms:
       summary: "Watch for EC2 instance capacity across regions"
 
 brews:
+  # No runtime `dependencies:` on truffle: lagotto imports truffle/pkg/aws as a
+  # COMPILED-IN Go library (linked into the lagotto binary), and never execs the
+  # `truffle` CLI at runtime — so a Homebrew runtime dependency on it was wrong
+  # and forced users to install a second binary they don't need.
   - name: lagotto
     repository:
       owner: spore-host
@@ -112,9 +116,6 @@ brews:
     homepage: https://github.com/spore-host/lagotto
     description: "Watch for EC2 instance capacity across regions"
     license: Apache-2.0
-    dependencies:
-      - name: spore-host/tap/truffle
-        type: runtime
     test: |
       system "#{bin}/lagotto", "version"
     install: |
@@ -131,8 +132,8 @@ scoops:
     homepage: https://github.com/spore-host/lagotto
     description: "Watch for EC2 instance capacity across regions"
     license: Apache-2.0
-    depends:
-      - spore-host/truffle
+    # No `depends:` on truffle — it's a compiled-in library, not a runtime CLI dep
+    # (see the brews entry above).
 
 release:
   github:

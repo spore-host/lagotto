@@ -106,6 +106,13 @@ type Watch struct {
 	// is stale and can be re-claimed (a crashed poller never blocks the watch).
 	LeaseOwner     string    `json:"lease_owner,omitempty" dynamodbav:"lease_owner,omitempty"`
 	LeaseExpiresAt time.Time `json:"lease_expires_at,omitempty" dynamodbav:"lease_expires_at,omitempty"`
+	// WaitToAcquireSeconds / TimeToGiveUpSeconds are DERIVED, display-only durations
+	// (#139) filled by ComputeDurations at read time — never persisted (dynamodbav
+	// "-"). wait-to-acquire = matched_at − created_at for a watch that matched/
+	// spawned; time-to-give-up = ended_at (last update) − created_at for a watch
+	// that ended failed. Both are nil (omitted) when they don't apply.
+	WaitToAcquireSeconds *float64 `json:"wait_to_acquire_seconds,omitempty" dynamodbav:"-"`
+	TimeToGiveUpSeconds  *float64 `json:"time_to_give_up_seconds,omitempty" dynamodbav:"-"`
 }
 
 // MatchResult records a capacity match event.
@@ -127,6 +134,10 @@ type MatchResult struct {
 	InstanceID    string    `json:"instance_id,omitempty" dynamodbav:"instance_id,omitempty"`
 	ReservationID string    `json:"reservation_id,omitempty" dynamodbav:"reservation_id,omitempty"`
 	TTLTimestamp  int64     `json:"ttl_timestamp" dynamodbav:"ttl_timestamp"`
+	// WaitToAcquireSeconds is the DERIVED time from the parent watch's creation to
+	// this match, in seconds (#139). Display-only, filled by the history command
+	// from the watch's created_at; never persisted (dynamodbav "-").
+	WaitToAcquireSeconds *float64 `json:"wait_to_acquire_seconds,omitempty" dynamodbav:"-"`
 }
 
 // clone returns a shallow copy of the match, so each worker in a fleet top-up

@@ -57,6 +57,13 @@ type WatchFilter struct {
 	WatchIDs []string // only these specific watch IDs
 }
 
+// Matches reports whether a watch is in scope for this filter. Exported so the
+// CLI (`list --project/--mine`) can reuse the exact same matching logic the
+// poller uses to scope a sweep (#47, #1), rather than re-implementing it.
+func (f *WatchFilter) Matches(w *Watch) bool {
+	return f.matches(w)
+}
+
 // matches reports whether a watch is in scope for this filter. An empty filter
 // (or empty field) doesn't constrain on that dimension.
 func (f *WatchFilter) matches(w *Watch) bool {

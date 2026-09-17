@@ -266,6 +266,69 @@ func TestSpawn_BadUserDataFileFailsFast(t *testing.T) {
 	}
 }
 
+// TestSpawn_StampsProvenanceTags verifies #1: a launched instance carries the
+// lagotto:watch-id tag (always) and lagotto:project tag (when the watch has a
+// project), on top of any tags the stored spawn config already set.
+func TestSpawn_StampsProvenanceTags(t *testing.T) {
+	var gotTags map[string]string
+	sp := newSpawnerWithProvision(func(ctx context.Context, _ *spawnaws.Client, cfg spawnaws.LaunchConfig, _ launcher.Options) (*spawnaws.LaunchResult, error) {
+		gotTags = cfg.Tags
+		return &spawnaws.LaunchResult{InstanceID: "i-ok"}, nil
+	})
+
+	// A config that already carries a user tag — the provenance tags must be added
+	// alongside it, not replace it.
+	raw, err := json.Marshal(SpawnConfigFile{
+		InstanceType: "g5.12xlarge", Region: "us-east-1", TTL: "24h",
+		Tags: stringOrMapTags{"team": "fieldwork"},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	w := &Watch{WatchID: "w-tag", Project: "buckai", LaunchConfigJSON: raw}
+	m := &MatchResult{Region: "us-east-1", CandidateAZs: []string{"us-east-1a"}}
+
+	if err := sp.Spawn(context.Background(), w, m); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if gotTags[WatchIDTagKey] != "w-tag" {
+		t.Errorf("tag %s = %q, want w-tag", WatchIDTagKey, gotTags[WatchIDTagKey])
+	}
+	if gotTags[ProjectTagKey] != "buckai" {
+		t.Errorf("tag %s = %q, want buckai", ProjectTagKey, gotTags[ProjectTagKey])
+	}
+	if gotTags["team"] != "fieldwork" {
+		t.Errorf("existing config tag team = %q, want fieldwork (must be preserved)", gotTags["team"])
+	}
+}
+
+// TestSpawn_OmitsProjectTagWhenEmpty confirms a watch with no project gets the
+// watch-id tag but NOT an empty lagotto:project tag (#1).
+func TestSpawn_OmitsProjectTagWhenEmpty(t *testing.T) {
+	var gotTags map[string]string
+	sp := newSpawnerWithProvision(func(ctx context.Context, _ *spawnaws.Client, cfg spawnaws.LaunchConfig, _ launcher.Options) (*spawnaws.LaunchResult, error) {
+		gotTags = cfg.Tags
+		return &spawnaws.LaunchResult{InstanceID: "i-ok"}, nil
+	})
+
+	raw, err := json.Marshal(SpawnConfigFile{InstanceType: "g5.12xlarge", Region: "us-east-1", TTL: "24h"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	w := &Watch{WatchID: "w-np", LaunchConfigJSON: raw}
+	m := &MatchResult{Region: "us-east-1", CandidateAZs: []string{"us-east-1a"}}
+
+	if err := sp.Spawn(context.Background(), w, m); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if gotTags[WatchIDTagKey] != "w-np" {
+		t.Errorf("tag %s = %q, want w-np", WatchIDTagKey, gotTags[WatchIDTagKey])
+	}
+	if _, ok := gotTags[ProjectTagKey]; ok {
+		t.Errorf("tag %s present (%q) for a project-less watch, want absent", ProjectTagKey, gotTags[ProjectTagKey])
+	}
+}
+
 // TestBuildIAMProfile_NoClientSkipsAWSCall verifies buildIAMProfile returns ""
 // (no error) when the Spawner has no AWS client (unit-test spawners), even
 // when iam_role/iam_policy_file are set — mirroring the pre-#129 IAMPolicies
