@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`lagotto list` now shows each watch's project and owner, and can filter by
+  them.** New `PROJECT` and `OWNER` columns surface the `--project` label and a
+  short form of the creator's caller ARN (e.g. `user/alice`,
+  `assumed-role/Dev/alice-session`); `--project <name>` narrows the list to one
+  project and `--mine` limits it to watches you created. `lagotto status` now
+  prints the watch's `Project:` and `Owner:` too. Both `list` and `status` include
+  `project` and `user_id` in `-o json`. (#1)
+- **Instances launched by a watch are now tagged with their origin.** Every
+  `--action spawn` launch stamps `lagotto:watch-id=<watch-id>` (and
+  `lagotto:project=<project>` when the watch has one) on the instance and its
+  volumes, so a running box is traceable back to the watch/project that created it
+  — handy for cost attribution and cleanup with a tag filter. (#1)
+- **`lagotto status` and `lagotto history` now report how long capacity took to
+  acquire.** For a watch that matched/spawned, they show `wait to acquire`
+  (matched-at minus created-at); for a watch that gave up, `status` shows
+  `time to give up` (failed-at minus created-at). Durations render human-readably
+  in tables (e.g. `4m12s`) and as raw `wait_to_acquire_seconds` /
+  `time_to_give_up_seconds` in `-o json`. (#139)
+
+### Changed
+- **Homebrew and Scoop packages no longer pull in `truffle` as a runtime
+  dependency.** lagotto links truffle in as a compiled-in Go library and never
+  runs the `truffle` CLI, so installing lagotto no longer force-installs a second
+  binary you don't need.
+
 ## [0.57.2] - 2026-09-17
 
 ### Fixed

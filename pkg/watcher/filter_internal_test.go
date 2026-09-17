@@ -33,6 +33,18 @@ func TestWatchFilter_Matches(t *testing.T) {
 	}
 }
 
+// TestWatchFilter_MatchesExported confirms the exported Matches wrapper (used by
+// `list --project/--mine`, #1) delegates to the same predicate as matches().
+func TestWatchFilter_MatchesExported(t *testing.T) {
+	w := &Watch{WatchID: "w-aaa", UserID: "arn:alice", Project: "fieldwork"}
+	if !(&WatchFilter{Project: "fieldwork"}).Matches(w) {
+		t.Error("Matches() = false for a matching project, want true")
+	}
+	if (&WatchFilter{Owner: "arn:bob"}).Matches(w) {
+		t.Error("Matches() = true for a non-matching owner, want false")
+	}
+}
+
 // TestWatchFilter_Empty confirms Empty() reports whether the filter constrains
 // nothing (drives the daemon's "scope all vs scoped" messaging).
 func TestWatchFilter_Empty(t *testing.T) {

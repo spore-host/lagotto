@@ -134,6 +134,19 @@ func (s *Spawner) Spawn(ctx context.Context, w *Watch, m *MatchResult) error {
 	cfg.InstanceType = m.InstanceType
 	cfg.Spot = m.IsSpot
 
+	// Stamp provenance tags so a launched instance is traceable back to the watch
+	// (and its project) it came from (#1): lagotto:watch-id always, lagotto:project
+	// only when the watch carries one. These ride the same spawn-config Tags path
+	// as the fleet tag below (LaunchConfig.Tags → spawn applies them to the
+	// instance and its volumes), so they need no new tagging mechanism.
+	if cfg.Tags == nil {
+		cfg.Tags = map[string]string{}
+	}
+	cfg.Tags[WatchIDTagKey] = w.WatchID
+	if w.Project != "" {
+		cfg.Tags[ProjectTagKey] = w.Project
+	}
+
 	// Goal-driven fleet watch: stamp the fleet tag so the supervisor can count
 	// running members and top up toward DesiredCount (#70). Harmless for
 	// single-shot watches, but only set it when this is actually a fleet so we
@@ -223,6 +236,17 @@ func (s *Spawner) buildIAMProfile(ctx context.Context, file *SpawnConfigFile) (s
 // fleet watch, valued with the WatchID. The supervisor counts running instances
 // carrying this tag to decide how many to (re)launch toward DesiredCount (#70).
 const FleetTagKey = "lagotto:watch"
+
+// Provenance tags stamped on every instance a watch launches (#1), so a running
+// box is traceable back to the watch (and project) that spawned it — e.g. to
+// find or clean up a project's instances with a tag filter. Distinct from
+// FleetTagKey ("lagotto:watch"), which the fleet supervisor counts.
+const (
+	// WatchIDTagKey carries the launching watch's WatchID (always set).
+	WatchIDTagKey = "lagotto:watch-id"
+	// ProjectTagKey carries the watch's Project label (set only when non-empty).
+	ProjectTagKey = "lagotto:project"
+)
 
 // countRunningFleet returns how many of a fleet watch's workers are currently
 // running (pending or running state), counted by the FleetTagKey=WatchID tag

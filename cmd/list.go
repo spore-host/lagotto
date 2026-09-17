@@ -12,7 +12,11 @@ import (
 	"github.com/spore-host/lagotto/pkg/watcher"
 )
 
-var listAll bool
+var (
+	listAll     bool
+	listProject string
+	listMine    bool
+)
 
 var listCmd = &cobra.Command{
 	Use:   "list",
@@ -23,6 +27,8 @@ var listCmd = &cobra.Command{
 func init() {
 	rootCmd.AddCommand(listCmd)
 	listCmd.Flags().BoolVar(&listAll, "all", false, "Show all statuses (default: active only)")
+	listCmd.Flags().StringVar(&listProject, "project", "", "Only show watches with this project label")
+	listCmd.Flags().BoolVar(&listMine, "mine", false, "Only show watches you created (matches your caller ARN)")
 }
 
 func runList(cmd *cobra.Command, args []string) error {
@@ -51,6 +57,24 @@ func runList(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("list watches: %w", err)
 	}
 
+	// Reuse the poller's WatchFilter matching logic (#1/#47) for --project/--mine
+	// rather than re-implementing it. list already queries only the caller's own
+	// watches, so --mine is a consistency guard (and self-documenting); --project
+	// narrows to a single project label.
+	filter := &watcher.WatchFilter{Project: listProject}
+	if listMine {
+		filter.Owner = *identity.Arn
+	}
+	if !filter.Empty() {
+		kept := watches[:0]
+		for _, w := range watches {
+			if filter.Matches(&w) {
+				kept = append(kept, w)
+			}
+		}
+		watches = kept
+	}
+
 	if getOutputFormat() == "json" {
 		enc := json.NewEncoder(cmd.OutOrStdout())
 		enc.SetIndent("", "  ")
@@ -62,8 +86,8 @@ func runList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	fmt.Fprintf(cmd.OutOrStdout(), "%-12s %-10s %-20s %-25s %-6s %-10s %s\n",
-		"WATCH ID", "STATUS", "PATTERN", "REGIONS", "SPOT", "ACTION", "EXPIRES")
+	fmt.Fprintf(cmd.OutOrStdout(), "%-12s %-10s %-15s %-20s %-20s %-25s %-6s %-10s %s\n",
+		"WATCH ID", "STATUS", "PROJECT", "OWNER", "PATTERN", "REGIONS", "SPOT", "ACTION", "EXPIRES")
 	for _, w := range watches {
 		regions := displayRegions(w.Regions)
 		if len(regions) > 25 {
@@ -75,9 +99,11 @@ func runList(cmd *cobra.Command, args []string) error {
 		if w.DesiredCount > 0 {
 			actionCol = fmt.Sprintf("%s×%d", w.Action, w.DesiredCount)
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "%-12s %-10s %-20s %-25s %-6v %-10s %s\n",
+		fmt.Fprintf(cmd.OutOrStdout(), "%-12s %-10s %-15s %-20s %-20s %-25s %-6v %-10s %s\n",
 			w.WatchID,
 			w.Status,
+			dashIfEmpty(truncate(w.Project, 15)),
+			truncate(shortOwner(w.UserID), 20),
 			truncate(w.InstanceTypePattern, 20),
 			regions,
 			w.Spot,
@@ -86,6 +112,15 @@ func runList(cmd *cobra.Command, args []string) error {
 		)
 	}
 	return nil
+}
+
+// dashIfEmpty renders "-" for an empty column value so a blank field reads as
+// "unset" rather than a formatting gap.
+func dashIfEmpty(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }
 
 func truncate(s string, max int) string {

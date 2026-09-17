@@ -24,6 +24,24 @@ func TestTruncate(t *testing.T) {
 	}
 }
 
+func TestShortOwner(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{"", "-"},
+		{"arn:aws:iam::123456789012:user/alice", "user/alice"},
+		{"arn:aws:sts::123456789012:assumed-role/Dev/alice-session", "assumed-role/Dev/alice-session"},
+		{"arn:aws:iam::123456789012:root", "root"},
+		{"no-colons", "no-colons"},
+	}
+	for _, tt := range tests {
+		if got := shortOwner(tt.in); got != tt.want {
+			t.Errorf("shortOwner(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
 func TestSplitFirst(t *testing.T) {
 	tests := []struct {
 		in   string

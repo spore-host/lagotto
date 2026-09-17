@@ -39,6 +39,10 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Fill the derived, display-only wait/give-up durations (#139) so both the
+	// JSON output and the detail table below share one computation.
+	w.ComputeDurations()
+
 	if getOutputFormat() == "json" {
 		enc := json.NewEncoder(cmd.OutOrStdout())
 		enc.SetIndent("", "  ")
@@ -48,6 +52,12 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	out := cmd.OutOrStdout()
 	fmt.Fprintf(out, "Watch:    %s\n", w.WatchID)
 	fmt.Fprintf(out, "Status:   %s\n", w.Status)
+	if w.Project != "" {
+		fmt.Fprintf(out, "Project:  %s\n", w.Project)
+	}
+	if w.UserID != "" {
+		fmt.Fprintf(out, "Owner:    %s\n", w.UserID)
+	}
 	fmt.Fprintf(out, "Pattern:  %s\n", w.InstanceTypePattern)
 	fmt.Fprintf(out, "Regions:  %s\n", displayRegions(w.Regions))
 	fmt.Fprintf(out, "Spot:     %v\n", w.Spot)
@@ -67,6 +77,15 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(out, "Last polled: %s\n", w.LastPolledAt.Format(time.RFC3339))
 	}
 	fmt.Fprintf(out, "Matches:  %d\n", w.MatchCount)
+
+	// Derived timings (#139): how long this watch waited for capacity, or — if it
+	// gave up — how long it tried before failing.
+	if d, ok := w.WaitToAcquire(); ok {
+		fmt.Fprintf(out, "Wait to acquire: %s\n", watcher.FormatWait(d))
+	}
+	if d, ok := w.TimeToGiveUp(); ok {
+		fmt.Fprintf(out, "Time to give up: %s\n", watcher.FormatWait(d))
+	}
 
 	if w.LastMatch != nil {
 		m := w.LastMatch

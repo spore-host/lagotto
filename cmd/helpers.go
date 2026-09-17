@@ -3,11 +3,26 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spore-host/lagotto/pkg/watcher"
 )
+
+// shortOwner renders a watch's UserID (the creator's caller ARN) as a compact,
+// human-readable owner for list output (#1): the ARN's trailing resource
+// segment — e.g. "user/alice" or "assumed-role/Dev/alice-session" — which is the
+// part after the last ':'. Returns "-" for an empty owner (legacy watches).
+func shortOwner(arn string) string {
+	if arn == "" {
+		return "-"
+	}
+	if i := strings.LastIndex(arn, ":"); i >= 0 && i+1 < len(arn) {
+		return arn[i+1:]
+	}
+	return arn
+}
 
 // stsIdentityAPI is the slice of STS we use, for testability.
 type stsIdentityAPI interface {
