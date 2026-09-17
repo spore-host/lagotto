@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.58.0] - 2026-09-16
+
 ### Added
 - **`lagotto list` now shows each watch's project and owner, and can filter by
   them.** New `PROJECT` and `OWNER` columns surface the `--project` label and a
@@ -860,7 +862,8 @@ Initial tagged release from the standalone `spore-host/lagotto` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/lagotto/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.57.2...HEAD
+[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.58.0...HEAD
+[0.58.0]: https://github.com/spore-host/lagotto/compare/v0.57.2...v0.58.0
 [0.57.2]: https://github.com/spore-host/lagotto/compare/v0.57.1...v0.57.2
 [0.57.1]: https://github.com/spore-host/lagotto/compare/v0.57.0...v0.57.1
 [0.57.0]: https://github.com/spore-host/lagotto/compare/v0.56.0...v0.57.0
