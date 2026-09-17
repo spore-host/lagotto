@@ -213,6 +213,15 @@ func PolicyDocument(region, accountID string) (string, error) {
 	schedulerInvokeRoleARN := arn("arn:aws:iam::%s:role/lagotto-capacity-poller-scheduler-invoke", accountID)
 	sporedRoleARN := arn("arn:aws:iam::%s:role/spored*", accountID)
 	sporedProfileARN := arn("arn:aws:iam::%s:instance-profile/spored*", accountID)
+	// spawn's launcher names the per-launch instance role/profile it creates
+	// "spawn-instance-<hash>" (spawn pkg/aws iam.go generateRoleName), not
+	// "spored*". The hosted poller MUST be able to GetRole/CreateRole/…/PassRole
+	// on those, or every auto-spawn dies at "set up IAM instance profile" with
+	// AccessDenied — which classifies terminal, so the watch fails ~immediately
+	// instead of waiting out capacity (lagotto#148). Keep spored* too (spawn's
+	// fixed fallback name + older launches).
+	spawnRoleARN := arn("arn:aws:iam::%s:role/spawn-instance*", accountID)
+	spawnProfileARN := arn("arn:aws:iam::%s:instance-profile/spawn-instance*", accountID)
 
 	passToService := func(svc string) interface{} {
 		return map[string]interface{}{"StringEquals": map[string]string{"iam:PassedToService": svc}}
@@ -250,15 +259,15 @@ func PolicyDocument(region, accountID string) (string, error) {
 			Resource: launchSchedARN},
 		{Effect: "Allow", Action: []string{"iam:PassRole"}, Resource: schedulerInvokeRoleARN,
 			Condition: passToService("scheduler.amazonaws.com")},
-		// spawn launch set: RunInstances/tags/SG, spored* role/profile setup.
+		// spawn launch set: RunInstances/tags/SG, spawn-instance*/spored* role/profile setup.
 		{Effect: "Allow", Action: []string{
 			"ec2:RunInstances", "ec2:CreateTags", "ec2:CreateSecurityGroup", "ec2:AuthorizeSecurityGroupIngress",
 		}, Resource: "*"},
 		{Effect: "Allow", Action: []string{
 			"iam:GetRole", "iam:CreateRole", "iam:PutRolePolicy", "iam:AttachRolePolicy",
 			"iam:GetInstanceProfile", "iam:CreateInstanceProfile", "iam:AddRoleToInstanceProfile",
-		}, Resource: []string{sporedRoleARN, sporedProfileARN}},
-		{Effect: "Allow", Action: []string{"iam:PassRole"}, Resource: sporedRoleARN,
+		}, Resource: []string{spawnRoleARN, spawnProfileARN, sporedRoleARN, sporedProfileARN}},
+		{Effect: "Allow", Action: []string{"iam:PassRole"}, Resource: []string{spawnRoleARN, sporedRoleARN},
 			Condition: passToService("ec2.amazonaws.com")},
 		// hold: capacity reservations.
 		{Effect: "Allow", Action: []string{

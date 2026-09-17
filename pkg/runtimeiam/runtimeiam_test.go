@@ -72,10 +72,18 @@ func TestPolicyDocument_ValidAndScoped(t *testing.T) {
 	if !strings.Contains(doc, "iam:PassedToService") {
 		t.Error("iam:PassRole is not scoped by PassedToService condition")
 	}
-	// Wide describe reads are Resource "*", but the spored role-setup must be
-	// scoped to spored* (not "*") — guard against an over-broad regression.
+	// Wide describe reads are Resource "*", but the instance role-setup must be
+	// scoped (not "*") — guard against an over-broad regression.
 	if strings.Contains(doc, `"iam:CreateRole"`) && !strings.Contains(doc, ":role/spored*") {
 		t.Error("iam:CreateRole is present but not scoped to spored*")
+	}
+	// #148: spawn's launcher creates "spawn-instance-<hash>" roles/profiles, so the
+	// poller must be authorized on spawn-instance* too — else auto-spawn dies at
+	// "set up IAM instance profile" (AccessDenied → terminal) and no watch retries.
+	for _, want := range []string{":role/spawn-instance*", ":instance-profile/spawn-instance*"} {
+		if !strings.Contains(doc, want) {
+			t.Errorf("policy missing %q (poller can't set up spawn's instance profile — lagotto#148)", want)
+		}
 	}
 }
 
