@@ -6,10 +6,12 @@ import (
 	"os"
 	"sort"
 
+	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spf13/cobra"
 	"github.com/spore-host/lagotto/pkg/awscfg"
 	"github.com/spore-host/lagotto/pkg/deploy"
+	"github.com/spore-host/lagotto/pkg/runtimeiam"
 	"github.com/spore-host/lagotto/pkg/watcher"
 )
 
@@ -117,6 +119,17 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("ensure scheduled-launches table: %w", terr)
 	} else if name != "" {
 		fmt.Fprintf(os.Stderr, "Created DynamoDB table: %s\n", name)
+	}
+
+	// Ensure the CLI-owned IAM roles exist before deploying (#145), exactly as the
+	// tables above. The stack references both roles by ARN and never creates them,
+	// so it can't collide with a role that already exists from a prior deploy or
+	// rollback (CloudFormation Early Validation ResourceExistenceCheck). Idempotent.
+	if acctID == "" {
+		return fmt.Errorf("could not resolve AWS account ID (needed to create the poller IAM roles); check your credentials")
+	}
+	if rerr := runtimeiam.EnsureRoles(ctx, iam.NewFromConfig(cfg), region, acctID); rerr != nil {
+		return fmt.Errorf("ensure poller IAM roles: %w", rerr)
 	}
 
 	fmt.Fprintf(os.Stderr, "Deploying %s (poller v%s) into %s / %s...\n", deployStackName, deployVersion, acctID, region)

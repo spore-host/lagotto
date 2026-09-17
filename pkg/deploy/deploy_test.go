@@ -8,12 +8,13 @@ import (
 	cfn "github.com/spore-host/lagotto/deployment/cloudformation"
 )
 
-// TestDeployCapabilities_NamedIAM is the #143 regression: the embedded template
-// creates IAM roles with explicit RoleNames, which CloudFormation accepts only
-// under CAPABILITY_NAMED_IAM (CAPABILITY_IAM is not enough). If a named IAM
-// resource is present, the deploy capabilities MUST include NAMED_IAM — else
-// CreateStack rolls back with "Requires capabilities: [CAPABILITY_NAMED_IAM]".
-func TestDeployCapabilities_NamedIAM(t *testing.T) {
+// TestDeployCapabilities is the #143/#145 regression. The template's IAM roles
+// are now CLI-owned and referenced by ARN, so the stack defines NO IAM resources:
+// it must NOT declare an AWS::IAM::Role (a named IAM resource would collide with
+// an already-existing role under Early Validation, #145), and the deploy
+// capabilities need only CAPABILITY_AUTO_EXPAND (the AWS::Serverless transform),
+// not CAPABILITY_IAM/NAMED_IAM.
+func TestDeployCapabilities(t *testing.T) {
 	has := func(c cfntypes.Capability) bool {
 		for _, x := range deployCapabilities {
 			if x == c {
@@ -22,14 +23,20 @@ func TestDeployCapabilities_NamedIAM(t *testing.T) {
 		}
 		return false
 	}
-	if !strings.Contains(cfn.StackTemplate, "RoleName:") {
-		t.Fatal("template no longer defines an explicit RoleName; if intentional, revisit whether NAMED_IAM is still required")
-	}
-	if !has(cfntypes.CapabilityCapabilityNamedIam) {
-		t.Error("deployCapabilities missing CAPABILITY_NAMED_IAM — named IAM roles roll back on CreateStack (#143)")
+	if strings.Contains(cfn.StackTemplate, "AWS::IAM::Role") {
+		t.Error("template defines an AWS::IAM::Role — roles must be CLI-owned + referenced by ARN, not stack-created (#145)")
 	}
 	if !has(cfntypes.CapabilityCapabilityAutoExpand) {
 		t.Error("deployCapabilities missing CAPABILITY_AUTO_EXPAND — the AWS::Serverless transform needs it")
+	}
+	// The roles are referenced by their constructed ARNs, not created.
+	for _, want := range []string{
+		"role/lagotto-capacity-poller-role",
+		"role/lagotto-capacity-poller-scheduler-invoke",
+	} {
+		if !strings.Contains(cfn.StackTemplate, want) {
+			t.Errorf("template no longer references %q by ARN", want)
+		}
 	}
 }
 

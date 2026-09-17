@@ -63,14 +63,14 @@ func LambdaObjectKey(version string) string {
 }
 
 // deployCapabilities are the CloudFormation capabilities the lagotto stack
-// requires. CAPABILITY_NAMED_IAM (not merely CAPABILITY_IAM) is mandatory
-// because the template creates IAM roles with explicit RoleNames
-// (lagotto-capacity-poller-role, lagotto-capacity-poller-scheduler-invoke — #87);
-// CloudFormation refuses named IAM resources under CAPABILITY_IAM alone and rolls
-// the stack back with "Requires capabilities: [CAPABILITY_NAMED_IAM]" (#143).
-// CAPABILITY_AUTO_EXPAND covers the AWS::Serverless transform.
+// requires. Only CAPABILITY_AUTO_EXPAND (for the AWS::Serverless transform) is
+// needed: the stack no longer defines any IAM resources — the poller execution
+// role and the Scheduler invoke role are CLI-owned (created by pkg/runtimeiam,
+// like the DynamoDB tables) and only referenced by ARN, so no CAPABILITY_IAM /
+// CAPABILITY_NAMED_IAM is required and there is no named-IAM create collision
+// under Early Validation (#143 added NAMED_IAM; #145 removed the IAM resources
+// entirely).
 var deployCapabilities = []cfntypes.Capability{
-	cfntypes.CapabilityCapabilityNamedIam,
 	cfntypes.CapabilityCapabilityAutoExpand,
 }
 

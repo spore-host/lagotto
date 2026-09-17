@@ -90,7 +90,7 @@ Resources:
           # EventBridge schedule targeting itself. Construct its own ARN by name
           # (a !GetAtt self-reference would be a CFN circular dependency).
           POLLER_FUNCTION_ARN: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:lagotto-capacity-poller'
-          SCHEDULER_INVOKE_ROLE_ARN: !GetAtt SchedulerInvokeRole.Arn
+          SCHEDULER_INVOKE_ROLE_ARN: !Sub 'arn:aws:iam::${AWS::AccountId}:role/lagotto-capacity-poller-scheduler-invoke'
       # The runtime PERMISSIONS policy is owned by `lagotto setup`, not this
       # template (#16): lagotto codifies "what the poller may call" in Go
       # (pkg/runtimeiam) as the single source of truth, the same way it owns its
@@ -100,7 +100,13 @@ Resources:
       # to it. NOTE: after a fresh `lagotto deploy`, run `lagotto setup` (or create
       # a watch — the CLI applies it) so the poller gains its spawn/hold/sagemaker
       # permissions; until then it can only send notifications.
-      Role: !GetAtt CapacityPollerRole.Arn
+      #
+      # The role itself is CLI-owned (created by `lagotto deploy`/`setup` via
+      # pkg/runtimeiam, like the DynamoDB tables — #59/#145), NOT created by this
+      # stack, so the stack only references it by ARN. This avoids a fatal collision
+      # under CloudFormation Early Validation when the role already exists from a
+      # prior deploy/rollback (ResourceExistenceCheck, #145).
+      Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/lagotto-capacity-poller-role'
       Tags:
         Environment: !Ref Environment
         Application: lagotto
@@ -119,62 +125,11 @@ Resources:
         Mode: 'OFF'
       Target:
         Arn: !GetAtt CapacityPollerFunction.Arn
-        RoleArn: !GetAtt SchedulerInvokeRole.Arn
+        # The invoke role is CLI-owned (pkg/runtimeiam), referenced by ARN — not a
+        # stack resource — so the stack never tries to create an already-existing
+        # named role (#145). See CapacityPollerFunction.Role above.
+        RoleArn: !Sub 'arn:aws:iam::${AWS::AccountId}:role/lagotto-capacity-poller-scheduler-invoke'
       State: DISABLED
-
-  # Minimal execution role for the poller Lambda. Its PERMISSIONS policy
-  # (DynamoDB/EC2/SNS/scheduler/spawn/hold/sagemaker) is attached by
-  # `lagotto setup` (pkg/runtimeiam), not here (#16) — CFN only provides the
-  # Lambda trust relationship + CloudWatch Logs basic execution. Named so the
-  # function can reference it and `setup` can find it by a stable name.
-  CapacityPollerRole:
-    Type: AWS::IAM::Role
-    Condition: DeployLambda
-    Properties:
-      RoleName: lagotto-capacity-poller-role
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: lambda.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-      Tags:
-        - Key: Application
-          Value: lagotto
-        - Key: Component
-          Value: capacity-poller
-
-  SchedulerInvokeRole:
-    Type: AWS::IAM::Role
-    Condition: DeployLambda
-    Properties:
-      RoleName: lagotto-capacity-poller-scheduler-invoke
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: scheduler.amazonaws.com
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: InvokeLambda
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action: lambda:InvokeFunction
-                # Reference the poller by CONSTRUCTED ARN, not !GetAtt, to break a
-                # CloudFormation circular dependency (#67). The function references
-                # SchedulerInvokeRole via the #62 SCHEDULER_INVOKE_ROLE_ARN env var
-                # + iam:PassRole; if this role also !GetAtt'd the function, the
-                # resources [Function, SchedulerInvokeRole, Schedule] form a cycle
-                # and the stack rolls back on a clean create. The function name is
-                # fixed (lagotto-capacity-poller), so its ARN is derivable without a
-                # dependency edge — making the graph a DAG.
-                Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:lagotto-capacity-poller'
 
 Outputs:
   WatchesTableName:
@@ -210,7 +165,7 @@ Outputs:
 
   SchedulerInvokeRoleArn:
     Condition: DeployLambda
-    Description: Role EventBridge Scheduler assumes to invoke the poller (reused by per-launch scheduled launches, #49)
-    Value: !GetAtt SchedulerInvokeRole.Arn
+    Description: Role EventBridge Scheduler assumes to invoke the poller (reused by per-launch scheduled launches, #49). CLI-owned (pkg/runtimeiam), referenced by ARN (#145).
+    Value: !Sub 'arn:aws:iam::${AWS::AccountId}:role/lagotto-capacity-poller-scheduler-invoke'
     Export:
       Name: !Sub '${AWS::StackName}-scheduler-invoke-role'
