@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.57.2] - 2026-09-17
+
 ### Fixed
 - **`lagotto deploy` no longer rolls back with a CloudFormation Early Validation
   `ResourceExistenceCheck` failure.** The stack used to create the two poller IAM
@@ -832,7 +834,8 @@ Initial tagged release from the standalone `spore-host/lagotto` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/lagotto/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.57.1...HEAD
+[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.57.2...HEAD
+[0.57.2]: https://github.com/spore-host/lagotto/compare/v0.57.1...v0.57.2
 [0.57.1]: https://github.com/spore-host/lagotto/compare/v0.57.0...v0.57.1
 [0.57.0]: https://github.com/spore-host/lagotto/compare/v0.56.0...v0.57.0
 [0.56.0]: https://github.com/spore-host/lagotto/compare/v0.55.2...v0.56.0
