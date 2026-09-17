@@ -8,6 +8,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
+	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
 )
 
 func TestPolicyDocument_ValidAndScoped(t *testing.T) {
@@ -78,10 +79,38 @@ func TestPolicyDocument_ValidAndScoped(t *testing.T) {
 	}
 }
 
-// fakeIAM records the PutRolePolicy call.
+// fakeIAM simulates the subset of IAM used by the package: a set of roles that
+// already exist, plus recorders for the create/attach/put calls.
 type fakeIAM struct {
+	existing map[string]bool
+	created  []string
+	attached []string
+	// last PutRolePolicy (kept for existing assertions) + a per-call log.
 	role, policy, doc string
-	calls             int
+	calls             int      // PutRolePolicy calls
+	puts              []string // "role/policy" per PutRolePolicy
+}
+
+func (f *fakeIAM) GetRole(_ context.Context, in *iam.GetRoleInput, _ ...func(*iam.Options)) (*iam.GetRoleOutput, error) {
+	if f.existing[aws.ToString(in.RoleName)] {
+		return &iam.GetRoleOutput{Role: &iamtypes.Role{RoleName: in.RoleName}}, nil
+	}
+	return nil, &iamtypes.NoSuchEntityException{}
+}
+
+func (f *fakeIAM) CreateRole(_ context.Context, in *iam.CreateRoleInput, _ ...func(*iam.Options)) (*iam.CreateRoleOutput, error) {
+	name := aws.ToString(in.RoleName)
+	f.created = append(f.created, name)
+	if f.existing == nil {
+		f.existing = map[string]bool{}
+	}
+	f.existing[name] = true
+	return &iam.CreateRoleOutput{Role: &iamtypes.Role{RoleName: in.RoleName}}, nil
+}
+
+func (f *fakeIAM) AttachRolePolicy(_ context.Context, in *iam.AttachRolePolicyInput, _ ...func(*iam.Options)) (*iam.AttachRolePolicyOutput, error) {
+	f.attached = append(f.attached, aws.ToString(in.RoleName))
+	return &iam.AttachRolePolicyOutput{}, nil
 }
 
 func (f *fakeIAM) PutRolePolicy(_ context.Context, in *iam.PutRolePolicyInput, _ ...func(*iam.Options)) (*iam.PutRolePolicyOutput, error) {
@@ -89,7 +118,63 @@ func (f *fakeIAM) PutRolePolicy(_ context.Context, in *iam.PutRolePolicyInput, _
 	f.role = aws.ToString(in.RoleName)
 	f.policy = aws.ToString(in.PolicyName)
 	f.doc = aws.ToString(in.PolicyDocument)
+	f.puts = append(f.puts, f.role+"/"+f.policy)
 	return &iam.PutRolePolicyOutput{}, nil
+}
+
+func contains(ss []string, want string) bool {
+	for _, s := range ss {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestEnsureRoles_CreatesBothWhenAbsent is the #145 core: deploy creates both
+// CLI-owned roles (so the stack can reference them by ARN instead of creating
+// named roles that may already exist).
+func TestEnsureRoles_CreatesBothWhenAbsent(t *testing.T) {
+	f := &fakeIAM{}
+	if err := EnsureRoles(context.Background(), f, "us-west-2", "123456789012"); err != nil {
+		t.Fatalf("EnsureRoles: %v", err)
+	}
+	if !contains(f.created, RoleName) {
+		t.Errorf("did not create %s (created=%v)", RoleName, f.created)
+	}
+	if !contains(f.created, SchedulerInvokeRoleName) {
+		t.Errorf("did not create %s (created=%v)", SchedulerInvokeRoleName, f.created)
+	}
+	if !contains(f.attached, RoleName) {
+		t.Errorf("did not attach basic-execution to %s (attached=%v)", RoleName, f.attached)
+	}
+	if !contains(f.puts, SchedulerInvokeRoleName+"/InvokeLambda") {
+		t.Errorf("did not put InvokeLambda on %s (puts=%v)", SchedulerInvokeRoleName, f.puts)
+	}
+}
+
+// TestEnsureRoles_IdempotentWhenPresent: pre-existing roles are not re-created.
+func TestEnsureRoles_IdempotentWhenPresent(t *testing.T) {
+	f := &fakeIAM{existing: map[string]bool{RoleName: true, SchedulerInvokeRoleName: true}}
+	if err := EnsureRoles(context.Background(), f, "us-west-2", "123456789012"); err != nil {
+		t.Fatalf("EnsureRoles: %v", err)
+	}
+	if len(f.created) != 0 {
+		t.Errorf("created roles that already existed: %v", f.created)
+	}
+}
+
+func TestEnsureRoles_RequiresRegionAndAccount(t *testing.T) {
+	f := &fakeIAM{}
+	if err := EnsureRoles(context.Background(), f, "", "123456789012"); err == nil {
+		t.Error("want error for empty region")
+	}
+	if err := EnsureRoles(context.Background(), f, "us-west-2", ""); err == nil {
+		t.Error("want error for empty account ID")
+	}
+	if len(f.created) != 0 {
+		t.Errorf("no role should be created on validation failure (created=%v)", f.created)
+	}
 }
 
 func TestEnsureRuntimeRole(t *testing.T) {

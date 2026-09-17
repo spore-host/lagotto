@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`lagotto deploy` no longer rolls back with a CloudFormation Early Validation
+  `ResourceExistenceCheck` failure.** The stack used to create the two poller IAM
+  roles (`lagotto-capacity-poller-role`, `lagotto-capacity-poller-scheduler-invoke`)
+  by explicit name; if either already existed — from a prior deploy, a rollback
+  that retained it, or `lagotto setup` — CloudFormation's Early Validation refused
+  the create and rolled the whole stack back, blocking the hosted poller (#145).
+  The roles are now **CLI-owned**: `lagotto deploy`/`setup` create them (idempotent,
+  exactly as the DynamoDB tables are — #59) and the stack only **references** them
+  by ARN. Deploy now succeeds whether or not the roles already exist, and no manual
+  role cleanup is needed. As a result the stack defines no IAM resources, so deploy
+  no longer requests `CAPABILITY_NAMED_IAM` (only `CAPABILITY_AUTO_EXPAND` for the
+  SAM transform). `lagotto setup` also now works on a fresh account without a prior
+  `lagotto deploy` (it creates the role instead of reporting it missing).
+
 ## [0.57.1] - 2026-09-17
 
 ### Fixed

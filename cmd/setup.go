@@ -2,13 +2,11 @@ package cmd
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
-	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spf13/cobra"
 	"github.com/spore-host/lagotto/pkg/awscfg"
@@ -89,15 +87,10 @@ func ensureRuntimePolicy(ctx context.Context, cfg aws.Config, out io.Writer) err
 		return fmt.Errorf("no region resolved; set --region, SPORE_REGION, or AWS_REGION")
 	}
 
-	err = runtimeiam.EnsureRuntimeRole(ctx, iam.NewFromConfig(cfg), region, aws.ToString(acct.Account))
-	if err != nil {
-		var notFound *iamtypes.NoSuchEntityException
-		if errors.As(err, &notFound) {
-			fmt.Fprintf(out, "Runtime IAM role %q not found — run `lagotto deploy` to create it, then re-run setup.\n"+
-				"(Until then the hosted poller can only send notifications, not spawn/hold/submit.)\n", runtimeiam.RoleName)
-			return nil
-		}
-		return fmt.Errorf("ensure runtime IAM policy: %w", err)
+	// EnsureRuntimeRole now creates the CLI-owned role if absent (#145), so setup
+	// works standalone on a fresh account without a prior `lagotto deploy`.
+	if err = runtimeiam.EnsureRuntimeRole(ctx, iam.NewFromConfig(cfg), region, aws.ToString(acct.Account)); err != nil {
+		return fmt.Errorf("ensure runtime IAM role/policy: %w", err)
 	}
 	fmt.Fprintf(out, "Applied runtime IAM policy %q to role %q.\n", runtimeiam.PolicyName, runtimeiam.RoleName)
 	return nil
