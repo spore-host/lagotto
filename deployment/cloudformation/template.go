@@ -9,8 +9,10 @@ package cfn
 import _ "embed"
 
 // StackTemplate is the lagotto stack (DynamoDB, SNS, Lambda, EventBridge
-// Scheduler, IAM) as a SAM template. Deploy it with CAPABILITY_IAM +
-// CAPABILITY_AUTO_EXPAND (it uses the AWS::Serverless transform).
+// Scheduler, IAM) as a SAM template. Deploy it with CAPABILITY_NAMED_IAM +
+// CAPABILITY_AUTO_EXPAND: it uses the AWS::Serverless transform, and its IAM
+// roles carry explicit RoleNames, which require NAMED_IAM (not plain IAM) — see
+// deploy.deployCapabilities (#143).
 //
 //go:embed lagotto-stack.yaml
 var StackTemplate string

@@ -62,6 +62,18 @@ func LambdaObjectKey(version string) string {
 	return fmt.Sprintf("lagotto/capacity-poller-v%s.zip", strings.TrimPrefix(version, "v"))
 }
 
+// deployCapabilities are the CloudFormation capabilities the lagotto stack
+// requires. CAPABILITY_NAMED_IAM (not merely CAPABILITY_IAM) is mandatory
+// because the template creates IAM roles with explicit RoleNames
+// (lagotto-capacity-poller-role, lagotto-capacity-poller-scheduler-invoke — #87);
+// CloudFormation refuses named IAM resources under CAPABILITY_IAM alone and rolls
+// the stack back with "Requires capabilities: [CAPABILITY_NAMED_IAM]" (#143).
+// CAPABILITY_AUTO_EXPAND covers the AWS::Serverless transform.
+var deployCapabilities = []cfntypes.Capability{
+	cfntypes.CapabilityCapabilityNamedIam,
+	cfntypes.CapabilityCapabilityAutoExpand,
+}
+
 // Deployer performs deploy/teardown against AWS. The httpGet field is indirected
 // so tests can stub the release download.
 type Deployer struct {
@@ -116,9 +128,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) (map[string]string,
 	if opts.ScheduledTable != "" {
 		params = append(params, cfntypes.Parameter{ParameterKey: aws.String("ScheduledTableName"), ParameterValue: aws.String(opts.ScheduledTable)})
 	}
-	caps := []cfntypes.Capability{cfntypes.CapabilityCapabilityIam, cfntypes.CapabilityCapabilityAutoExpand}
-
-	if err := d.createOrUpdate(ctx, opts.StackName, params, caps); err != nil {
+	if err := d.createOrUpdate(ctx, opts.StackName, params, deployCapabilities); err != nil {
 		return nil, err
 	}
 	return d.stackOutputs(ctx, opts.StackName)
