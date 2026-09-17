@@ -251,6 +251,12 @@ func PolicyDocument(region, accountID string) (string, error) {
 			"ec2:DescribeRegions", "ec2:DescribeImages", "ec2:DescribeVpcs", "ec2:DescribeSubnets",
 			"ec2:DescribeSecurityGroups", "ec2:DescribeKeyPairs", "ec2:DescribeInstances",
 			"ec2:DescribeCapacityReservations", "ssm:GetParameter", "ssm:GetParameters",
+			// pricing:GetProducts backs spawn's --cost-limit enforcement: the launcher
+			// looks up the on-demand price before RunInstances, and for newer types
+			// (g7/g7e/p5) there's no static-fallback price, so without this the launch
+			// fails with AccessDenied — which classifies terminal, killing the watch
+			// before any capacity check (lagotto#148). Pricing is a global read-only API.
+			"pricing:GetProducts", "pricing:GetAttributeValues",
 		}, Resource: "*"},
 		// Scheduler: manage this poller's schedule + the #62 per-launch schedules.
 		{Effect: "Allow", Action: []string{"scheduler:UpdateSchedule", "scheduler:GetSchedule"},

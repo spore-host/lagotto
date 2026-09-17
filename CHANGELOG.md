@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Hosted-poller auto-spawn can now enforce `--cost-limit`, so cost-capped GPU
+  watches reach a real capacity check instead of dying** (#148, second layer).
+  With the #149 instance-profile fix in place, watches still went terminal
+  because the poller's runtime role lacked **`pricing:GetProducts`**: spawn looks
+  up the on-demand price to enforce `--cost-limit` before launching, and for
+  newer GPU types (g7/g7e/p5) there's no static-fallback price, so the launch
+  failed with `AccessDenied` — a terminal error — before any capacity check
+  (observed: 11/12 GPU watches). The runtime policy now grants
+  `pricing:GetProducts`/`GetAttributeValues`, so a genuine capacity miss
+  classifies `FailureCapacity` and retries to TTL as intended. **Re-run `lagotto
+  setup` (or `lagotto deploy`) after upgrading to apply it to an existing poller.**
+
 ## [0.58.1] - 2026-09-17
 
 ### Fixed

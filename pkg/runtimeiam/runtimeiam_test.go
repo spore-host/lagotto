@@ -55,6 +55,8 @@ func TestPolicyDocument_ValidAndScoped(t *testing.T) {
 		"dynamodb:PutItem", "sns:Publish", "ec2:DescribeInstanceTypes",
 		"ec2:RunInstances", "ec2:CreateCapacityReservation",
 		"sagemaker:CreateTrainingJob", "scheduler:CreateSchedule", "iam:PassRole",
+		// #148: spawn's launcher needs the Pricing API to enforce --cost-limit.
+		"pricing:GetProducts",
 	} {
 		if !actions[want] {
 			t.Errorf("policy missing required action %q", want)
