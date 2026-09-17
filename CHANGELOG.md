@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.57.1] - 2026-09-17
+
 ### Fixed
 - **`lagotto deploy` no longer fails immediately with a CloudFormation rollback.**
   The stack creates IAM roles with explicit names
@@ -815,7 +817,8 @@ Initial tagged release from the standalone `spore-host/lagotto` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/lagotto/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.57.0...HEAD
+[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.57.1...HEAD
+[0.57.1]: https://github.com/spore-host/lagotto/compare/v0.57.0...v0.57.1
 [0.57.0]: https://github.com/spore-host/lagotto/compare/v0.56.0...v0.57.0
 [0.56.0]: https://github.com/spore-host/lagotto/compare/v0.55.2...v0.56.0
 [0.55.2]: https://github.com/spore-host/lagotto/compare/v0.55.1...v0.55.2
