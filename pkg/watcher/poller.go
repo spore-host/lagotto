@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/spore-host/lagotto/pkg/quotacheck"
 	truffleaws "github.com/spore-host/truffle/pkg/aws"
 )
 
@@ -47,6 +48,18 @@ type Poller struct {
 	// hosted marks the in-account Lambda poller, which has no shell/sandbox and so
 	// refuses shell completion conditions on fleet watches (#70). False = CLI daemon.
 	hosted bool
+	// notifyQuotaCap overrides where a #153 quota-cap notification goes. Defaults
+	// to p.notifier.NotifyQuotaCap; an unexported seam (mirroring the
+	// Spawner.provision / listInstances indirections) so tests can COUNT
+	// notifications — ValidateWebhookURL deliberately refuses loopback, so an
+	// httptest server can't stand in for a real notify channel.
+	notifyQuotaCap func(ctx context.Context, w *Watch, running int, reason string) error
+	// quotas, when non-nil, enriches a quota-cap report with the account's actual
+	// vCPU limit/usage numbers (#153). OPTIONAL and nil-safe by design: the cap
+	// itself is detected from the RunInstances error, so a poller with no
+	// servicequotas read permission (or an older runtime policy) still reports
+	// "capped at M/N" — it just reports it without the numbers.
+	quotas quotacheck.Lookup
 }
 
 // WatchFilter scopes a poll sweep to a subset of watches (#47). A zero-value
@@ -128,6 +141,10 @@ type PollerOpts struct {
 	// Hosted marks the in-account Lambda poller (refuses shell completion
 	// conditions — no sandbox). False = CLI daemon (#70).
 	Hosted bool
+	// Quotas optionally supplies the Service Quotas numbers used to enrich a
+	// quota-cap report (#153). nil is fully supported — the cap is detected from
+	// the RunInstances error, so this only adds exact limit/usage figures.
+	Quotas quotacheck.Lookup
 }
 
 // NewPoller creates a Poller backed by a truffle client and DynamoDB store.
@@ -145,6 +162,7 @@ func NewPoller(truffle *truffleaws.Client, store *Store, verbose bool, opts ...P
 		p.filter = opts[0].Filter
 		p.leaseOwner = opts[0].LeaseOwner
 		p.hosted = opts[0].Hosted
+		p.quotas = opts[0].Quotas
 	}
 	return p
 }
@@ -163,6 +181,12 @@ type PollSummary struct {
 	Failed   int           `json:"failed"`   // terminal failure → failed
 	Expired  int           `json:"expired"`  // TTL elapsed this cycle → expired
 	Matches  []MatchResult `json:"matches"`  // launched + notified events
+	// QuotaCapped counts fleet watches whose top-up this cycle was bounded by the
+	// account's EC2 vCPU quota — either a launch was refused by the quota, or the
+	// cycle was suppressed because a known ceiling hadn't been re-probed yet
+	// (#153). These watches stay ACTIVE and keep their running workers, so they're
+	// counted separately from Retrying (capacity dry) and Failed (terminal).
+	QuotaCapped int `json:"quota_capped"`
 }
 
 // Total returns the number of watches the sweep accounted for.
@@ -372,6 +396,34 @@ func (p *Poller) pollFleetWatch(ctx context.Context, w *Watch, summary *PollSumm
 		if p.verbose {
 			fmt.Fprintf(os.Stderr, "Watch %s: fleet at %d/%d; nothing to top up\n", w.WatchID, running, w.DesiredCount)
 		}
+		// Reaching the goal means the ceiling isn't binding any more (a quota
+		// increase landed, or the count was mis-attributed), so drop the cap state
+		// (#153) — otherwise a later dip would be suppressed by a stale ceiling.
+		if w.QuotaCappedCount > 0 {
+			p.clearQuotaCap(ctx, w)
+		}
+		_ = p.store.UpdateLastPolled(ctx, w.WatchID)
+		return
+	}
+
+	// 2b. Quota-cap backoff (#153). A fleet we KNOW is at its vCPU ceiling must not
+	// re-fail a launch every cycle for the rest of its TTL. Placed AFTER the
+	// completion-condition check (a capped fleet must still retire on --until) and
+	// AFTER the gap<=0 return (it must still clear its cap on reaching the goal),
+	// but BEFORE the lease claim and the capacity search, so a suppressed cycle
+	// costs zero AWS calls.
+	//
+	// The `running >= w.QuotaCappedCount` conjunct is essential: the backoff
+	// applies only to attempts we already know will fail. A worker that died below
+	// the known ceiling is replaced on the very next cycle, not up to 30 minutes
+	// later.
+	if w.QuotaCappedCount > 0 && running >= w.QuotaCappedCount && time.Since(w.QuotaCappedAt) < QuotaCapReprobeInterval {
+		if p.verbose {
+			fmt.Fprintf(os.Stderr, "Watch %s: fleet capped at %d/%d by EC2 quota; next re-probe in %s\n",
+				w.WatchID, w.QuotaCappedCount, w.DesiredCount,
+				(QuotaCapReprobeInterval - time.Since(w.QuotaCappedAt)).Round(time.Second))
+		}
+		summary.QuotaCapped++
 		_ = p.store.UpdateLastPolled(ctx, w.WatchID)
 		return
 	}
@@ -407,22 +459,52 @@ func (p *Poller) pollFleetWatch(ctx context.Context, w *Watch, summary *PollSumm
 		return
 	}
 
-	launched := p.fillFleetGap(ctx, w, bestMatch, gap, summary)
+	out := p.fillFleetGap(ctx, w, bestMatch, gap, summary)
 	if p.verbose {
 		fmt.Fprintf(os.Stderr, "Watch %s: topped up %d/%d workers (fleet now ~%d/%d)\n",
-			w.WatchID, launched, gap, running+launched, w.DesiredCount)
+			w.WatchID, out.Launched, gap, running+out.Launched, w.DesiredCount)
+	}
+	switch {
+	case out.QuotaErr != nil:
+		// The ceiling is wherever we actually got to this cycle — note that a
+		// launched-then-capped cycle correctly records the cap at the NEW higher
+		// level and re-notifies ("capped at 3/5", was "2/5").
+		p.recordQuotaCap(ctx, w, running+out.Launched, bestMatch, out.QuotaErr, summary)
+	case out.Launched > 0 && w.QuotaCappedCount > 0:
+		// A launch succeeded while capped → the ceiling moved (a granted increase,
+		// or other usage freed up). Clear the cap so we top up at full speed and a
+		// future cap notifies again (#153).
+		p.clearQuotaCap(ctx, w)
 	}
 	// The watch stays active (never flips to matched) — it only retires when the
 	// completion condition holds (step 1) or its TTL elapses.
 	_ = p.store.UpdateLastPolled(ctx, w.WatchID)
 }
 
+// fillOutcome is what one gap-fill cycle produced: how many workers launched,
+// and — when the stop was specifically an exhausted account quota (#153) — the
+// error that proves it, so the caller can report the ceiling instead of silently
+// re-failing the same launch every poll.
+type fillOutcome struct {
+	Launched int
+	// QuotaErr is non-nil only for a quota-exceeded refusal (IsQuotaExceeded).
+	// Every other failure (capacity, terminal, unknown) leaves it nil and keeps the
+	// pre-existing "warn and stop filling this cycle" behavior exactly as it was.
+	QuotaErr error
+}
+
 // fillFleetGap launches up to `gap` workers into the found capacity, each a
 // cloned MatchResult so Spawn stamps a distinct instance. It stops early on the
 // first launch failure (capacity ran out mid-fill, or a terminal fault): the
 // watch stays active and retries next cycle, so a partial fill is fine — the
-// completion condition and TTL bound the watch. Returns how many launched.
-func (p *Poller) fillFleetGap(ctx context.Context, w *Watch, bestMatch *MatchResult, gap int, summary *PollSummary) int {
+// completion condition and TTL bound the watch.
+//
+// A quota refusal is reported back via fillOutcome.QuotaErr rather than acted on
+// here. Note this does NOT re-classify anything: quota codes stay FailureTerminal
+// in pkg/failure, and this function still must not treat a FailureTerminal as
+// "fail the watch" — doing so would abandon the fleet's healthy running workers
+// (which is exactly why the silence, not the retry, was the #153 defect).
+func (p *Poller) fillFleetGap(ctx context.Context, w *Watch, bestMatch *MatchResult, gap int, summary *PollSummary) fillOutcome {
 	launched := 0
 	for i := 0; i < gap; i++ {
 		m := bestMatch.clone()
@@ -430,6 +512,9 @@ func (p *Poller) fillFleetGap(ctx context.Context, w *Watch, bestMatch *MatchRes
 			failure := ClassifyFailure(err)
 			fmt.Fprintf(os.Stderr, "Warning: fleet top-up launch %d/%d for %s failed (%s): %v\n",
 				i+1, gap, w.WatchID, failureLabel(failure), err)
+			if IsQuotaExceeded(err) {
+				return fillOutcome{Launched: launched, QuotaErr: err}
+			}
 			break
 		}
 		launched++
@@ -439,7 +524,127 @@ func (p *Poller) fillFleetGap(ctx context.Context, w *Watch, bestMatch *MatchRes
 			fmt.Fprintf(os.Stderr, "Warning: failed to record fleet match for %s: %v\n", w.WatchID, err)
 		}
 	}
-	return launched
+	return fillOutcome{Launched: launched}
+}
+
+// recordQuotaCap reports that a fleet watch has hit its EC2 vCPU quota ceiling
+// (#153): it composes the human reason, persists the cap level + backoff anchor,
+// logs it, and — only the FIRST time at a given level — notifies.
+//
+// The watch deliberately stays ACTIVE. Quota codes classify FailureTerminal, but
+// failing a fleet watch here would throw away its healthy running workers, and a
+// quota can be raised mid-watch; the fix is to say so once and back off, not to
+// stop.
+func (p *Poller) recordQuotaCap(ctx context.Context, w *Watch, running int, m *MatchResult, quotaErr error, summary *PollSummary) {
+	summary.QuotaCapped++
+
+	instanceType := w.InstanceTypePattern
+	region := ""
+	if len(w.Regions) > 0 {
+		region = w.Regions[0]
+	}
+	if m != nil {
+		if m.InstanceType != "" {
+			instanceType = m.InstanceType
+		}
+		if m.Region != "" {
+			region = m.Region
+		}
+	}
+
+	reason := quotacheck.CapReason(region, instanceType, w.Spot, w.DesiredCount, running, p.quotaReport(ctx, w, region, m))
+
+	// isNew must be computed BEFORE the write-back: the persisted level is what
+	// makes "report once" possible across stateless poller invocations.
+	isNew := w.QuotaCappedCount != running
+
+	if err := p.store.RecordQuotaCap(ctx, w.WatchID, running, reason); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to record quota cap for %s: %v\n", w.WatchID, err)
+	}
+	// Mirror recordOutcome's discipline: keep the in-memory watch in step with the
+	// store so the rest of this cycle (and the caller) sees the new level.
+	w.QuotaCappedCount = running
+	w.QuotaCappedAt = time.Now().UTC()
+	w.QuotaCapReason = reason
+
+	// Log unconditionally, not under p.verbose: for a hosted poller the
+	// CloudWatch log is a real audience, and this is the evidence that
+	// distinguishes a quota ceiling from a capacity drought.
+	fmt.Fprintf(os.Stderr, "Watch %s: %s (quota error: %v)\n", w.WatchID, reason, quotaErr)
+
+	if !isNew {
+		if p.verbose {
+			fmt.Fprintf(os.Stderr, "Watch %s: quota cap unchanged at %d/%d; not re-notifying\n",
+				w.WatchID, running, w.DesiredCount)
+		}
+		return
+	}
+	if notify := p.quotaCapNotifier(); notify != nil {
+		if err := notify(ctx, w, running, reason); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: quota-cap notification failed for %s: %v\n", w.WatchID, err)
+		}
+	}
+}
+
+// quotaCapNotifier resolves where a quota-cap notification goes: the test seam if
+// set, else the wired Notifier, else nowhere (a notify-less watch still gets the
+// persisted reason and `lagotto status`).
+func (p *Poller) quotaCapNotifier() func(ctx context.Context, w *Watch, running int, reason string) error {
+	if p.notifyQuotaCap != nil {
+		return p.notifyQuotaCap
+	}
+	if p.notifier != nil {
+		return p.notifier.NotifyQuotaCap
+	}
+	return nil
+}
+
+// quotaReport optionally enriches a cap report with the account's real vCPU
+// limit/usage. It FAILS OPEN in every direction — no lookup wired, an
+// AccessDenied from a poller running a pre-#153 runtime policy, a throttle, a
+// timeout — returning nil so CapReason still names the family and the
+// remediation. The core fix must never depend on this (#148/#150).
+func (p *Poller) quotaReport(ctx context.Context, w *Watch, region string, m *MatchResult) *quotacheck.Report {
+	if p.quotas == nil || region == "" {
+		return nil
+	}
+	rungs := SplitInstanceTypePatterns(w.InstanceTypePattern)
+	if m != nil && m.InstanceType != "" {
+		// The matched type is what RunInstances was actually refused for, so it's a
+		// better basis than the pattern's smallest rung.
+		rungs = []string{m.InstanceType}
+	}
+	lctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	rep, err := quotacheck.Feasibility(lctx, p.quotas, quotacheck.Request{
+		Region:  region,
+		Rungs:   rungs,
+		Spot:    w.Spot,
+		Desired: w.DesiredCount,
+	})
+	if err != nil || !rep.Known {
+		if p.verbose {
+			fmt.Fprintf(os.Stderr, "Watch %s: quota numbers unavailable (reporting the cap without them): %v\n", w.WatchID, err)
+		}
+		return nil
+	}
+	return &rep
+}
+
+// clearQuotaCap drops a watch's quota-cap state (#153) after a successful launch
+// or on reaching the fleet goal, so a granted quota increase is picked up with no
+// user action and a later cap notifies again.
+func (p *Poller) clearQuotaCap(ctx context.Context, w *Watch) {
+	if err := p.store.ClearQuotaCap(ctx, w.WatchID); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to clear quota cap for %s: %v\n", w.WatchID, err)
+		return
+	}
+	if p.verbose {
+		fmt.Fprintf(os.Stderr, "Watch %s: quota cap cleared (was %d/%d)\n", w.WatchID, w.QuotaCappedCount, w.DesiredCount)
+	}
+	w.QuotaCappedCount = 0
+	w.QuotaCappedAt = time.Time{}
+	w.QuotaCapReason = ""
 }
 
 // searchBestMatch runs a single-watch truffle capacity search and returns the
@@ -745,6 +950,14 @@ func warnUnmatchablePattern(w *Watch) {
 	fmt.Fprintf(os.Stderr,
 		"Warning: watch %s pattern %q matches no known instance type in %s — check for typos; still watching in case it becomes available\n",
 		w.WatchID, w.InstanceTypePattern, regions)
+}
+
+// SplitInstanceTypePatterns splits a watch pattern into its comma-separated
+// sub-patterns (#135). Exported so the CLI (`watch`'s create-time quota
+// feasibility check) reuses the exact splitting the poller uses, rather than
+// re-implementing comma-list semantics — same wrapper style as WatchFilter.Matches.
+func SplitInstanceTypePatterns(pattern string) []string {
+	return splitInstanceTypePatterns(pattern)
 }
 
 // splitInstanceTypePatterns splits a watch pattern on commas into its sub-patterns,

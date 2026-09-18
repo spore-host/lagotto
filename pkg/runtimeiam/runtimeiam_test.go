@@ -57,6 +57,11 @@ func TestPolicyDocument_ValidAndScoped(t *testing.T) {
 		"sagemaker:CreateTrainingJob", "scheduler:CreateSchedule", "iam:PassRole",
 		// #148: spawn's launcher needs the Pricing API to enforce --cost-limit.
 		"pricing:GetProducts",
+		// #153: read-only Service Quotas access so a quota-cap report can carry the
+		// account's actual vCPU limit/usage. Not required to DETECT the cap (that
+		// comes from the RunInstances error), but the grant must not silently
+		// disappear from the policy either.
+		"servicequotas:GetServiceQuota",
 	} {
 		if !actions[want] {
 			t.Errorf("policy missing required action %q", want)

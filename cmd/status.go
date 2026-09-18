@@ -70,6 +70,17 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		if w.CompletionCondition != "" {
 			fmt.Fprintf(out, "Until:    %s\n", w.CompletionCondition)
 		}
+		// The quota ceiling (#153). This is the PRIMARY user-visible surface for it:
+		// most watches carry no --notify, so without this line a fleet stuck below
+		// --maintain by an account quota is only explained in the poller's logs.
+		if w.QuotaCappedCount > 0 {
+			fmt.Fprintf(out, "Quota cap: fleet capped at %d/%d since %s\n",
+				w.QuotaCappedCount, w.DesiredCount, w.QuotaCappedAt.Format(time.RFC3339))
+			if w.QuotaCapReason != "" {
+				fmt.Fprintf(out, "  %s\n", w.QuotaCapReason)
+			}
+			fmt.Fprintf(out, "  The watch stays active and keeps its running workers; a granted quota increase is picked up automatically.\n")
+		}
 	}
 	fmt.Fprintf(out, "Created:  %s\n", w.CreatedAt.Format(time.RFC3339))
 	fmt.Fprintf(out, "Expires:  %s\n", w.ExpiresAt.Format(time.RFC3339))

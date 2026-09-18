@@ -441,3 +441,57 @@ func TestSplitInstanceTypePatterns(t *testing.T) {
 		}
 	}
 }
+
+// TestEvaluate_CarriesVCPUs verifies both Evaluate branches stamp the matched
+// type's authoritative vCPU count onto the MatchResult (#153) — quotas are
+// denominated in vCPUs per family, so the poller needs it to explain a refusal.
+func TestEvaluate_CarriesVCPUs(t *testing.T) {
+	typeResult := truffleaws.InstanceTypeResult{
+		InstanceType:  "g6e.xlarge",
+		Region:        "us-east-1",
+		AvailableAZs:  []string{"us-east-1a"},
+		OnDemandPrice: 2.24,
+		VCPUs:         4,
+	}
+
+	// On-demand branch.
+	m := Evaluate(&Watch{WatchID: "w-v1", InstanceTypePattern: "g6e.xlarge"},
+		MatchCandidate{InstanceType: typeResult})
+	if m == nil {
+		t.Fatal("on-demand: no match")
+	}
+	if m.VCPUs != 4 {
+		t.Errorf("on-demand VCPUs = %d, want 4", m.VCPUs)
+	}
+
+	// Spot branch: searchBestMatch back-fills the InstanceTypeResult onto the
+	// candidate, so the vCPU count is available even though the type is named by
+	// the spot price.
+	m = Evaluate(&Watch{WatchID: "w-v2", InstanceTypePattern: "g6e.xlarge", Spot: true},
+		MatchCandidate{
+			InstanceType: typeResult,
+			SpotPrice: &truffleaws.SpotPriceResult{
+				InstanceType: "g6e.xlarge", Region: "us-east-1",
+				AvailabilityZone: "us-east-1a", SpotPrice: 0.8,
+			},
+		})
+	if m == nil {
+		t.Fatal("spot: no match")
+	}
+	if m.VCPUs != 4 {
+		t.Errorf("spot VCPUs = %d, want 4", m.VCPUs)
+	}
+
+	// No vCPU figure available (a hand-built candidate) → left at zero, never a
+	// guessed value.
+	m = Evaluate(&Watch{WatchID: "w-v3", InstanceTypePattern: "g6e.xlarge"},
+		MatchCandidate{InstanceType: truffleaws.InstanceTypeResult{
+			InstanceType: "g6e.xlarge", Region: "us-east-1", AvailableAZs: []string{"us-east-1a"},
+		}})
+	if m == nil {
+		t.Fatal("no-vcpu: no match")
+	}
+	if m.VCPUs != 0 {
+		t.Errorf("no-vcpu VCPUs = %d, want 0", m.VCPUs)
+	}
+}

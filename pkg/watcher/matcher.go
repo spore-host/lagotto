@@ -27,7 +27,7 @@ func Evaluate(w *Watch, c MatchCandidate) *MatchResult {
 		if az != "" {
 			candidates = []string{az}
 		}
-		return &MatchResult{
+		m := &MatchResult{
 			WatchID:          w.WatchID,
 			UserID:           w.UserID,
 			Region:           c.SpotPrice.Region,
@@ -38,6 +38,15 @@ func Evaluate(w *Watch, c MatchCandidate) *MatchResult {
 			IsSpot:           true,
 			ActionTaken:      "pending",
 		}
+		// Carry the authoritative vCPU count so a quota refusal can be explained in
+		// the units quotas are actually denominated in (#153). The spot branch names
+		// the type from the spot price, but searchBestMatch back-fills the matching
+		// InstanceTypeResult onto the candidate, so this is usually populated; guard
+		// so a hand-built candidate doesn't stamp a zero.
+		if c.InstanceType.VCPUs > 0 {
+			m.VCPUs = c.InstanceType.VCPUs
+		}
+		return m
 	}
 
 	// On-demand availability check: instance type exists in the region
@@ -58,7 +67,7 @@ func Evaluate(w *Watch, c MatchCandidate) *MatchResult {
 		if len(candidates) > 0 {
 			az = candidates[0]
 		}
-		return &MatchResult{
+		m := &MatchResult{
 			WatchID:          w.WatchID,
 			UserID:           w.UserID,
 			Region:           c.InstanceType.Region,
@@ -69,6 +78,10 @@ func Evaluate(w *Watch, c MatchCandidate) *MatchResult {
 			IsSpot:           false,
 			ActionTaken:      "pending",
 		}
+		if c.InstanceType.VCPUs > 0 {
+			m.VCPUs = c.InstanceType.VCPUs
+		}
+		return m
 	}
 
 	// Spot watch but no pricing data available — no match

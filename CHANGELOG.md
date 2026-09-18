@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A `--maintain` fleet that exceeds your EC2 vCPU quota now tells you, instead
+  of silently re-failing a launch every poll for the whole TTL** (#153). Ask for
+  `--maintain 5` on a `g6e.*` pattern when your G-family quota only fits 2 and you
+  got 2 instances, one wasted failed `RunInstances` per poll cycle, and **no
+  user-visible signal at all** — the evidence was buried in the poller's
+  CloudWatch logs. Now the ceiling is reported once: a notification (when the
+  watch has `--notify`) and a `Quota cap: fleet capped at 2/5 since <time>` line
+  in `lagotto status`, with the family, the numbers, and the
+  `aws service-quotas request-service-quota-increase` command to raise it. The
+  watch deliberately **stays active and keeps its running workers** (failing it
+  would throw away healthy instances, and a quota can be raised mid-watch), makes
+  at most one top-up attempt per 30 minutes while capped, still replaces a worker
+  that dies *below* the ceiling on the very next cycle, still retires on `--until`,
+  and **picks up a granted quota increase automatically** with no user action.
+  `lagotto poll` gained a `quota-capped` count in its cycle summary.
+
+### Added
+- **A create-time feasibility warning for fleet watches** (#153): `lagotto watch
+  --maintain 5` now checks the family's vCPU quota up front and warns (to stderr,
+  so it survives `-o json`) when the goal doesn't fit — "this fleet may not reach
+  --maintain 5 … fits at best 2 × g6e.xlarge (4 vCPU each)", or the louder "your
+  quota is 0 — this fleet cannot launch a single worker" — together with the
+  quota-increase command. It is **non-fatal**: the watch is still created, and a
+  quota that can't be read produces no warning at all (a missing read permission
+  must never look like a zero quota).
+- **Read-only `servicequotas:GetServiceQuota` / `ListServiceQuotas` in the hosted
+  poller's runtime policy**, so a quota-cap report can carry your account's actual
+  limit and usage. Re-run `lagotto setup` (or `lagotto deploy`) to get exact quota
+  numbers in the report — **the report itself works without it**: the ceiling is
+  detected from the `RunInstances` error, and the quota lookup is optional and
+  fails open.
+
 ## [0.58.3] - 2026-09-17
 
 ### Fixed

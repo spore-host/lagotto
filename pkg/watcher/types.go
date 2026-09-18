@@ -47,6 +47,17 @@ const (
 // fault) doesn't burn a launch attempt every poll for its whole TTL (#41).
 const MaxConsecutiveFailures = 10
 
+// QuotaCapReprobeInterval is how long a fleet watch that has hit its EC2 vCPU
+// quota ceiling waits before attempting another top-up (#153). Backoff applies
+// ONLY to attempts we already know will fail (running is at or above the known
+// ceiling); a worker lost below the ceiling is replaced on the very next cycle.
+//
+// At the hosted poller's 5-minute cadence, a 48h watch capped one worker short
+// makes ~576 doomed RunInstances calls under the old behavior; at 30 minutes
+// that's ~96 — still frequent enough that a granted quota increase is picked up
+// within half an hour with no user action.
+const QuotaCapReprobeInterval = 30 * time.Minute
+
 // Watch represents a user's request to monitor for instance capacity.
 type Watch struct {
 	WatchID string `json:"watch_id" dynamodbav:"watch_id"`
@@ -100,6 +111,24 @@ type Watch struct {
 	// MaxConsecutiveFailures the watch is stopped as failed (#41). Genuine
 	// capacity failures never touch it, so a real capacity wait stays uncapped.
 	ConsecutiveFailures int `json:"consecutive_failures,omitempty" dynamodbav:"consecutive_failures,omitempty"`
+	// QuotaCappedCount / QuotaCappedAt / QuotaCapReason record that a fleet
+	// watch has hit its EC2 vCPU quota ceiling (#153). These are PERSISTED (unlike
+	// the derived duration fields below) precisely because the hosted poller is
+	// stateless across invocations: without them there is nowhere to remember
+	// "already reported this", so the user would be notified every 5 minutes for
+	// the whole TTL — or, as before the fix, never.
+	//
+	// QuotaCappedCount is the ceiling M in "capped at M/N" — the number of workers
+	// that were running when the quota refused the next launch. 0 means not
+	// capped, so it doubles as the already-reported flag AND the suppression
+	// threshold (a cap at a different level overwrites and re-notifies). All three
+	// are omitempty, so pre-#153 watch records read back as zero — no migration.
+	QuotaCappedCount int `json:"quota_capped_count,omitempty" dynamodbav:"quota_capped_count,omitempty"`
+	// QuotaCappedAt anchors the QuotaCapReprobeInterval backoff.
+	QuotaCappedAt time.Time `json:"quota_capped_at,omitempty" dynamodbav:"quota_capped_at,omitempty"`
+	// QuotaCapReason is the human explanation (family, numbers when known, and the
+	// quota-increase hint) shown by `lagotto status`.
+	QuotaCapReason string `json:"quota_cap_reason,omitempty" dynamodbav:"quota_cap_reason,omitempty"`
 	// LeaseOwner / LeaseExpiresAt guard the double-poller race (#47): before a
 	// poller acts on a match it claims a short lease, so two daemons (or a daemon
 	// + the hosted Lambda) can't both fire the same watch. A lease past its expiry
@@ -125,8 +154,13 @@ type MatchResult struct {
 	// CandidateAZs are all AZs (in preference order) where this type was offered
 	// this poll, so the spawner can retry the next AZ on InsufficientInstance
 	// Capacity within a cycle. AvailabilityZone is CandidateAZs[0] (#34).
-	CandidateAZs  []string  `json:"candidate_azs,omitempty" dynamodbav:"candidate_azs,omitempty"`
-	InstanceType  string    `json:"instance_type" dynamodbav:"instance_type"`
+	CandidateAZs []string `json:"candidate_azs,omitempty" dynamodbav:"candidate_azs,omitempty"`
+	InstanceType string   `json:"instance_type" dynamodbav:"instance_type"`
+	// VCPUs is the matched type's vCPU count, carried from truffle's
+	// DescribeInstanceTypes result — the AUTHORITATIVE figure, not a size-suffix
+	// estimate. The quota ceiling is expressed in vCPUs per family, so the poller
+	// needs it to say how much quota a refused launch was asking for (#153).
+	VCPUs         int32     `json:"vcpus,omitempty" dynamodbav:"vcpus,omitempty"`
 	Price         float64   `json:"price" dynamodbav:"price"`
 	IsSpot        bool      `json:"is_spot" dynamodbav:"is_spot"`
 	MatchedAt     time.Time `json:"matched_at" dynamodbav:"matched_at"`

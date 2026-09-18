@@ -15,6 +15,7 @@ import (
 	schedulertypes "github.com/aws/aws-sdk-go-v2/service/scheduler/types"
 	"github.com/spore-host/lagotto/pkg/watcher"
 	truffleaws "github.com/spore-host/truffle/pkg/aws"
+	"github.com/spore-host/truffle/pkg/quotas"
 )
 
 var (
@@ -86,6 +87,11 @@ func init() {
 		// Hosted: this poller has no shell sandbox, so it refuses shell-based
 		// fleet completion conditions (#70); those run only on a local daemon.
 		Hosted: true,
+		// Optional Service Quotas numbers for a #153 quota-cap report. Nil-safe and
+		// fail-open: the cap itself comes from the RunInstances error, so a poller
+		// whose runtime policy predates the servicequotas grant still reports
+		// "capped at M/N" — just without the exact limit/usage figures.
+		Quotas: quotas.NewClientFromConfig(cfg),
 	})
 
 	schedulerClient = scheduler.NewFromConfig(cfg)
@@ -229,8 +235,8 @@ func handlePoll(ctx context.Context) error {
 		return fmt.Errorf("poll: %w", err)
 	}
 
-	log.Printf("Poll complete: watched=%d launched=%d notified=%d retrying=%d failed=%d expired=%d",
-		s.Watched, s.Launched, s.Notified, s.Retrying, s.Failed, s.Expired)
+	log.Printf("Poll complete: watched=%d launched=%d notified=%d retrying=%d failed=%d expired=%d quotaCapped=%d",
+		s.Watched, s.Launched, s.Notified, s.Retrying, s.Failed, s.Expired, s.QuotaCapped)
 
 	// Check if any active watches remain. Retrying watches are still active, so
 	// the schedule stays armed until every watch has launched, failed, or
