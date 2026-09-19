@@ -386,3 +386,65 @@ func TestReleaseLease_OnlyOwnerClears(t *testing.T) {
 		t.Fatalf("after non-owner release, pollerB claim err = %v, want ErrLeaseHeld (A still holds)", err)
 	}
 }
+
+// TestRecordAndClearQuotaCap round-trips the three persisted quota-cap fields
+// (#153) and confirms ClearQuotaCap removes all three while leaving the unrelated
+// consecutive-failure counter alone.
+func TestRecordAndClearQuotaCap(t *testing.T) {
+	store := setupStore(t)
+	ctx := context.Background()
+
+	w := newTestWatch("w-quota-store", "arn:alice")
+	w.DesiredCount = 5
+	if err := store.PutWatch(ctx, w); err != nil {
+		t.Fatalf("PutWatch: %v", err)
+	}
+	// An unrelated counter that must survive the clear.
+	if _, err := store.IncrementConsecutiveFailures(ctx, w.WatchID); err != nil {
+		t.Fatalf("IncrementConsecutiveFailures: %v", err)
+	}
+
+	const reason = "fleet capped at 2/5 by the EC2 G-family On-Demand vCPU quota in us-east-1"
+	before := time.Now().UTC().Add(-time.Second)
+	if err := store.RecordQuotaCap(ctx, w.WatchID, 2, reason); err != nil {
+		t.Fatalf("RecordQuotaCap: %v", err)
+	}
+
+	got, err := store.GetWatch(ctx, w.WatchID)
+	if err != nil {
+		t.Fatalf("GetWatch: %v", err)
+	}
+	if got.QuotaCappedCount != 2 {
+		t.Errorf("QuotaCappedCount = %d, want 2", got.QuotaCappedCount)
+	}
+	if got.QuotaCapReason != reason {
+		t.Errorf("QuotaCapReason = %q, want %q", got.QuotaCapReason, reason)
+	}
+	if got.QuotaCappedAt.Before(before) {
+		t.Errorf("QuotaCappedAt = %v, want >= %v", got.QuotaCappedAt, before)
+	}
+
+	// Re-recording at a different level overwrites (it's a level, not a counter).
+	if err := store.RecordQuotaCap(ctx, w.WatchID, 3, reason); err != nil {
+		t.Fatalf("RecordQuotaCap (relevel): %v", err)
+	}
+	got, _ = store.GetWatch(ctx, w.WatchID)
+	if got.QuotaCappedCount != 3 {
+		t.Errorf("QuotaCappedCount after re-record = %d, want 3 (overwritten, not summed)", got.QuotaCappedCount)
+	}
+
+	if err := store.ClearQuotaCap(ctx, w.WatchID); err != nil {
+		t.Fatalf("ClearQuotaCap: %v", err)
+	}
+	got, err = store.GetWatch(ctx, w.WatchID)
+	if err != nil {
+		t.Fatalf("GetWatch after clear: %v", err)
+	}
+	if got.QuotaCappedCount != 0 || got.QuotaCapReason != "" || !got.QuotaCappedAt.IsZero() {
+		t.Errorf("cap state not cleared: count=%d at=%v reason=%q",
+			got.QuotaCappedCount, got.QuotaCappedAt, got.QuotaCapReason)
+	}
+	if got.ConsecutiveFailures != 1 {
+		t.Errorf("ConsecutiveFailures = %d, want 1 (untouched by the quota-cap clear)", got.ConsecutiveFailures)
+	}
+}

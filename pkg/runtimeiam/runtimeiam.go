@@ -257,6 +257,20 @@ func PolicyDocument(region, accountID string) (string, error) {
 			// fails with AccessDenied — which classifies terminal, killing the watch
 			// before any capacity check (lagotto#148). Pricing is a global read-only API.
 			"pricing:GetProducts", "pricing:GetAttributeValues",
+			// servicequotas reads let the poller put the account's ACTUAL vCPU
+			// limit/usage numbers into a quota-cap report (lagotto#153) — e.g. "fleet
+			// capped at 2/5; G on-demand quota is 8 vCPU with 8 in use". Read-only,
+			// region-agnostic, no write/request-increase action.
+			//
+			// Explicitly NOT required for the fix: the cap is detected from the
+			// RunInstances error itself (pure error inspection), and the lookup seam
+			// is nil-safe and fails open. That's deliberate — #148 and #150 were both
+			// "a fix that silently no-ops if you forget to re-run `lagotto setup`",
+			// and this must not become a third. Re-running setup upgrades the report
+			// from "capped at 2/5" to "capped at 2/5, quota is 8 vCPU"; it never
+			// decides whether the cap is reported at all. (ec2:DescribeInstances,
+			// which GetQuotas also needs for current usage, is already granted above.)
+			"servicequotas:GetServiceQuota", "servicequotas:ListServiceQuotas",
 		}, Resource: "*"},
 		// Scheduler: manage this poller's schedule + the #62 per-launch schedules.
 		{Effect: "Allow", Action: []string{"scheduler:UpdateSchedule", "scheduler:GetSchedule"},

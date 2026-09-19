@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -385,6 +386,58 @@ func (s *Store) ResetConsecutiveFailures(ctx context.Context, watchID string) er
 	})
 	if err != nil {
 		return fmt.Errorf("reset consecutive failures: %w", err)
+	}
+	return nil
+}
+
+// RecordQuotaCap persists that a fleet watch is capped at `running` workers by
+// its EC2 vCPU quota, with the human explanation and the timestamp that anchors
+// the QuotaCapReprobeInterval backoff (#153). Called on EVERY capped cycle (it
+// refreshes the anchor and the reason); the caller decides whether this cap is
+// NEW and therefore worth a notification.
+//
+// Deliberately a SET of all three attributes rather than an ADD: the value is a
+// level ("capped at M"), not a counter, so a cap at a different level overwrites
+// cleanly and re-notifies.
+func (s *Store) RecordQuotaCap(ctx context.Context, watchID string, running int, reason string) error {
+	_, err := s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: &s.watchesTable,
+		Key: map[string]types.AttributeValue{
+			"watch_id": &types.AttributeValueMemberS{Value: watchID},
+		},
+		UpdateExpression: aws.String("SET last_polled_at = :now, quota_capped_count = :n, quota_capped_at = :now, quota_cap_reason = :reason"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":now":    &types.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)},
+			":n":      &types.AttributeValueMemberN{Value: strconv.Itoa(running)},
+			":reason": &types.AttributeValueMemberS{Value: reason},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("record quota cap: %w", err)
+	}
+	return nil
+}
+
+// ClearQuotaCap removes the quota-cap state from a watch (#153), so the next
+// cycle top-ups immediately and a later cap notifies again. Called when a launch
+// succeeds while capped or the fleet reaches its goal — which is what makes a
+// granted quota increase self-correcting with no user action.
+//
+// The single-expression `REMOVE … SET …` form is already proven against both real
+// DynamoDB and Substrate by UpdateSageMakerJob.
+func (s *Store) ClearQuotaCap(ctx context.Context, watchID string) error {
+	_, err := s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: &s.watchesTable,
+		Key: map[string]types.AttributeValue{
+			"watch_id": &types.AttributeValueMemberS{Value: watchID},
+		},
+		UpdateExpression: aws.String("REMOVE quota_capped_count, quota_capped_at, quota_cap_reason SET last_polled_at = :now"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":now": &types.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("clear quota cap: %w", err)
 	}
 	return nil
 }

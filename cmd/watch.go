@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -15,7 +16,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"github.com/spore-host/lagotto/pkg/awscfg"
+	"github.com/spore-host/lagotto/pkg/quotacheck"
 	"github.com/spore-host/lagotto/pkg/watcher"
+	"github.com/spore-host/truffle/pkg/quotas"
 	"gopkg.in/yaml.v3"
 )
 
@@ -207,6 +210,15 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "Created DynamoDB table %s\n", name)
 	}
 
+	// Create-time feasibility check for a fleet watch (#153): tell the user NOW if
+	// their --maintain goal exceeds the account's vCPU quota, instead of leaving
+	// them to infer it from a fleet that never fills. Deliberately NON-FATAL and
+	// without a --force escape hatch: truffle's GetQuotas swallows per-quota errors
+	// (truffle#167), so "zero quota" isn't reliably distinguishable from "lookup
+	// failed / no permission / throttled" — a fatal gate would break watch creation
+	// for anyone lacking a read permission. (Opt-in strictness is #157.)
+	quotaReport := warnFleetQuotaFeasibility(ctx, quotas.NewClientFromConfig(cfg), os.Stderr, w, cfg.Region)
+
 	if err := store.PutWatch(ctx, w); err != nil {
 		return fmt.Errorf("create watch: %w", err)
 	}
@@ -219,6 +231,15 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	if getOutputFormat() == "json" {
 		enc := json.NewEncoder(cmd.OutOrStdout())
 		enc.SetIndent("", "  ")
+		if quotaReport != nil {
+			// The quota report rides alongside the watch (the Report's own struct tags
+			// do the rest), so a scripted caller can see the feasibility verdict that
+			// was printed to stderr.
+			return enc.Encode(struct {
+				*watcher.Watch
+				QuotaWarning *quotacheck.Report `json:"quota_warning,omitempty"`
+			}{Watch: w, QuotaWarning: quotaReport})
+		}
 		return enc.Encode(w)
 	}
 
@@ -244,8 +265,144 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	if w.Service == watcher.ServiceSageMaker && len(w.SageMakerJobJSON) > 0 {
 		fmt.Fprintf(cmd.OutOrStdout(), "  SageMaker config: %s\n", watchSageMakerConfig)
 	}
+	if quotaReport != nil && quotaReport.Known {
+		fmt.Fprintf(cmd.OutOrStdout(), "  Quota:    %s\n", quotaSummaryRow(quotaReport, w))
+	}
 	fmt.Fprintf(cmd.OutOrStdout(), "  Expires:  %s\n", w.ExpiresAt.Format(time.RFC3339))
 	return nil
+}
+
+// quotaSummaryRow is the one-line "Quota:" row echoed in the human watch-create
+// summary, so the feasibility answer appears next to the fleet size even when the
+// stderr warning scrolls past.
+func quotaSummaryRow(rep *quotacheck.Report, w *watcher.Watch) string {
+	lifecycle := "on-demand"
+	if w.Spot {
+		lifecycle = "spot"
+	}
+	head := fmt.Sprintf("%s-family %s: %d vCPU limit, %d in use", rep.Family, lifecycle, rep.Limit, rep.Used)
+	if rep.MaxWorkers < 0 {
+		return head
+	}
+	verdict := "fits the fleet"
+	if !rep.Feasible {
+		verdict = fmt.Sprintf("short of --maintain %d", w.DesiredCount)
+	}
+	return fmt.Sprintf("%s → room for %d × %s (%s)", head, rep.MaxWorkers, rep.SmallestRung, verdict)
+}
+
+// maxQuotaCheckRegions bounds how many regions the create-time check queries. Each
+// GetQuotas is ~16 GetServiceQuota calls plus 2 DescribeInstances, and an empty
+// --regions means ALL enabled regions — sweeping those at watch-create would turn
+// a convenience warning into a ~500-call stall.
+const maxQuotaCheckRegions = 3
+
+// warnFleetQuotaFeasibility warns (to stderr, non-fatally) when a --maintain
+// fleet's goal doesn't fit the account's EC2 vCPU quota (#153), and returns the
+// report for the JSON output. Returns nil when there's nothing to say: not a
+// fleet watch, no lookup, or a lookup that produced no usable numbers.
+//
+// Output goes to STDERR on purpose so it survives `-o json`. fallbackRegion is the
+// caller's configured region, used when --regions is empty (which means "all
+// enabled regions" at poll time — never swept here).
+func warnFleetQuotaFeasibility(ctx context.Context, l quotacheck.Lookup, out io.Writer, w *watcher.Watch, fallbackRegion string) *quotacheck.Report {
+	if w == nil || w.DesiredCount <= 0 || l == nil {
+		return nil
+	}
+	regions := w.Regions
+	if len(regions) == 0 && fallbackRegion != "" {
+		regions = []string{fallbackRegion}
+	}
+	if len(regions) == 0 {
+		return nil
+	}
+	truncated := false
+	if len(regions) > maxQuotaCheckRegions {
+		regions = regions[:maxQuotaCheckRegions]
+		truncated = true
+	}
+
+	rungs := watcher.SplitInstanceTypePatterns(w.InstanceTypePattern)
+	if len(rungs) == 0 {
+		return nil
+	}
+
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	var first *quotacheck.Report
+	for _, region := range regions {
+		rep, err := quotacheck.Feasibility(cctx, l, quotacheck.Request{
+			Region:  region,
+			Rungs:   rungs,
+			Spot:    w.Spot,
+			Desired: w.DesiredCount,
+		})
+		if err != nil {
+			// A failed lookup is NOT a quota problem — stay quiet (verbose-only) so a
+			// missing read permission never reads as "your quota is zero".
+			if verbose {
+				fmt.Fprintf(out, "note: could not read EC2 service quotas in %s: %v\n", region, err)
+			}
+			continue
+		}
+		if !rep.Known {
+			if verbose {
+				fmt.Fprintf(out, "note: no EC2 %s-family quota figure available in %s "+
+					"(needs servicequotas:GetServiceQuota); the watch still reports a quota ceiling if it hits one.\n",
+					rep.Family, region)
+			}
+			continue
+		}
+		if first == nil {
+			r := rep
+			first = &r
+		}
+		printQuotaFeasibility(out, w, region, &rep)
+	}
+	if truncated && first != nil {
+		fmt.Fprintf(out, "note: quota checked in the first %d of %d region(s) only.\n", maxQuotaCheckRegions, len(w.Regions))
+	}
+	return first
+}
+
+// printQuotaFeasibility writes the human warning for one region's report. The
+// zero-quota case is the loudest; an infeasible-but-nonzero quota is a warning
+// that also says what the watch WILL do; a feasible fleet says nothing.
+func printQuotaFeasibility(out io.Writer, w *watcher.Watch, region string, rep *quotacheck.Report) {
+	lifecycle := "on-demand"
+	if w.Spot {
+		lifecycle = "spot"
+	}
+	switch {
+	case rep.ZeroQuota:
+		fmt.Fprintf(out, "warning: your EC2 %s-family %s vCPU quota in %s is 0 — this fleet cannot launch a single worker until it's raised.\n",
+			rep.Family, lifecycle, region)
+	case !rep.Feasible:
+		fmt.Fprintf(out, "warning: this fleet may not reach --maintain %d: your EC2 %s-family %s vCPU quota in %s is %d vCPU with %d in use",
+			w.DesiredCount, rep.Family, lifecycle, region, rep.Limit, rep.Used)
+		if rep.MaxWorkers >= 0 {
+			qualifier := ""
+			if rep.MixedRungs {
+				// Which rung matches isn't fixed at create time (#135 comma-list), so the
+				// count is the most optimistic reading — name the rung it assumes.
+				qualifier = "at best "
+			}
+			fmt.Fprintf(out, ", which fits %s%d × %s (%d vCPU each).\n",
+				qualifier, rep.MaxWorkers, rep.SmallestRung, rep.VCPUsPerWorker)
+		} else {
+			// No literal rung in the pattern (a pure wildcard) — report the vCPU
+			// headroom rather than invent a worker count.
+			fmt.Fprintf(out, " (%d vCPU free), and %q has no literal size to count workers against.\n",
+				rep.Limit-rep.Used, w.InstanceTypePattern)
+		}
+		fmt.Fprintf(out, "  The watch will still run: it maintains as many workers as quota allows, tells you when it hits the ceiling, and picks up a granted increase automatically.\n")
+	default:
+		return
+	}
+	if rep.Remediation != "" {
+		fmt.Fprintf(out, "%s\n", rep.Remediation)
+	}
 }
 
 // loadEC2SpawnConfig reads an EC2 --spawn-config YAML file, normalizes its keys

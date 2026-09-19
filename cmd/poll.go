@@ -15,6 +15,7 @@ import (
 	"github.com/spore-host/lagotto/pkg/awscfg"
 	"github.com/spore-host/lagotto/pkg/watcher"
 	truffleaws "github.com/spore-host/truffle/pkg/aws"
+	"github.com/spore-host/truffle/pkg/quotas"
 )
 
 var (
@@ -128,6 +129,9 @@ func buildPoller(ctx context.Context) (*watcher.Poller, *watcher.WatchFilter, er
 		SageMaker:  watcher.NewSageMakerLauncher(cfg),
 		Filter:     filter,
 		LeaseOwner: leaseOwner,
+		// Optional quota numbers for a #153 cap report. Nil-safe: the cap is
+		// detected from the RunInstances error, so this only adds exact figures.
+		Quotas: quotas.NewClientFromConfig(cfg),
 	}), filter, nil
 }
 
@@ -218,8 +222,9 @@ func printPollSummary(cmd *cobra.Command, summary *watcher.PollSummary) {
 	}
 
 	fmt.Fprintf(cmd.OutOrStdout(),
-		"Poll cycle: %d watched, %d launched, %d notified, %d retrying, %d failed, %d expired\n",
-		summary.Watched, summary.Launched, summary.Notified, summary.Retrying, summary.Failed, summary.Expired)
+		"Poll cycle: %d watched, %d launched, %d notified, %d retrying, %d failed, %d expired, %d quota-capped\n",
+		summary.Watched, summary.Launched, summary.Notified, summary.Retrying, summary.Failed, summary.Expired,
+		summary.QuotaCapped)
 
 	for _, m := range summary.Matches {
 		spotLabel := "on-demand"

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -122,3 +123,105 @@ func TestNotifyNoChannels(t *testing.T) {
 }
 
 // TODO: SNS tests require Substrate emulator or mock SNS client
+
+// ── Quota-cap notification (#153) ─────────────────────────────────────────────
+
+// TestSendQuotaCapWebhook_Payload checks the quota-cap webhook body. Called
+// directly, as TestSendWebhook_Payload does, because httptest servers are
+// http://loopback and ValidateWebhookURL rightly refuses those.
+func TestSendQuotaCapWebhook_Payload(t *testing.T) {
+	var received map[string]interface{}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	n := &Notifier{httpClient: ts.Client()}
+	w := &Watch{WatchID: "w-cap1", InstanceTypePattern: "g6e.xlarge", DesiredCount: 5}
+
+	if err := n.sendQuotaCapWebhook(context.Background(), ts.URL, w, 2, "fleet capped at 2/5 by the EC2 G-family On-Demand vCPU quota"); err != nil {
+		t.Fatalf("sendQuotaCapWebhook: %v", err)
+	}
+	if received == nil {
+		t.Fatal("webhook was not called")
+	}
+	if got := received["event"]; got != "quota_capped" {
+		t.Errorf("event = %v, want quota_capped", got)
+	}
+	if got := received["running"].(float64); got != 2 {
+		t.Errorf("running = %v, want 2", got)
+	}
+	if got := received["desired"].(float64); got != 5 {
+		t.Errorf("desired = %v, want 5", got)
+	}
+	if got := received["pattern"]; got != "g6e.xlarge" {
+		t.Errorf("pattern = %v, want g6e.xlarge", got)
+	}
+	if got, _ := received["reason"].(string); got == "" {
+		t.Error("reason is empty")
+	}
+}
+
+// TestMatchWebhookHasNoEventKey: the "event" key is new to the quota-cap payload
+// ONLY — the existing match payload is deliberately left unchanged so no webhook
+// consumer has to adapt.
+func TestMatchWebhookHasNoEventKey(t *testing.T) {
+	var received map[string]interface{}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&received)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	n := &Notifier{httpClient: ts.Client()}
+	w := &Watch{WatchID: "w-match", InstanceTypePattern: "g6e.xlarge"}
+	m := &MatchResult{InstanceType: "g6e.xlarge", MatchedAt: time.Now()}
+	if err := n.sendWebhook(context.Background(), ts.URL, w, m); err != nil {
+		t.Fatalf("sendWebhook: %v", err)
+	}
+	if _, ok := received["event"]; ok {
+		t.Error(`match payload gained an "event" key — it must stay as-is`)
+	}
+}
+
+func TestQuotaCapSubjectAndBody(t *testing.T) {
+	w := &Watch{
+		WatchID: "w-cap2", InstanceTypePattern: "g6e.xlarge,g6e.2xlarge",
+		Regions: []string{"us-east-1"}, DesiredCount: 5,
+	}
+	if got, want := quotaCapSubject(w, 2), "[lagotto] fleet capped at 2/5 by EC2 quota"; got != want {
+		t.Errorf("quotaCapSubject = %q, want %q", got, want)
+	}
+	body := quotaCapBody(w, 2, "fleet capped at 2/5 by the EC2 G-family On-Demand vCPU quota in us-east-1")
+	for _, want := range []string{"w-cap2", "2 of 5", "g6e.xlarge,g6e.2xlarge", "stays ACTIVE", "G-family"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("quotaCapBody missing %q:\n%s", want, body)
+		}
+	}
+}
+
+// TestNotifyQuotaCap_NoChannels: a watch with no --notify is silent and errorless
+// (the persisted reason + `lagotto status` is its surface).
+func TestNotifyQuotaCap_NoChannels(t *testing.T) {
+	n := &Notifier{}
+	if err := n.NotifyQuotaCap(context.Background(), &Watch{WatchID: "w-none"}, 1, "r"); err != nil {
+		t.Errorf("want nil error with no channels, got %v", err)
+	}
+}
+
+// TestNotifyQuotaCap_RejectsHTTP: the same defence-in-depth webhook re-check as
+// Notify, for watches stored before URL validation shipped.
+func TestNotifyQuotaCap_RejectsHTTP(t *testing.T) {
+	n := &Notifier{httpClient: http.DefaultClient}
+	w := &Watch{
+		WatchID:        "w-cap-http",
+		DesiredCount:   3,
+		NotifyChannels: []NotifyChannel{{Type: "webhook", Target: "http://evil.example.com/steal"}},
+	}
+	if err := n.NotifyQuotaCap(context.Background(), w, 1, "r"); err == nil {
+		t.Fatal("expected NotifyQuotaCap to reject an http:// webhook URL")
+	}
+}
