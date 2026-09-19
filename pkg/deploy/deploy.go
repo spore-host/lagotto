@@ -7,6 +7,8 @@ package deploy
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,8 +18,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/cloudformation"
 	cfntypes "github.com/aws/aws-sdk-go-v2/service/cloudformation/types"
+	"github.com/aws/aws-sdk-go-v2/service/lambda"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/aws-sdk-go-v2/service/scheduler"
+	"github.com/aws/aws-sdk-go-v2/service/sns"
 
 	cfn "github.com/spore-host/lagotto/deployment/cloudformation"
 )
@@ -74,12 +79,19 @@ var deployCapabilities = []cfntypes.Capability{
 	cfntypes.CapabilityCapabilityAutoExpand,
 }
 
-// Deployer performs deploy/teardown against AWS. The httpGet field is indirected
-// so tests can stub the release download.
+// Deployer performs deploy/teardown against AWS. Every AWS dependency is held
+// behind a narrow interface (see infra.go) and the two time/network-touching
+// operations are function fields, so unit tests can drive the whole thing
+// offline: httpGet stubs the release download, and sleep makes retry/poll loops
+// instant.
 type Deployer struct {
-	cfn     *cloudformation.Client
+	cfn     cfnAPI
 	s3      *s3.Client
+	lambda  lambdaAPI
+	sns     snsAPI
+	sched   schedulerAPI
 	httpGet func(url string) (*http.Response, error)
+	sleep   func(time.Duration)
 }
 
 // New builds a Deployer from an AWS config.
@@ -87,7 +99,11 @@ func New(cfg aws.Config) *Deployer {
 	return &Deployer{
 		cfn:     cloudformation.NewFromConfig(cfg),
 		s3:      s3.NewFromConfig(cfg),
+		lambda:  lambda.NewFromConfig(cfg),
+		sns:     sns.NewFromConfig(cfg),
+		sched:   scheduler.NewFromConfig(cfg),
 		httpGet: http.Get,
+		sleep:   time.Sleep,
 	}
 }
 
@@ -104,7 +120,10 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) (map[string]string,
 	if err := d.ensureBucket(ctx, bucket, opts.Region); err != nil {
 		return nil, err
 	}
-	if err := d.uploadArtifact(ctx, bucket, key, opts.Version); err != nil {
+	// The returned code digest is only consumed by the SDK-native path
+	// (EnsurePollerFunction); CloudFormation decides code freshness from the
+	// bucket/key parameters.
+	if _, err := d.uploadArtifact(ctx, bucket, key, opts.Version); err != nil {
 		return nil, err
 	}
 
@@ -166,28 +185,40 @@ func (d *Deployer) ensureBucket(ctx context.Context, bucket, region string) erro
 	return nil
 }
 
-func (d *Deployer) uploadArtifact(ctx context.Context, bucket, key, version string) error {
+// uploadArtifact downloads the published poller zip and puts it in the artifact
+// bucket, returning the base64-std-encoded SHA-256 of the bytes — the same
+// convention Lambda reports in FunctionConfiguration.CodeSha256 — so
+// EnsurePollerFunction can skip an UpdateFunctionCode that would be a no-op.
+//
+// Treat that hash strictly as an OPTIMIZATION, never as correctness: we hash the
+// bytes we already hold in memory, so it costs nothing, but if the convention
+// ever fails to line up with what a given endpoint reports (substrate, for
+// instance, reports an S3-sourced package's ETag instead), the only consequence
+// is an unconditional UpdateFunctionCode — which is still completely correct,
+// just not free. Never gate correctness on this value matching.
+func (d *Deployer) uploadArtifact(ctx context.Context, bucket, key, version string) (string, error) {
 	url := LambdaArtifactURL(version)
 	resp, err := d.httpGet(url)
 	if err != nil {
-		return fmt.Errorf("download poller Lambda %s: %w", url, err)
+		return "", fmt.Errorf("download poller Lambda %s: %w", url, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("download poller Lambda %s: HTTP %d (is v%s released?)", url, resp.StatusCode, strings.TrimPrefix(version, "v"))
+		return "", fmt.Errorf("download poller Lambda %s: HTTP %d (is v%s released?)", url, resp.StatusCode, strings.TrimPrefix(version, "v"))
 	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("read poller Lambda zip: %w", err)
+		return "", fmt.Errorf("read poller Lambda zip: %w", err)
 	}
 	if _, err := d.s3.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
 		Body:   strings.NewReader(string(body)),
 	}); err != nil {
-		return fmt.Errorf("upload poller Lambda to s3://%s/%s: %w", bucket, key, err)
+		return "", fmt.Errorf("upload poller Lambda to s3://%s/%s: %w", bucket, key, err)
 	}
-	return nil
+	sum := sha256.Sum256(body)
+	return base64.StdEncoding.EncodeToString(sum[:]), nil
 }
 
 // failedCreateStates are terminal states a stack can be left in by a failed
@@ -202,6 +233,11 @@ var failedCreateStates = map[cfntypes.StackStatus]bool{
 	cfntypes.StackStatusDeleteFailed:     true,
 }
 
+// createOrUpdate drives the CloudFormation path. KEEP IT: `Deploy` still uses it,
+// and once `Deploy` cuts over to the SDK-native Ensure* path (#154) it remains
+// the only offline way to produce a genuinely CFN-created stack — i.e. the
+// fixture the adopt-an-existing-stack migration test needs. Do not delete it as
+// "dead code" when the cutover lands.
 func (d *Deployer) createOrUpdate(ctx context.Context, stackName string, params []cfntypes.Parameter, caps []cfntypes.Capability) error {
 	exists, status, err := d.stackState(ctx, stackName)
 	if err != nil {

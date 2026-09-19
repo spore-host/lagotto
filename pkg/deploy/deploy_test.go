@@ -67,6 +67,33 @@ func TestLambdaObjectKey(t *testing.T) {
 	}
 }
 
+// TestResourceARNs pins the constructed ARNs the SDK-native path relies on.
+// Every poller resource has a fixed name, which is exactly what lets `lagotto
+// launch` derive these from account+region instead of reading stack outputs — so
+// a typo here would be a silent mis-wire, not a build failure.
+func TestResourceARNs(t *testing.T) {
+	if got, want := PollerFunctionARN("us-west-2", "123456789012"),
+		"arn:aws:lambda:us-west-2:123456789012:function:lagotto-capacity-poller"; got != want {
+		t.Errorf("PollerFunctionARN = %q, want %q", got, want)
+	}
+	if got, want := AlertsTopicARN("eu-central-1", "210987654321"),
+		"arn:aws:sns:eu-central-1:210987654321:lagotto-capacity-alerts"; got != want {
+		t.Errorf("AlertsTopicARN = %q, want %q", got, want)
+	}
+	// The fixed names must keep matching what the template declares, or an
+	// account with a CFN-deployed stack would get duplicate resources instead of
+	// the SDK path adopting the existing ones.
+	for _, name := range []string{PollerFunctionName, AlertsTopicName, PollerScheduleName} {
+		if !strings.Contains(cfn.StackTemplate, name) {
+			t.Errorf("template no longer names %q — the SDK path would no longer adopt the stack's resource", name)
+		}
+	}
+	if PollerScheduleName != PollerFunctionName {
+		t.Errorf("PollerScheduleName %q and PollerFunctionName %q diverged; the template uses the same string for both",
+			PollerScheduleName, PollerFunctionName)
+	}
+}
+
 // TestFailedCreateStates documents which stack statuses trigger the #59
 // delete-and-recreate path: a stack stranded by a failed CreateStack (most
 // importantly ROLLBACK_COMPLETE) can't be updated and must be recreated, while a

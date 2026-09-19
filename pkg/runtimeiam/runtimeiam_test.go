@@ -223,3 +223,33 @@ func TestEnsureRuntimeRole_RequiresRegionAndAccount(t *testing.T) {
 		t.Errorf("PutRolePolicy should not be called on validation failure (called %d)", f.calls)
 	}
 }
+
+// TestRoleARNs pins the two constructed role ARNs. They're built here — next to
+// the names they derive from — so pkg/deploy has a single source of truth rather
+// than its own copy of the format string; a drift would silently mis-wire the
+// poller's execution role or the Scheduler target.
+func TestRoleARNs(t *testing.T) {
+	if got, want := RoleARN("123456789012"),
+		"arn:aws:iam::123456789012:role/lagotto-capacity-poller-role"; got != want {
+		t.Errorf("RoleARN = %q, want %q", got, want)
+	}
+	if got, want := SchedulerInvokeRoleARN("123456789012"),
+		"arn:aws:iam::123456789012:role/lagotto-capacity-poller-scheduler-invoke"; got != want {
+		t.Errorf("SchedulerInvokeRoleARN = %q, want %q", got, want)
+	}
+	// IAM is global: the ARNs must carry no region.
+	for _, arn := range []string{RoleARN("1"), SchedulerInvokeRoleARN("1")} {
+		if !strings.HasPrefix(arn, "arn:aws:iam:::role/") && !strings.Contains(arn, "iam::1:role/") {
+			t.Errorf("%q does not look like a region-less IAM role ARN", arn)
+		}
+	}
+	// The policy document already grants PassRole on the scheduler-invoke role by
+	// the same ARN; keep them in lockstep.
+	doc, err := PolicyDocument("us-east-1", "123456789012")
+	if err != nil {
+		t.Fatalf("PolicyDocument: %v", err)
+	}
+	if !strings.Contains(doc, SchedulerInvokeRoleARN("123456789012")) {
+		t.Error("the runtime policy no longer references SchedulerInvokeRoleARN's exact ARN")
+	}
+}
