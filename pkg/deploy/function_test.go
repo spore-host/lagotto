@@ -551,3 +551,59 @@ func TestDeletePollerFunction_AbsentIsNotAnError(t *testing.T) {
 		t.Error("a real delete failure must surface")
 	}
 }
+
+// TestRequirePollerDeployed_PresentIsOK: a function that exists is simply fine.
+func TestRequirePollerDeployed_PresentIsOK(t *testing.T) {
+	fl := &fakeLambda{getOut: &lambda.GetFunctionOutput{
+		Configuration: liveConfig(testPollerInput()),
+	}}
+	d, _ := testDeployer(fl, nil, nil)
+
+	if err := d.RequirePollerDeployed(context.Background(), testRegion, testAccount); err != nil {
+		t.Fatalf("RequirePollerDeployed: %v", err)
+	}
+	if fl.getCalls != 1 {
+		t.Errorf("GetFunction called %d times, want 1", fl.getCalls)
+	}
+}
+
+// TestRequirePollerDeployed_AbsentNamesWhereToLook: the whole point of this check
+// is the error message `lagotto launch` shows when the poller was never deployed
+// (or was deleted out from under a stack that still reports its outputs), so pin
+// the pieces a user needs: the function name, the account, the region, and the
+// command to run.
+func TestRequirePollerDeployed_AbsentNamesWhereToLook(t *testing.T) {
+	fl := &fakeLambda{getErr: &lambdatypes.ResourceNotFoundException{}}
+	d, _ := testDeployer(fl, nil, nil)
+
+	err := d.RequirePollerDeployed(context.Background(), testRegion, testAccount)
+	if err == nil {
+		t.Fatal("expected an error when the poller function is absent")
+	}
+	for _, want := range []string{PollerFunctionName, testAccount, testRegion, "lagotto deploy"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+}
+
+// TestRequirePollerDeployed_NonNotFoundIsWrapped is the important guard: an
+// AccessDenied on GetFunction means we don't KNOW whether the poller is deployed.
+// Telling the user to run `lagotto deploy` would send them to fix the wrong
+// problem, so the underlying error must be wrapped and surfaced instead.
+func TestRequirePollerDeployed_NonNotFoundIsWrapped(t *testing.T) {
+	denied := errors.New("AccessDeniedException: User is not authorized to perform lambda:GetFunction")
+	fl := &fakeLambda{getErr: denied}
+	d, _ := testDeployer(fl, nil, nil)
+
+	err := d.RequirePollerDeployed(context.Background(), testRegion, testAccount)
+	if err == nil {
+		t.Fatal("expected the AccessDenied to surface")
+	}
+	if !errors.Is(err, denied) {
+		t.Errorf("error must wrap the underlying failure, got %v", err)
+	}
+	if strings.Contains(err.Error(), "isn't deployed") || strings.Contains(err.Error(), "lagotto deploy") {
+		t.Errorf("a permissions failure must not be reported as an undeployed poller: %v", err)
+	}
+}

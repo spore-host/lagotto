@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **`lagotto launch` no longer needs a CloudFormation stack to find the poller**
+  (#154). It used to read the poller Lambda's ARN and the scheduler role's ARN out
+  of the stack's outputs; now it builds both from your account and region — those
+  resources have fixed names, and the CloudFormation template constructed the very
+  same ARNs itself — and then confirms the poller is actually there with a direct
+  Lambda lookup. Two practical differences: you get a clear *"the hosted poller
+  isn't deployed in account … / … — run 'lagotto deploy' first"* instead of a
+  stack-outputs error, and a poller that was deleted out from under its stack is
+  now caught (the old check was satisfied by the stack still reporting outputs,
+  even when the function was gone). A permissions failure on that lookup is
+  reported as a permissions failure, not as a missing deployment. This works
+  whether the poller was created by `lagotto deploy` or by the CloudFormation
+  template, so existing deployments keep working untouched.
+
+### Deprecated
+- **`lagotto launch --stack-name` is ignored** (#154). The poller has a fixed name,
+  so there is no stack to point at. The flag still parses (scripts that pass it
+  won't break) and stays visible in `--help`, now labelled as ignored, and `launch`
+  prints a one-line note when you use it. `lagotto deploy --stack-name` is
+  unaffected.
+
 ## [0.59.0] - 2026-09-18
 
 ### Fixed
