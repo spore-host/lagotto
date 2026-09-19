@@ -11,11 +11,13 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	cfntypes "github.com/aws/aws-sdk-go-v2/service/cloudformation/types"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
 	lambdatypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
 	"github.com/aws/aws-sdk-go-v2/service/scheduler"
 	schedulertypes "github.com/aws/aws-sdk-go-v2/service/scheduler/types"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
+	snstypes "github.com/aws/aws-sdk-go-v2/service/sns/types"
 
 	"github.com/spore-host/lagotto/pkg/testutil"
 )
@@ -52,102 +54,15 @@ func TestStackState_NoSuchStack(t *testing.T) {
 	}
 }
 
-// TestDeploy_CreatesStackAndReturnsOutputs exercises Deploy end to end against
-// Substrate: bucket creation, artifact upload (via a stubbed httpGet, so no
-// real network/GitHub-release fetch), and CreateStack — then asserts the
-// SAM-transformed stack's outputs come back, since callers (cmd/deploy.go,
-// cmd/launch.go's scheduled-launch wiring) depend on those keys existing.
-func TestDeploy_CreatesStackAndReturnsOutputs(t *testing.T) {
-	env := testutil.SubstrateServer(t)
-	d := New(env.AWSConfig)
-	d.httpGet = fakeHTTPGet(t)
-
-	outs, err := d.Deploy(context.Background(), Options{
-		StackName: "lagotto-test", Region: "us-east-1", Version: "0.44.0",
-		AccountID: "123456789012",
-	})
-	if err != nil {
-		t.Fatalf("Deploy: %v", err)
-	}
-	for _, key := range []string{
-		"CapacityPollerFunctionArn", "SchedulerInvokeRoleArn",
-		"WatchesTableName", "MatchHistoryTableName", "ScheduledTableName",
-	} {
-		if outs[key] == "" {
-			t.Errorf("stack outputs missing %q (got %v)", key, outs)
-		}
-	}
-}
-
-// TestDeploy_RedeployIsAnUpdateNotAFailure verifies the createOrUpdate branch
-// where the stack already exists in a healthy state: a second Deploy call
-// must go through UpdateStack (not error out, not recreate) and still return
-// outputs — this is the ordinary "run `lagotto deploy` again" path.
-func TestDeploy_RedeployIsAnUpdateNotAFailure(t *testing.T) {
-	env := testutil.SubstrateServer(t)
-	d := New(env.AWSConfig)
-	d.httpGet = fakeHTTPGet(t)
-
-	ctx := context.Background()
-	opts := Options{StackName: "lagotto-redeploy", Region: "us-east-1", Version: "0.44.0", AccountID: "123456789012"}
-
-	if _, err := d.Deploy(ctx, opts); err != nil {
-		t.Fatalf("first Deploy: %v", err)
-	}
-	outs, err := d.Deploy(ctx, opts)
-	if err != nil {
-		t.Fatalf("second Deploy (update path): %v", err)
-	}
-	if outs["CapacityPollerFunctionArn"] == "" {
-		t.Error("outputs missing CapacityPollerFunctionArn after redeploy")
-	}
-}
-
-// TestTeardown_DeletesStack verifies Teardown removes a deployed stack and
-// waits for completion — after it returns, stackState must report the stack
-// gone, so a subsequent Deploy takes the CreateStack path rather than trying
-// (and failing) an UpdateStack against nothing.
-func TestTeardown_DeletesStack(t *testing.T) {
-	env := testutil.SubstrateServer(t)
-	d := New(env.AWSConfig)
-	d.httpGet = fakeHTTPGet(t)
-
-	ctx := context.Background()
-	if _, err := d.Deploy(ctx, Options{
-		StackName: "lagotto-teardown", Region: "us-east-1", Version: "0.44.0", AccountID: "123456789012",
-	}); err != nil {
-		t.Fatalf("Deploy: %v", err)
-	}
-
-	if err := d.Teardown(ctx, "lagotto-teardown"); err != nil {
-		t.Fatalf("Teardown: %v", err)
-	}
-
-	exists, _, err := d.stackState(ctx, "lagotto-teardown")
-	if err != nil {
-		t.Fatalf("stackState after teardown: %v", err)
-	}
-	if exists {
-		t.Error("stack still exists after Teardown")
-	}
-}
-
 // TestStackOutputs_ReadsDeployedStack is the direct regression guard for the
-// public StackOutputs wrapper (used by cmd/launch.go to find the poller/
-// scheduler ARNs for a scheduled launch) — distinct from Deploy's own return
-// value, since a caller may query outputs for a stack deployed in a PRIOR
-// process/invocation.
+// public StackOutputs wrapper, which is retained for the optional CloudFormation
+// path (reading the outputs of an already-CFN-deployed stack). Since the #154
+// cutover `Deploy` no longer creates a stack, so the fixture is built with the
+// retained createOrUpdate — the reason that function is kept.
 func TestStackOutputs_ReadsDeployedStack(t *testing.T) {
-	env := testutil.SubstrateServer(t)
-	d := New(env.AWSConfig)
-	d.httpGet = fakeHTTPGet(t)
-
+	d := substrateDeployer(t)
 	ctx := context.Background()
-	if _, err := d.Deploy(ctx, Options{
-		StackName: "lagotto-outputs", Region: "us-east-1", Version: "0.44.0", AccountID: "123456789012",
-	}); err != nil {
-		t.Fatalf("Deploy: %v", err)
-	}
+	createLegacyStack(t, d, "lagotto-outputs")
 
 	outs, err := d.StackOutputs(ctx, "lagotto-outputs")
 	if err != nil {
@@ -287,6 +202,467 @@ func (s snsTagQuirk) TagResource(ctx context.Context, in *sns.TagResourceInput, 
 		return &sns.TagResourceOutput{}, nil
 	}
 	return out, err
+}
+
+// legacyStackVersion is the artifact version the legacy-stack fixture points at.
+const legacyStackVersion = "0.44.0"
+
+// createLegacyStack builds a genuinely CloudFormation-created stack via the
+// retained createOrUpdate — the only offline way to produce one now that Deploy
+// doesn't. This is the fixture the migration tests need: you cannot test detaching
+// a stack without a stack.
+func createLegacyStack(t *testing.T, d *Deployer, stackName string) {
+	t.Helper()
+	ctx := context.Background()
+	bucket := DefaultBucketName("123456789012", "us-east-1")
+	key := LambdaObjectKey(legacyStackVersion)
+	if err := d.ensureBucket(ctx, bucket, "us-east-1"); err != nil {
+		t.Fatalf("ensureBucket: %v", err)
+	}
+	if _, err := d.uploadArtifact(ctx, bucket, key, legacyStackVersion); err != nil {
+		t.Fatalf("uploadArtifact: %v", err)
+	}
+	params := []cfntypes.Parameter{
+		{ParameterKey: aws.String("Environment"), ParameterValue: aws.String("production")},
+		{ParameterKey: aws.String("LambdaCodeBucket"), ParameterValue: aws.String(bucket)},
+		{ParameterKey: aws.String("LambdaCodeKey"), ParameterValue: aws.String(key)},
+	}
+	if err := d.createOrUpdate(ctx, stackName, params, deployCapabilities); err != nil {
+		t.Fatalf("createOrUpdate (legacy stack fixture): %v", err)
+	}
+}
+
+// substrateDeployOptions is the Options a substrate Deploy uses.
+func substrateDeployOptions() Options {
+	return Options{
+		StackName: "lagotto", Region: "us-east-1", Version: "0.55.1",
+		AccountID: "123456789012", Environment: "production",
+	}
+}
+
+// TestSubstrate_Deploy_CreatesAllThreeResources is the SDK path end to end: bucket,
+// artifact upload (stubbed httpGet, no network), topic, function, schedule — and
+// the output keys the CLI prints.
+func TestSubstrate_Deploy_CreatesAllThreeResources(t *testing.T) {
+	d := substrateDeployer(t)
+	ctx := context.Background()
+
+	res, err := d.Deploy(ctx, substrateDeployOptions())
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	// The exact key set the stack used to export. Callers and humans read these.
+	want := []string{
+		"CapacityAlertsTopicArn", "CapacityPollerFunctionArn", "SchedulerInvokeRoleArn",
+		"WatchesTableName", "MatchHistoryTableName", "ScheduledTableName",
+	}
+	for _, k := range want {
+		if res.Outputs[k] == "" {
+			t.Errorf("outputs missing %q (got %v)", k, res.Outputs)
+		}
+	}
+	if len(res.Outputs) != len(want) {
+		t.Errorf("outputs has %d keys, want exactly %d (%v)", len(res.Outputs), len(want), res.Outputs)
+	}
+	if len(res.Actions) != 3 {
+		t.Errorf("Actions = %v, want one line per resource", res.Actions)
+	}
+
+	// All three resources are really there.
+	if _, err := d.lambda.GetFunction(ctx, &lambda.GetFunctionInput{FunctionName: aws.String(PollerFunctionName)}); err != nil {
+		t.Errorf("GetFunction after Deploy: %v", err)
+	}
+	if _, err := d.sched.GetSchedule(ctx, &scheduler.GetScheduleInput{Name: aws.String(PollerScheduleName)}); err != nil {
+		t.Errorf("GetSchedule after Deploy: %v", err)
+	}
+	if _, err := d.sns.GetTopicAttributes(ctx, &sns.GetTopicAttributesInput{
+		TopicArn: aws.String(res.Outputs["CapacityAlertsTopicArn"]),
+	}); err != nil {
+		t.Errorf("GetTopicAttributes after Deploy: %v", err)
+	}
+
+	// SNS_TOPIC_ARN must be the ARN the topic call actually returned.
+	fn, err := d.lambda.GetFunction(ctx, &lambda.GetFunctionInput{FunctionName: aws.String(PollerFunctionName)})
+	if err != nil {
+		t.Fatalf("GetFunction: %v", err)
+	}
+	if got := fn.Configuration.Environment.Variables["SNS_TOPIC_ARN"]; got != res.Outputs["CapacityAlertsTopicArn"] {
+		t.Errorf("SNS_TOPIC_ARN = %q, want the reported topic ARN %q", got, res.Outputs["CapacityAlertsTopicArn"])
+	}
+}
+
+// TestSubstrate_Deploy_IsIdempotent: a second Deploy converges rather than
+// failing. This is the structural death of the whole ROLLBACK_COMPLETE class of
+// bug (#59/#143) — there is no stack to strand, so a re-run is just three more
+// idempotent Ensure calls.
+func TestSubstrate_Deploy_IsIdempotent(t *testing.T) {
+	d := substrateDeployer(t)
+	ctx := context.Background()
+	opts := substrateDeployOptions()
+
+	first, err := d.Deploy(ctx, opts)
+	if err != nil {
+		t.Fatalf("first Deploy: %v", err)
+	}
+	second, err := d.Deploy(ctx, opts)
+	if err != nil {
+		t.Fatalf("second Deploy: %v", err)
+	}
+	for k, v := range first.Outputs {
+		if second.Outputs[k] != v {
+			t.Errorf("output %s changed between runs: %q then %q", k, v, second.Outputs[k])
+		}
+	}
+}
+
+// TestSubstrate_Deploy_PreservesEnabledSchedule is the #154 central guarantee at
+// the Deploy level (EnsurePollerSchedule has its own narrower version):
+//
+//	lagotto deploy  → schedule created DISABLED
+//	lagotto watch   → enablePollingSchedule flips it to ENABLED
+//	lagotto deploy  → MUST NOT turn the running poller back off
+func TestSubstrate_Deploy_PreservesEnabledSchedule(t *testing.T) {
+	d := substrateDeployer(t)
+	ctx := context.Background()
+	opts := substrateDeployOptions()
+
+	if _, err := d.Deploy(ctx, opts); err != nil {
+		t.Fatalf("first Deploy: %v", err)
+	}
+
+	// Exactly what cmd/watch.go's enablePollingSchedule does, out of band.
+	cur, err := d.sched.GetSchedule(ctx, &scheduler.GetScheduleInput{Name: aws.String(PollerScheduleName)})
+	if err != nil {
+		t.Fatalf("GetSchedule: %v", err)
+	}
+	if _, err := d.sched.UpdateSchedule(ctx, &scheduler.UpdateScheduleInput{
+		Name:               cur.Name,
+		ScheduleExpression: cur.ScheduleExpression,
+		FlexibleTimeWindow: cur.FlexibleTimeWindow,
+		Target:             cur.Target,
+		State:              schedulertypes.ScheduleStateEnabled,
+	}); err != nil {
+		t.Fatalf("enabling the schedule: %v", err)
+	}
+
+	if _, err := d.Deploy(ctx, opts); err != nil {
+		t.Fatalf("second Deploy: %v", err)
+	}
+
+	after, err := d.sched.GetSchedule(ctx, &scheduler.GetScheduleInput{Name: aws.String(PollerScheduleName)})
+	if err != nil {
+		t.Fatalf("GetSchedule after redeploy: %v", err)
+	}
+	if after.State != schedulertypes.ScheduleStateEnabled {
+		t.Fatalf("State = %q after a redeploy, want ENABLED — `lagotto deploy` must never be able to turn off a running poller", after.State)
+	}
+}
+
+// TestSubstrate_Teardown_RemovesAllThreeAndIsRepeatable covers the cutover from
+// DeleteStack to explicit deletes: all three go, and a second Teardown is a no-op
+// success rather than a pile of NotFound errors.
+func TestSubstrate_Teardown_RemovesAllThreeAndIsRepeatable(t *testing.T) {
+	d := substrateDeployer(t)
+	ctx := context.Background()
+
+	res, err := d.Deploy(ctx, substrateDeployOptions())
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+
+	deleted, err := d.Teardown(ctx, "us-east-1", "123456789012")
+	if err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if len(deleted) != 3 {
+		t.Errorf("Teardown deleted %v, want all three resources", deleted)
+	}
+
+	if _, err := d.lambda.GetFunction(ctx, &lambda.GetFunctionInput{FunctionName: aws.String(PollerFunctionName)}); err == nil {
+		t.Error("the poller Lambda is still there after Teardown")
+	}
+	if _, err := d.sched.GetSchedule(ctx, &scheduler.GetScheduleInput{Name: aws.String(PollerScheduleName)}); err == nil {
+		t.Error("the poller schedule is still there after Teardown")
+	}
+	if _, err := d.sns.GetTopicAttributes(ctx, &sns.GetTopicAttributesInput{
+		TopicArn: aws.String(res.Outputs["CapacityAlertsTopicArn"]),
+	}); err == nil {
+		t.Error("the alerts topic is still there after Teardown")
+	}
+
+	again, err := d.Teardown(ctx, "us-east-1", "123456789012")
+	if err != nil {
+		t.Fatalf("second Teardown: %v", err)
+	}
+	if len(again) != 0 {
+		t.Errorf("second Teardown reported deleting %v; there was nothing left to delete", again)
+	}
+}
+
+// TestSubstrate_MigrateFromStack_DetachesWithoutDeletingResources is the whole
+// point of migrate.go: an account with a real CloudFormation stack ends up with no
+// stack and a fully intact poller.
+//
+// What this DOES cover: the whole five-step sequence against a real wire protocol
+// — DescribeStacks, the retain UpdateStack, GetTemplate(Original) read back and
+// gated (substrate stores the body we send and returns it, so the gate genuinely
+// has to pass), DeleteStack + waiter, and the post-delete verification.
+//
+// What it does NOT cover, and the reason the safety gate's own test uses fakes:
+// substrate's CloudFormation emulator does not MATERIALIZE template resources at
+// all (a stack create leaves no Lambda behind), so its DeleteStack cannot model
+// DeletionPolicy: Retain either. The resources survive here because the SDK path
+// created them, not because CloudFormation was told to retain them. Retain
+// semantics are only provable against real AWS; the offline guarantees are the
+// overlay's shape invariant (TestRetainOverlay_AddsExactlySixLines) and the gate's
+// refusal to delete (TestMigrateFromStack_RefusesToDeleteWithoutTheRetainGate).
+func TestSubstrate_MigrateFromStack_DetachesWithoutDeletingResources(t *testing.T) {
+	d := substrateDeployer(t)
+	ctx := context.Background()
+
+	createLegacyStack(t, d, "lagotto")
+
+	// The SDK path adopts what the stack created (fixed names), which is the state
+	// a user is in after upgrading and re-running deploy.
+	if _, err := d.Deploy(ctx, substrateDeployOptions()); err != nil {
+		t.Fatalf("Deploy (adopting the stack's resources): %v", err)
+	}
+
+	if err := d.MigrateFromStack(ctx, "lagotto"); err != nil {
+		t.Fatalf("MigrateFromStack: %v", err)
+	}
+
+	// (1) the stack is gone.
+	exists, _, err := d.stackState(ctx, "lagotto")
+	if err != nil {
+		t.Fatalf("stackState after migrate: %v", err)
+	}
+	if exists {
+		t.Error("the CloudFormation stack still exists after MigrateFromStack")
+	}
+	// (2) all three resources survived. MigrateFromStack verifies this itself, so a
+	// failure above would already have errored — assert independently anyway, since
+	// "the verification is the feature" is exactly the kind of thing that rots.
+	if _, err := d.lambda.GetFunction(ctx, &lambda.GetFunctionInput{FunctionName: aws.String(PollerFunctionName)}); err != nil {
+		t.Errorf("the poller Lambda did not survive the migration: %v", err)
+	}
+	if _, err := d.sched.GetSchedule(ctx, &scheduler.GetScheduleInput{Name: aws.String(PollerScheduleName)}); err != nil {
+		t.Errorf("the poller schedule did not survive the migration: %v", err)
+	}
+	if _, err := d.sns.GetTopicAttributes(ctx, &sns.GetTopicAttributesInput{
+		TopicArn: aws.String(AlertsTopicARN("us-east-1", "123456789012")),
+	}); err != nil {
+		t.Errorf("the alerts topic did not survive the migration: %v", err)
+	}
+}
+
+// TestSubstrate_LegacyStackState covers the automatic detection that drives the
+// warning: present-and-live before the migration, absent after.
+func TestSubstrate_LegacyStackState(t *testing.T) {
+	d := substrateDeployer(t)
+	ctx := context.Background()
+
+	if exists, _, err := d.LegacyStackState(ctx, "lagotto"); err != nil || exists {
+		t.Fatalf("LegacyStackState with no stack = (%v, %v), want (false, nil)", exists, err)
+	}
+
+	createLegacyStack(t, d, "lagotto")
+	exists, status, err := d.LegacyStackState(ctx, "lagotto")
+	if err != nil {
+		t.Fatalf("LegacyStackState: %v", err)
+	}
+	if !exists {
+		t.Errorf("LegacyStackState reports no stack, but one was just created (status %q)", status)
+	}
+}
+
+// --- Deploy / Teardown wiring, against the in-package fakes -----------------
+//
+// These use Substrate only for S3 (d.s3 is a concrete *s3.Client, not a seam, so
+// ensureBucket/uploadArtifact need a real endpoint) and the recording fakes for
+// Lambda/SNS/Scheduler, where exact arguments are the thing being asserted.
+// Substrate v0.109.0 drops a schedule's Target.RoleArn on the wire, so the role
+// wiring in particular can ONLY be asserted here.
+func hybridDeployer(t *testing.T) (*Deployer, *fakeLambda, *fakeSNS, *fakeScheduler) {
+	t.Helper()
+	env := testutil.SubstrateServer(t)
+	d := New(env.AWSConfig)
+	d.httpGet = fakeHTTPGet(t)
+	d.sleep = func(time.Duration) {}
+	// A deliberately WRONG-LOOKING topic ARN: if the function's SNS_TOPIC_ARN ends
+	// up matching this, it can only have come from the topic call's return value
+	// rather than from a separately constructed guess.
+	sn := &fakeSNS{arn: "arn:aws:sns:us-east-1:123456789012:lagotto-capacity-alerts-RETURNED-BY-SNS"}
+	l := &fakeLambda{getErr: &lambdatypes.ResourceNotFoundException{Message: aws.String("Function not found")}}
+	sc := &fakeScheduler{getErr: &schedulertypes.ResourceNotFoundException{Message: aws.String("Schedule not found")}}
+	d.sns, d.lambda, d.sched = sn, l, sc
+	return d, l, sn, sc
+}
+
+// TestDeploy_WiresTheTopicARNAndScheduleTarget asserts the three things a silent
+// mis-wiring would break without any error being raised: the output key set, the
+// function's SNS_TOPIC_ARN, and what the schedule targets.
+func TestDeploy_WiresTheTopicARNAndScheduleTarget(t *testing.T) {
+	d, l, sn, sc := hybridDeployer(t)
+
+	res, err := d.Deploy(context.Background(), Options{
+		Region: "us-east-1", AccountID: "123456789012", Version: "0.55.1", Environment: "production",
+	})
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+
+	// The output key set is a compatibility surface: it's what the CLI prints and
+	// what the stack used to export.
+	wantKeys := map[string]string{
+		"CapacityAlertsTopicArn":    sn.arn,
+		"CapacityPollerFunctionArn": PollerFunctionARN("us-east-1", "123456789012"),
+		"SchedulerInvokeRoleArn":    schedulerInvokeRoleARN("123456789012"),
+		"WatchesTableName":          DefaultWatchesTable,
+		"MatchHistoryTableName":     DefaultHistoryTable,
+		"ScheduledTableName":        DefaultScheduledTable,
+	}
+	if len(res.Outputs) != len(wantKeys) {
+		t.Errorf("outputs = %v, want exactly the %d stack-compatible keys", res.Outputs, len(wantKeys))
+	}
+	for k, want := range wantKeys {
+		if res.Outputs[k] != want {
+			t.Errorf("output %s = %q, want %q", k, res.Outputs[k], want)
+		}
+	}
+
+	// SNS_TOPIC_ARN is the ARN EnsureAlertsTopic actually returned.
+	if len(l.createCalls) != 1 {
+		t.Fatalf("CreateFunction called %d times, want 1", len(l.createCalls))
+	}
+	if got := l.createCalls[0].Environment.Variables["SNS_TOPIC_ARN"]; got != sn.arn {
+		t.Errorf("SNS_TOPIC_ARN = %q, want the ARN EnsureAlertsTopic returned (%q)", got, sn.arn)
+	}
+	// Empty table options fall back to the same names the template defaulted to.
+	for k, want := range map[string]string{
+		"WATCHES_TABLE": DefaultWatchesTable, "HISTORY_TABLE": DefaultHistoryTable,
+		"SCHEDULED_TABLE": DefaultScheduledTable,
+	} {
+		if got := l.createCalls[0].Environment.Variables[k]; got != want {
+			t.Errorf("env %s = %q, want the template's default %q", k, got, want)
+		}
+	}
+	if got := aws.ToString(l.createCalls[0].Role); got != runtimeRoleARN("123456789012") {
+		t.Errorf("function Role = %q, want the runtimeiam-owned role", got)
+	}
+
+	// The schedule targets the derived function ARN and the CLI-owned invoke role.
+	if len(sc.createCalls) != 1 {
+		t.Fatalf("CreateSchedule called %d times, want 1", len(sc.createCalls))
+	}
+	target := sc.createCalls[0].Target
+	if target == nil {
+		t.Fatal("the schedule was created with no target")
+	}
+	if got := aws.ToString(target.Arn); got != PollerFunctionARN("us-east-1", "123456789012") {
+		t.Errorf("schedule target = %q, want the poller function ARN %q", got, PollerFunctionARN("us-east-1", "123456789012"))
+	}
+	if got := aws.ToString(target.RoleArn); got != schedulerInvokeRoleARN("123456789012") {
+		t.Errorf("schedule role = %q, want the Scheduler invoke role %q", got, schedulerInvokeRoleARN("123456789012"))
+	}
+	if sc.createCalls[0].State != schedulertypes.ScheduleStateDisabled {
+		t.Errorf("schedule created in state %q, want DISABLED (nothing is watching yet)", sc.createCalls[0].State)
+	}
+}
+
+// TestDeploy_RequiresAccountAndRegion: every poller name and ARN is derived from
+// them, so a missing one has to fail up front rather than produce a function whose
+// role ARN is "arn:aws:iam:::role/…".
+func TestDeploy_RequiresAccountAndRegion(t *testing.T) {
+	d, _, _, _ := hybridDeployer(t)
+	if _, err := d.Deploy(context.Background(), Options{Region: "us-east-1", Version: "0.55.1"}); err == nil {
+		t.Error("Deploy accepted an empty AccountID")
+	}
+	if _, err := d.Deploy(context.Background(), Options{AccountID: "123456789012", Version: "0.55.1"}); err == nil {
+		t.Error("Deploy accepted an empty Region")
+	}
+}
+
+// TestTeardown_DeletesInTheRightOrder: schedule → function → topic, so nothing can
+// fire into a half-deleted poller.
+func TestTeardown_DeletesInTheRightOrder(t *testing.T) {
+	log := &callLog{}
+	l := &fakeLambda{log: log, getOut: &lambda.GetFunctionOutput{
+		Configuration: &lambdatypes.FunctionConfiguration{
+			FunctionArn: aws.String(PollerFunctionARN("us-east-1", "123456789012")),
+			State:       lambdatypes.StateActive,
+		},
+	}}
+	sn := &fakeSNS{log: log, arn: AlertsTopicARN("us-east-1", "123456789012"),
+		attributes: map[string]string{"DisplayName": "Lagotto Capacity Alerts"}}
+	sc := &fakeScheduler{log: log, getOut: &scheduler.GetScheduleOutput{Name: aws.String(PollerScheduleName)}}
+	d, _ := testDeployer(l, sn, sc)
+
+	deleted, err := d.Teardown(context.Background(), "us-east-1", "123456789012")
+	if err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	want := []string{"DeleteSchedule", "DeleteFunction", "DeleteTopic"}
+	if len(log.calls) != len(want) {
+		t.Fatalf("delete calls = %v, want %v", log.calls, want)
+	}
+	for i, w := range want {
+		if log.calls[i] != w {
+			t.Errorf("delete call %d = %s, want %s (order: %v, want %v)", i, log.calls[i], w, log.calls, want)
+		}
+	}
+	if len(deleted) != 3 {
+		t.Errorf("Teardown reported %v, want all three resources", deleted)
+	}
+}
+
+// TestTeardown_AbsentEverythingIsSuccess: a teardown against an account where the
+// poller was never deployed (or has already been torn down) must be a no-op
+// success, not a pile of NotFound errors.
+func TestTeardown_AbsentEverythingIsSuccess(t *testing.T) {
+	log := &callLog{}
+	l := &fakeLambda{log: log, getErr: &lambdatypes.ResourceNotFoundException{Message: aws.String("Function not found")}}
+	sn := &fakeSNS{log: log, getErr: &snstypes.NotFoundException{Message: aws.String("Topic not found")}}
+	sc := &fakeScheduler{log: log, getErr: &schedulertypes.ResourceNotFoundException{Message: aws.String("Schedule not found")}}
+	d, _ := testDeployer(l, sn, sc)
+
+	deleted, err := d.Teardown(context.Background(), "us-east-1", "123456789012")
+	if err != nil {
+		t.Fatalf("Teardown with nothing deployed: %v", err)
+	}
+	if len(deleted) != 0 {
+		t.Errorf("Teardown reported deleting %v, but nothing existed", deleted)
+	}
+	if len(log.calls) != 0 {
+		t.Errorf("Teardown issued delete calls %v for resources that don't exist", log.calls)
+	}
+}
+
+// TestTeardown_ProbeErrorIsNotSilentlyTreatedAsAbsence: an AccessDenied on the
+// existence probe must fail the teardown. Reporting "nothing to delete" there
+// would tell the user their poller is gone when it is still running and billing.
+func TestTeardown_ProbeErrorIsNotSilentlyTreatedAsAbsence(t *testing.T) {
+	log := &callLog{}
+	sc := &fakeScheduler{log: log, getErr: errors.New("AccessDeniedException: not authorized to perform scheduler:GetSchedule")}
+	d, _ := testDeployer(&fakeLambda{log: log}, &fakeSNS{log: log}, sc)
+
+	if _, err := d.Teardown(context.Background(), "us-east-1", "123456789012"); err == nil {
+		t.Error("Teardown swallowed an AccessDenied on the schedule probe")
+	}
+	if len(log.calls) != 0 {
+		t.Errorf("Teardown kept deleting (%v) after a probe failed", log.calls)
+	}
+}
+
+// TestTeardown_RequiresRegionAndAccount: the topic ARN is derived from them.
+func TestTeardown_RequiresRegionAndAccount(t *testing.T) {
+	d, _ := testDeployer(&fakeLambda{}, &fakeSNS{}, &fakeScheduler{})
+	if _, err := d.Teardown(context.Background(), "us-east-1", ""); err == nil {
+		t.Error("Teardown accepted an empty account ID")
+	}
+	if _, err := d.Teardown(context.Background(), "", "123456789012"); err == nil {
+		t.Error("Teardown accepted an empty region")
+	}
 }
 
 // TestSubstrate_EnsureAlertsTopic asserts the topic is created with the

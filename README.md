@@ -110,8 +110,8 @@ still get spored's TTL/idle lifecycle.
 A watch only fires when something polls it. Two ways:
 
 ```bash
-# Infra-free: poll in the foreground until the watch fires/expires (no Lambda,
-# no CloudFormation). Keep it running — or under your own supervisor/cron.
+# Infra-free: poll in the foreground until the watch fires/expires (no Lambda
+# at all). Keep it running — or under your own supervisor/cron.
 lagotto poll --daemon --interval 5m
 
 # One-off cycle (testing/debugging)
@@ -120,8 +120,8 @@ lagotto poll
 
 `--daemon` runs the same poll loop the hosted Lambda does, so
 `lagotto watch --action spawn` works hands-off in your own account with zero
-extra infrastructure. The hosted, multi-tenant Lambda poller (deployed via
-CloudFormation) remains the option for teams — see [DEPLOYMENT.md](DEPLOYMENT.md).
+extra infrastructure. The hosted Lambda poller (`lagotto deploy`) remains the
+option for teams — see [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ### Scoping a daemon in a shared account
 
@@ -175,8 +175,8 @@ EventBridge latency doesn't cost you, and retries on `--retry-interval` (default
 30s) through the open — absorbing the transient capacity / not-yet-active blips at
 the boundary — until an instance is running, then stops.
 
-Scheduled launches are driven by EventBridge Scheduler in the hosted poller
-stack, so they require `lagotto deploy` first (the schedule targets the poller
+Scheduled launches are driven by EventBridge Scheduler against the hosted
+poller, so they require `lagotto deploy` first (the schedule targets the poller
 Lambda in your account). The launched instance always carries a TTL (#38), and a
 one-shot's schedule self-deletes after it fires.
 
@@ -217,7 +217,11 @@ The three actions differ in what they *do* when a match appears:
 
 ## Deployment
 
-Lagotto deploys as a CloudFormation stack. See [DEPLOYMENT.md](DEPLOYMENT.md) for setup.
+`lagotto deploy` stands the hosted poller up in your own AWS account with direct
+AWS API calls — no CloudFormation, re-runnable, and a `--version` bump is a fast
+code-only update. A CloudFormation template is still shipped as an optional
+declarative path for IaC/enterprise environments. See
+[DEPLOYMENT.md](DEPLOYMENT.md) for both.
 
 ## Go Library
 

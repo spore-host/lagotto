@@ -51,6 +51,47 @@ func TestCIRunsTheFormatGate(t *testing.T) {
 	}
 }
 
+// TestDeploymentDocCFNCapabilities gates the one documented command nothing else
+// can check.
+//
+// DEPLOYMENT.md documents a raw `aws cloudformation deploy` for the optional IaC
+// path. That command is not exercised by any test or CI job, so when #143 added
+// CAPABILITY_NAMED_IAM and #145 removed the stack's IAM resources entirely, the
+// documented `--capabilities CAPABILITY_IAM` silently became wrong — and shipped
+// broken for two releases. A copy-pasted command that fails is the worst kind of
+// doc bug: it looks like the tool is broken.
+//
+// The template needs CAPABILITY_AUTO_EXPAND (the AWS::Serverless transform) and no
+// IAM capability at all, since it declares no IAM resources.
+func TestDeploymentDocCFNCapabilities(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(repoRoot(), "DEPLOYMENT.md"))
+	if err != nil {
+		t.Fatalf("read DEPLOYMENT.md: %v", err)
+	}
+	doc := string(data)
+	if !strings.Contains(doc, "aws cloudformation deploy") {
+		t.Skip("DEPLOYMENT.md no longer documents a raw 'aws cloudformation deploy'; nothing to gate")
+	}
+	if !strings.Contains(doc, "--capabilities CAPABILITY_AUTO_EXPAND") {
+		t.Error("the documented 'aws cloudformation deploy' does not pass " +
+			"--capabilities CAPABILITY_AUTO_EXPAND; the AWS::Serverless transform " +
+			"requires it and the command fails without it")
+	}
+	for _, wrong := range []string{"CAPABILITY_IAM", "CAPABILITY_NAMED_IAM"} {
+		if strings.Contains(doc, "--capabilities "+wrong) {
+			t.Errorf("the documented 'aws cloudformation deploy' passes --capabilities %s. "+
+				"The template declares no IAM resources (both roles are CLI-owned since #146), "+
+				"so no IAM capability applies and the command is wrong.", wrong)
+		}
+	}
+	// The stale claim #155 was filed for. The roles are created by pkg/runtimeiam,
+	// not by the stack, and a stack delete does not remove them.
+	if strings.Contains(doc, "The stack creates a **minimal** execution role") {
+		t.Error("DEPLOYMENT.md still claims the stack creates the poller execution role; " +
+			"both roles have been CLI-owned (pkg/runtimeiam) since #146")
+	}
+}
+
 // unquote strips single- and double-quoted spans from a shell recipe, leaving
 // roughly the commands. Crude, but the question it answers is narrow: does the
 // recipe RUN something, or merely mention it in a message?
