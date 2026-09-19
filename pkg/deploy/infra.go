@@ -32,6 +32,18 @@ const (
 	PollerScheduleName = PollerFunctionName
 )
 
+// Default names of the CLI-owned DynamoDB tables the poller is wired to (#59).
+// These are the SAME strings as the CFN template's WatchesTableName /
+// HistoryTableName / ScheduledTableName parameter defaults — that is the whole
+// point of naming them here: an empty --watches-table etc. must resolve to
+// exactly what the template would have defaulted to, so the SDK path and the
+// template path wire the poller identically.
+const (
+	DefaultWatchesTable   = "lagotto-watches"
+	DefaultHistoryTable   = "lagotto-match-history"
+	DefaultScheduledTable = "lagotto-scheduled-launches"
+)
+
 // Lambda function shape — the contract the CFN/SAM template establishes and the
 // SDK path must reproduce exactly (deployment/cloudformation/lagotto-stack.yaml).
 const (

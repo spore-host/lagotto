@@ -1,8 +1,30 @@
-// Package deploy stands up (and tears down) the hosted lagotto capacity-poller
-// stack in the caller's own AWS account (#48): it fetches the published poller
-// Lambda zip (#29), uploads it to a bucket in the user's account, and deploys the
-// embedded CloudFormation/SAM template. This is the "arm a watch, walk away, it's
-// genuinely server-side" path that the laptop-bound `poll --daemon` can't be.
+// Package deploy stands up (and tears down) the hosted lagotto capacity poller in
+// the caller's own AWS account (#48): it fetches the published poller Lambda zip
+// (#29), uploads it to a bucket in the user's account, and then provisions the
+// three poller resources — the SNS alerts topic, the poller Lambda and the
+// EventBridge Scheduler schedule — with direct SDK calls. This is the "arm a
+// watch, walk away, it's genuinely server-side" path that the laptop-bound
+// `poll --daemon` can't be.
+//
+// # Why not CloudFormation (#154)
+//
+// It used to deploy the embedded CloudFormation/SAM template. Every deploy outage
+// lagotto has had was CloudFormation-specific — a Function↔Role↔Schedule circular
+// dependency (#67/#68), an AlreadyExists collision between `watch` and `deploy`
+// (#59), a missing-capability refusal that wedged the stack in ROLLBACK_COMPLETE
+// (#143), and a post-transform Early Validation failure that had to be bisected
+// with no-execute change sets (#145). Two of the four were fixed by taking
+// resources OUT of CloudFormation; by the end the stack held only three.
+//
+// Direct SDK calls make #143 and #145 structurally impossible, remove the
+// ROLLBACK_COMPLETE wedge, surface each error at the call that failed, and make a
+// `--version` bump a fast code-only update.
+//
+// The template is KEPT as an optional declarative artifact for IaC/enterprise
+// consumers (deployment/cloudformation/lagotto-stack.yaml, documented in
+// DEPLOYMENT.md), and everything needed to read, migrate away from, and — in
+// tests — create a real stack stays in this package: StackOutputs, stackState,
+// createOrUpdate, and MigrateFromStack (migrate.go).
 package deploy
 
 import (
@@ -35,18 +57,41 @@ const (
 
 // Options configure a Deploy.
 type Options struct {
-	StackName   string // CloudFormation stack name (default "lagotto")
+	// StackName is NOT what deploy creates any more (#154). Every poller resource
+	// has a fixed name; this is only the name of a LEGACY CloudFormation stack, used
+	// to detect one that still exists (so the user can be warned) and as the target
+	// of MigrateFromStack.
+	StackName   string
 	Region      string
 	Version     string // release version to pull the Lambda zip from, e.g. "0.44.0" (no leading v)
 	Environment string // SAM Environment param (default "production")
 	Bucket      string // S3 bucket for the Lambda zip; empty → derive lagotto-lambda-<account>-<region>
 	AccountID   string // caller account (for the derived bucket name + messaging)
-	// The CLI-owned DynamoDB table names the stack wires the poller to (#59). The
-	// stack references them by name and never creates them; empty falls back to
-	// the template defaults (lagotto-watches / -match-history / -scheduled-launches).
+	// The CLI-owned DynamoDB table names the poller is wired to (#59). deploy
+	// never creates them; empty falls back to the standard names, which are also
+	// the CFN template's parameter defaults (lagotto-watches / -match-history /
+	// -scheduled-launches) so the two paths agree.
 	WatchesTable   string
 	HistoryTable   string
 	ScheduledTable string
+}
+
+// Result is what a Deploy reports back.
+//
+// Outputs keeps the EXACT key names the CloudFormation stack used to export, so
+// the block `lagotto deploy` prints is byte-identical to what people already
+// recognize from the stack-based releases (and so anything scripted against those
+// key names keeps working):
+//
+//	CapacityAlertsTopicArn, CapacityPollerFunctionArn, SchedulerInvokeRoleArn,
+//	WatchesTableName, MatchHistoryTableName, ScheduledTableName
+//
+// Actions is one human-readable line per resource — "created", "code updated",
+// "unchanged" — which is the thing a stack event log used to tell you and an
+// idempotent Ensure* path otherwise wouldn't.
+type Result struct {
+	Outputs map[string]string
+	Actions []string
 }
 
 // LambdaArtifactURL returns the GitHub Release download URL for the poller Lambda
@@ -107,10 +152,37 @@ func New(cfg aws.Config) *Deployer {
 	}
 }
 
-// Deploy creates or updates the stack: ensure the artifact bucket exists, upload
-// the release Lambda zip into it, then CreateStack/UpdateStack the embedded
-// template pointing at that bucket/key. Returns the resolved stack outputs.
-func (d *Deployer) Deploy(ctx context.Context, opts Options) (map[string]string, error) {
+// Deploy provisions the hosted poller with direct SDK calls (#154) and returns the
+// resolved outputs plus what each step actually did.
+//
+// The order is load-bearing:
+//
+//  1. ensureBucket + uploadArtifact — the code has to be in S3 before anything can
+//     point at it. uploadArtifact hands back the zip's base64 SHA-256 so a re-run
+//     with unchanged code can skip the code push.
+//  2. EnsureAlertsTopic — its ARN is an INPUT to the function's SNS_TOPIC_ARN, so
+//     the topic must exist first. Using the ARN the topic call actually returned
+//     (rather than a separately constructed guess) is what keeps a mismatch from
+//     silently degrading the poller into a non-notifying one.
+//  3. EnsurePollerFunction — converged onto the shape the SAM template declared.
+//  4. EnsurePollerSchedule — targets the function and the CLI-owned Scheduler
+//     invoke role. Created DISABLED; an existing schedule's state is passed
+//     through untouched, so a deploy can never switch off a running poller.
+//
+// The DynamoDB tables and the two IAM roles are NOT touched here: they are ensured
+// by the caller (cmd/deploy.go, via watcher.Store.EnsureTables and
+// runtimeiam.EnsureRoles) before Deploy is called, exactly as before the cutover.
+//
+// Legacy-stack detection is deliberately NOT part of Deploy — see
+// LegacyStackState: the caller runs it AFTER a successful deploy so a detection
+// failure can never bury the real error.
+func (d *Deployer) Deploy(ctx context.Context, opts Options) (*Result, error) {
+	if opts.AccountID == "" {
+		return nil, fmt.Errorf("deploy: AccountID is required (the poller's role and ARNs are derived from it)")
+	}
+	if opts.Region == "" {
+		return nil, fmt.Errorf("deploy: Region is required (the poller's ARNs are derived from it)")
+	}
 	bucket := opts.Bucket
 	if bucket == "" {
 		bucket = DefaultBucketName(opts.AccountID, opts.Region)
@@ -120,10 +192,8 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) (map[string]string,
 	if err := d.ensureBucket(ctx, bucket, opts.Region); err != nil {
 		return nil, err
 	}
-	// The returned code digest is only consumed by the SDK-native path
-	// (EnsurePollerFunction); CloudFormation decides code freshness from the
-	// bucket/key parameters.
-	if _, err := d.uploadArtifact(ctx, bucket, key, opts.Version); err != nil {
+	digest, err := d.uploadArtifact(ctx, bucket, key, opts.Version)
+	if err != nil {
 		return nil, err
 	}
 
@@ -131,40 +201,122 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) (map[string]string,
 	if env == "" {
 		env = "production"
 	}
-	params := []cfntypes.Parameter{
-		{ParameterKey: aws.String("Environment"), ParameterValue: aws.String(env)},
-		{ParameterKey: aws.String("LambdaCodeBucket"), ParameterValue: aws.String(bucket)},
-		{ParameterKey: aws.String("LambdaCodeKey"), ParameterValue: aws.String(key)},
-	}
-	// Wire the poller to the CLI-owned tables by name (#59). Only set a param when
-	// non-empty so the template's defaults still apply for the standard names.
-	if opts.WatchesTable != "" {
-		params = append(params, cfntypes.Parameter{ParameterKey: aws.String("WatchesTableName"), ParameterValue: aws.String(opts.WatchesTable)})
-	}
-	if opts.HistoryTable != "" {
-		params = append(params, cfntypes.Parameter{ParameterKey: aws.String("HistoryTableName"), ParameterValue: aws.String(opts.HistoryTable)})
-	}
-	if opts.ScheduledTable != "" {
-		params = append(params, cfntypes.Parameter{ParameterKey: aws.String("ScheduledTableName"), ParameterValue: aws.String(opts.ScheduledTable)})
-	}
-	if err := d.createOrUpdate(ctx, opts.StackName, params, deployCapabilities); err != nil {
+
+	topicARN, err := d.EnsureAlertsTopic(ctx, env)
+	if err != nil {
 		return nil, err
 	}
-	return d.stackOutputs(ctx, opts.StackName)
+
+	fnARN, fnAction, err := d.EnsurePollerFunction(ctx, PollerFunctionInput{
+		RoleARN:    runtimeRoleARN(opts.AccountID),
+		Bucket:     bucket,
+		Key:        key,
+		CodeSHA256: digest,
+		EnvVars: PollerEnvVars(opts.Region, opts.AccountID,
+			opts.WatchesTable, opts.HistoryTable, opts.ScheduledTable, topicARN),
+		Tags: PollerTags(env),
+	})
+	if err != nil {
+		return nil, err
+	}
+	// Fall back to the constructed ARN if the endpoint didn't report one. The two
+	// are the same string — the name is fixed — so this only guards against an
+	// empty Target.Arn on the schedule below, which would be an unhelpful failure.
+	if fnARN == "" {
+		fnARN = PollerFunctionARN(opts.Region, opts.AccountID)
+	}
+
+	schedRoleARN := schedulerInvokeRoleARN(opts.AccountID)
+	schedAction, err := d.EnsurePollerSchedule(ctx, fnARN, schedRoleARN)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Result{
+		Outputs: map[string]string{
+			"CapacityAlertsTopicArn":    topicARN,
+			"CapacityPollerFunctionArn": fnARN,
+			"SchedulerInvokeRoleArn":    schedRoleARN,
+			"WatchesTableName":          orDefault(opts.WatchesTable, DefaultWatchesTable),
+			"MatchHistoryTableName":     orDefault(opts.HistoryTable, DefaultHistoryTable),
+			"ScheduledTableName":        orDefault(opts.ScheduledTable, DefaultScheduledTable),
+		},
+		Actions: []string{
+			fmt.Sprintf("SNS topic %s: ensured", AlertsTopicName),
+			fmt.Sprintf("Lambda %s: %s", PollerFunctionName, fnAction),
+			fmt.Sprintf("schedule %s: %s", PollerScheduleName, schedAction),
+		},
+	}, nil
 }
 
-// Teardown deletes the stack and waits for completion.
-func (d *Deployer) Teardown(ctx context.Context, stackName string) error {
-	if _, err := d.cfn.DeleteStack(ctx, &cloudformation.DeleteStackInput{
-		StackName: aws.String(stackName),
-	}); err != nil {
-		return fmt.Errorf("delete stack %s: %w", stackName, err)
+// Teardown deletes the three poller resources explicitly, in the order
+// schedule → function → topic, and returns a description of each one it actually
+// removed.
+//
+// The order matters: the schedule goes FIRST so nothing can fire into a
+// half-deleted poller. Every step tolerates an already-absent resource, so a
+// Teardown is idempotent — running it twice, or after a partial failure, succeeds
+// and simply reports fewer deletions.
+//
+// Deliberately NOT deleted (each is stated in the CLI's confirmation prompt):
+//
+//   - The three DynamoDB tables. They hold watches and match history; `lagotto
+//     teardown` owns those.
+//   - Both IAM roles. runtimeiam owns them since #146 and the Scheduler invoke
+//     role is shared with the #49 per-launch schedules, so deleting it here would
+//     break a pending `lagotto launch --at`.
+//   - The artifact bucket. ensureBucket creates it OUTSIDE the stack, so even the
+//     old DeleteStack never removed it; changing that silently would be a
+//     surprising data deletion.
+//   - Per-launch lagotto-launch-sl-* schedules, same as before the cutover.
+func (d *Deployer) Teardown(ctx context.Context, region, accountID string) ([]string, error) {
+	if region == "" || accountID == "" {
+		return nil, fmt.Errorf("teardown: region and accountID are required (the topic ARN is derived from them)")
 	}
-	w := cloudformation.NewStackDeleteCompleteWaiter(d.cfn)
-	if err := w.Wait(ctx, &cloudformation.DescribeStacksInput{StackName: aws.String(stackName)}, 15*time.Minute); err != nil {
-		return fmt.Errorf("waiting for stack %s deletion: %w", stackName, err)
+	var deleted []string
+
+	// 1. Schedule first: an enabled schedule firing into a deleted function just
+	// produces invocation errors, and a schedule outliving its target is worse than
+	// a target outliving its schedule.
+	if exists, err := d.pollerScheduleExists(ctx); err != nil {
+		return deleted, err
+	} else if exists {
+		if err := d.deletePollerSchedule(ctx); err != nil {
+			return deleted, err
+		}
+		deleted = append(deleted, "schedule "+PollerScheduleName)
 	}
-	return nil
+
+	// 2. The function.
+	if exists, err := d.pollerFunctionExists(ctx); err != nil {
+		return deleted, err
+	} else if exists {
+		if err := d.deletePollerFunction(ctx); err != nil {
+			return deleted, err
+		}
+		deleted = append(deleted, "function "+PollerFunctionName)
+	}
+
+	// 3. The topic last: it's the only resource whose deletion loses something
+	// (subscriptions), so it goes after the things that publish to it are gone.
+	if exists, err := d.alertsTopicExists(ctx, region, accountID); err != nil {
+		return deleted, err
+	} else if exists {
+		if err := d.deleteAlertsTopic(ctx, region, accountID); err != nil {
+			return deleted, err
+		}
+		deleted = append(deleted, "SNS topic "+AlertsTopicName)
+	}
+
+	return deleted, nil
+}
+
+// orDefault returns v, or d when v is empty.
+func orDefault(v, d string) string {
+	if v == "" {
+		return d
+	}
+	return v
 }
 
 func (d *Deployer) ensureBucket(ctx context.Context, bucket, region string) error {
@@ -233,11 +385,10 @@ var failedCreateStates = map[cfntypes.StackStatus]bool{
 	cfntypes.StackStatusDeleteFailed:     true,
 }
 
-// createOrUpdate drives the CloudFormation path. KEEP IT: `Deploy` still uses it,
-// and once `Deploy` cuts over to the SDK-native Ensure* path (#154) it remains
-// the only offline way to produce a genuinely CFN-created stack — i.e. the
-// fixture the adopt-an-existing-stack migration test needs. Do not delete it as
-// "dead code" when the cutover lands.
+// createOrUpdate drives the CloudFormation path. KEEP IT: it has no production
+// caller since the #154 cutover, but it is the only offline way to produce a
+// genuinely CFN-created stack — i.e. the fixture the adopt-an-existing-stack
+// migration test needs. Do not delete it as "dead code".
 func (d *Deployer) createOrUpdate(ctx context.Context, stackName string, params []cfntypes.Parameter, caps []cfntypes.Capability) error {
 	exists, status, err := d.stackState(ctx, stackName)
 	if err != nil {
@@ -246,7 +397,7 @@ func (d *Deployer) createOrUpdate(ctx context.Context, stackName string, params 
 	// A stack stranded in a failed-create state can't be updated; delete it first
 	// so the CreateStack below starts clean (#59).
 	if exists && failedCreateStates[status] {
-		if err := d.Teardown(ctx, stackName); err != nil {
+		if err := d.deleteStack(ctx, stackName); err != nil {
 			return fmt.Errorf("delete prior failed stack %s (status %s) before redeploy: %w", stackName, status, err)
 		}
 		exists = false
@@ -283,6 +434,23 @@ func (d *Deployer) createOrUpdate(ctx context.Context, stackName string, params 
 	w := cloudformation.NewStackCreateCompleteWaiter(d.cfn)
 	if err := w.Wait(ctx, &cloudformation.DescribeStacksInput{StackName: aws.String(stackName)}, 15*time.Minute); err != nil {
 		return fmt.Errorf("waiting for stack %s creation: %w", stackName, err)
+	}
+	return nil
+}
+
+// deleteStack removes a CloudFormation stack and waits for completion. The only
+// remaining CFN-deleting paths are createOrUpdate's failed-create recovery and
+// MigrateFromStack's final detach step; `lagotto deploy --teardown` no longer
+// touches CloudFormation at all.
+func (d *Deployer) deleteStack(ctx context.Context, stackName string) error {
+	if _, err := d.cfn.DeleteStack(ctx, &cloudformation.DeleteStackInput{
+		StackName: aws.String(stackName),
+	}); err != nil {
+		return fmt.Errorf("delete stack %s: %w", stackName, err)
+	}
+	w := cloudformation.NewStackDeleteCompleteWaiter(d.cfn)
+	if err := w.Wait(ctx, &cloudformation.DescribeStacksInput{StackName: aws.String(stackName)}, 15*time.Minute); err != nil {
+		return fmt.Errorf("waiting for stack %s deletion: %w", stackName, err)
 	}
 	return nil
 }

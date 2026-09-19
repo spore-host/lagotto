@@ -156,9 +156,23 @@ func (d *Deployer) updatePollerSchedule(ctx context.Context, cur *scheduler.GetS
 	return nil
 }
 
+// pollerScheduleExists reports whether the poller schedule is there, so Teardown
+// can report what it actually deleted (see pollerFunctionExists).
+func (d *Deployer) pollerScheduleExists(ctx context.Context) (bool, error) {
+	_, err := d.sched.GetSchedule(ctx, &scheduler.GetScheduleInput{
+		Name: aws.String(PollerScheduleName),
+	})
+	if err == nil {
+		return true, nil
+	}
+	var notFound *schedulertypes.ResourceNotFoundException
+	if errors.As(err, &notFound) {
+		return false, nil
+	}
+	return false, fmt.Errorf("check whether schedule %s exists: %w", PollerScheduleName, err)
+}
+
 // deletePollerSchedule removes the poller schedule, tolerating an absent one.
-// Unexported and not yet called by production code — it exists now so the
-// Teardown cutover (#154, follow-up PR) is pure wiring.
 func (d *Deployer) deletePollerSchedule(ctx context.Context) error {
 	_, err := d.sched.DeleteSchedule(ctx, &scheduler.DeleteScheduleInput{
 		Name: aws.String(PollerScheduleName),

@@ -7,7 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`lagotto deploy --migrate-from-cloudformation`** (#154) detaches an existing
+  CloudFormation stack from your live poller and then deletes it, leaving the
+  poller, topic and schedule running. You do not need it for things to work — the
+  resources all have fixed names, so `lagotto deploy` adopts whatever a previous
+  stack created, and nothing is duplicated or recreated. You need it to be rid of
+  the stack *safely*, because the stack still thinks it owns those resources and a
+  plain `aws cloudformation delete-stack` would take your poller down with it.
+  `deploy` warns you whenever it sees such a stack. The migration puts
+  `DeletionPolicy: Retain` on the three resources, **reads the deployed template
+  back to confirm the policy actually landed**, and only then deletes the stack —
+  if the verification fails it aborts without deleting anything and prints the
+  manual commands.
+
 ### Changed
+- **`lagotto deploy` provisions the poller with direct AWS API calls instead of
+  CloudFormation** (#154). Every deploy outage lagotto has had was
+  CloudFormation-specific — a circular dependency between the function, its role
+  and its schedule (#67/#68), an `AlreadyExists` collision between `watch` and
+  `deploy` (#59), a missing-capability refusal that wedged the stack in
+  `ROLLBACK_COMPLETE` (#143), and a post-transform validation failure that took
+  change-set bisection to even read (#145). Two of those four were fixed by taking
+  resources *out* of CloudFormation; by the end the stack held three. So now the
+  SNS topic, the poller Lambda and its schedule are each created or converged
+  directly. What you get: re-running `deploy` is genuinely incremental and can't
+  strand anything, a `--version` bump is a fast code-only update (no more
+  `aws lambda update-function-code` by hand), and a failure reports the actual API
+  error at the call that failed instead of an aggregate "Validation failed with 2
+  error(s)". The printed output keys are unchanged. The CloudFormation template is
+  still shipped as an optional declarative path for IaC/enterprise use — see
+  DEPLOYMENT.md.
+- **`lagotto deploy --teardown` deletes the three resources explicitly** (#154), in
+  the order schedule → function → topic so nothing can fire into a half-deleted
+  poller, and is safe to re-run. The confirmation prompt now spells out everything
+  that is *retained*: your DynamoDB tables (as before), **both IAM roles** — they're
+  CLI-owned and the Scheduler invoke role is shared with per-launch scheduled
+  launches — and **the artifact bucket**, which was never stack-owned so no previous
+  teardown removed it either. Two of those three were previously unmentioned, and
+  the docs claimed a stack delete removed the IAM roles. It never did.
+- **`lagotto deploy --stack-name` now means "the legacy stack"** (#154). `deploy`
+  doesn't create a stack any more, so the flag only names one to detect and
+  optionally migrate away from. The poller's own resources have fixed names.
+- **The topic-only deploy mode is gone from the CLI** (#154). Deploying the SNS
+  topic without the Lambda was reachable only by setting an empty
+  `LambdaCodeBucket`, which the CLI never did. The template still supports it for
+  anyone using the raw CloudFormation path.
 - **`lagotto launch` no longer needs a CloudFormation stack to find the poller**
   (#154). It used to read the poller Lambda's ARN and the scheduler role's ARN out
   of the stack's outputs; now it builds both from your account and region — those
@@ -27,7 +72,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so there is no stack to point at. The flag still parses (scripts that pass it
   won't break) and stays visible in `--help`, now labelled as ignored, and `launch`
   prints a one-line note when you use it. `lagotto deploy --stack-name` is
-  unaffected.
+  rescoped rather than deprecated (see Changed).
+
+### Fixed
+- **`lagotto deploy` can no longer switch off a running poller** (#154). The
+  schedule's on/off state belongs to `lagotto watch` (which enables it) and to the
+  poller itself (which disables it when it goes idle) — but the CloudFormation
+  template declared `State: DISABLED`, so it was permanently out of step with
+  reality and any deploy that reasserted it would have stopped an active watch's
+  polling. The new path sets `DISABLED` only when *creating* the schedule, and
+  passes the current state through untouched on every update.
+- **The `aws cloudformation deploy` command in DEPLOYMENT.md failed as documented**
+  (#155). It passed `--capabilities CAPABILITY_IAM`; since #146 the template needs
+  `CAPABILITY_AUTO_EXPAND` and no IAM capability at all. Fixed, and a test now
+  fails if it drifts again.
+
+### Documentation
+- **DEPLOYMENT.md is rewritten around `lagotto deploy`** (#155), with
+  CloudFormation as a clearly-labelled alternate path for IaC/enterprise use. Gone:
+  the claim that the stack creates the poller's execution role and that a stack
+  delete removes the IAM roles (both untrue since #146), the manual
+  `aws lambda update-function-code` recipe (use `lagotto deploy --version X`), and
+  `deployment/cloudformation/template.go`'s reference to a `sam deploy` path that
+  never existed. Added: what each resource is and who owns it, exactly what
+  teardown retains, how to migrate off a stack, and a warning that `lagotto setup`
+  **replaces** `lagotto-runtime-policy` wholesale — so re-run `setup` after
+  upgrading, and never run an older lagotto's `setup` against a
+  newer-deployed poller.
 
 ## [0.59.0] - 2026-09-18
 

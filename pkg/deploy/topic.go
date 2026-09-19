@@ -117,9 +117,26 @@ func (d *Deployer) convergeTopicAttributes(ctx context.Context, arn string) erro
 	return nil
 }
 
+// alertsTopicExists reports whether the capacity-alerts topic is there, so
+// Teardown can report what it actually deleted (see pollerFunctionExists).
+//
+// This one needs its own probe more than the others do: SNS DeleteTopic on a
+// missing topic succeeds silently, so the delete call itself carries no
+// create-vs-absent signal at all.
+func (d *Deployer) alertsTopicExists(ctx context.Context, region, accountID string) (bool, error) {
+	arn := AlertsTopicARN(region, accountID)
+	_, err := d.sns.GetTopicAttributes(ctx, &sns.GetTopicAttributesInput{TopicArn: aws.String(arn)})
+	if err == nil {
+		return true, nil
+	}
+	if isSNSNotFound(err) {
+		return false, nil
+	}
+	return false, fmt.Errorf("check whether SNS topic %s exists: %w", arn, err)
+}
+
 // deleteAlertsTopic removes the capacity-alerts topic, tolerating an already-gone
-// topic. Unexported and not yet called by production code: it exists now so the
-// Teardown cutover (#154, follow-up PR) is pure wiring rather than new logic.
+// topic.
 func (d *Deployer) deleteAlertsTopic(ctx context.Context, region, accountID string) error {
 	arn := AlertsTopicARN(region, accountID)
 	_, err := d.sns.DeleteTopic(ctx, &sns.DeleteTopicInput{TopicArn: aws.String(arn)})

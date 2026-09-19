@@ -54,16 +54,10 @@ type PollerFunctionInput struct {
 // place and asserted in tests. AUTO_DELETE_TABLES is deliberately NOT set here:
 // it's an opt-in a human adds by hand, exactly as with the template.
 func PollerEnvVars(region, accountID, watchesTable, historyTable, scheduledTable, topicARN string) map[string]string {
-	dflt := func(v, d string) string {
-		if v == "" {
-			return d
-		}
-		return v
-	}
 	return map[string]string{
-		"WATCHES_TABLE":             dflt(watchesTable, "lagotto-watches"),
-		"HISTORY_TABLE":             dflt(historyTable, "lagotto-match-history"),
-		"SCHEDULED_TABLE":           dflt(scheduledTable, "lagotto-scheduled-launches"),
+		"WATCHES_TABLE":             orDefault(watchesTable, DefaultWatchesTable),
+		"HISTORY_TABLE":             orDefault(historyTable, DefaultHistoryTable),
+		"SCHEDULED_TABLE":           orDefault(scheduledTable, DefaultScheduledTable),
 		"SNS_TOPIC_ARN":             topicARN,
 		"SCHEDULE_NAME":             PollerScheduleName,
 		"POLLER_FUNCTION_ARN":       PollerFunctionARN(region, accountID),
@@ -312,9 +306,26 @@ func isResourceConflict(err error) bool {
 	return errors.As(err, &rc)
 }
 
+// pollerFunctionExists reports whether the poller Lambda is there. Teardown uses
+// it to report what it ACTUALLY deleted: DeleteFunction alone can't tell you,
+// because deletePollerFunction (correctly) treats an absent function as success.
+// An error other than ResourceNotFoundException is returned, so an AccessDenied
+// fails the teardown instead of being reported as "nothing to delete".
+func (d *Deployer) pollerFunctionExists(ctx context.Context) (bool, error) {
+	_, err := d.lambda.GetFunction(ctx, &lambda.GetFunctionInput{
+		FunctionName: aws.String(PollerFunctionName),
+	})
+	if err == nil {
+		return true, nil
+	}
+	var notFound *lambdatypes.ResourceNotFoundException
+	if errors.As(err, &notFound) {
+		return false, nil
+	}
+	return false, fmt.Errorf("check whether function %s exists: %w", PollerFunctionName, err)
+}
+
 // deletePollerFunction removes the poller Lambda, tolerating an absent function.
-// Unexported and not yet called by production code — it exists now so the
-// Teardown cutover (#154, follow-up PR) is pure wiring.
 func (d *Deployer) deletePollerFunction(ctx context.Context) error {
 	_, err := d.lambda.DeleteFunction(ctx, &lambda.DeleteFunctionInput{
 		FunctionName: aws.String(PollerFunctionName),

@@ -2,8 +2,11 @@ package deploy
 
 import (
 	"context"
+	"fmt"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/service/cloudformation"
+	cfntypes "github.com/aws/aws-sdk-go-v2/service/cloudformation/types"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
 	lambdatypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
 	"github.com/aws/aws-sdk-go-v2/service/scheduler"
@@ -14,6 +17,17 @@ import (
 // pkg/runtimeiam/runtimeiam_test.go's fakeIAM. They're in-package because
 // lambdaAPI/snsAPI/schedulerAPI are unexported — which is deliberate: the seams
 // are for tests, not for the package's public surface.
+
+// callLog records an ORDERED trace across several fakes. Teardown's guarantee is
+// about sequence (schedule → function → topic), and per-fake counters can't
+// express a sequence that spans three services.
+type callLog struct{ calls []string }
+
+func (c *callLog) add(s string) {
+	if c != nil {
+		c.calls = append(c.calls, s)
+	}
+}
 
 // fakeLambda records Lambda calls and answers from scripted state.
 type fakeLambda struct {
@@ -38,6 +52,7 @@ type fakeLambda struct {
 	deleteCalls int
 	getCalls    int
 	deleteErr   error
+	log         *callLog
 }
 
 type getResult struct {
@@ -94,6 +109,7 @@ func (f *fakeLambda) UpdateFunctionConfiguration(_ context.Context, in *lambda.U
 
 func (f *fakeLambda) DeleteFunction(_ context.Context, _ *lambda.DeleteFunctionInput, _ ...func(*lambda.Options)) (*lambda.DeleteFunctionOutput, error) {
 	f.deleteCalls++
+	f.log.add("DeleteFunction")
 	if f.deleteErr != nil {
 		return nil, f.deleteErr
 	}
@@ -119,6 +135,7 @@ type fakeSNS struct {
 	createErr error
 	getErr    error
 	deleteErr error
+	log       *callLog
 }
 
 func (f *fakeSNS) CreateTopic(_ context.Context, in *sns.CreateTopicInput, _ ...func(*sns.Options)) (*sns.CreateTopicOutput, error) {
@@ -157,6 +174,7 @@ func (f *fakeSNS) TagResource(_ context.Context, in *sns.TagResourceInput, _ ...
 
 func (f *fakeSNS) DeleteTopic(_ context.Context, _ *sns.DeleteTopicInput, _ ...func(*sns.Options)) (*sns.DeleteTopicOutput, error) {
 	f.deleteCalls++
+	f.log.add("DeleteTopic")
 	if f.deleteErr != nil {
 		return nil, f.deleteErr
 	}
@@ -175,6 +193,7 @@ type fakeScheduler struct {
 	deleteCalls int
 	getCalls    int
 	deleteErr   error
+	log         *callLog
 }
 
 func (f *fakeScheduler) GetSchedule(_ context.Context, _ *scheduler.GetScheduleInput, _ ...func(*scheduler.Options)) (*scheduler.GetScheduleOutput, error) {
@@ -200,10 +219,92 @@ func (f *fakeScheduler) UpdateSchedule(_ context.Context, in *scheduler.UpdateSc
 
 func (f *fakeScheduler) DeleteSchedule(_ context.Context, _ *scheduler.DeleteScheduleInput, _ ...func(*scheduler.Options)) (*scheduler.DeleteScheduleOutput, error) {
 	f.deleteCalls++
+	f.log.add("DeleteSchedule")
 	if f.deleteErr != nil {
 		return nil, f.deleteErr
 	}
 	return &scheduler.DeleteScheduleOutput{}, nil
+}
+
+// fakeCFN is a tiny CloudFormation state machine: one stack, whose status and
+// stored template body move as UpdateStack/DeleteStack are called. That is enough
+// for MigrateFromStack, which is a sequence of five calls whose ORDER and
+// PRECONDITIONS are the thing worth testing — in particular that DeleteStack is
+// never reached when the read-back template doesn't show the retain policies.
+type fakeCFN struct {
+	stackName string
+	status    cfntypes.StackStatus
+	params    []cfntypes.Parameter
+	outputs   []cfntypes.Output
+	// template is what GetTemplate returns; UpdateStack replaces it, exactly as
+	// CloudFormation would.
+	template string
+	// missing makes DescribeStacks answer the way CloudFormation does for an absent
+	// stack — a ValidationError whose message contains "does not exist".
+	missing bool
+
+	describeErr    error
+	updateErr      error
+	getTemplateErr error
+	deleteErr      error
+
+	describeCalls    int
+	createCalls      []*cloudformation.CreateStackInput
+	updateCalls      []*cloudformation.UpdateStackInput
+	getTemplateCalls []*cloudformation.GetTemplateInput
+	deleteCalls      []*cloudformation.DeleteStackInput
+}
+
+func (f *fakeCFN) DescribeStacks(_ context.Context, _ *cloudformation.DescribeStacksInput, _ ...func(*cloudformation.Options)) (*cloudformation.DescribeStacksOutput, error) {
+	f.describeCalls++
+	if f.describeErr != nil {
+		return nil, f.describeErr
+	}
+	if f.missing {
+		return nil, fmt.Errorf("ValidationError: Stack with id %s does not exist", f.stackName)
+	}
+	return &cloudformation.DescribeStacksOutput{Stacks: []cfntypes.Stack{{
+		StackName:   strptr(f.stackName),
+		StackStatus: f.status,
+		Parameters:  f.params,
+		Outputs:     f.outputs,
+	}}}, nil
+}
+
+func (f *fakeCFN) GetTemplate(_ context.Context, in *cloudformation.GetTemplateInput, _ ...func(*cloudformation.Options)) (*cloudformation.GetTemplateOutput, error) {
+	f.getTemplateCalls = append(f.getTemplateCalls, in)
+	if f.getTemplateErr != nil {
+		return nil, f.getTemplateErr
+	}
+	return &cloudformation.GetTemplateOutput{TemplateBody: strptr(f.template)}, nil
+}
+
+func (f *fakeCFN) CreateStack(_ context.Context, in *cloudformation.CreateStackInput, _ ...func(*cloudformation.Options)) (*cloudformation.CreateStackOutput, error) {
+	f.createCalls = append(f.createCalls, in)
+	f.missing = false
+	f.status = cfntypes.StackStatusCreateComplete
+	f.template = deref(in.TemplateBody)
+	return &cloudformation.CreateStackOutput{}, nil
+}
+
+func (f *fakeCFN) UpdateStack(_ context.Context, in *cloudformation.UpdateStackInput, _ ...func(*cloudformation.Options)) (*cloudformation.UpdateStackOutput, error) {
+	f.updateCalls = append(f.updateCalls, in)
+	if f.updateErr != nil {
+		return nil, f.updateErr
+	}
+	f.status = cfntypes.StackStatusUpdateComplete
+	f.template = deref(in.TemplateBody)
+	return &cloudformation.UpdateStackOutput{}, nil
+}
+
+func (f *fakeCFN) DeleteStack(_ context.Context, in *cloudformation.DeleteStackInput, _ ...func(*cloudformation.Options)) (*cloudformation.DeleteStackOutput, error) {
+	f.deleteCalls = append(f.deleteCalls, in)
+	if f.deleteErr != nil {
+		return nil, f.deleteErr
+	}
+	// The SDK's delete waiter matches on DELETE_COMPLETE.
+	f.status = cfntypes.StackStatusDeleteComplete
+	return &cloudformation.DeleteStackOutput{}, nil
 }
 
 // --- helpers ----------------------------------------------------------------
@@ -236,4 +337,11 @@ func (s *fakeSleeper) sleep(d time.Duration) { s.calls = append(s.calls, d) }
 func testDeployer(l lambdaAPI, sn snsAPI, sc schedulerAPI) (*Deployer, *fakeSleeper) {
 	sl := &fakeSleeper{}
 	return &Deployer{lambda: l, sns: sn, sched: sc, sleep: sl.sleep}, sl
+}
+
+// testMigrator builds a Deployer wired to all four fakes, for the CloudFormation
+// migration path.
+func testMigrator(c cfnAPI, l lambdaAPI, sn snsAPI, sc schedulerAPI) *Deployer {
+	sl := &fakeSleeper{}
+	return &Deployer{cfn: c, lambda: l, sns: sn, sched: sc, sleep: sl.sleep}
 }
