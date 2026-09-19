@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.59.0] - 2026-09-18
+
 ### Fixed
 - **A `--maintain` fleet that exceeds your EC2 vCPU quota now tells you, instead
   of silently re-failing a launch every poll for the whole TTL** (#153). Ask for
@@ -939,7 +941,8 @@ Initial tagged release from the standalone `spore-host/lagotto` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/lagotto/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.58.3...HEAD
+[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.59.0...HEAD
+[0.59.0]: https://github.com/spore-host/lagotto/compare/v0.58.3...v0.59.0
 [0.58.3]: https://github.com/spore-host/lagotto/compare/v0.58.2...v0.58.3
 [0.58.2]: https://github.com/spore-host/lagotto/compare/v0.58.1...v0.58.2
 [0.58.1]: https://github.com/spore-host/lagotto/compare/v0.58.0...v0.58.1
