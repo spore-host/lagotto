@@ -42,6 +42,21 @@ const (
 	lambdaBasicExecutionARN = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 )
 
+// RoleARN returns the constructed ARN of the poller execution role (RoleName).
+// IAM is global, so no region is needed. Exported here — next to the name it is
+// derived from — so pkg/deploy has a single source of truth for it rather than
+// its own copy of the format string. The dependency is one-way (deploy imports
+// runtimeiam; runtimeiam imports nothing of deploy's), so there is no cycle.
+func RoleARN(accountID string) string {
+	return fmt.Sprintf("arn:aws:iam::%s:role/%s", accountID, RoleName)
+}
+
+// SchedulerInvokeRoleARN returns the constructed ARN of the EventBridge
+// Scheduler invoke role (SchedulerInvokeRoleName).
+func SchedulerInvokeRoleARN(accountID string) string {
+	return fmt.Sprintf("arn:aws:iam::%s:role/%s", accountID, SchedulerInvokeRoleName)
+}
+
 // trust returns an sts:AssumeRole trust policy JSON for a single AWS service.
 func trust(service string) string {
 	doc := map[string]interface{}{
