@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spore-host/lagotto/pkg/awscfg"
 	"github.com/spore-host/lagotto/pkg/deploy"
+	"github.com/spore-host/lagotto/pkg/runtimeiam"
 	"github.com/spore-host/lagotto/pkg/watcher"
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
 )
@@ -63,7 +64,11 @@ func init() {
 	f.StringVar(&launchSpawnConfig, "spawn-config", "", "spawn LaunchConfig YAML (required): a local path, an s3://bucket/key URI, or '-' for stdin. Referenced user_data_file / iam_policy_file are read now and stored inline.")
 	f.StringVar(&launchRegion, "region", "", "AWS region to launch in (default: from your AWS config)")
 	f.StringVar(&launchAZ, "az", "", "Availability zone (required to match a Capacity Block's AZ)")
-	f.StringVar(&launchStackName, "stack-name", "lagotto", "Deployed lagotto stack name (provides the poller target)")
+	// Deliberately NOT MarkDeprecated: that hides the flag from --help and from
+	// docs-gen/launch.md, which is the opposite of helpful for someone who already
+	// has --stack-name in a script and needs to find out why it stopped mattering.
+	// Keep it visible, labelled ignored, and warn when it's actually passed.
+	f.StringVar(&launchStackName, "stack-name", "lagotto", "(deprecated, ignored — the poller has a fixed name)")
 	f.StringVar(&launchName, "name", "", "Instance Name tag (the overlap dedup key); defaults to the spawn config's name")
 	f.StringVar(&launchIfExists, "if-exists", "", "If an instance with this Name already exists at fire time: skip|launch|replace (default: skip for --at/--after, launch for --cron)")
 	// #62 Capacity-Block start-time launch.
@@ -76,6 +81,13 @@ func init() {
 func runLaunch(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 	out := cmd.OutOrStdout()
+
+	// --stack-name no longer participates in resolving anything here (#154): the
+	// poller's ARNs come from its fixed resource names. Say so out loud rather than
+	// silently ignoring it, so a script that still passes it learns why.
+	if cmd.Flags().Changed("stack-name") {
+		fmt.Fprintf(os.Stderr, "Note: --stack-name (%q) is deprecated and ignored by 'lagotto launch' — the poller has a fixed name, so its ARN is derived from your account and region.\n", launchStackName)
+	}
 
 	if launchSpawnConfig == "" {
 		return fmt.Errorf("--spawn-config is required")
@@ -184,20 +196,29 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 	}
 
 	userID := ""
-	if id, ierr := sts.NewFromConfig(cfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{}); ierr == nil && id.Arn != nil {
-		userID = *id.Arn
+	acctID := ""
+	if id, ierr := sts.NewFromConfig(cfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{}); ierr == nil {
+		if id.Arn != nil {
+			userID = *id.Arn
+		}
+		if id.Account != nil {
+			acctID = *id.Account
+		}
+	}
+	if acctID == "" {
+		return fmt.Errorf("could not resolve AWS account ID (needed to address the poller Lambda and scheduler role); check your credentials")
 	}
 
-	// Discover the poller function + scheduler role from the deployed stack: the
-	// per-launch schedule targets the poller Lambda with a routing payload.
-	outputs, err := deploy.New(cfg).StackOutputs(ctx, launchStackName)
-	if err != nil {
-		return fmt.Errorf("could not read stack %q outputs (run 'lagotto deploy' first): %w", launchStackName, err)
-	}
-	fnArn := outputs["CapacityPollerFunctionArn"]
-	roleArn := outputs["SchedulerInvokeRoleArn"]
-	if fnArn == "" || roleArn == "" {
-		return fmt.Errorf("stack %q is missing the poller function / scheduler role outputs — redeploy with 'lagotto deploy' (a stack deployed without the Lambda can't run scheduled launches)", launchStackName)
+	// The poller function + scheduler role are fixed-name resources, so their ARNs
+	// are derived from account+region rather than read out of a CloudFormation stack
+	// (#154). That works identically whether the poller was created by
+	// `lagotto deploy` or by the CloudFormation template — the template itself
+	// constructs these same ARNs with !Sub. RequirePollerDeployed then checks the
+	// thing this command actually needs: that the function is really there.
+	fnArn := deploy.PollerFunctionARN(region, acctID)
+	roleArn := runtimeiam.SchedulerInvokeRoleARN(acctID)
+	if err := deploy.New(cfg).RequirePollerDeployed(ctx, region, acctID); err != nil {
+		return err
 	}
 
 	// Persist the scheduled launch, then arm the schedule. Store first so the

@@ -108,6 +108,39 @@ func (d *Deployer) EnsurePollerFunction(ctx context.Context, in PollerFunctionIn
 	return d.updatePollerFunction(ctx, in, cur.Configuration)
 }
 
+// RequirePollerDeployed confirms the hosted poller Lambda actually exists in the
+// caller's account, so a command that only needs the poller's ARN (rather than to
+// create it) can fail early with an actionable message.
+//
+// This is what `lagotto launch` checks instead of reading CloudFormation stack
+// outputs (#154): every poller resource has a fixed name, so the ARNs are
+// derivable — but derivable is not the same as present. A GetFunction tests the
+// thing launch actually depends on, which the old stack-outputs check did not: a
+// stack keeps reporting its outputs even after the function has been deleted out
+// from under it.
+//
+// region and accountID are only used to make the "not deployed" message name the
+// place the user should look; they're passed in because a Deployer doesn't retain
+// the aws.Config it was built from.
+//
+// An error other than ResourceNotFoundException is wrapped as-is: an AccessDenied
+// on GetFunction must NOT be reported as "the poller isn't deployed", or the user
+// goes off re-running `lagotto deploy` to fix a permissions problem.
+func (d *Deployer) RequirePollerDeployed(ctx context.Context, region, accountID string) error {
+	_, err := d.lambda.GetFunction(ctx, &lambda.GetFunctionInput{
+		FunctionName: aws.String(PollerFunctionName),
+	})
+	if err == nil {
+		return nil
+	}
+	var notFound *lambdatypes.ResourceNotFoundException
+	if errors.As(err, &notFound) {
+		return fmt.Errorf("the hosted poller isn't deployed in account %s / %s (no Lambda function %q) — run 'lagotto deploy' first",
+			accountID, region, PollerFunctionName)
+	}
+	return fmt.Errorf("check whether function %s exists: %w", PollerFunctionName, err)
+}
+
 // createPollerFunction creates the function from scratch.
 func (d *Deployer) createPollerFunction(ctx context.Context, in PollerFunctionInput) (string, error) {
 	var arn string
