@@ -1,6 +1,9 @@
 package cmd
 
 import (
+	"bytes"
+	"io"
+	"os"
 	"strings"
 	"testing"
 
@@ -93,4 +96,68 @@ func TestLaunchStackNameFlagIsDeprecated(t *testing.T) {
 	if !strings.Contains(f.Usage, "deprecated") || !strings.Contains(f.Usage, "ignored") {
 		t.Errorf("--stack-name usage %q should say it is deprecated and ignored", f.Usage)
 	}
+}
+
+// TestLaunchStackNameWarnsWhenPassed: passing the inert --stack-name must not be
+// rejected (scripts keep working) but must print a note saying it's ignored,
+// otherwise a user whose script still sets it has no way to learn why the flag
+// stopped mattering.
+//
+// Driven via the real runLaunch, which returns on the missing --spawn-config long
+// before it loads an AWS config or calls anything — so this touches no AWS.
+func TestLaunchStackNameWarnsWhenPassed(t *testing.T) {
+	prev := launchStackName
+	prevConfig := launchSpawnConfig
+	t.Cleanup(func() {
+		launchStackName = prev
+		launchSpawnConfig = prevConfig
+		// launchCmd is a package-level singleton, so undo the Changed bit too —
+		// otherwise every later test in this package sees --stack-name as "passed".
+		if f := launchCmd.Flags().Lookup("stack-name"); f != nil {
+			f.Changed = false
+		}
+	})
+	launchSpawnConfig = "" // force the early return, before any AWS call
+
+	if err := launchCmd.Flags().Set("stack-name", "my-old-stack"); err != nil {
+		t.Fatalf("--stack-name must still be settable: %v", err)
+	}
+
+	stderr := captureStderr(t, func() {
+		if err := runLaunch(launchCmd, nil); err == nil {
+			t.Error("expected runLaunch to stop at the missing --spawn-config")
+		}
+	})
+
+	if !strings.Contains(stderr, "--stack-name") || !strings.Contains(stderr, "ignored") {
+		t.Errorf("expected a note that --stack-name is ignored, got %q", stderr)
+	}
+	if !strings.Contains(stderr, "my-old-stack") {
+		t.Errorf("the note should echo the value that was passed, got %q", stderr)
+	}
+}
+
+// captureStderr runs fn with os.Stderr redirected to a pipe and returns what was
+// written. The deprecation note goes to os.Stderr directly (not cmd.ErrOrStderr),
+// matching how the rest of the command reports side notes.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	done := make(chan string, 1)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, r)
+		done <- buf.String()
+	}()
+	fn()
+	os.Stderr = orig
+	_ = w.Close()
+	out := <-done
+	_ = r.Close()
+	return out
 }
