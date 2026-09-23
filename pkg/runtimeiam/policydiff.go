@@ -386,10 +386,18 @@ func expandStatement(st rawStatement) []Grant {
 // canonicalJSON re-marshals a JSON blob through interface{} so object keys come
 // back sorted and all insignificant whitespace is gone. That is what lets two
 // conditions that differ only in key order compare equal.
+//
+// The generic interface{} is required, not laziness: an IAM Condition block is an
+// open-ended map of operator → key → value(s) (and the value may be a string or
+// an array), so there is no concrete struct that can round-trip an arbitrary one.
+// Nothing is dispatched on the decoded shape — it is immediately re-marshalled to
+// a string used only as a comparison key — so the deserialization-gadget concern
+// the rule is about does not apply.
 func canonicalJSON(raw json.RawMessage) string {
 	if len(raw) == 0 || string(raw) == "null" {
 		return ""
 	}
+	// nosemgrep: go.lang.security.deserialization.unsafe-deserialization-interface.go-unsafe-deserialization-interface -- see above: an IAM Condition has no fixed schema, and the value is only re-marshalled into a comparison key.
 	var v interface{}
 	if err := json.Unmarshal(raw, &v); err != nil {
 		// Unparseable: compare it verbatim rather than silently ignoring it.
