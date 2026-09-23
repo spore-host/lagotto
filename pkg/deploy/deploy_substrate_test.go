@@ -744,7 +744,7 @@ func TestSubstrate_EnsurePollerFunction(t *testing.T) {
 		Key:        key,
 		CodeSHA256: sha,
 		EnvVars:    PollerEnvVars("us-east-1", "123456789012", "", "", "", topicARN),
-		Tags:       PollerTags("production"),
+		Tags:       PollerTags("production", "0.44.0"),
 	})
 	if err != nil {
 		t.Fatalf("EnsurePollerFunction: %v", err)
@@ -824,7 +824,7 @@ func TestSubstrate_EnsurePollerFunction_IsIdempotent(t *testing.T) {
 		Key:        key,
 		CodeSHA256: sha,
 		EnvVars:    PollerEnvVars("us-east-1", "123456789012", "", "", "", topicARN),
-		Tags:       PollerTags("production"),
+		Tags:       PollerTags("production", "0.44.0"),
 	}
 	if _, _, err := d.EnsurePollerFunction(ctx, in); err != nil {
 		t.Fatalf("first EnsurePollerFunction: %v", err)
@@ -982,7 +982,7 @@ func TestSubstrate_DeleteHelpersTolerateAbsence(t *testing.T) {
 	fnARN, _, err := d.EnsurePollerFunction(ctx, PollerFunctionInput{
 		RoleARN: runtimeRoleARN("123456789012"), Bucket: bucket, Key: key, CodeSHA256: sha,
 		EnvVars: PollerEnvVars("us-east-1", "123456789012", "", "", "", topicARN),
-		Tags:    PollerTags("production"),
+		Tags:    PollerTags("production", "0.44.0"),
 	})
 	if err != nil {
 		t.Fatalf("EnsurePollerFunction: %v", err)

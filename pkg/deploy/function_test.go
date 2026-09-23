@@ -21,7 +21,7 @@ func testPollerInput() PollerFunctionInput {
 		Key:        LambdaObjectKey("0.55.1"),
 		CodeSHA256: "sha-of-the-zip",
 		EnvVars:    PollerEnvVars(testRegion, testAccount, "", "", "", AlertsTopicARN(testRegion, testAccount)),
-		Tags:       PollerTags("production"),
+		Tags:       PollerTags("production", "0.44.0"),
 	}
 }
 

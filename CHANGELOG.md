@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`lagotto doctor`** (#156) — a read-only health check that tells you whether the
+  hosted poller in your account still matches the lagotto you're running. The
+  headline is the poller's runtime IAM policy: `lagotto setup` replaces it
+  *wholesale* with the permissions compiled into whichever binary ran it, so
+  upgrading lagotto and forgetting to re-run `setup` silently leaves the poller on
+  the old permissions — and running an *older* lagotto's `setup` reverts newer
+  ones. Neither shows up anywhere until a watch dies, and for the hosted poller
+  that failure is only visible in CloudWatch Logs. That is what made #149, #151
+  and #153 fail silently, and `doctor` now reports it as drift, naming the exact
+  actions and resources that are missing (or extra) instead of dumping a diff of
+  two JSON documents. It also reports a poller Lambda older than your CLI, a
+  missing table/role/Lambda/topic/schedule, a schedule that is switched off while
+  watches are active — the case where your watches look armed but nothing is
+  polling them — and a leftover CloudFormation stack. Every finding comes with the
+  command that fixes it. It exits non-zero only on failures (warnings don't count),
+  so you can run it in CI, and `-o json` gives the machine-readable form. Nothing
+  about it writes: there is deliberately no `--fix`.
+- `lagotto deploy` now stamps the poller Lambda with a `Version` tag recording the
+  release its code came from, which is what makes "is my deployed poller stale?"
+  answerable. A poller deployed by an earlier lagotto has no such tag; `doctor`
+  reports its version as unknown rather than guessing.
+
 ## [0.60.0] - 2026-09-19
 
 ### Added

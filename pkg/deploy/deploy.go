@@ -214,7 +214,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) (*Result, error) {
 		CodeSHA256: digest,
 		EnvVars: PollerEnvVars(opts.Region, opts.AccountID,
 			opts.WatchesTable, opts.HistoryTable, opts.ScheduledTable, topicARN),
-		Tags: PollerTags(env),
+		Tags: PollerTags(env, opts.Version),
 	})
 	if err != nil {
 		return nil, err

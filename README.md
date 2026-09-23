@@ -223,6 +223,22 @@ code-only update. A CloudFormation template is still shipped as an optional
 declarative path for IaC/enterprise environments. See
 [DEPLOYMENT.md](DEPLOYMENT.md) for both.
 
+### Checking a deployment
+
+`lagotto doctor` reports drift between the poller deployed in your account and
+what your lagotto binary expects — most importantly the poller's runtime IAM
+policy, which `lagotto setup` replaces wholesale with the grants compiled into
+whichever binary ran it. Upgrading lagotto without re-running `setup` therefore
+leaves the poller on the old permissions, and the only evidence is an
+`AccessDenied` in the poller's CloudWatch Logs. `doctor` also flags a poller
+Lambda older than your CLI, missing tables/roles/poller/topic/schedule, a
+schedule that's switched off while watches are active, and a leftover
+CloudFormation stack.
+
+It is strictly read-only (there is no `--fix`) and exits non-zero only when a
+check FAILS, so it can gate CI. `-o json` gives the machine-readable form,
+including the exact missing or extra IAM grants.
+
 ## Go Library
 
 ```go
