@@ -104,9 +104,21 @@ type fakeIAM struct {
 	role, policy, doc string
 	calls             int      // PutRolePolicy calls
 	puts              []string // "role/policy" per PutRolePolicy
+	// inline holds the inline policy documents PutRolePolicy has written, keyed
+	// "role/policy", so GetRolePolicy can read back what setup applied.
+	inline map[string]string
+	// getPolicyErr, when set, is what GetRolePolicy returns instead of reading
+	// inline — for the AccessDenied-is-not-absence case.
+	getPolicyErr error
+	// getRoleErr, when set, is what GetRole returns — an error that is NOT a
+	// NoSuchEntity, so "absent" and "can't tell" stay distinguishable.
+	getRoleErr error
 }
 
 func (f *fakeIAM) GetRole(_ context.Context, in *iam.GetRoleInput, _ ...func(*iam.Options)) (*iam.GetRoleOutput, error) {
+	if f.getRoleErr != nil {
+		return nil, f.getRoleErr
+	}
 	if f.existing[aws.ToString(in.RoleName)] {
 		return &iam.GetRoleOutput{Role: &iamtypes.Role{RoleName: in.RoleName}}, nil
 	}
@@ -134,7 +146,27 @@ func (f *fakeIAM) PutRolePolicy(_ context.Context, in *iam.PutRolePolicyInput, _
 	f.policy = aws.ToString(in.PolicyName)
 	f.doc = aws.ToString(in.PolicyDocument)
 	f.puts = append(f.puts, f.role+"/"+f.policy)
+	if f.inline == nil {
+		f.inline = map[string]string{}
+	}
+	f.inline[f.role+"/"+f.policy] = f.doc
 	return &iam.PutRolePolicyOutput{}, nil
+}
+
+func (f *fakeIAM) GetRolePolicy(_ context.Context, in *iam.GetRolePolicyInput, _ ...func(*iam.Options)) (*iam.GetRolePolicyOutput, error) {
+	if f.getPolicyErr != nil {
+		return nil, f.getPolicyErr
+	}
+	key := aws.ToString(in.RoleName) + "/" + aws.ToString(in.PolicyName)
+	doc, ok := f.inline[key]
+	if !ok {
+		return nil, &iamtypes.NoSuchEntityException{}
+	}
+	return &iam.GetRolePolicyOutput{
+		RoleName:       in.RoleName,
+		PolicyName:     in.PolicyName,
+		PolicyDocument: aws.String(doc),
+	}, nil
 }
 
 func contains(ss []string, want string) bool {

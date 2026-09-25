@@ -65,16 +65,26 @@ func PollerEnvVars(region, accountID, watchesTable, historyTable, scheduledTable
 	}
 }
 
-// PollerTags mirrors the template's function tags.
-func PollerTags(env string) map[string]string {
+// PollerTags mirrors the template's function tags, plus the VersionTag stamp that
+// records which lagotto release the deployed artifact came from (#156).
+//
+// The Version stamp is what makes "is the deployed poller older than my CLI?"
+// answerable at all — see VersionTag for why no other signal works. An empty
+// version omits the tag rather than writing an empty one, so doctor can tell
+// "deployed by a lagotto that didn't stamp versions" from "stamped with nothing".
+func PollerTags(env, version string) map[string]string {
 	if env == "" {
 		env = "production"
 	}
-	return map[string]string{
+	tags := map[string]string{
 		"Environment": env,
 		"Application": "lagotto",
 		"Component":   "capacity-poller",
 	}
+	if v := strings.TrimPrefix(version, "v"); v != "" {
+		tags[VersionTag] = v
+	}
+	return tags
 }
 
 // EnsurePollerFunction get-or-creates the lagotto-capacity-poller Lambda and
