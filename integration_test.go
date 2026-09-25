@@ -61,7 +61,7 @@ func TestIntegration_WatchLifecycle(t *testing.T) {
 		CreatedAt:           now,
 		UpdatedAt:           now,
 		ExpiresAt:           now.Add(1 * time.Hour),
-		TTLTimestamp:        now.Add(1 * time.Hour).Unix(),
+		TTLTimestamp:        watcher.RetentionTTL(now.Add(1 * time.Hour)),
 	}
 
 	if err := store.PutWatch(ctx, w); err != nil {
@@ -130,7 +130,7 @@ func TestIntegration_ExtendWatch(t *testing.T) {
 		CreatedAt:           now,
 		UpdatedAt:           now,
 		ExpiresAt:           now.Add(1 * time.Hour),
-		TTLTimestamp:        now.Add(1 * time.Hour).Unix(),
+		TTLTimestamp:        watcher.RetentionTTL(now.Add(1 * time.Hour)),
 	}
 	if err := store.PutWatch(ctx, w); err != nil {
 		t.Fatalf("PutWatch: %v", err)
@@ -145,7 +145,12 @@ func TestIntegration_ExtendWatch(t *testing.T) {
 	}
 
 	got, _ := store.GetWatch(ctx, watchID)
-	if got.TTLTimestamp != newExpiry.Unix() {
-		t.Errorf("TTLTimestamp = %d, want %d", got.TTLTimestamp, newExpiry.Unix())
+	// ttl_timestamp is the RETENTION horizon (expiry + 90d), never the watch's own
+	// expiry — that conflation is #161, and this assertion used to require it.
+	if want := watcher.RetentionTTL(newExpiry); got.TTLTimestamp < want {
+		t.Errorf("TTLTimestamp = %d, want >= %d (newExpiry + retention)", got.TTLTimestamp, want)
+	}
+	if got.TTLTimestamp == newExpiry.Unix() {
+		t.Errorf("TTLTimestamp == newExpiry (%d): DynamoDB would delete the record the moment the watch expires (#161)", newExpiry.Unix())
 	}
 }

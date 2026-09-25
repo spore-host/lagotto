@@ -271,6 +271,11 @@ func TestUpdateLastPolled(t *testing.T) {
 	// Just verify no error — the timestamp is set server-side
 }
 
+// TestExtendWatch is the #161 REGRESSION GUARD, and the assertion below used to
+// say the opposite: it required ttl_timestamp == newExpiry.Unix(), which is
+// exactly the bug — DynamoDB then hard-deletes the record at the instant the watch
+// expires, taking the status=expired tombstone with it. ttl_timestamp is a
+// RETENTION horizon (expiry + 90d), never the watch's own expiry.
 func TestExtendWatch(t *testing.T) {
 	store := setupStore(t)
 	ctx := context.Background()
@@ -284,8 +289,115 @@ func TestExtendWatch(t *testing.T) {
 	}
 
 	got, _ := store.GetWatch(ctx, "w-extend")
-	if got.TTLTimestamp != newExpiry.Unix() {
-		t.Errorf("TTLTimestamp = %d, want %d", got.TTLTimestamp, newExpiry.Unix())
+	if !got.ExpiresAt.Equal(newExpiry.Truncate(time.Second)) {
+		t.Errorf("ExpiresAt = %s, want %s", got.ExpiresAt, newExpiry)
+	}
+	// The record must outlive the watch by the full retention window.
+	if want := watcher.RetentionTTL(newExpiry); got.TTLTimestamp < want {
+		t.Errorf("TTLTimestamp = %d, want >= %d (newExpiry + retention)", got.TTLTimestamp, want)
+	}
+	// And must NOT be the watch's own expiry — the precise shape of the bug, so it
+	// can't quietly come back.
+	if got.TTLTimestamp == newExpiry.Unix() {
+		t.Errorf("TTLTimestamp = %d == newExpiry: ttl_timestamp was set to the watch expiry, so DynamoDB will delete the record the moment it expires (#161)", got.TTLTimestamp)
+	}
+	// Sanity: the retention horizon is ~90 days out, not ~48 hours.
+	if minExpected := time.Now().UTC().Add(60 * 24 * time.Hour).Unix(); got.TTLTimestamp < minExpected {
+		t.Errorf("TTLTimestamp = %d, want at least ~90d out (>= %d)", got.TTLTimestamp, minExpected)
+	}
+}
+
+// TestPutWatch_RetentionTTL guards the OTHER direction: the creation path must
+// arm ttl_timestamp at expiry + retention, so a watch that is never extended
+// still leaves a tombstone (#161). This is the path the reporter hit — they never
+// ran `lagotto extend`.
+func TestPutWatch_RetentionTTL(t *testing.T) {
+	store := setupStore(t)
+	ctx := context.Background()
+
+	expiry := time.Now().UTC().Add(48 * time.Hour)
+	w := newTestWatch("w-retain", "arn:aws:iam::123456789012:user/test")
+	w.ExpiresAt = expiry
+	w.TTLTimestamp = watcher.RetentionTTL(expiry) // what cmd/watch.go now does
+	if err := store.PutWatch(ctx, w); err != nil {
+		t.Fatalf("PutWatch: %v", err)
+	}
+
+	got, _ := store.GetWatch(ctx, "w-retain")
+	if got.TTLTimestamp != watcher.RetentionTTL(expiry) {
+		t.Errorf("TTLTimestamp = %d, want %d (expiry + retention)", got.TTLTimestamp, watcher.RetentionTTL(expiry))
+	}
+	if got.TTLTimestamp == expiry.Unix() {
+		t.Errorf("TTLTimestamp == expiry (%d): the record would be deleted at expiry (#161)", expiry.Unix())
+	}
+}
+
+// TestRetentionTTL_IsNotTheWatchExpiry pins the invariant itself, independent of
+// any store call: the retention horizon is strictly later than the expiry it's
+// derived from, by ~90 days.
+func TestRetentionTTL_IsNotTheWatchExpiry(t *testing.T) {
+	expiry := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	got := watcher.RetentionTTL(expiry)
+	if got == expiry.Unix() {
+		t.Fatal("RetentionTTL returned the expiry unchanged")
+	}
+	if want := expiry.Add(90 * 24 * time.Hour).Unix(); got != want {
+		t.Errorf("RetentionTTL = %d, want %d (expiry + 90d)", got, want)
+	}
+}
+
+// TestUpdateWatchStatus_ExpiredTombstoneSurvives is the #161 end state: after the
+// TTL transition the record is still THERE, resolvable by ID, and says
+// status=expired — distinguishable from a watch ID that never existed (which
+// GetWatch reports as nil). It also covers the self-heal: this watch was stored
+// with the old buggy ttl_timestamp == expiry, and the status write repairs it.
+func TestUpdateWatchStatus_ExpiredTombstoneSurvives(t *testing.T) {
+	store := setupStore(t)
+	ctx := context.Background()
+
+	past := time.Now().UTC().Add(-1 * time.Hour)
+	w := newTestWatch("w-tomb", "arn:aws:iam::123456789012:user/test")
+	w.CreatedAt = past.Add(-48 * time.Hour)
+	w.ExpiresAt = past
+	w.TTLTimestamp = past.Unix() // the pre-fix value: delete-at-expiry
+	if err := store.PutWatch(ctx, w); err != nil {
+		t.Fatalf("PutWatch: %v", err)
+	}
+
+	if err := store.UpdateWatchStatus(ctx, "w-tomb", watcher.StatusExpired); err != nil {
+		t.Fatalf("UpdateWatchStatus: %v", err)
+	}
+
+	got, err := store.GetWatch(ctx, "w-tomb")
+	if err != nil {
+		t.Fatalf("GetWatch: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expired watch resolved to nil — the tombstone is gone (#161)")
+	}
+	if got.Status != watcher.StatusExpired {
+		t.Errorf("Status = %q, want expired", got.Status)
+	}
+	// Self-heal: the doomed ttl_timestamp has been pushed out to the retention horizon.
+	if minExpected := time.Now().UTC().Add(60 * 24 * time.Hour).Unix(); got.TTLTimestamp < minExpected {
+		t.Errorf("TTLTimestamp = %d, want at least ~90d out (>= %d) — the tombstone is still armed to self-delete", got.TTLTimestamp, minExpected)
+	}
+	// And the give-up duration is now derivable from the tombstone (#139/#161).
+	d, ok := got.TimeToGiveUp()
+	if !ok {
+		t.Fatal("TimeToGiveUp not reported for an expired watch")
+	}
+	if d < 47*time.Hour {
+		t.Errorf("TimeToGiveUp = %s, want ~48h", d)
+	}
+
+	// Contrast: a watch ID that never existed still reads as absent.
+	missing, err := store.GetWatch(ctx, "w-never-existed")
+	if err != nil {
+		t.Fatalf("GetWatch: %v", err)
+	}
+	if missing != nil {
+		t.Errorf("nonexistent watch resolved to %+v, want nil", missing)
 	}
 }
 
@@ -446,5 +558,47 @@ func TestRecordAndClearQuotaCap(t *testing.T) {
 	}
 	if got.ConsecutiveFailures != 1 {
 		t.Errorf("ConsecutiveFailures = %d, want 1 (untouched by the quota-cap clear)", got.ConsecutiveFailures)
+	}
+}
+
+// TestListWatchesByUser_IncludesExpired is the `list --all` half of #161: the
+// unfiltered per-user query (what --all issues) returns the expired tombstone
+// alongside the active watch, while the default active-only filter still hides it.
+// No new flag was needed — only a record that survives expiry.
+func TestListWatchesByUser_IncludesExpired(t *testing.T) {
+	store := setupStore(t)
+	ctx := context.Background()
+
+	alice := "arn:aws:iam::123456789012:user/alice"
+	active := newTestWatch("w-live", alice)
+	expired := newTestWatch("w-dead", alice)
+	expired.Status = watcher.StatusExpired
+	for _, w := range []*watcher.Watch{active, expired} {
+		if err := store.PutWatch(ctx, w); err != nil {
+			t.Fatalf("PutWatch %s: %v", w.WatchID, err)
+		}
+	}
+
+	all, err := store.ListWatchesByUser(ctx, alice, "") // `list --all`
+	if err != nil {
+		t.Fatalf("ListWatchesByUser(all): %v", err)
+	}
+	seen := map[string]watcher.WatchStatus{}
+	for _, w := range all {
+		seen[w.WatchID] = w.Status
+	}
+	if seen["w-dead"] != watcher.StatusExpired {
+		t.Errorf("--all did not surface the expired watch: %v", seen)
+	}
+	if seen["w-live"] != watcher.StatusActive {
+		t.Errorf("--all did not surface the active watch: %v", seen)
+	}
+
+	activeOnly, err := store.ListWatchesByUser(ctx, alice, watcher.StatusActive) // default
+	if err != nil {
+		t.Fatalf("ListWatchesByUser(active): %v", err)
+	}
+	if len(activeOnly) != 1 || activeOnly[0].WatchID != "w-live" {
+		t.Errorf("default filter returned %+v, want only w-live", activeOnly)
 	}
 }

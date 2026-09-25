@@ -99,3 +99,40 @@ func TestComputeDurations(t *testing.T) {
 		t.Errorf("WaitToAcquireSeconds = %v, want nil for a failed (never-matched) watch", *failed.WaitToAcquireSeconds)
 	}
 }
+
+// TestTimeToGiveUp_Expired covers #161: an expired watch is a give-up too — it
+// waited the full elapsed duration and never acquired. Before the fix only
+// StatusFailed qualified, so the 48h "we hunted g7e and never got it" datapoint
+// had nowhere to be reported even once the tombstone survived.
+func TestTimeToGiveUp_Expired(t *testing.T) {
+	created := time.Date(2026, 9, 16, 10, 0, 0, 0, time.UTC)
+
+	expired := &Watch{Status: StatusExpired, CreatedAt: created, UpdatedAt: created.Add(48 * time.Hour)}
+	d, ok := expired.TimeToGiveUp()
+	if !ok {
+		t.Fatal("TimeToGiveUp() ok=false for an expired watch, want true")
+	}
+	if d != 48*time.Hour {
+		t.Errorf("TimeToGiveUp() = %v, want 48h", d)
+	}
+	if got := FormatWait(d); got != "48h0m0s" {
+		t.Errorf("FormatWait = %q, want 48h0m0s", got)
+	}
+
+	expired.ComputeDurations()
+	if expired.TimeToGiveUpSeconds == nil || *expired.TimeToGiveUpSeconds != 172800 {
+		t.Errorf("TimeToGiveUpSeconds = %v, want 172800", expired.TimeToGiveUpSeconds)
+	}
+	if expired.WaitToAcquireSeconds != nil {
+		t.Errorf("WaitToAcquireSeconds = %v, want nil for a never-matched watch", *expired.WaitToAcquireSeconds)
+	}
+
+	// An active watch is not a give-up, however long it has been running.
+	if _, ok := (&Watch{Status: StatusActive, CreatedAt: created, UpdatedAt: created.Add(time.Hour)}).TimeToGiveUp(); ok {
+		t.Error("TimeToGiveUp() ok=true for an active watch, want false")
+	}
+	// Neither is a cancelled one — the user stopped it; it didn't give up.
+	if _, ok := (&Watch{Status: StatusCancelled, CreatedAt: created, UpdatedAt: created.Add(time.Hour)}).TimeToGiveUp(); ok {
+		t.Error("TimeToGiveUp() ok=true for a cancelled watch, want false")
+	}
+}

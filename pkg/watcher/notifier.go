@@ -213,6 +213,138 @@ func (n *Notifier) sendQuotaCapWebhook(ctx context.Context, url string, w *Watch
 	return nil
 }
 
+// NotifyExpired tells the user that a watch reached its TTL without ever
+// acquiring capacity (#161) — the mirror image of the match notification, and the
+// moment a human most wants to hear from an unattended hunt, especially for
+// `--action spawn` where nothing was ever launched.
+//
+// A sibling of Notify rather than a synthesized MatchResult, for the same reason
+// NotifyQuotaCap is: an expiry is the ABSENCE of a match, and faking one would
+// pollute match history and the --action semantics.
+//
+// Notify-once is structural, not stateful: the poller only ever loads ACTIVE
+// watches, so the active→expired transition happens exactly once and no
+// "already notified" flag is needed (unlike the #153 quota cap, which recurs
+// while the watch stays active).
+func (n *Notifier) NotifyExpired(ctx context.Context, w *Watch) error {
+	if len(w.NotifyChannels) == 0 {
+		return nil
+	}
+
+	subject := expiredSubject(w)
+	body := expiredBody(w)
+
+	var lastErr error
+	for _, ch := range w.NotifyChannels {
+		var err error
+		switch ch.Type {
+		case "email":
+			_, err = n.snsClient.Publish(ctx, &sns.PublishInput{
+				TopicArn: aws.String(n.topicArn),
+				Subject:  aws.String(subject),
+				Message:  aws.String(body),
+			})
+		case "webhook":
+			// Same defence-in-depth re-validation as Notify, for watches created
+			// before the URL validation fix shipped.
+			if verr := ValidateWebhookURL(ch.Target); verr != nil {
+				err = fmt.Errorf("blocked unsafe webhook URL: %w", verr)
+			} else {
+				err = n.sendExpiredWebhook(ctx, ch.Target, w)
+			}
+		case "sns":
+			var data []byte
+			if data, err = json.Marshal(expiredPayload(w)); err == nil {
+				_, err = n.snsClient.Publish(ctx, &sns.PublishInput{
+					TopicArn: aws.String(ch.Target),
+					Message:  aws.String(string(data)),
+				})
+			}
+		default:
+			continue
+		}
+		if err != nil {
+			lastErr = err
+		}
+	}
+	return lastErr
+}
+
+// expiredSubject renders the notification subject line, e.g.
+// "[lagotto] watch w-cf8e1a08 expired without acquiring g7e.*". Pure, so it's
+// testable without SNS (snsClient is a concrete *sns.Client).
+func expiredSubject(w *Watch) string {
+	return fmt.Sprintf("[lagotto] watch %s expired without acquiring %s", w.WatchID, w.InstanceTypePattern)
+}
+
+// expiredBody renders the notification body: what was hunted, for how long, and
+// the one action that matters next (re-arm with a longer TTL, or widen the search).
+func expiredBody(w *Watch) string {
+	waited := "unknown"
+	if d, ok := w.TimeToGiveUp(); ok {
+		waited = FormatWait(d)
+	}
+	return fmt.Sprintf(`Your watch %s reached its TTL without ever finding capacity.
+
+Pattern:  %s
+Regions:  %v
+Spot:     %v
+Action:   %s (never taken — no capacity was found)
+Created:  %s
+Expired:  %s
+Waited:   %s
+
+Nothing was launched. The watch record is kept as status=expired so you can see
+this happened, rather than having to infer it from silence.
+
+To keep hunting, re-arm it with a longer TTL:
+
+  lagotto extend %s --ttl 7d
+
+If it never matched at all, consider widening --regions or the instance-type
+pattern, or dropping --max-price.
+`,
+		w.WatchID, w.InstanceTypePattern, w.Regions, w.Spot, w.Action,
+		w.CreatedAt.Format(time.RFC3339), w.UpdatedAt.Format(time.RFC3339), waited,
+		w.WatchID)
+}
+
+// expiredPayload is the machine-readable expiry event. Like the quota-cap
+// payload, the "event" key is new to THIS payload only — the existing match
+// payload is left untouched, so no existing webhook consumer changes shape.
+func expiredPayload(w *Watch) map[string]interface{} {
+	p := map[string]interface{}{
+		"watch_id": w.WatchID,
+		"event":    "expired",
+		"pattern":  w.InstanceTypePattern,
+		"regions":  w.Regions,
+		"action":   string(w.Action),
+		"acquired": false,
+	}
+	if d, ok := w.TimeToGiveUp(); ok {
+		p["time_to_give_up_seconds"] = d.Seconds()
+	}
+	return p
+}
+
+// sendExpiredWebhook posts the expiry event to a webhook target.
+func (n *Notifier) sendExpiredWebhook(ctx context.Context, url string, w *Watch) error {
+	data, err := json.Marshal(expiredPayload(w))
+	if err != nil {
+		return fmt.Errorf("marshal expiry webhook payload: %w", err)
+	}
+	resp, err := n.httpClient.Post(url, "application/json", bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("post to webhook: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("webhook returned %d: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
 func (n *Notifier) sendEmail(ctx context.Context, email string, w *Watch, m *MatchResult) error {
 	spotLabel := "On-Demand"
 	if m.IsSpot {

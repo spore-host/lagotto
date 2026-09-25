@@ -54,6 +54,10 @@ type Poller struct {
 	// notifications — ValidateWebhookURL deliberately refuses loopback, so an
 	// httptest server can't stand in for a real notify channel.
 	notifyQuotaCap func(ctx context.Context, w *Watch, running int, reason string) error
+	// notifyExpired overrides where a #161 expiry notification goes — same test
+	// seam, same reason (ValidateWebhookURL refuses loopback, so an httptest server
+	// can't stand in for a real notify channel).
+	notifyExpired func(ctx context.Context, w *Watch) error
 	// quotas, when non-nil, enriches a quota-cap report with the account's actual
 	// vCPU limit/usage numbers (#153). OPTIONAL and nil-safe by design: the cap
 	// itself is detected from the RunInstances error, so a poller with no
@@ -241,6 +245,20 @@ func (p *Poller) PollAll(ctx context.Context) (*PollSummary, error) {
 				summary.Expired++
 				if p.verbose {
 					fmt.Fprintf(os.Stderr, "Watch %s expired (TTL %s elapsed)\n", w.WatchID, w.ExpiresAt.Format(time.RFC3339))
+				}
+				// Mirror the persisted transition onto the in-memory copy BEFORE
+				// notifying: TimeToGiveUp is derived from Status + UpdatedAt, and the
+				// loaded record still says active (#161).
+				w.Status = StatusExpired
+				w.UpdatedAt = now
+				// "Your watch expired without acquiring" is the mirror of the match
+				// notification and the moment a human wants to hear from an unattended
+				// hunt (#161). Best-effort: a notify failure must not stop the sweep, and
+				// the tombstone is already durable either way.
+				if notify := p.expiredNotifier(); notify != nil {
+					if err := notify(ctx, w); err != nil {
+						fmt.Fprintf(os.Stderr, "Warning: failed to notify expiry of watch %s: %v\n", w.WatchID, err)
+					}
 				}
 			}
 			continue
@@ -595,6 +613,19 @@ func (p *Poller) quotaCapNotifier() func(ctx context.Context, w *Watch, running 
 	}
 	if p.notifier != nil {
 		return p.notifier.NotifyQuotaCap
+	}
+	return nil
+}
+
+// expiredNotifier resolves where a TTL-expiry notification goes: the test seam if
+// set, else the wired Notifier, else nowhere (a notify-less watch still gets the
+// persisted status=expired tombstone, `lagotto status` and `lagotto history`).
+func (p *Poller) expiredNotifier() func(ctx context.Context, w *Watch) error {
+	if p.notifyExpired != nil {
+		return p.notifyExpired
+	}
+	if p.notifier != nil {
+		return p.notifier.NotifyExpired
 	}
 	return nil
 }
