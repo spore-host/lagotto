@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.62.0] - 2026-09-25
+
 ### Fixed
 - **Extending a watch no longer causes its record to be hard-deleted the moment it
   expires** (#161). `lagotto extend` set the record's DynamoDB TTL to the watch's
@@ -1098,7 +1100,8 @@ Initial tagged release from the standalone `spore-host/lagotto` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/lagotto/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.61.0...HEAD
+[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.62.0...HEAD
+[0.62.0]: https://github.com/spore-host/lagotto/compare/v0.61.0...v0.62.0
 [0.61.0]: https://github.com/spore-host/lagotto/compare/v0.60.0...v0.61.0
 [0.60.0]: https://github.com/spore-host/lagotto/compare/v0.59.0...v0.60.0
 [0.59.0]: https://github.com/spore-host/lagotto/compare/v0.58.3...v0.59.0
