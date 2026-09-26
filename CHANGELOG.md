@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Extending a watch no longer causes its record to be hard-deleted the moment it
+  expires** (#161). `lagotto extend` set the record's DynamoDB TTL to the watch's
+  *new expiry*, so DynamoDB deleted the item at the exact instant the watch ran
+  out — destroying the terminal `status=expired` marker lagotto writes on that same
+  transition. The record's TTL is a 90-day **retention** horizon, deliberately not
+  the watch's own TTL, and creating a watch made the same mistake, which is why an
+  expired watch vanished even if you never ran `extend`. An expired watch now
+  leaves a `status=expired` tombstone, so you can tell "expired without ever
+  acquiring" from "that watch ID never existed" — and `lagotto status <id>` answers
+  instead of printing nothing. Watches created before this fix are repaired in
+  place when they expire, so you don't have to re-arm them to get a tombstone.
+- The terminal status transitions (`expired`, `cancelled`, `completed`, `failed`)
+  now all push the record's retention horizon out, so no terminal outcome can be
+  deleted out from under itself (#161).
+
+### Added
+- **Expired watches are now surfaced instead of disappearing** (#161). `lagotto
+  history` gained a "Gave up without acquiring" section listing every watch that
+  ended without ever getting capacity, with the elapsed watch duration reported as
+  *waited* — the other half of the wait measurement added in #139, which until now
+  only reported successful acquisitions. "We watched g7e for 48h across 5 regions
+  and never got it" is arguably the most useful thing a capacity watcher can tell
+  you, and it used to be silently dropped. `lagotto list --all` shows them too; it
+  needed no new flag, since `--all` already meant "every status" — there was simply
+  no record left to find. In `-o json`, each history row now carries an `event` key
+  (`match` or `gave_up`); match rows are otherwise unchanged, and a gave-up row is
+  deliberately its own shape so nothing can mistake it for an acquisition.
+- **A watch that expires without acquiring now notifies you**, on the same
+  `--notify` channels as a match (#161) — the mirror image of "capacity found", and
+  the moment you most want to hear from an unattended hunt, especially with
+  `--action spawn` where nothing was ever launched. The message says what was
+  hunted, for how long, that nothing was launched, and how to re-arm with a longer
+  TTL. Sent once, at the expiry transition. Webhook and raw-SNS channels get an
+  `"event": "expired"` payload with `"acquired": false`; the existing match payload
+  is untouched.
+
 ## [0.61.0] - 2026-09-25
 
 ### Added

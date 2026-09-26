@@ -139,7 +139,8 @@ type Watch struct {
 	// (#139) filled by ComputeDurations at read time — never persisted (dynamodbav
 	// "-"). wait-to-acquire = matched_at − created_at for a watch that matched/
 	// spawned; time-to-give-up = ended_at (last update) − created_at for a watch
-	// that ended failed. Both are nil (omitted) when they don't apply.
+	// that ended failed OR expired without acquiring (#161). Both are nil (omitted)
+	// when they don't apply.
 	WaitToAcquireSeconds *float64 `json:"wait_to_acquire_seconds,omitempty" dynamodbav:"-"`
 	TimeToGiveUpSeconds  *float64 `json:"time_to_give_up_seconds,omitempty" dynamodbav:"-"`
 }

@@ -60,12 +60,20 @@ func (w *Watch) WaitToAcquire() (time.Duration, bool) {
 	return d, true
 }
 
-// TimeToGiveUp is the DERIVED time from a watch's creation until it ended as
-// StatusFailed — how long it kept trying before giving up (#139). The watch's
-// last update (UpdatedAt) is the end time: RecordMatch stamps it on the terminal
-// transition to failed. ok is false for any non-failed watch.
+// TimeToGiveUp is the DERIVED time from a watch's creation until it gave up
+// without acquiring — how long it kept trying (#139). Two terminal statuses
+// qualify: StatusFailed (a terminal launch error stopped it) and StatusExpired
+// (its TTL elapsed with no match, #161) — "we hunted g7e for 48h and never got
+// it" is the same measurement as "we tried for 20m and the AMI was bad", and both
+// are the half of the wait distribution that a successful WaitToAcquire can't
+// show. The watch's last update (UpdatedAt) is the end time: RecordMatch stamps it
+// on the transition to failed, UpdateWatchStatus on the transition to expired.
+// ok is false for any other status.
 func (w *Watch) TimeToGiveUp() (time.Duration, bool) {
-	if w.Status != StatusFailed || w.CreatedAt.IsZero() || w.UpdatedAt.IsZero() {
+	if w.Status != StatusFailed && w.Status != StatusExpired {
+		return 0, false
+	}
+	if w.CreatedAt.IsZero() || w.UpdatedAt.IsZero() {
 		return 0, false
 	}
 	d := w.UpdatedAt.Sub(w.CreatedAt)

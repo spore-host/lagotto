@@ -169,7 +169,11 @@ func (s *Store) ExtendWatch(ctx context.Context, watchID string, newExpiry time.
 	expr := "SET expires_at = :exp, ttl_timestamp = :ttl, updated_at = :now"
 	values := map[string]types.AttributeValue{
 		":exp": &types.AttributeValueMemberS{Value: newExpiry.Format(time.RFC3339)},
-		":ttl": &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", newExpiry.Unix())},
+		// RETENTION horizon, not the new watch expiry (#161). This used to be
+		// newExpiry.Unix(), which armed DynamoDB to hard-delete the record at the
+		// exact instant the watch expired — destroying the status=expired tombstone
+		// the poller writes on that same transition. See RetentionTTL.
+		":ttl": &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", RetentionTTL(newExpiry))},
 		":now": &types.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)},
 	}
 	names := map[string]string{}
@@ -200,19 +204,29 @@ func (s *Store) ExtendWatch(ctx context.Context, watchID string, newExpiry time.
 }
 
 // UpdateWatchStatus atomically updates a watch's status.
+//
+// Every caller moves a watch to a TERMINAL status (expired, cancelled, completed,
+// failed), so this also pushes ttl_timestamp out to the retention horizon —
+// mirroring what RecordMatch does for the matched/failed transition (#41). That
+// matters twice over (#161): the status write IS the tombstone, so it must not be
+// made in a record DynamoDB is about to delete; and because the poller enforces
+// ExpiresAt itself while DynamoDB TTL deletion is lazy (up to ~48h late), this
+// SELF-HEALS watches created before the #161 fix — they get a proper 90-day
+// tombstone at the moment they're marked expired.
 func (s *Store) UpdateWatchStatus(ctx context.Context, watchID string, status WatchStatus) error {
 	_, err := s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: &s.watchesTable,
 		Key: map[string]types.AttributeValue{
 			"watch_id": &types.AttributeValueMemberS{Value: watchID},
 		},
-		UpdateExpression: aws.String("SET #st = :status, updated_at = :now"),
+		UpdateExpression: aws.String("SET #st = :status, updated_at = :now, ttl_timestamp = :ttl"),
 		ExpressionAttributeNames: map[string]string{
 			"#st": "status",
 		},
 		ExpressionAttributeValues: map[string]types.AttributeValue{
 			":status": &types.AttributeValueMemberS{Value: string(status)},
 			":now":    &types.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)},
+			":ttl":    &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", RetentionTTL(time.Now().UTC()))},
 		},
 	})
 	if err != nil {
@@ -287,6 +301,23 @@ func (s *Store) ReleaseLease(ctx context.Context, watchID, owner string) error {
 // record itself both use it, so a matched/launched watch record isn't deleted
 // early at its original watch-expiry TTL.
 const retentionWindow = 90 * 24 * time.Hour
+
+// RetentionTTL returns the DynamoDB `ttl_timestamp` for a watch record whose
+// watch-level expiry is expiry — i.e. that expiry plus the retention window.
+//
+// The two timestamps mean different things and have now been conflated twice
+// (#41, #161), so state it plainly: `expires_at` is when lagotto STOPS WATCHING;
+// `ttl_timestamp` is when DynamoDB FORGETS THE RECORD. They must never be the
+// same instant. The terminal `status=expired` tombstone is written AT expiry, so a
+// record whose ttl_timestamp equals its expiry is deleted out from under the very
+// tombstone that explains what happened to it — leaving an expired watch
+// indistinguishable from one that never existed.
+//
+// Every write path that sets ttl_timestamp on a watch record should go through
+// here rather than reaching for the watch's own expiry.
+func RetentionTTL(expiry time.Time) int64 {
+	return expiry.Add(retentionWindow).Unix()
+}
 
 // RecordMatch updates the watch with match info and writes a history record.
 func (s *Store) RecordMatch(ctx context.Context, w *Watch, m *MatchResult) error {

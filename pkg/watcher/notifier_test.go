@@ -225,3 +225,105 @@ func TestNotifyQuotaCap_RejectsHTTP(t *testing.T) {
 		t.Fatal("expected NotifyQuotaCap to reject an http:// webhook URL")
 	}
 }
+
+// TestExpiredSubjectAndBody: pure renderers for the #161 expiry notification, so
+// the copy is tested without SNS (snsClient is a concrete *sns.Client).
+func TestExpiredSubjectAndBody(t *testing.T) {
+	created := time.Date(2026, 9, 16, 10, 0, 0, 0, time.UTC)
+	w := &Watch{
+		WatchID: "w-cf8e1a08", InstanceTypePattern: "g7e.*",
+		Regions:   []string{"us-east-1", "us-west-2"},
+		Action:    ActionSpawn,
+		Status:    StatusExpired,
+		CreatedAt: created,
+		UpdatedAt: created.Add(48 * time.Hour),
+	}
+	if got, want := expiredSubject(w), "[lagotto] watch w-cf8e1a08 expired without acquiring g7e.*"; got != want {
+		t.Errorf("expiredSubject = %q, want %q", got, want)
+	}
+	body := expiredBody(w)
+	for _, want := range []string{
+		"w-cf8e1a08", "g7e.*", "us-west-2", "48h0m0s",
+		"Nothing was launched", "status=expired", "lagotto extend w-cf8e1a08",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expiredBody missing %q:\n%s", want, body)
+		}
+	}
+}
+
+// TestExpiredPayload: the machine-readable event is explicitly an expiry, never a
+// match — acquired=false and event="expired", so no consumer reads a give-up as an
+// acquisition.
+func TestExpiredPayload(t *testing.T) {
+	created := time.Date(2026, 9, 16, 10, 0, 0, 0, time.UTC)
+	w := &Watch{
+		WatchID: "w-p", InstanceTypePattern: "p5.*", Regions: []string{"us-east-2"},
+		Action: ActionSpawn, Status: StatusExpired,
+		CreatedAt: created, UpdatedAt: created.Add(90 * time.Minute),
+	}
+	p := expiredPayload(w)
+	if p["event"] != "expired" {
+		t.Errorf("event = %v, want expired", p["event"])
+	}
+	if p["acquired"] != false {
+		t.Errorf("acquired = %v, want false", p["acquired"])
+	}
+	if p["time_to_give_up_seconds"] != 5400.0 {
+		t.Errorf("time_to_give_up_seconds = %v, want 5400", p["time_to_give_up_seconds"])
+	}
+	if _, ok := p["instance_type"]; ok {
+		t.Error(`expiry payload has an "instance_type" key — it must not look like a match`)
+	}
+}
+
+// TestNotifyExpired_NoChannels: a watch with no --notify is silent and errorless
+// (the status=expired tombstone + `lagotto history` is its surface).
+func TestNotifyExpired_NoChannels(t *testing.T) {
+	n := &Notifier{}
+	if err := n.NotifyExpired(context.Background(), &Watch{WatchID: "w-none"}); err != nil {
+		t.Errorf("want nil error with no channels, got %v", err)
+	}
+}
+
+// TestNotifyExpired_RejectsHTTP: same defence-in-depth webhook re-check as Notify,
+// for watches stored before URL validation shipped.
+func TestNotifyExpired_RejectsHTTP(t *testing.T) {
+	n := &Notifier{httpClient: &http.Client{}}
+	w := &Watch{
+		WatchID:        "w-bad",
+		NotifyChannels: []NotifyChannel{{Type: "webhook", Target: "http://169.254.169.254/latest/meta-data/"}},
+	}
+	err := n.NotifyExpired(context.Background(), w)
+	if err == nil || !strings.Contains(err.Error(), "blocked unsafe webhook URL") {
+		t.Errorf("NotifyExpired error = %v, want blocked unsafe webhook URL", err)
+	}
+}
+
+// TestSendExpiredWebhook_Payload exercises the HTTP dispatch directly (bypassing
+// URL validation, since httptest servers are always http://).
+func TestSendExpiredWebhook_Payload(t *testing.T) {
+	var received map[string]interface{}
+	ts := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		rw.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	n := &Notifier{httpClient: ts.Client()}
+	w := &Watch{
+		WatchID: "w-hook-exp", InstanceTypePattern: "g7e.*", Status: StatusExpired,
+		CreatedAt: time.Now().Add(-time.Hour), UpdatedAt: time.Now(),
+	}
+	if err := n.sendExpiredWebhook(context.Background(), ts.URL, w); err != nil {
+		t.Fatalf("sendExpiredWebhook: %v", err)
+	}
+	if received["event"] != "expired" {
+		t.Errorf("event = %v, want expired", received["event"])
+	}
+	if received["watch_id"] != "w-hook-exp" {
+		t.Errorf("watch_id = %v, want w-hook-exp", received["watch_id"])
+	}
+}

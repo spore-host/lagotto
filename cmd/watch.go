@@ -196,7 +196,11 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		CreatedAt:           now,
 		UpdatedAt:           now,
 		ExpiresAt:           expiresAt,
-		TTLTimestamp:        expiresAt.Unix(),
+		// The record's RETENTION horizon, NOT the watch's TTL (#161). This used to be
+		// expiresAt.Unix(), so DynamoDB hard-deleted the item at the same instant the
+		// poller marked it expired — the tombstone was written and then immediately
+		// vanished. The watch still stops at ExpiresAt; the record outlives it.
+		TTLTimestamp: watcher.RetentionTTL(expiresAt),
 	}
 
 	store := watcher.NewStore(cfg, watchesTable, historyTable)

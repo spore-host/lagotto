@@ -26,7 +26,11 @@ var listCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(listCmd)
-	listCmd.Flags().BoolVar(&listAll, "all", false, "Show all statuses (default: active only)")
+	// --all already means "no status filter", so it covers expired watches for free
+	// once their records survive expiry (#161) — no separate --include-expired flag.
+	// The help text just has to say so, since "all statuses" read as boilerplate
+	// back when an expired watch had already been deleted.
+	listCmd.Flags().BoolVar(&listAll, "all", false, "Show all statuses, including expired, cancelled, completed and failed watches (default: active only)")
 	listCmd.Flags().StringVar(&listProject, "project", "", "Only show watches with this project label")
 	listCmd.Flags().BoolVar(&listMine, "mine", false, "Only show watches you created (matches your caller ARN)")
 }
@@ -47,12 +51,7 @@ func runList(cmd *cobra.Command, args []string) error {
 
 	store := watcher.NewStore(cfg, watchesTable, historyTable)
 
-	var statusFilter watcher.WatchStatus
-	if !listAll {
-		statusFilter = watcher.StatusActive
-	}
-
-	watches, err := store.ListWatchesByUser(ctx, *identity.Arn, statusFilter)
+	watches, err := store.ListWatchesByUser(ctx, *identity.Arn, listStatusFilter(listAll))
 	if err != nil {
 		return fmt.Errorf("list watches: %w", err)
 	}
@@ -112,6 +111,17 @@ func runList(cmd *cobra.Command, args []string) error {
 		)
 	}
 	return nil
+}
+
+// listStatusFilter maps --all to the store's status filter: the empty filter means
+// "every status", so --all already covers expired watches (#161) now that their
+// records survive expiry — hence no separate --include-expired flag. Extracted so
+// that contract is unit-testable without AWS.
+func listStatusFilter(all bool) watcher.WatchStatus {
+	if all {
+		return "" // no filter — every status, expired included
+	}
+	return watcher.StatusActive
 }
 
 // dashIfEmpty renders "-" for an empty column value so a blank field reads as
