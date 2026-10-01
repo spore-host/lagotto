@@ -27,7 +27,7 @@ const (
 
 func expectedPolicy(t *testing.T) string {
 	t.Helper()
-	doc, err := runtimeiam.PolicyDocument(testRegion, testAccount)
+	doc, err := runtimeiam.PolicyDocument(testRegion, testAccount, nil)
 	if err != nil {
 		t.Fatalf("PolicyDocument: %v", err)
 	}
@@ -130,6 +130,91 @@ func TestEvaluate_PolicyMissingGrantFails(t *testing.T) {
 	}
 	if !Evaluate(st).Failed() {
 		t.Error("a missing grant must make the report fail (non-zero exit)")
+	}
+}
+
+// TestEvaluate_ReportingOnlyGrantsDoNotClaimTheWatchDies is the lagotto#170
+// diagnostic bug.
+//
+// doctor used to append "the poller fails these calls with AccessDenied, which
+// classifies TERMINAL — the watch dies instead of waiting for capacity" for EVERY
+// missing grant. For the servicequotas pair that is false: Poller.quotaReport fails
+// open, and PolicyDocument itself documents them as "Explicitly NOT required for the
+// fix". The reporter had exactly this gap, believed the consequence, and spent a day
+// chasing their spawn-config while an unrelated iam:GetRole AccessDenied was killing
+// their watches.
+//
+// Against the pre-fix code this test fails on both counts: FAIL instead of WARN, and
+// the terminal claim present.
+func TestEvaluate_ReportingOnlyGrantsDoNotClaimTheWatchDies(t *testing.T) {
+	st := healthyState(t)
+	st.PolicyDoc = policyWithout(t, "servicequotas:GetServiceQuota")
+	st.PolicyDoc = mutatePolicy(t, st.PolicyDoc, func(statements []map[string]interface{}) []map[string]interface{} {
+		for _, s := range statements {
+			dropAction(s, "servicequotas:ListServiceQuotas")
+		}
+		return statements
+	})
+
+	c := find(t, Evaluate(st), CheckRuntimePolicy)
+	body := c.Summary + "\n" + strings.Join(c.Detail, "\n")
+
+	if c.Status != StatusWarn {
+		t.Errorf("status = %s, want WARN: nothing load-bearing is missing, so watches still match and launch\n%s", c.Status, body)
+	}
+	if strings.Contains(body, "TERMINAL") || strings.Contains(body, "watch dies") {
+		t.Errorf("a reporting-only gap must not claim the watch dies:\n%s", body)
+	}
+	if !strings.Contains(body, "servicequotas:GetServiceQuota") {
+		t.Errorf("the finding must still name the missing actions:\n%s", body)
+	}
+	if !strings.Contains(body, "fails open") {
+		t.Errorf("the finding should say the lookup fails open, so the reader knows why it's survivable:\n%s", body)
+	}
+	if Evaluate(st).Failed() {
+		t.Error("a reporting-only gap must not fail the report (non-zero exit)")
+	}
+}
+
+// TestEvaluate_RequiredGrantStillClaimsTheWatchDies is the other half of #170: for a
+// load-bearing grant the terminal warning is correct and must survive.
+func TestEvaluate_RequiredGrantStillClaimsTheWatchDies(t *testing.T) {
+	st := healthyState(t)
+	st.PolicyDoc = policyWithout(t, "iam:GetRole")
+
+	c := find(t, Evaluate(st), CheckRuntimePolicy)
+	body := c.Summary + "\n" + strings.Join(c.Detail, "\n")
+
+	if c.Status != StatusFail {
+		t.Errorf("status = %s, want FAIL for a required grant\n%s", c.Status, body)
+	}
+	if !strings.Contains(body, "TERMINAL") {
+		t.Errorf("a required gap must still state the terminal consequence:\n%s", body)
+	}
+}
+
+// TestEvaluate_MixedCriticalityReportsBoth: when both kinds are missing the finding
+// must distinguish them rather than flattening to the worst case.
+func TestEvaluate_MixedCriticalityReportsBoth(t *testing.T) {
+	st := healthyState(t)
+	st.PolicyDoc = policyWithout(t, "servicequotas:GetServiceQuota")
+	st.PolicyDoc = mutatePolicy(t, st.PolicyDoc, func(statements []map[string]interface{}) []map[string]interface{} {
+		for _, s := range statements {
+			dropAction(s, "pricing:GetProducts")
+		}
+		return statements
+	})
+
+	c := find(t, Evaluate(st), CheckRuntimePolicy)
+	body := c.Summary + "\n" + strings.Join(c.Detail, "\n")
+
+	if c.Status != StatusFail {
+		t.Errorf("status = %s, want FAIL when a required grant is among them", c.Status)
+	}
+	for _, want := range []string{"REQUIRED", "pricing:GetProducts", "reporting only", "servicequotas:GetServiceQuota"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("finding must contain %q so the two kinds are distinguishable:\n%s", want, body)
+		}
 	}
 }
 

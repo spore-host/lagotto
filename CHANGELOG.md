@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`lagotto setup --instance-role NAME`** authorizes the hosted poller to launch
+  with an IAM instance role your watch names in `spawn_config.iam_role` (#170).
+  Repeatable; `--revoke-instance-role NAME` removes one. Previously there was no
+  way to do this at all: the poller's policy covers only `spawn-instance*` and
+  `spored*`, so a watch naming any other role waited for capacity, **matched**, and
+  then died at launch with `AccessDenied: iam:GetRole`. Three real `g6.8xlarge`
+  watches were lost that way after matching in under a minute.
+  **What you are granting:** the poller may read that role, write its inline
+  policy, attach managed policies to it, and pass it to EC2 — spawn adds its
+  spored/SSM baseline to every role it launches with. That is why roles must be
+  named explicitly; a wildcard is refused.
+- **`lagotto watch` refuses up front** when a watch names an `iam_role` the hosted
+  poller cannot use, naming the missing permissions and the exact `lagotto setup`
+  command to fix it (#170). It refuses only on evidence from the deployed policy:
+  with no hosted poller it stays silent (a local `poll --daemon` runs under your own
+  credentials), and if the policy can't be read it warns rather than blocking. The
+  verdict is in `-o json` as `instance_role_check`.
+
+### Fixed
+- **`lagotto setup` no longer silently revokes instance-role authorizations.** The
+  runtime policy is written with a wholesale `PutRolePolicy`, so a plain re-run used
+  to drop anything the running binary didn't know about. It now carries existing
+  authorizations forward, and `lagotto doctor` no longer reports them as drift.
+- **`lagotto doctor` no longer claims a missing grant kills your watches when it
+  doesn't** (#170). It asserted, for *every* missing grant, that "the poller fails
+  these calls with AccessDenied, which classifies TERMINAL — the watch dies". That
+  is false for the `servicequotas:*` reads, whose lookup **fails open** and only
+  enriches quota-cap reports with real vCPU numbers. #170's reporter had exactly
+  that gap, believed the stated consequence, and spent a day investigating their
+  spawn config while an unrelated `iam:GetRole` denial was actually killing their
+  watches. Missing grants are now reported as **required** or **reporting-only**,
+  with the real consequence of each, and a gap that is reporting-only is a WARN
+  rather than a FAIL.
+- **Errors are no longer printed twice.** Cobra printed `Error: <err>` and lagotto
+  printed the error again. Unnoticeable for a one-line message; it made longer,
+  actionable messages read as noise.
+
 ## [0.62.0] - 2026-09-25
 
 ### Fixed
