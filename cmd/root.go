@@ -50,6 +50,14 @@ func Execute() {
 }
 
 func init() {
+	// Cobra prints "Error: <err>" itself, and [Execute] also prints the error and
+	// sets the exit code deliberately — so without this every failure was reported
+	// TWICE. Harmless-looking for a one-line error, but #170's instance-role
+	// refusal is a seven-line explanation with a remediation command in it, and
+	// printing that twice makes it read as output noise rather than something to
+	// act on. Set here rather than in Execute so it is a property of the command.
+	rootCmd.SilenceErrors = true
+
 	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
 		ensureI18nInitialized()
 		// Record shared-config flag values for pkg/awscfg (flag > env > file > default).

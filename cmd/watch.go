@@ -56,7 +56,13 @@ With --service sagemaker, lagotto submits your SageMaker job (--sagemaker-config
 directly and retries it on CapacityError until SageMaker provisions it. SageMaker
 has its own AWS-managed compute pool, so the attempt targets SageMaker itself.`,
 	Args: cobra.ExactArgs(1),
-	RunE: runWatch,
+	// A refused watch is a finding, not a usage error (same reasoning as
+	// doctor's SilenceUsage). The #170 instance-role refusal is a multi-line
+	// explanation with a remediation command in it; printing the full flag block
+	// above that buries the one thing the user needs to read. Cobra still prints
+	// usage for genuine flag misuse, which is parsed before RunE.
+	SilenceUsage: true,
+	RunE:         runWatch,
 }
 
 func init() {
@@ -223,6 +229,16 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	// for anyone lacking a read permission. (Opt-in strictness is #157.)
 	quotaReport := warnFleetQuotaFeasibility(ctx, quotas.NewClientFromConfig(cfg), os.Stderr, w, cfg.Region)
 
+	// Create-time authorization check for a named iam_role (#170). Unlike the quota
+	// check above this one CAN be fatal, because it refuses only on direct evidence
+	// from the deployed policy — see checkInstanceRoleAuthorized for the four
+	// outcomes. It runs before PutWatch so a watch that provably cannot launch is
+	// never persisted to wait for capacity it can't use.
+	roleCheck, err := checkInstanceRoleAuthorizedFromConfig(ctx, cfg, os.Stderr, w)
+	if err != nil {
+		return err
+	}
+
 	if err := store.PutWatch(ctx, w); err != nil {
 		return fmt.Errorf("create watch: %w", err)
 	}
@@ -235,14 +251,15 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	if getOutputFormat() == "json" {
 		enc := json.NewEncoder(cmd.OutOrStdout())
 		enc.SetIndent("", "  ")
-		if quotaReport != nil {
-			// The quota report rides alongside the watch (the Report's own struct tags
-			// do the rest), so a scripted caller can see the feasibility verdict that
+		if quotaReport != nil || roleCheck != nil {
+			// The quota report and the instance-role verdict ride alongside the watch
+			// (their own struct tags do the rest), so a scripted caller can see what
 			// was printed to stderr.
 			return enc.Encode(struct {
 				*watcher.Watch
 				QuotaWarning *quotacheck.Report `json:"quota_warning,omitempty"`
-			}{Watch: w, QuotaWarning: quotaReport})
+				InstanceRole *InstanceRoleCheck `json:"instance_role_check,omitempty"`
+			}{Watch: w, QuotaWarning: quotaReport, InstanceRole: roleCheck})
 		}
 		return enc.Encode(w)
 	}

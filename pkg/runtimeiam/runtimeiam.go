@@ -19,6 +19,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"sort"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
@@ -188,14 +191,14 @@ func ensureSchedulerInvokeRole(ctx context.Context, client IAMAPI, region, accou
 // runtime permissions policy onto it (idempotent PutRolePolicy — an
 // update-in-place on re-run). region and accountID scope the policy's ARNs
 // (scheduler, PassRole, spored* resources).
-func EnsureRuntimeRole(ctx context.Context, client IAMAPI, region, accountID string) error {
+func EnsureRuntimeRole(ctx context.Context, client IAMAPI, region, accountID string, instanceRoles []string) error {
 	if region == "" || accountID == "" {
 		return fmt.Errorf("runtimeiam: region and accountID are required")
 	}
 	if err := ensurePollerRole(ctx, client); err != nil {
 		return err
 	}
-	doc, err := PolicyDocument(region, accountID)
+	doc, err := PolicyDocument(region, accountID, instanceRoles)
 	if err != nil {
 		return fmt.Errorf("runtimeiam: build policy: %w", err)
 	}
@@ -208,6 +211,81 @@ func EnsureRuntimeRole(ctx context.Context, client IAMAPI, region, accountID str
 		return fmt.Errorf("runtimeiam: put role policy on %s: %w", RoleName, err)
 	}
 	return nil
+}
+
+// InstanceRoleActions are the IAM actions spawn's launcher performs on an
+// instance role and its identically-named instance profile, in
+// CreateOrGetInstanceProfile (spawn pkg/aws/iam.go).
+//
+// It is exported and used both to BUILD the policy and to CHECK a named role at
+// watch-creation time, so the grant and the check cannot drift apart. The order
+// matters only for readable output.
+//
+// Why the whole set rather than just iam:GetRole, which is where #170's
+// AccessDenied surfaced: for a pre-existing role the launcher goes on to write
+// the spored baseline inline policy (PutRolePolicy, unconditional since spawn#502)
+// and attach the SSM managed policy (AttachRolePolicy), then reads/creates the
+// instance profile, then passes the role to EC2. Granting these one at a time just
+// moves the failure to the next call.
+var InstanceRoleActions = []string{
+	"iam:GetRole", "iam:CreateRole", "iam:PutRolePolicy", "iam:AttachRolePolicy",
+	"iam:GetInstanceProfile", "iam:CreateInstanceProfile", "iam:AddRoleToInstanceProfile",
+}
+
+// InstanceRolePassAction is granted separately from [InstanceRoleActions] because
+// it carries a PassedToService condition, which is part of a grant's identity.
+const InstanceRolePassAction = "iam:PassRole"
+
+// instanceRoleNamePattern is the subset of IAM's role-name grammar we accept for
+// an authorized instance role.
+//
+// IAM itself allows `+=,.@-` and `_`; this deliberately refuses `*` and `?`. An
+// authorized name is interpolated straight into a Resource ARN, so accepting a
+// wildcard would turn `--instance-role '*'` into iam:PutRolePolicy and
+// iam:PassRole on EVERY role in the account — a privilege-escalation path handed
+// over by a typo. Refusing is the whole point of naming roles explicitly.
+var instanceRoleNamePattern = regexp.MustCompile(`^[A-Za-z0-9+=,.@_-]{1,64}$`)
+
+// ValidateInstanceRoleName rejects anything that is not a plain IAM role name —
+// in particular a wildcard or a full ARN. Callers should surface the error as-is.
+func ValidateInstanceRoleName(name string) error {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return fmt.Errorf("runtimeiam: instance role name is empty")
+	}
+	if strings.ContainsAny(trimmed, "*?") {
+		return fmt.Errorf("runtimeiam: instance role name %q contains a wildcard; name the role exactly "+
+			"(a wildcard here would grant iam:PutRolePolicy and iam:PassRole on every matching role)", name)
+	}
+	if strings.Contains(trimmed, "/") || strings.HasPrefix(trimmed, "arn:") {
+		return fmt.Errorf("runtimeiam: %q looks like an ARN or path; pass just the role name", name)
+	}
+	if !instanceRoleNamePattern.MatchString(trimmed) {
+		return fmt.Errorf("runtimeiam: %q is not a valid IAM role name", name)
+	}
+	return nil
+}
+
+// normalizeInstanceRoles trims, drops empties and invalid names, de-duplicates
+// and sorts, so the emitted policy is deterministic (a policy that reorders
+// between runs would show as drift in `lagotto doctor`).
+//
+// Invalid names are dropped rather than erroring because this runs during policy
+// construction; callers validate with [ValidateInstanceRoleName] at the point the
+// user supplies the name, where a clear error can be shown.
+func normalizeInstanceRoles(names []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		t := strings.TrimSpace(n)
+		if t == "" || seen[t] || ValidateInstanceRoleName(t) != nil {
+			continue
+		}
+		seen[t] = true
+		out = append(out, t)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // statement is a single IAM policy statement (minimal shape we emit).
@@ -224,7 +302,7 @@ type statement struct {
 // DynamoDB CRUD (3 tables), SNS publish, EC2/SSM read discovery, scheduler
 // manage + PassRole, the spawn launch set (RunInstances/tags/SG + spored* role
 // setup + PassRole to ec2), capacity reservations, and SageMaker submit + PassRole.
-func PolicyDocument(region, accountID string) (string, error) {
+func PolicyDocument(region, accountID string, instanceRoles []string) (string, error) {
 	arn := func(f string, a ...interface{}) string { return fmt.Sprintf(f, a...) }
 	schedulerARN := arn("arn:aws:scheduler:%s:%s:schedule/default/lagotto-capacity-poller", region, accountID)
 	launchSchedARN := arn("arn:aws:scheduler:%s:%s:schedule/default/lagotto-launch-*", region, accountID)
@@ -301,11 +379,9 @@ func PolicyDocument(region, accountID string) (string, error) {
 		{Effect: "Allow", Action: []string{
 			"ec2:RunInstances", "ec2:CreateTags", "ec2:CreateSecurityGroup", "ec2:AuthorizeSecurityGroupIngress",
 		}, Resource: "*"},
-		{Effect: "Allow", Action: []string{
-			"iam:GetRole", "iam:CreateRole", "iam:PutRolePolicy", "iam:AttachRolePolicy",
-			"iam:GetInstanceProfile", "iam:CreateInstanceProfile", "iam:AddRoleToInstanceProfile",
-		}, Resource: []string{spawnRoleARN, spawnProfileARN, sporedRoleARN, sporedProfileARN}},
-		{Effect: "Allow", Action: []string{"iam:PassRole"}, Resource: []string{spawnRoleARN, sporedRoleARN},
+		{Effect: "Allow", Action: InstanceRoleActions,
+			Resource: []string{spawnRoleARN, spawnProfileARN, sporedRoleARN, sporedProfileARN}},
+		{Effect: "Allow", Action: []string{InstanceRolePassAction}, Resource: []string{spawnRoleARN, sporedRoleARN},
 			Condition: passToService("ec2.amazonaws.com")},
 		// hold: capacity reservations.
 		{Effect: "Allow", Action: []string{
@@ -317,6 +393,28 @@ func PolicyDocument(region, accountID string) (string, error) {
 		}, Resource: "*"},
 		{Effect: "Allow", Action: []string{"iam:PassRole"}, Resource: "*",
 			Condition: passToService("sagemaker.amazonaws.com")},
+	}
+
+	// Operator-authorized instance roles (#170). A watch's spawn_config may name
+	// any iam_role, and spawn's launcher uses that name verbatim — so the fixed
+	// spawn-instance*/spored* prefixes above cannot cover it, and the watch dies at
+	// launch with AccessDenied on iam:GetRole *after* matching capacity.
+	//
+	// These get exactly the grant set above, on the named role and the
+	// identically-named instance profile (CreateOrGetInstanceProfile uses
+	// profileName := roleName). Granting the whole set at once is deliberate:
+	// granting only iam:GetRole moves the failure to PutRolePolicy, then
+	// AttachRolePolicy, then PassRole — the #149/#151/#153 sequence of
+	// rediscoveries, each costing a user a matched watch.
+	for _, name := range normalizeInstanceRoles(instanceRoles) {
+		roleARN := arn("arn:aws:iam::%s:role/%s", accountID, name)
+		profileARN := arn("arn:aws:iam::%s:instance-profile/%s", accountID, name)
+		statements = append(statements,
+			statement{Effect: "Allow", Action: InstanceRoleActions,
+				Resource: []string{roleARN, profileARN}},
+			statement{Effect: "Allow", Action: []string{InstanceRolePassAction},
+				Resource: []string{roleARN}, Condition: passToService("ec2.amazonaws.com")},
+		)
 	}
 
 	doc := map[string]interface{}{"Version": "2012-10-17", "Statement": statements}

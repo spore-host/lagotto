@@ -122,6 +122,11 @@ func (d *PolicyDiff) MissingSummary() []string { return Summarize(d.Missing) }
 // ExtraSummary is MissingSummary's counterpart for the extra grants.
 func (d *PolicyDiff) ExtraSummary() []string { return Summarize(d.Extra) }
 
+// DistinctActions returns the de-duplicated, sorted action names in grants. It is
+// the exported form of distinctActions, for callers that have already partitioned
+// a diff (e.g. by criticality) and so cannot use PolicyDiff.MissingActions.
+func DistinctActions(grants []Grant) []string { return distinctActions(grants) }
+
 func distinctActions(grants []Grant) []string {
 	seen := map[string]bool{}
 	var out []string
@@ -205,12 +210,296 @@ func DiffPolicy(deployed, expected string) (*PolicyDiff, error) {
 
 // DiffRuntimePolicy is DiffPolicy against this binary's own PolicyDocument for
 // the given region/account — the comparison `lagotto doctor` actually makes.
+//
+// The operator-authorized instance roles (#170) are recovered from the DEPLOYED
+// policy and folded into the expectation, because they are an operator decision
+// this binary cannot otherwise know. Without that, every authorized role would be
+// reported as `Extra` drift — "the deployed policy is AHEAD of this lagotto" — and
+// `lagotto setup` would look like the fix while actually REVOKING the
+// authorization.
 func DiffRuntimePolicy(deployed, region, accountID string) (*PolicyDiff, error) {
-	expected, err := PolicyDocument(region, accountID)
+	authorized, err := AuthorizedInstanceRoles(deployed)
+	if err != nil {
+		return nil, fmt.Errorf("read authorized instance roles: %w", err)
+	}
+	expected, err := PolicyDocument(region, accountID, authorized)
 	if err != nil {
 		return nil, fmt.Errorf("build expected policy: %w", err)
 	}
 	return DiffPolicy(deployed, expected)
+}
+
+// AuthorizedInstanceRoles returns the instance-role names a deployed policy has
+// been explicitly authorized for (#170), sorted and de-duplicated.
+//
+// The deployed policy is the source of truth: there is no separate store to fall
+// out of sync with, and `lagotto setup` reads this to PRESERVE existing
+// authorizations across a re-run rather than silently dropping them (the policy is
+// written with a wholesale PutRolePolicy).
+//
+// A role is "authorized" when the policy grants [InstanceRolePassAction] on a
+// concrete role ARN that is not one of the built-in spawn-instance*/spored*
+// patterns. PassRole is the discriminator because it is the one action granted per
+// role and never on "*" for ec2 — the SageMaker statement grants PassRole on "*",
+// which is skipped here precisely because a wildcard names no role.
+func AuthorizedInstanceRoles(deployed string) ([]string, error) {
+	grants, err := ParsePolicy(deployed)
+	if err != nil {
+		return nil, fmt.Errorf("parse deployed policy: %w", err)
+	}
+
+	seen := map[string]bool{}
+	var names []string
+	for _, g := range grants {
+		if !strings.EqualFold(g.Effect, "Allow") || !strings.EqualFold(g.Action, InstanceRolePassAction) {
+			continue
+		}
+		name, ok := roleNameFromARN(g.Resource)
+		if !ok || isBuiltinInstanceRolePattern(name) || seen[name] {
+			continue
+		}
+		// A wildcard or a name we would refuse to authorize ourselves is not
+		// reported as an authorization: echoing it back into the expected policy
+		// would launder a hand-edited grant into something `setup` re-applies.
+		if ValidateInstanceRoleName(name) != nil {
+			continue
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// roleNameFromARN pulls the role name out of an IAM role ARN, returning false for
+// anything that is not one (including "*" and instance-profile ARNs).
+func roleNameFromARN(resource string) (string, bool) {
+	const marker = ":role/"
+	i := strings.Index(resource, marker)
+	if i < 0 || !strings.HasPrefix(resource, "arn:") {
+		return "", false
+	}
+	name := resource[i+len(marker):]
+	if name == "" || strings.Contains(name, "/") {
+		return "", false // a role path, not a bare name
+	}
+	return name, true
+}
+
+// isBuiltinInstanceRolePattern reports whether a role name from the policy is one
+// of the fixed patterns PolicyDocument always emits, rather than an authorization.
+func isBuiltinInstanceRolePattern(name string) bool {
+	return name == "spawn-instance*" || name == "spored*" || name == SchedulerInvokeRoleName
+}
+
+// --- grant criticality -------------------------------------------------------
+
+// reportingOnlyActionPrefixes are actions whose absence degrades a REPORT but
+// cannot stop a watch from matching capacity and launching.
+//
+// servicequotas reads only enrich a quota-cap report with the account's real vCPU
+// limit/usage (#153). The cap itself is detected from the RunInstances error by
+// pure error inspection, and Poller.quotaReport fails open in every direction —
+// including on exactly the AccessDenied a missing grant here produces. PolicyDocument
+// says the same from the policy side: these are "Explicitly NOT required for the fix".
+//
+// This list exists because `doctor` used to assert, for EVERY missing grant, that
+// "the poller fails these calls with AccessDenied, which classifies TERMINAL — the
+// watch dies". For these two actions that is false, and saying it cost #170's
+// reporter a day: doctor named a real gap with a wrong consequence while a
+// different, unrelated AccessDenied was actually killing their watches.
+var reportingOnlyActionPrefixes = []string{"servicequotas:"}
+
+// GrantIsRequired reports whether losing this action breaks a watch (true) or only
+// degrades a report (false). See [reportingOnlyActionPrefixes].
+func GrantIsRequired(action string) bool {
+	a := strings.ToLower(strings.TrimSpace(action))
+	for _, p := range reportingOnlyActionPrefixes {
+		if strings.HasPrefix(a, p) {
+			return false
+		}
+	}
+	return true
+}
+
+// PartitionByCriticality splits grants into those whose absence breaks a watch and
+// those whose absence only degrades reporting.
+func PartitionByCriticality(grants []Grant) (required, reportingOnly []Grant) {
+	for _, g := range grants {
+		if GrantIsRequired(g.Action) {
+			required = append(required, g)
+		} else {
+			reportingOnly = append(reportingOnly, g)
+		}
+	}
+	return required, reportingOnly
+}
+
+// --- local policy evaluation -------------------------------------------------
+
+// Allows reports whether grants permit action on resource, and is how the
+// create-time check in `lagotto watch` decides whether a named instance role will
+// work BEFORE a watch spends hours waiting and then dies at launch (#170).
+//
+// This is a deliberately small subset of IAM evaluation, sufficient because it is
+// applied to a policy lagotto wrote: Allow/Deny with `*`/`?` wildcards in actions
+// and resources, case-insensitive actions, and an explicit Deny beating any Allow.
+//
+// It does NOT evaluate conditions, so for a conditioned action it answers "is this
+// permitted under SOME condition". That is wrong for iam:PassRole — the stock
+// policy grants PassRole on "*" conditioned to sagemaker.amazonaws.com, which does
+// NOT permit passing a role to EC2, and treating it as a match would report an
+// unauthorized role as usable and let the watch die anyway. Use
+// [AllowsPassRoleTo] for PassRole; [MissingInstanceRoleGrants] already does.
+func Allows(grants []Grant, action, resource string) bool {
+	allowed := false
+	for _, g := range grants {
+		if !wildcardMatchFold(g.Action, action) || !wildcardMatch(g.Resource, resource) {
+			continue
+		}
+		if strings.EqualFold(g.Effect, "Deny") {
+			return false
+		}
+		if strings.EqualFold(g.Effect, "Allow") {
+			allowed = true
+		}
+	}
+	return allowed
+}
+
+// MissingInstanceRoleGrants returns the actions from [InstanceRoleActions] plus
+// [InstanceRolePassAction] that grants do NOT permit for roleName, in the order
+// the launcher would attempt them. Empty means the role is fully usable.
+func MissingInstanceRoleGrants(grants []Grant, accountID, roleName string) []string {
+	roleARN := fmt.Sprintf("arn:aws:iam::%s:role/%s", accountID, roleName)
+	profileARN := fmt.Sprintf("arn:aws:iam::%s:instance-profile/%s", accountID, roleName)
+
+	var missing []string
+	for _, action := range InstanceRoleActions {
+		// The profile-shaped actions are checked against the instance-profile ARN;
+		// the role-shaped ones against the role ARN. CreateOrGetInstanceProfile
+		// names the profile the same as the role, so both must be covered.
+		target := roleARN
+		if strings.Contains(action, "InstanceProfile") {
+			target = profileARN
+		}
+		if !Allows(grants, action, target) {
+			missing = append(missing, action)
+		}
+	}
+	// PassRole must be checked WITH its condition: the stock policy already grants
+	// PassRole on "*" for sagemaker.amazonaws.com, and counting that as coverage
+	// would declare an unauthorized role usable — the watch would still die at
+	// RunInstances, which is the failure this whole check exists to prevent.
+	if !AllowsPassRoleTo(grants, roleARN, "ec2.amazonaws.com") {
+		missing = append(missing, InstanceRolePassAction)
+	}
+	return missing
+}
+
+// AllowsPassRoleTo reports whether grants permit iam:PassRole on roleARN for
+// passing to service (e.g. "ec2.amazonaws.com").
+//
+// An unconditioned PassRole grant permits passing to anything, so it counts. A
+// grant conditioned on iam:PassedToService counts only when that condition names
+// the service asked about. A grant with some other condition is not counted: this
+// cannot evaluate it, and over-reporting coverage here means a watch dies at launch.
+func AllowsPassRoleTo(grants []Grant, roleARN, service string) bool {
+	allowed := false
+	for _, g := range grants {
+		if !wildcardMatchFold(g.Action, InstanceRolePassAction) || !wildcardMatch(g.Resource, roleARN) {
+			continue
+		}
+		if !conditionPermitsService(g.Condition, service) {
+			continue
+		}
+		if strings.EqualFold(g.Effect, "Deny") {
+			return false
+		}
+		if strings.EqualFold(g.Effect, "Allow") {
+			allowed = true
+		}
+	}
+	return allowed
+}
+
+// conditionPermitsService reports whether a grant's condition block allows passing
+// a role to service. An empty condition permits any service.
+func conditionPermitsService(condition, service string) bool {
+	if strings.TrimSpace(condition) == "" {
+		return true
+	}
+	var parsed map[string]map[string]interface{}
+	if err := json.Unmarshal([]byte(condition), &parsed); err != nil {
+		return false // unparseable: do not claim coverage
+	}
+	for op, kv := range parsed {
+		if !strings.HasPrefix(strings.ToLower(op), "stringequals") &&
+			!strings.HasPrefix(strings.ToLower(op), "stringlike") {
+			return false // an operator we don't model
+		}
+		for key, raw := range kv {
+			if !strings.EqualFold(key, "iam:PassedToService") {
+				return false // conditioned on something we don't model
+			}
+			switch v := raw.(type) {
+			case string:
+				if wildcardMatchFold(v, service) {
+					return true
+				}
+			case []interface{}:
+				for _, item := range v {
+					if s, ok := item.(string); ok && wildcardMatchFold(s, service) {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+// wildcardMatch reports whether pattern (IAM-style, with `*` and `?`) matches s.
+func wildcardMatch(pattern, s string) bool {
+	if pattern == "*" {
+		return true
+	}
+	if !strings.ContainsAny(pattern, "*?") {
+		return pattern == s
+	}
+	return matchHere(pattern, s)
+}
+
+func wildcardMatchFold(pattern, s string) bool {
+	return wildcardMatch(strings.ToLower(pattern), strings.ToLower(s))
+}
+
+// matchHere is an iterative glob matcher with backtracking on `*`. Iterative
+// rather than recursive so a pathological pattern cannot blow the stack.
+func matchHere(pattern, s string) bool {
+	var pi, si, starIdx, matchIdx int
+	starIdx = -1
+	for si < len(s) {
+		switch {
+		case pi < len(pattern) && (pattern[pi] == '?' || pattern[pi] == s[si]):
+			pi++
+			si++
+		case pi < len(pattern) && pattern[pi] == '*':
+			starIdx = pi
+			matchIdx = si
+			pi++
+		case starIdx >= 0:
+			pi = starIdx + 1
+			matchIdx++
+			si = matchIdx
+		default:
+			return false
+		}
+	}
+	for pi < len(pattern) && pattern[pi] == '*' {
+		pi++
+	}
+	return pi == len(pattern)
 }
 
 func diffGrants(deployed, expected []Grant) *PolicyDiff {

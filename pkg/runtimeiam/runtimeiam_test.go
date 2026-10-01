@@ -12,7 +12,7 @@ import (
 )
 
 func TestPolicyDocument_ValidAndScoped(t *testing.T) {
-	doc, err := PolicyDocument("us-west-2", "123456789012")
+	doc, err := PolicyDocument("us-west-2", "123456789012", nil)
 	if err != nil {
 		t.Fatalf("PolicyDocument: %v", err)
 	}
@@ -226,7 +226,7 @@ func TestEnsureRoles_RequiresRegionAndAccount(t *testing.T) {
 
 func TestEnsureRuntimeRole(t *testing.T) {
 	f := &fakeIAM{}
-	if err := EnsureRuntimeRole(context.Background(), f, "us-east-1", "123456789012"); err != nil {
+	if err := EnsureRuntimeRole(context.Background(), f, "us-east-1", "123456789012", nil); err != nil {
 		t.Fatalf("EnsureRuntimeRole: %v", err)
 	}
 	if f.calls != 1 {
@@ -245,10 +245,10 @@ func TestEnsureRuntimeRole(t *testing.T) {
 
 func TestEnsureRuntimeRole_RequiresRegionAndAccount(t *testing.T) {
 	f := &fakeIAM{}
-	if err := EnsureRuntimeRole(context.Background(), f, "", "123456789012"); err == nil {
+	if err := EnsureRuntimeRole(context.Background(), f, "", "123456789012", nil); err == nil {
 		t.Error("want error for empty region")
 	}
-	if err := EnsureRuntimeRole(context.Background(), f, "us-east-1", ""); err == nil {
+	if err := EnsureRuntimeRole(context.Background(), f, "us-east-1", "", nil); err == nil {
 		t.Error("want error for empty account ID")
 	}
 	if f.calls != 0 {
@@ -277,7 +277,7 @@ func TestRoleARNs(t *testing.T) {
 	}
 	// The policy document already grants PassRole on the scheduler-invoke role by
 	// the same ARN; keep them in lockstep.
-	doc, err := PolicyDocument("us-east-1", "123456789012")
+	doc, err := PolicyDocument("us-east-1", "123456789012", nil)
 	if err != nil {
 		t.Fatalf("PolicyDocument: %v", err)
 	}

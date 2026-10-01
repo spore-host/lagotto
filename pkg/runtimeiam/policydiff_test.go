@@ -18,7 +18,7 @@ const (
 // mustPolicy returns this binary's expected policy document.
 func mustPolicy(t *testing.T) string {
 	t.Helper()
-	doc, err := PolicyDocument(testRegion, testAccount)
+	doc, err := PolicyDocument(testRegion, testAccount, nil)
 	if err != nil {
 		t.Fatalf("PolicyDocument: %v", err)
 	}
@@ -299,7 +299,7 @@ func TestParsePolicy_RejectsGarbage(t *testing.T) {
 }
 
 // TestDiffRuntimePolicy_UsesThisBinarysPolicy wires the convenience form: the
-// expected side must be PolicyDocument(region, account), so a deployed policy
+// expected side must be PolicyDocument(region, account, nil), so a deployed policy
 // scoped to the WRONG account shows as drift rather than passing.
 func TestDiffRuntimePolicy_UsesThisBinarysPolicy(t *testing.T) {
 	diff, err := DiffRuntimePolicy(mustPolicy(t), testRegion, testAccount)
@@ -310,7 +310,7 @@ func TestDiffRuntimePolicy_UsesThisBinarysPolicy(t *testing.T) {
 		t.Errorf("own policy reported as drifted: %v / %v", diff.MissingSummary(), diff.ExtraSummary())
 	}
 
-	otherAccount, err := PolicyDocument(testRegion, "999999999999")
+	otherAccount, err := PolicyDocument(testRegion, "999999999999", nil)
 	if err != nil {
 		t.Fatalf("PolicyDocument: %v", err)
 	}
@@ -329,7 +329,7 @@ func TestDiffRuntimePolicy_UsesThisBinarysPolicy(t *testing.T) {
 // what EnsureRuntimeRole put there, so doctor's PASS means something.
 func TestReadRuntimePolicy_RoundTripsWhatSetupWrote(t *testing.T) {
 	f := &fakeIAM{}
-	if err := EnsureRuntimeRole(context.Background(), f, testRegion, testAccount); err != nil {
+	if err := EnsureRuntimeRole(context.Background(), f, testRegion, testAccount, nil); err != nil {
 		t.Fatalf("EnsureRuntimeRole: %v", err)
 	}
 	doc, err := ReadRuntimePolicy(context.Background(), f)

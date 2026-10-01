@@ -349,15 +349,40 @@ func evalRuntimePolicy(st State) (Check, *runtimeiam.PolicyDiff) {
 		return c, diff
 	}
 	if len(diff.Missing) > 0 {
-		c.Status = StatusFail
-		c.Summary = fmt.Sprintf("the deployed %s is BEHIND this lagotto: %d grant(s) this binary expects are missing",
-			runtimeiam.PolicyName, len(diff.Missing))
-		c.Detail = append(c.Detail, "missing actions: "+strings.Join(diff.MissingActions(), ", "))
-		for _, line := range diff.MissingSummary() {
-			c.Detail = append(c.Detail, "  - missing: "+line)
+		// The consequence is reported PER GRANT, not asserted for all of them
+		// (#170). Claiming "the watch dies" for a grant that fails open is a
+		// confident, nearly-right diagnosis, and it sent #170's reporter after the
+		// wrong cause for a day while a different AccessDenied killed their watches.
+		required, reportingOnly := runtimeiam.PartitionByCriticality(diff.Missing)
+
+		if len(required) > 0 {
+			c.Status = StatusFail
+			c.Summary = fmt.Sprintf("the deployed %s is BEHIND this lagotto: %d required grant(s) are missing",
+				runtimeiam.PolicyName, len(required))
+		} else {
+			// Nothing load-bearing is missing, so nothing is broken: a watch still
+			// matches and launches. WARN, not FAIL.
+			c.Status = StatusWarn
+			c.Summary = fmt.Sprintf("the deployed %s lacks %d reporting-only grant(s); watches still match and launch",
+				runtimeiam.PolicyName, len(reportingOnly))
 		}
-		c.Detail = append(c.Detail,
-			"until this is applied the poller fails these calls with AccessDenied, which classifies TERMINAL — the watch dies instead of waiting for capacity")
+
+		if len(required) > 0 {
+			c.Detail = append(c.Detail, "REQUIRED, missing: "+strings.Join(runtimeiam.DistinctActions(required), ", "))
+			for _, line := range runtimeiam.Summarize(required) {
+				c.Detail = append(c.Detail, "  - "+line)
+			}
+			c.Detail = append(c.Detail,
+				"the poller fails these with AccessDenied, which classifies TERMINAL — the watch dies instead of waiting for capacity")
+		}
+		if len(reportingOnly) > 0 {
+			c.Detail = append(c.Detail, "reporting only, missing: "+strings.Join(runtimeiam.DistinctActions(reportingOnly), ", "))
+			for _, line := range runtimeiam.Summarize(reportingOnly) {
+				c.Detail = append(c.Detail, "  - "+line)
+			}
+			c.Detail = append(c.Detail,
+				"these only enrich quota-cap reports with real vCPU numbers; the lookup fails open, so watches are unaffected")
+		}
 		c.Fix = []string{"lagotto setup"}
 	}
 	if len(diff.Extra) > 0 {
