@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.63.1] - 2026-10-04
+
 ### Added
 
 - **The changelog policy is now enforced in CI rather than by habit.** A PR that changes
@@ -1172,7 +1174,8 @@ Initial tagged release from the standalone `spore-host/lagotto` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/lagotto/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.63.0...HEAD
+[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.63.1...HEAD
+[0.63.1]: https://github.com/spore-host/lagotto/compare/v0.63.0...v0.63.1
 [0.63.0]: https://github.com/spore-host/lagotto/compare/v0.62.0...v0.63.0
 [0.62.0]: https://github.com/spore-host/lagotto/compare/v0.61.0...v0.62.0
 [0.61.0]: https://github.com/spore-host/lagotto/compare/v0.60.0...v0.61.0
