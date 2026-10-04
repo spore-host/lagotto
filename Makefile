@@ -127,3 +127,10 @@ help:
 	@sed -n 's/^##//p' $(MAKEFILE_LIST) | column -t -s ':' | sed -e 's/^/ /'
 
 .DEFAULT_GOAL := help
+
+# Mechanical fix for the duplicate-group conflict changelog_test.go rejects. Two
+# PRs each adding their own `### Fixed` merge cleanly for git and badly for the
+# format; this merges them in Keep-a-Changelog order. Touches [Unreleased] only.
+.PHONY: changelog-fix
+changelog-fix:
+	python3 scripts/changelog-consolidate.py CHANGELOG.md
