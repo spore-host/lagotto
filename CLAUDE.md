@@ -21,6 +21,12 @@ and keeps a **[Keep a Changelog](https://keepachangelog.com/en/1.1.0/)**-format
   Reference the issue/PR where it helps.
 - Do this in the **same PR** as the change, so the changelog never lags.
 
+**This is enforced, not advisory.** CI fails a PR that changes non-test Go source
+without touching `CHANGELOG.md`, and `changelog_test.go` checks `[Unreleased]` for
+duplicate group headings, unknown group names, entries outside a group, and releases
+missing a compare link. `scripts/changelog-consolidate.py` (or `make changelog-fix`)
+merges duplicate groups mechanically.
+
 **On release:**
 
 1. Rename `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD` and open a fresh empty
