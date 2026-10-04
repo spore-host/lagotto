@@ -23,6 +23,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `### Fixed` is a routine conflict that merges cleanly for git and badly for the format
   — not a mistake worth hand-fixing each time.
 
+### Fixed
+
+- **The capacity-poller Lambda is now built as a package, not a file list** (#172). The
+  GoReleaser `before` hook ran `go build ... main.go`, which compiles **only** the named
+  files. The module is single-file today, which is the only reason that worked.
+  The loud failure is a second source file that `main.go` references: the build breaks,
+  which at least stops the release — spawn's reaper hit exactly that. The failure worth
+  gating is the quiet one: a new file `main.go` does *not* reference (a `func init()`
+  registration, a side-effect import) compiles fine and produces a binary **silently
+  missing that code**. The release succeeds, the asset publishes, and `lagotto deploy`
+  installs a poller that is subtly wrong.
+  Fixed in both places it appeared — the GoReleaser hook **and**
+  `lambda/capacity-poller/Makefile`, which had the same bug and would have kept a local
+  build diverging from the released one. A test now scans every Makefile, YAML and shell
+  script for a `go build` naming `.go` files, so this can't come back.
+
 ## [0.63.0] - 2026-10-01
 
 ### Added

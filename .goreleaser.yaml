@@ -9,7 +9,15 @@ version: 2
 # GitHub Release (no infra-account S3 bucket required).
 before:
   hooks:
-    - sh -c "cd lambda/capacity-poller && GOOS=linux GOARCH=arm64 go build -tags lambda.norpc -o bootstrap main.go && zip -j capacity-poller_lambda_linux_arm64.zip bootstrap"
+    # Build the PACKAGE (`.`), NOT `main.go` (#172). Naming files compiles only
+    # those files, so the first time this module gains a second source file the
+    # release either fails outright or — if the new file is not referenced from
+    # main.go (a func init() registration, a side-effect import) — silently ships
+    # a binary MISSING that code. The release succeeds, the asset publishes, and
+    # `lagotto deploy` installs a poller that is subtly wrong. spawn's reaper hit
+    # the loud half of this for real (spore-host/spawn#466); this module is
+    # single-file today, which is the only reason the old form worked.
+    - sh -c "cd lambda/capacity-poller && GOOS=linux GOARCH=arm64 go build -tags lambda.norpc -o bootstrap . && zip -j capacity-poller_lambda_linux_arm64.zip bootstrap"
 
 builds:
   - id: lagotto

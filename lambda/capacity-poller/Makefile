@@ -2,7 +2,11 @@
 
 build:
 	@echo "Building capacity-poller Lambda..."
-	GOOS=linux GOARCH=arm64 go build -tags lambda.norpc -o bootstrap main.go
+	@# Build the PACKAGE (`.`), not `main.go` (#172) — same reason as the
+	@# GoReleaser hook in .goreleaser.yaml. Naming files compiles only those
+	@# files, so a second source file either breaks the build or, worse, is
+	@# silently omitted from the binary.
+	GOOS=linux GOARCH=arm64 go build -tags lambda.norpc -o bootstrap .
 	zip function.zip bootstrap
 	@echo "Build complete: function.zip"
 
