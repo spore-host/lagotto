@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Rebuilt against Go 1.26.9 and `golang.org/x/net` v0.60.0** for the Go
+  vulnerabilities disclosed 2026-10-09: GO-2026-6605, 6607, 6608, 6610, 6611,
+  6612, 6613 and 6617, across `net/http`, `crypto/tls`, `mime/multipart`,
+  `net/http/httputil`, `net/textproto` and x/net's HTTP/2 implementation. The CI
+  Go pin moves 1.26.8 → 1.26.9 in all workflows, and the nested `lambda/capacity-poller` module is re-tidied
+  (it has its own go.mod with a `replace ../..`, so it pins its own copy of the
+  root's dependencies and otherwise fails with "updates to go.mod needed").
+
 ## [0.63.1] - 2026-10-04
 
 ### Added
