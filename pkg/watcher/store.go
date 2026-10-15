@@ -13,10 +13,63 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
+// dynamoAPI is the subset of *dynamodb.Client the Store uses. It is an
+// interface so tests can substitute a fake — in particular one that returns a
+// Query or Scan result across several pages (#181).
+type dynamoAPI interface {
+	CreateTable(context.Context, *dynamodb.CreateTableInput, ...func(*dynamodb.Options)) (*dynamodb.CreateTableOutput, error)
+	DeleteTable(context.Context, *dynamodb.DeleteTableInput, ...func(*dynamodb.Options)) (*dynamodb.DeleteTableOutput, error)
+	DescribeTable(context.Context, *dynamodb.DescribeTableInput, ...func(*dynamodb.Options)) (*dynamodb.DescribeTableOutput, error)
+	DescribeTimeToLive(context.Context, *dynamodb.DescribeTimeToLiveInput, ...func(*dynamodb.Options)) (*dynamodb.DescribeTimeToLiveOutput, error)
+	GetItem(context.Context, *dynamodb.GetItemInput, ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error)
+	ListTagsOfResource(context.Context, *dynamodb.ListTagsOfResourceInput, ...func(*dynamodb.Options)) (*dynamodb.ListTagsOfResourceOutput, error)
+	PutItem(context.Context, *dynamodb.PutItemInput, ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error)
+	Query(context.Context, *dynamodb.QueryInput, ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error)
+	Scan(context.Context, *dynamodb.ScanInput, ...func(*dynamodb.Options)) (*dynamodb.ScanOutput, error)
+	UpdateItem(context.Context, *dynamodb.UpdateItemInput, ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error)
+	UpdateTimeToLive(context.Context, *dynamodb.UpdateTimeToLiveInput, ...func(*dynamodb.Options)) (*dynamodb.UpdateTimeToLiveOutput, error)
+}
+
+var _ dynamoAPI = (*dynamodb.Client)(nil)
+
+// queryAll runs a Query to completion, following LastEvaluatedKey across every
+// page. A single Query call returns at most 1 MB, so reading only the first
+// page silently drops the rest (#181).
+func queryAll(ctx context.Context, api dynamodb.QueryAPIClient, input *dynamodb.QueryInput) ([]map[string]types.AttributeValue, error) {
+	var items []map[string]types.AttributeValue
+	p := dynamodb.NewQueryPaginator(api, input)
+	for p.HasMorePages() {
+		page, err := p.NextPage(ctx)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, page.Items...)
+	}
+	return items, nil
+}
+
+// scanFindsAny reports whether a Scan matches at least one item, following
+// LastEvaluatedKey until a page has a non-zero Count or the table is
+// exhausted. With a FilterExpression, an early page can match nothing while a
+// later one does, so the first page alone is not an answer (#181).
+func scanFindsAny(ctx context.Context, api dynamodb.ScanAPIClient, input *dynamodb.ScanInput) (bool, error) {
+	p := dynamodb.NewScanPaginator(api, input)
+	for p.HasMorePages() {
+		page, err := p.NextPage(ctx)
+		if err != nil {
+			return false, err
+		}
+		if page.Count > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // Store handles DynamoDB persistence for watches, match history, and scheduled
 // launches.
 type Store struct {
-	client         *dynamodb.Client
+	client         dynamoAPI
 	watchesTable   string
 	historyTable   string
 	scheduledTable string
@@ -86,19 +139,16 @@ func (s *Store) GetWatch(ctx context.Context, watchID string) (*Watch, error) {
 }
 
 // ListWatchesByUser returns watches belonging to a user, optionally filtered by status.
+//
+// It reads every page of the query (#181): with a status filter in particular,
+// DynamoDB applies the filter after reading each 1 MB page, so the caller's
+// matching watches can sit on any page.
 func (s *Store) ListWatchesByUser(ctx context.Context, userID string, statusFilter WatchStatus) ([]Watch, error) {
-	expr := "user_id = :uid"
 	exprValues := map[string]types.AttributeValue{
 		":uid": &types.AttributeValueMemberS{Value: userID},
 	}
 	if statusFilter != "" {
-		expr += " AND #st = :status"
 		exprValues[":status"] = &types.AttributeValueMemberS{Value: string(statusFilter)}
-	}
-
-	var exprNames map[string]string
-	if statusFilter != "" {
-		exprNames = map[string]string{"#st": "status"}
 	}
 
 	input := &dynamodb.QueryInput{
@@ -109,16 +159,16 @@ func (s *Store) ListWatchesByUser(ctx context.Context, userID string, statusFilt
 	}
 	if statusFilter != "" {
 		input.FilterExpression = aws.String("#st = :status")
-		input.ExpressionAttributeNames = exprNames
+		input.ExpressionAttributeNames = map[string]string{"#st": "status"}
 	}
 
-	result, err := s.client.Query(ctx, input)
+	items, err := queryAll(ctx, s.client, input)
 	if err != nil {
 		return nil, fmt.Errorf("list watches: %w", err)
 	}
 
-	watches := make([]Watch, 0, len(result.Items))
-	for _, item := range result.Items {
+	watches := make([]Watch, 0, len(items))
+	for _, item := range items {
 		var w Watch
 		if err := attributevalue.UnmarshalMap(item, &w); err != nil {
 			return nil, fmt.Errorf("unmarshal watch: %w", err)
@@ -142,23 +192,17 @@ func (s *Store) ListActiveWatches(ctx context.Context) ([]Watch, error) {
 		},
 	}
 
-	var watches []Watch
-	for {
-		result, err := s.client.Query(ctx, input)
-		if err != nil {
-			return nil, fmt.Errorf("list active watches: %w", err)
+	items, err := queryAll(ctx, s.client, input)
+	if err != nil {
+		return nil, fmt.Errorf("list active watches: %w", err)
+	}
+	watches := make([]Watch, 0, len(items))
+	for _, item := range items {
+		var w Watch
+		if err := attributevalue.UnmarshalMap(item, &w); err != nil {
+			return nil, fmt.Errorf("unmarshal watch: %w", err)
 		}
-		for _, item := range result.Items {
-			var w Watch
-			if err := attributevalue.UnmarshalMap(item, &w); err != nil {
-				return nil, fmt.Errorf("unmarshal watch: %w", err)
-			}
-			watches = append(watches, w)
-		}
-		if result.LastEvaluatedKey == nil {
-			break
-		}
-		input.ExclusiveStartKey = result.LastEvaluatedKey
+		watches = append(watches, w)
 	}
 	return watches, nil
 }
@@ -511,7 +555,7 @@ func (s *Store) ListMatchHistory(ctx context.Context, watchID string) ([]MatchRe
 }
 
 func (s *Store) listMatchHistoryByWatch(ctx context.Context, watchID string) ([]MatchResult, error) {
-	result, err := s.client.Query(ctx, &dynamodb.QueryInput{
+	items, err := queryAll(ctx, s.client, &dynamodb.QueryInput{
 		TableName:              &s.historyTable,
 		KeyConditionExpression: aws.String("watch_id = :wid"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{
@@ -522,23 +566,37 @@ func (s *Store) listMatchHistoryByWatch(ctx context.Context, watchID string) ([]
 	if err != nil {
 		return nil, fmt.Errorf("query match history: %w", err)
 	}
-	return unmarshalMatches(result.Items)
+	return unmarshalMatches(items)
 }
 
+// scanMatchHistoryCap bounds the unscoped history scan: it reads the whole
+// table, across every user, so it returns at most this many records.
+const scanMatchHistoryCap = 100
+
 func (s *Store) scanMatchHistory(ctx context.Context) ([]MatchResult, error) {
-	result, err := s.client.Scan(ctx, &dynamodb.ScanInput{
+	// Follow pages until the cap is reached (#181): a page is also bounded at
+	// 1 MB, so one call can return fewer than the cap while more remain.
+	var items []map[string]types.AttributeValue
+	p := dynamodb.NewScanPaginator(s.client, &dynamodb.ScanInput{
 		TableName: &s.historyTable,
-		Limit:     aws.Int32(100),
+		Limit:     aws.Int32(scanMatchHistoryCap),
 	})
-	if err != nil {
-		return nil, fmt.Errorf("scan match history: %w", err)
+	for p.HasMorePages() && len(items) < scanMatchHistoryCap {
+		page, err := p.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("scan match history: %w", err)
+		}
+		items = append(items, page.Items...)
 	}
-	return unmarshalMatches(result.Items)
+	if len(items) > scanMatchHistoryCap {
+		items = items[:scanMatchHistoryCap]
+	}
+	return unmarshalMatches(items)
 }
 
 // ListMatchHistoryByUser returns match history for a specific user.
 func (s *Store) ListMatchHistoryByUser(ctx context.Context, userID string) ([]MatchResult, error) {
-	result, err := s.client.Query(ctx, &dynamodb.QueryInput{
+	items, err := queryAll(ctx, s.client, &dynamodb.QueryInput{
 		TableName:              &s.historyTable,
 		IndexName:              aws.String("user_id-index"),
 		KeyConditionExpression: aws.String("user_id = :uid"),
@@ -550,7 +608,7 @@ func (s *Store) ListMatchHistoryByUser(ctx context.Context, userID string) ([]Ma
 	if err != nil {
 		return nil, fmt.Errorf("query match history by user: %w", err)
 	}
-	return unmarshalMatches(result.Items)
+	return unmarshalMatches(items)
 }
 
 // EnsureTables creates the watches and match-history tables if they don't yet
@@ -648,7 +706,10 @@ func (s *Store) enableTTL(ctx context.Context, name string) error {
 // items. Used to decide when the account can be auto-torn-down (no litter).
 func (s *Store) TablesEmpty(ctx context.Context) (bool, error) {
 	for _, name := range []string{s.watchesTable, s.historyTable, s.scheduledTable} {
-		out, err := s.client.Scan(ctx, &dynamodb.ScanInput{
+		// Follow pages rather than trusting the first (#181): this answer
+		// decides whether the account is torn down, so "empty" must mean the
+		// whole table was read and nothing was found.
+		found, err := scanFindsAny(ctx, s.client, &dynamodb.ScanInput{
 			TableName: aws.String(name),
 			Limit:     aws.Int32(1),
 			Select:    types.SelectCount,
@@ -660,7 +721,7 @@ func (s *Store) TablesEmpty(ctx context.Context) (bool, error) {
 			}
 			return false, fmt.Errorf("scan %q: %w", name, err)
 		}
-		if out.Count > 0 {
+		if found {
 			return false, nil
 		}
 	}

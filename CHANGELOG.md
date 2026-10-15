@@ -28,6 +28,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`lagotto list` and `lagotto history` no longer drop watches past the first
+  page** (#181). DynamoDB returns a query in pages of at most 1 MB, and lagotto
+  read only the first, so a user with enough watches (or match records) saw a
+  silently truncated list. Every DynamoDB query and scan now follows all pages.
+  That also fixes two decisions the capacity-poller Lambda makes from a scan:
+  whether any scheduled launch is still pending (a pending launch past the first
+  page could let the poller disable its schedule under it) and, with
+  `AUTO_DELETE_TABLES=true`, whether the tables are empty before deleting them.
 - **`lagotto --account <id>` now actually guards the account** (#179). The flag
   ("Expected AWS account ID (optional guard)") was parsed and ignored, so a
   command ran against whatever account your credentials belonged to. That
