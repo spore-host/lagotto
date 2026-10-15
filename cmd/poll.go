@@ -179,7 +179,7 @@ func runPollDaemon(ctx context.Context, cmd *cobra.Command, poller *watcher.Poll
 	if filter != nil && !filter.Empty() {
 		scope = filter.Describe()
 	}
-	fmt.Fprintf(cmd.OutOrStderr(), "lagotto poll daemon: every %s, scope: %s (Ctrl-C to stop)\n", pollInterval, scope)
+	_, _ = fmt.Fprintf(cmd.OutOrStderr(), "lagotto poll daemon: every %s, scope: %s (Ctrl-C to stop)\n", pollInterval, scope)
 
 	// Poll immediately, then on each tick — don't make the user wait one full
 	// interval for the first cycle.
@@ -188,7 +188,7 @@ func runPollDaemon(ctx context.Context, cmd *cobra.Command, poller *watcher.Poll
 		if err != nil {
 			// Transient errors (throttling, a flaky region) shouldn't kill the
 			// daemon — log and keep looping.
-			fmt.Fprintf(cmd.OutOrStderr(), "poll cycle error (continuing): %v\n", err)
+			_, _ = fmt.Fprintf(cmd.OutOrStderr(), "poll cycle error (continuing): %v\n", err)
 		} else {
 			printPollSummary(cmd, summary)
 			// summary.Watched counts only in-scope watches (out-of-scope ones are
@@ -196,9 +196,9 @@ func runPollDaemon(ctx context.Context, cmd *cobra.Command, poller *watcher.Poll
 			// are done, not the whole account's (#47).
 			if summary.Watched == 0 {
 				if filter != nil && !filter.Empty() {
-					fmt.Fprintf(cmd.OutOrStderr(), "No active watches in scope (%s) remain — daemon exiting.\n", filter.Describe())
+					_, _ = fmt.Fprintf(cmd.OutOrStderr(), "No active watches in scope (%s) remain — daemon exiting.\n", filter.Describe())
 				} else {
-					fmt.Fprintf(cmd.OutOrStderr(), "No active watches remain — daemon exiting.\n")
+					_, _ = fmt.Fprintf(cmd.OutOrStderr(), "No active watches remain — daemon exiting.\n")
 				}
 				return nil
 			}
@@ -206,7 +206,7 @@ func runPollDaemon(ctx context.Context, cmd *cobra.Command, poller *watcher.Poll
 
 		select {
 		case <-ctx.Done():
-			fmt.Fprintf(cmd.OutOrStderr(), "\nStopped.\n")
+			_, _ = fmt.Fprintf(cmd.OutOrStderr(), "\nStopped.\n")
 			return nil
 		case <-time.After(pollInterval):
 		}
@@ -221,7 +221,7 @@ func printPollSummary(cmd *cobra.Command, summary *watcher.PollSummary) {
 		return
 	}
 
-	fmt.Fprintf(cmd.OutOrStdout(),
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(),
 		"Poll cycle: %d watched, %d launched, %d notified, %d retrying, %d failed, %d expired, %d quota-capped\n",
 		summary.Watched, summary.Launched, summary.Notified, summary.Retrying, summary.Failed, summary.Expired,
 		summary.QuotaCapped)
@@ -231,7 +231,7 @@ func printPollSummary(cmd *cobra.Command, summary *watcher.PollSummary) {
 		if m.IsSpot {
 			spotLabel = "spot"
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "  %s %s in %s (%s) $%.4f/hr [watch: %s] action: %s\n",
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  %s %s in %s (%s) $%.4f/hr [watch: %s] action: %s\n",
 			m.InstanceType, spotLabel, m.Region, m.AvailabilityZone, m.Price, m.WatchID, m.ActionTaken)
 	}
 }

@@ -50,7 +50,7 @@ func runCancel(cmd *cobra.Command, args []string) error {
 	}
 
 	if !cancelYes && !confirmCancel(fmt.Sprintf("Cancel watch %s (%s)?", watchID, w.InstanceTypePattern)) {
-		fmt.Fprintln(cmd.OutOrStdout(), "Aborted.")
+		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Aborted.")
 		return nil
 	}
 
@@ -62,7 +62,7 @@ func runCancel(cmd *cobra.Command, args []string) error {
 		if rerr := holder.Release(ctx, w.LastMatch.Region, w.LastMatch.ReservationID); rerr != nil {
 			fmt.Fprintf(os.Stderr, "Note: could not release capacity reservation %s: %v\n", w.LastMatch.ReservationID, rerr)
 		} else {
-			fmt.Fprintf(cmd.OutOrStdout(), "Released capacity reservation %s\n", w.LastMatch.ReservationID)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Released capacity reservation %s\n", w.LastMatch.ReservationID)
 		}
 	}
 
@@ -70,7 +70,7 @@ func runCancel(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("cancel watch: %w", err)
 	}
 
-	fmt.Fprintf(cmd.OutOrStdout(), "Cancelled watch %s\n", watchID)
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Cancelled watch %s\n", watchID)
 	return nil
 }
 

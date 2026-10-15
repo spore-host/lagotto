@@ -71,10 +71,23 @@ test:
 	@echo "Running tests..."
 	$(GOTEST) -v ./...
 
-## lint: Run linter
+## lint: Run linter (root module and lambda/capacity-poller)
+# Keep in step with the version pinned in .github/workflows/ci.yml (Lint job);
+# cmd/ci_gates_test.go fails if the two drift apart.
+#
+# lambda/capacity-poller is a separate Go module, so a root `golangci-lint run`
+# does not see it; it is linted explicitly.
+#
+# --max-same-issues=0: the default (3) hides every repeat of the same message, so
+# a run reporting 8 findings was really hiding 105 (#183). A gate that shows a
+# fraction of the problem invites fix-8-find-8-more round trips.
+GOLANGCI_LINT_VERSION=2.14.0
 lint:
 	@echo "Running linter..."
-	golangci-lint run
+	@which golangci-lint > /dev/null || (echo "golangci-lint not installed. Run: curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/v$(GOLANGCI_LINT_VERSION)/install.sh | sh -s -- -b $$(go env GOPATH)/bin v$(GOLANGCI_LINT_VERSION)" && exit 1)
+	@golangci-lint version 2>/dev/null | grep -q "version $(GOLANGCI_LINT_VERSION) " || echo "warning: CI pins golangci-lint $(GOLANGCI_LINT_VERSION); local $$(golangci-lint version 2>/dev/null | awk '{print $$4}') may report different findings"
+	golangci-lint run --max-same-issues=0
+	cd lambda/capacity-poller && golangci-lint run --max-same-issues=0
 
 ## fmt: Format code
 fmt:

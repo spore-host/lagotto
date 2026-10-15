@@ -81,11 +81,11 @@ func runList(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(watches) == 0 {
-		fmt.Fprintln(cmd.OutOrStdout(), "No watches found.")
+		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "No watches found.")
 		return nil
 	}
 
-	fmt.Fprintf(cmd.OutOrStdout(), "%-12s %-10s %-15s %-20s %-20s %-25s %-6s %-10s %s\n",
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%-12s %-10s %-15s %-20s %-20s %-25s %-6s %-10s %s\n",
 		"WATCH ID", "STATUS", "PROJECT", "OWNER", "PATTERN", "REGIONS", "SPOT", "ACTION", "EXPIRES")
 	for _, w := range watches {
 		regions := displayRegions(w.Regions)
@@ -98,7 +98,7 @@ func runList(cmd *cobra.Command, args []string) error {
 		if w.DesiredCount > 0 {
 			actionCol = fmt.Sprintf("%s×%d", w.Action, w.DesiredCount)
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "%-12s %-10s %-15s %-20s %-20s %-25s %-6v %-10s %s\n",
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%-12s %-10s %-15s %-20s %-20s %-25s %-6v %-10s %s\n",
 			w.WatchID,
 			w.Status,
 			dashIfEmpty(truncate(w.Project, 15)),

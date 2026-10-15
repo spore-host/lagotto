@@ -70,7 +70,7 @@ func runExtend(cmd *cobra.Command, args []string) error {
 	}
 
 	if reactivate {
-		fmt.Fprintln(cmd.OutOrStdout(), i18n.T("lagotto.extend.reactivated", map[string]interface{}{
+		_, _ = fmt.Fprintln(cmd.OutOrStdout(), i18n.T("lagotto.extend.reactivated", map[string]interface{}{
 			"WatchID": watchID,
 		}))
 		// Re-enable polling schedule since we reactivated a watch
@@ -79,7 +79,7 @@ func runExtend(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	fmt.Fprintln(cmd.OutOrStdout(), i18n.T("lagotto.extend.extended", map[string]interface{}{
+	_, _ = fmt.Fprintln(cmd.OutOrStdout(), i18n.T("lagotto.extend.extended", map[string]interface{}{
 		"WatchID":   watchID,
 		"ExpiresAt": newExpiry.Format(time.RFC3339),
 	}))
