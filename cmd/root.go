@@ -20,7 +20,9 @@ var (
 	watchesTable string
 	historyTable string
 
-	// Shared spore.host config flags (see libs/sporeconfig).
+	// Shared spore.host config flags (see libs/sporeconfig). The profile and
+	// region go to pkg/awscfg; the account is a guard checked in
+	// PersistentPreRunE (see account.go).
 	sharedProfile string
 	sharedRegion  string
 	sharedAccount string
@@ -62,6 +64,14 @@ func init() {
 		ensureI18nInitialized()
 		// Record shared-config flag values for pkg/awscfg (flag > env > file > default).
 		awscfg.SetFlags(sharedProfile, sharedRegion)
+
+		// --account: verify the resolved credentials belong to the named account
+		// before doing anything else (#179). A refusal is not a usage error, so
+		// don't follow it with the help text.
+		if err := runAccountGuard(); err != nil {
+			cmd.SilenceUsage = true
+			return err
+		}
 		return nil
 	}
 

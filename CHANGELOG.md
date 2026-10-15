@@ -17,6 +17,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (it has its own go.mod with a `replace ../..`, so it pins its own copy of the
   root's dependencies and otherwise fails with "updates to go.mod needed").
 
+### Added
+
+- **A gate that fails on any flag nothing reads** (`cmd/inert_flags_test.go`,
+  ported from truffle). It parses the `cmd` package and requires every
+  registered flag's variable to be read somewhere, so a flag can't again parse,
+  show in `--help` and do nothing. Unlike truffle's version it also sees flags
+  registered through a local alias (`f := cmd.Flags(); f.StringVar(...)`), which
+  is how `deploy` and `launch` register theirs.
+
+### Fixed
+
+- **`lagotto --account <id>` now actually guards the account** (#179). The flag
+  ("Expected AWS account ID (optional guard)") was parsed and ignored, so a
+  command ran against whatever account your credentials belonged to. That
+  includes `watch --action spawn`, which launches billable instances. Now, when
+  you pass it, lagotto checks the resolved credentials with STS
+  `GetCallerIdentity` before doing anything else, and refuses on a mismatch or
+  if the account can't be determined. Only the explicit flag is enforced.
+  `SPORE_ACCOUNT` and the shared config's `account` are not, matching truffle
+  (see spore-host/truffle#206).
+
 ## [0.63.1] - 2026-10-04
 
 ### Added
