@@ -162,7 +162,12 @@ func (s *Store) HasPendingScheduledLaunches(ctx context.Context) (bool, error) {
 	// Both "pending" (armed, not yet fired) and "retrying" (#62, mid boundary
 	// retry) keep the infra alive — tearing the poller down under a retrying
 	// Capacity-Block launch would abandon it right at the window open.
-	out, err := s.client.Scan(ctx, &dynamodb.ScanInput{
+	//
+	// The status test is a FilterExpression, applied after each 1 MB page is
+	// read, so a pending launch can sit on any page; scanFindsAny follows them
+	// all (#181). Reading only the first page could report "none pending" and
+	// let the poller disable its schedule under an armed launch.
+	found, err := scanFindsAny(ctx, s.client, &dynamodb.ScanInput{
 		TableName:                aws.String(s.scheduledTable),
 		FilterExpression:         aws.String("#s = :p OR #s = :r"),
 		ExpressionAttributeNames: map[string]string{"#s": "status"},
@@ -179,7 +184,7 @@ func (s *Store) HasPendingScheduledLaunches(ctx context.Context) (bool, error) {
 		}
 		return false, fmt.Errorf("scan scheduled launches: %w", err)
 	}
-	return out.Count > 0, nil
+	return found, nil
 }
 
 // scheduledTableSchema is the CreateTable input for the scheduled-launches table:
