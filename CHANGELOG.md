@@ -58,6 +58,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **CI action pins now say which version they actually run** (#189, #190).
+  `actions/checkout@3d3c42e…` was commented `# v6` in every workflow but is
+  v7.0.1, and `goreleaser-action` `# v7` is v7.2.3. The SHAs were right and are
+  unchanged; only the comments were wrong — but those comments are what
+  reviewers read and what Dependabot rewrites. A new `workflow_pins_test.go` now
+  fails on any `uses:` not pinned to a full SHA with a `# vX.Y.Z` comment, and
+  checks each comment against `scripts/action-pins.txt`, a table of what every
+  pinned SHA really is, regenerated from GitHub by
+  `scripts/refresh-action-pins.sh` (run it, and commit the table, whenever a pin
+  changes — including on a Dependabot bump).
 - **`lagotto list` and `lagotto history` no longer drop watches past the first
   page** (#181). DynamoDB returns a query in pages of at most 1 MB, and lagotto
   read only the first, so a user with enough watches (or match records) saw a
