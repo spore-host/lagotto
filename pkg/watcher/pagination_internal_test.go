@@ -2,6 +2,7 @@ package watcher
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"testing"
@@ -189,28 +190,6 @@ func TestListMatchHistoryReadsEveryPage(t *testing.T) {
 		}
 		wantIDs(t, "ListMatchHistoryByUser", ids(got, matchID), "m", 4)
 	})
-	t.Run("unscoped scan keeps its cap", func(t *testing.T) {
-		f := newFakePagedDynamo()
-		// A short first page (the 1 MB bound) must not end the scan early...
-		f.pages["h"] = pagesOf(matchItem, "m", 30, 30)
-		got, err := newPagedStore(f).ListMatchHistory(context.Background(), "")
-		if err != nil {
-			t.Fatal(err)
-		}
-		wantIDs(t, "ListMatchHistory(all)", ids(got, matchID), "m", 60)
-
-		// ...but the scan still stops at the cap rather than reading the table.
-		f = newFakePagedDynamo()
-		f.pages["h"] = pagesOf(matchItem, "m", 60, 60, 60)
-		got, err = newPagedStore(f).ListMatchHistory(context.Background(), "")
-		if err != nil {
-			t.Fatal(err)
-		}
-		wantIDs(t, "ListMatchHistory(all, capped)", ids(got, matchID), "m", scanMatchHistoryCap)
-		if f.calls["h"] != 2 {
-			t.Errorf("capped scan made %d calls, want 2", f.calls["h"])
-		}
-	})
 }
 
 // TestHasPendingScheduledLaunchesReadsEveryPage: the pending test is a
@@ -263,5 +242,23 @@ func TestTablesEmptyReadsPastAnEmptyFirstPage(t *testing.T) {
 	empty, err = newPagedStore(f).TablesEmpty(context.Background())
 	if err != nil || !empty {
 		t.Fatalf("TablesEmpty over empty pages = %v, %v; want true, nil", empty, err)
+	}
+}
+
+// TestListMatchHistoryRequiresWatchID guards #184. An empty watch ID used to
+// Scan the whole history table, across every user, and return up to 100 of
+// their records. It must now fail before any DynamoDB call is made.
+func TestListMatchHistoryRequiresWatchID(t *testing.T) {
+	f := newFakePagedDynamo()
+	f.pages["h"] = pagesOf(matchItem, "m", 3)
+	got, err := newPagedStore(f).ListMatchHistory(context.Background(), "")
+	if !errors.Is(err, ErrHistoryWatchIDRequired) {
+		t.Fatalf("ListMatchHistory(\"\") error = %v, want ErrHistoryWatchIDRequired", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("ListMatchHistory(\"\") returned %d records from other users' history", len(got))
+	}
+	if f.calls["h"] != 0 {
+		t.Errorf("ListMatchHistory(\"\") made %d history-table calls, want 0", f.calls["h"])
 	}
 }

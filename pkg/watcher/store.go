@@ -545,13 +545,24 @@ func (s *Store) UpdateSageMakerJob(ctx context.Context, watchID, jobName string)
 	return nil
 }
 
-// ListMatchHistory returns match history, optionally filtered by watch ID.
+// ErrHistoryWatchIDRequired is returned by ListMatchHistory for an empty watch
+// ID. The history table holds every user's records, so there is no safe
+// "everything" to return: for one user's history, use ListMatchHistoryByUser.
+var ErrHistoryWatchIDRequired = errors.New("match history needs a watch ID; use ListMatchHistoryByUser for a user's history")
+
+// ListMatchHistory returns one watch's match history, newest first.
+//
+// watchID is required. It used to be optional, and an empty ID scanned the whole
+// history table across every user, returning up to 100 records in arbitrary scan
+// order (#184). No lagotto command passed an empty ID, but the method is
+// exported, so a new caller could read other users' history by accident. An
+// empty ID now returns ErrHistoryWatchIDRequired without touching DynamoDB.
+// Ownership of the watch is the caller's to check (cmd/history.go, #41).
 func (s *Store) ListMatchHistory(ctx context.Context, watchID string) ([]MatchResult, error) {
-	if watchID != "" {
-		return s.listMatchHistoryByWatch(ctx, watchID)
+	if watchID == "" {
+		return nil, ErrHistoryWatchIDRequired
 	}
-	// Scan all history (for the user's history command — should be scoped by user in practice)
-	return s.scanMatchHistory(ctx)
+	return s.listMatchHistoryByWatch(ctx, watchID)
 }
 
 func (s *Store) listMatchHistoryByWatch(ctx context.Context, watchID string) ([]MatchResult, error) {
@@ -565,31 +576,6 @@ func (s *Store) listMatchHistoryByWatch(ctx context.Context, watchID string) ([]
 	})
 	if err != nil {
 		return nil, fmt.Errorf("query match history: %w", err)
-	}
-	return unmarshalMatches(items)
-}
-
-// scanMatchHistoryCap bounds the unscoped history scan: it reads the whole
-// table, across every user, so it returns at most this many records.
-const scanMatchHistoryCap = 100
-
-func (s *Store) scanMatchHistory(ctx context.Context) ([]MatchResult, error) {
-	// Follow pages until the cap is reached (#181): a page is also bounded at
-	// 1 MB, so one call can return fewer than the cap while more remain.
-	var items []map[string]types.AttributeValue
-	p := dynamodb.NewScanPaginator(s.client, &dynamodb.ScanInput{
-		TableName: &s.historyTable,
-		Limit:     aws.Int32(scanMatchHistoryCap),
-	})
-	for p.HasMorePages() && len(items) < scanMatchHistoryCap {
-		page, err := p.NextPage(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("scan match history: %w", err)
-		}
-		items = append(items, page.Items...)
-	}
-	if len(items) > scanMatchHistoryCap {
-		items = items[:scanMatchHistoryCap]
 	}
 	return unmarshalMatches(items)
 }
