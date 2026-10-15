@@ -37,6 +37,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-user query), and no other spore.host module calls it. This is a breaking
   change to the exported Go API, so the next release is a MINOR bump.
 
+- **The inert-flag gate's "found no flags" check is now tested** (#185). If
+  the gate's parser ever stopped recognising how flags are registered, it
+  would find nothing and could report the package clean; it fails instead, and
+  a test now proves that. Ported from truffle#215 so the two copies stay in
+  step, including its fixture for an unread flag registered through a
+  `PersistentFlags()` alias. Test-only; no change to the CLI.
+
 ### Fixed
 
 - **`lagotto list` and `lagotto history` no longer drop watches past the first
