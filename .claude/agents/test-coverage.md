@@ -29,7 +29,7 @@ go tool cover -func=/tmp/cov.out | grep '^total:'
 
 ## Remaining targets (per #1)
 pkg/watcher sendEmail/sendSNS (SES/SNS — sendSNS reachable via Notify against
-substrate), scanMatchHistory; cmd RunE bodies.
+substrate); cmd RunE bodies.
 
 ## Rules
 - Match existing test style: table-driven, package `watcher_test`, the

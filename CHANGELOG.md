@@ -26,6 +26,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   registered through a local alias (`f := cmd.Flags(); f.StringVar(...)`), which
   is how `deploy` and `launch` register theirs.
 
+### Changed
+
+- **`watcher.Store.ListMatchHistory` now requires a watch ID** (#184). An
+  empty ID used to Scan the whole match-history table across every user and
+  return up to 100 of their records in arbitrary order. It now returns
+  `watcher.ErrHistoryWatchIDRequired` without reading anything; use
+  `ListMatchHistoryByUser` for a user's history. No lagotto command is affected
+  (`lagotto history` always passes an ownership-checked watch ID, or uses the
+  per-user query), and no other spore.host module calls it. This is a breaking
+  change to the exported Go API, so the next release is a MINOR bump.
+
 ### Fixed
 
 - **`lagotto list` and `lagotto history` no longer drop watches past the first
