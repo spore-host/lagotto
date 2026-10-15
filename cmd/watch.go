@@ -264,32 +264,32 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		return enc.Encode(w)
 	}
 
-	fmt.Fprintf(cmd.OutOrStdout(), "Created watch %s\n", w.WatchID)
-	fmt.Fprintf(cmd.OutOrStdout(), "  Pattern:  %s\n", w.InstanceTypePattern)
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Created watch %s\n", w.WatchID)
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Pattern:  %s\n", w.InstanceTypePattern)
 	if w.Service == watcher.ServiceSageMaker {
-		fmt.Fprintf(cmd.OutOrStdout(), "  Service:  sagemaker (submits your SageMaker job, retries on CapacityError)\n")
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Service:  sagemaker (submits your SageMaker job, retries on CapacityError)\n")
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "  Regions:  %v\n", displayRegions(w.Regions))
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Regions:  %v\n", displayRegions(w.Regions))
 	if len(w.AvailabilityZones) > 0 {
-		fmt.Fprintf(cmd.OutOrStdout(), "  AZs:      %v\n", w.AvailabilityZones)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  AZs:      %v\n", w.AvailabilityZones)
 	} else {
-		fmt.Fprintf(cmd.OutOrStdout(), "  AZs:      all in region\n")
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  AZs:      all in region\n")
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "  Spot:     %v\n", w.Spot)
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Spot:     %v\n", w.Spot)
 	if w.MaxPrice > 0 {
-		fmt.Fprintf(cmd.OutOrStdout(), "  Max price: $%.4f/hr\n", w.MaxPrice)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Max price: $%.4f/hr\n", w.MaxPrice)
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "  Action:   %s\n", w.Action)
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Action:   %s\n", w.Action)
 	if action == watcher.ActionSpawn && w.Service == watcher.ServiceEC2 {
-		fmt.Fprintf(cmd.OutOrStdout(), "  Spawn config: %s\n", watchSpawnConfig)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Spawn config: %s\n", watchSpawnConfig)
 	}
 	if w.Service == watcher.ServiceSageMaker && len(w.SageMakerJobJSON) > 0 {
-		fmt.Fprintf(cmd.OutOrStdout(), "  SageMaker config: %s\n", watchSageMakerConfig)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  SageMaker config: %s\n", watchSageMakerConfig)
 	}
 	if quotaReport != nil && quotaReport.Known {
-		fmt.Fprintf(cmd.OutOrStdout(), "  Quota:    %s\n", quotaSummaryRow(quotaReport, w))
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Quota:    %s\n", quotaSummaryRow(quotaReport, w))
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "  Expires:  %s\n", w.ExpiresAt.Format(time.RFC3339))
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Expires:  %s\n", w.ExpiresAt.Format(time.RFC3339))
 	return nil
 }
 
@@ -363,13 +363,13 @@ func warnFleetQuotaFeasibility(ctx context.Context, l quotacheck.Lookup, out io.
 			// A failed lookup is NOT a quota problem — stay quiet (verbose-only) so a
 			// missing read permission never reads as "your quota is zero".
 			if verbose {
-				fmt.Fprintf(out, "note: could not read EC2 service quotas in %s: %v\n", region, err)
+				_, _ = fmt.Fprintf(out, "note: could not read EC2 service quotas in %s: %v\n", region, err)
 			}
 			continue
 		}
 		if !rep.Known {
 			if verbose {
-				fmt.Fprintf(out, "note: no EC2 %s-family quota figure available in %s "+
+				_, _ = fmt.Fprintf(out, "note: no EC2 %s-family quota figure available in %s "+
 					"(needs servicequotas:GetServiceQuota); the watch still reports a quota ceiling if it hits one.\n",
 					rep.Family, region)
 			}
@@ -382,7 +382,7 @@ func warnFleetQuotaFeasibility(ctx context.Context, l quotacheck.Lookup, out io.
 		printQuotaFeasibility(out, w, region, &rep)
 	}
 	if truncated && first != nil {
-		fmt.Fprintf(out, "note: quota checked in the first %d of %d region(s) only.\n", maxQuotaCheckRegions, len(w.Regions))
+		_, _ = fmt.Fprintf(out, "note: quota checked in the first %d of %d region(s) only.\n", maxQuotaCheckRegions, len(w.Regions))
 	}
 	return first
 }
@@ -397,10 +397,10 @@ func printQuotaFeasibility(out io.Writer, w *watcher.Watch, region string, rep *
 	}
 	switch {
 	case rep.ZeroQuota:
-		fmt.Fprintf(out, "warning: your EC2 %s-family %s vCPU quota in %s is 0 — this fleet cannot launch a single worker until it's raised.\n",
+		_, _ = fmt.Fprintf(out, "warning: your EC2 %s-family %s vCPU quota in %s is 0 — this fleet cannot launch a single worker until it's raised.\n",
 			rep.Family, lifecycle, region)
 	case !rep.Feasible:
-		fmt.Fprintf(out, "warning: this fleet may not reach --maintain %d: your EC2 %s-family %s vCPU quota in %s is %d vCPU with %d in use",
+		_, _ = fmt.Fprintf(out, "warning: this fleet may not reach --maintain %d: your EC2 %s-family %s vCPU quota in %s is %d vCPU with %d in use",
 			w.DesiredCount, rep.Family, lifecycle, region, rep.Limit, rep.Used)
 		if rep.MaxWorkers >= 0 {
 			qualifier := ""
@@ -409,20 +409,20 @@ func printQuotaFeasibility(out io.Writer, w *watcher.Watch, region string, rep *
 				// count is the most optimistic reading — name the rung it assumes.
 				qualifier = "at best "
 			}
-			fmt.Fprintf(out, ", which fits %s%d × %s (%d vCPU each).\n",
+			_, _ = fmt.Fprintf(out, ", which fits %s%d × %s (%d vCPU each).\n",
 				qualifier, rep.MaxWorkers, rep.SmallestRung, rep.VCPUsPerWorker)
 		} else {
 			// No literal rung in the pattern (a pure wildcard) — report the vCPU
 			// headroom rather than invent a worker count.
-			fmt.Fprintf(out, " (%d vCPU free), and %q has no literal size to count workers against.\n",
+			_, _ = fmt.Fprintf(out, " (%d vCPU free), and %q has no literal size to count workers against.\n",
 				rep.Limit-rep.Used, w.InstanceTypePattern)
 		}
-		fmt.Fprintf(out, "  The watch will still run: it maintains as many workers as quota allows, tells you when it hits the ceiling, and picks up a granted increase automatically.\n")
+		_, _ = fmt.Fprintf(out, "  The watch will still run: it maintains as many workers as quota allows, tells you when it hits the ceiling, and picks up a granted increase automatically.\n")
 	default:
 		return
 	}
 	if rep.Remediation != "" {
-		fmt.Fprintf(out, "%s\n", rep.Remediation)
+		_, _ = fmt.Fprintf(out, "%s\n", rep.Remediation)
 	}
 }
 

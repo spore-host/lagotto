@@ -67,10 +67,10 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("ensure tables: %w", err)
 	}
 	if len(created) == 0 {
-		fmt.Fprintf(out, "Tables already exist (%s, %s).\n", watchesTable, historyTable)
+		_, _ = fmt.Fprintf(out, "Tables already exist (%s, %s).\n", watchesTable, historyTable)
 	}
 	for _, name := range created {
-		fmt.Fprintf(out, "Created table %s\n", name)
+		_, _ = fmt.Fprintf(out, "Created table %s\n", name)
 	}
 
 	// 2. Runtime IAM policy (#16): lagotto owns the hosted poller's permissions in
@@ -83,7 +83,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	fmt.Fprintln(out, "Setup complete.")
+	_, _ = fmt.Fprintln(out, "Setup complete.")
 	return nil
 }
 
@@ -119,11 +119,11 @@ func ensureRuntimePolicy(ctx context.Context, cfg aws.Config, out io.Writer) err
 	if err = runtimeiam.EnsureRuntimeRole(ctx, iamClient, region, aws.ToString(acct.Account), roles); err != nil {
 		return fmt.Errorf("ensure runtime IAM role/policy: %w", err)
 	}
-	fmt.Fprintf(out, "Applied runtime IAM policy %q to role %q.\n", runtimeiam.PolicyName, runtimeiam.RoleName)
+	_, _ = fmt.Fprintf(out, "Applied runtime IAM policy %q to role %q.\n", runtimeiam.PolicyName, runtimeiam.RoleName)
 	if len(roles) > 0 {
-		fmt.Fprintf(out, "Authorized instance role(s) for hosted spawns: %s\n", strings.Join(roles, ", "))
-		fmt.Fprintln(out, "  The poller may now read these roles, write their inline policy, attach managed policies to")
-		fmt.Fprintln(out, "  them, and pass them to EC2. spawn adds its spored/SSM baseline to every role it launches with.")
+		_, _ = fmt.Fprintf(out, "Authorized instance role(s) for hosted spawns: %s\n", strings.Join(roles, ", "))
+		_, _ = fmt.Fprintln(out, "  The poller may now read these roles, write their inline policy, attach managed policies to")
+		_, _ = fmt.Fprintln(out, "  them, and pass them to EC2. spawn adds its spored/SSM baseline to every role it launches with.")
 	}
 	return nil
 }
@@ -182,7 +182,7 @@ func resolveAuthorizedInstanceRoles(ctx context.Context, client runtimeiam.IAMAP
 	for _, n := range setupRevokeRoles {
 		n = strings.TrimSpace(n)
 		if !containsString(current, n) {
-			fmt.Fprintf(out, "note: instance role %q was not authorized; nothing to revoke.\n", n)
+			_, _ = fmt.Fprintf(out, "note: instance role %q was not authorized; nothing to revoke.\n", n)
 		}
 	}
 	return final, nil

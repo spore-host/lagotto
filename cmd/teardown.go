@@ -58,12 +58,12 @@ func runTeardown(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("delete tables: %w", err)
 	}
 	if len(deleted) == 0 {
-		fmt.Fprintf(out, "No lagotto tables to delete (%s, %s already absent).\n", watchesTable, historyTable)
+		_, _ = fmt.Fprintf(out, "No lagotto tables to delete (%s, %s already absent).\n", watchesTable, historyTable)
 		return nil
 	}
 	for _, name := range deleted {
-		fmt.Fprintf(out, "Deleted table %s\n", name)
+		_, _ = fmt.Fprintf(out, "Deleted table %s\n", name)
 	}
-	fmt.Fprintln(out, "Teardown complete.")
+	_, _ = fmt.Fprintln(out, "Teardown complete.")
 	return nil
 }

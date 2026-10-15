@@ -191,7 +191,7 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 		if launchAZ == "" {
 			launchAZ = cr.AvailabilityZone
 		}
-		fmt.Fprintf(out, "Reservation %s: state=%s window %s → %s; firing %s (retry until %s)\n",
+		_, _ = fmt.Fprintf(out, "Reservation %s: state=%s window %s → %s; firing %s (retry until %s)\n",
 			launchReservationID, cr.State, cr.StartDate, cr.EndDate, expr, retryUntil.UTC().Format(time.RFC3339))
 	}
 
@@ -278,14 +278,14 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("create EventBridge schedule: %w", err)
 	}
 
-	fmt.Fprintf(out, "Scheduled launch %s armed (%s) in %s.\n", scheduleID, expr, region)
+	_, _ = fmt.Fprintf(out, "Scheduled launch %s armed (%s) in %s.\n", scheduleID, expr, region)
 	if launchAZ != "" {
-		fmt.Fprintf(out, "  AZ: %s\n", launchAZ)
+		_, _ = fmt.Fprintf(out, "  AZ: %s\n", launchAZ)
 	}
 	if instanceName != "" {
-		fmt.Fprintf(out, "  Name: %s (if it already exists at fire time: %s)\n", instanceName, ifExists)
+		_, _ = fmt.Fprintf(out, "  Name: %s (if it already exists at fire time: %s)\n", instanceName, ifExists)
 	}
-	fmt.Fprintf(out, "  Cancel with: aws scheduler delete-schedule --name %s --region %s\n", scheduleName, region)
+	_, _ = fmt.Fprintf(out, "  Cancel with: aws scheduler delete-schedule --name %s --region %s\n", scheduleName, region)
 	return nil
 }
 

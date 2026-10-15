@@ -3,6 +3,7 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -49,6 +50,93 @@ func TestCIRunsTheFormatGate(t *testing.T) {
 		t.Error("the CI workflow does not run 'make check-fmt'; without it nothing " +
 			"prevents unformatted code from reaching main (#99)")
 	}
+}
+
+// TestCIGatesLint checks that CI runs `make lint` (so the repo's own golangci
+// config, not a CI-only invocation, is what gates) with a golangci-lint whose
+// version AND tarball hash are pinned, and that the Makefile's pin agrees with
+// CI's. `make lint` existed for a long time with nothing running it, and
+// findings accumulated on main until every PR's local run failed for unrelated
+// reasons (#183; truffle#192 is the same story).
+func TestCIGatesLint(t *testing.T) {
+	data, err := os.ReadFile(dotGithub("workflows/ci.yml"))
+	if err != nil {
+		t.Fatalf("read ci.yml: %v", err)
+	}
+	step, ok := workflowStep(string(data), "Lint gate")
+	if !ok {
+		t.Fatal("the CI workflow has no 'Lint gate' step; without it lint findings " +
+			"accumulate on main unnoticed (#183)")
+	}
+	if !strings.Contains(step, "make lint") {
+		t.Error("the Lint gate does not run 'make lint'")
+	}
+	install, ok := workflowStep(string(data), "Install golangci-lint")
+	if !ok {
+		t.Fatal("the CI workflow has no 'Install golangci-lint' step")
+	}
+	ver := regexp.MustCompile(`VER=(\d+\.\d+\.\d+)`).FindStringSubmatch(install)
+	if ver == nil {
+		t.Error("golangci-lint is not pinned to an exact version (VER=X.Y.Z)")
+	}
+	if !regexp.MustCompile(`SHA256=[0-9a-f]{64}`).MatchString(install) ||
+		!strings.Contains(install, "sha256sum -c") {
+		t.Error("the golangci-lint download is not verified against a pinned SHA256")
+	}
+
+	// The Makefile pin is what `make lint` warns against locally; if it drifts
+	// from CI's, contributors are told to install a version CI doesn't run.
+	mk, err := os.ReadFile(filepath.Join(repoRoot(), "Makefile"))
+	if err != nil {
+		t.Fatalf("read Makefile: %v", err)
+	}
+	mkVer := regexp.MustCompile(`(?m)^GOLANGCI_LINT_VERSION=(\S+)$`).FindSubmatch(mk)
+	if mkVer == nil {
+		t.Fatal("the Makefile does not pin GOLANGCI_LINT_VERSION")
+	}
+	if ver != nil && string(mkVer[1]) != ver[1] {
+		t.Errorf("Makefile pins golangci-lint %s but CI installs %s; keep them in step",
+			mkVer[1], ver[1])
+	}
+
+	// The default max-same-issues=3 hides repeats of the same message: main
+	// reported 8 findings while really carrying 105 (#183). And the lambda is a
+	// separate module that a root `golangci-lint run` never looks at.
+	body, ok := makeTarget(t, "lint")
+	if !ok {
+		t.Fatal("the Makefile has no lint target; CI's Lint gate calls it")
+	}
+	if !strings.Contains(body, "--max-same-issues=0") {
+		t.Error("make lint does not pass --max-same-issues=0, so repeated findings are hidden")
+	}
+	if !strings.Contains(body, "lambda/capacity-poller") {
+		t.Error("make lint does not lint the lambda/capacity-poller module")
+	}
+}
+
+// workflowStep returns the YAML block for the step named name: from its "- name:"
+// line up to the next line at the same indentation starting a new list item.
+func workflowStep(yaml, name string) (string, bool) {
+	lines := strings.Split(yaml, "\n")
+	start := -1
+	var indent string
+	for i, line := range lines {
+		if strings.HasSuffix(strings.TrimSpace(line), "name: "+name) &&
+			strings.HasPrefix(strings.TrimSpace(line), "- ") {
+			start = i
+			indent = line[:strings.Index(line, "- ")]
+			break
+		}
+	}
+	if start < 0 {
+		return "", false
+	}
+	for i := start + 1; i < len(lines); i++ {
+		if strings.HasPrefix(lines[i], indent+"- ") {
+			return strings.Join(lines[start:i], "\n"), true
+		}
+	}
+	return strings.Join(lines[start:], "\n"), true
 }
 
 // TestDeploymentDocCFNCapabilities gates the one documented command nothing else

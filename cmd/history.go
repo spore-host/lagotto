@@ -175,19 +175,19 @@ func historyEntries(matches []watcher.MatchResult, gaveUp []watcher.Watch) []any
 // gave-up section (#161). Pure over its inputs (no AWS), so it's unit-testable.
 func renderHistory(out io.Writer, matches []watcher.MatchResult, gaveUp []watcher.Watch) error {
 	if len(matches) == 0 && len(gaveUp) == 0 {
-		fmt.Fprintln(out, "No match history found.")
+		_, _ = fmt.Fprintln(out, "No match history found.")
 		return nil
 	}
 
 	if len(matches) > 0 {
-		fmt.Fprintf(out, "%-12s %-18s %-15s %-15s %-10s %-10s %-25s %s\n",
+		_, _ = fmt.Fprintf(out, "%-12s %-18s %-15s %-15s %-10s %-10s %-25s %s\n",
 			"WATCH ID", "INSTANCE TYPE", "REGION", "AZ", "PRICE", "ACTION", "MATCHED AT", "WAIT")
 		for _, m := range matches {
 			wait := "-"
 			if m.WaitToAcquireSeconds != nil {
 				wait = watcher.FormatWait(time.Duration(*m.WaitToAcquireSeconds * float64(time.Second)))
 			}
-			fmt.Fprintf(out, "%-12s %-18s %-15s %-15s $%-9.4f %-10s %-25s %s\n",
+			_, _ = fmt.Fprintf(out, "%-12s %-18s %-15s %-15s $%-9.4f %-10s %-25s %s\n",
 				m.WatchID,
 				m.InstanceType,
 				m.Region,
@@ -205,14 +205,14 @@ func renderHistory(out io.Writer, matches []watcher.MatchResult, gaveUp []watche
 	}
 
 	if len(matches) > 0 {
-		fmt.Fprintln(out)
+		_, _ = fmt.Fprintln(out)
 	}
 	// The other half of the wait distribution (#139/#161): watches that waited and
 	// never got capacity. Reported as GAVE UP with the elapsed watch duration, so
 	// "we hunted g7e for 48h across 5 regions and never got it" is visible rather
 	// than inferred from silence.
-	fmt.Fprintln(out, "Gave up without acquiring:")
-	fmt.Fprintf(out, "%-12s %-10s %-20s %-25s %-25s %s\n",
+	_, _ = fmt.Fprintln(out, "Gave up without acquiring:")
+	_, _ = fmt.Fprintf(out, "%-12s %-10s %-20s %-25s %-25s %s\n",
 		"WATCH ID", "OUTCOME", "PATTERN", "REGIONS", "ENDED AT", "WAITED")
 	for i := range gaveUp {
 		w := &gaveUp[i]
@@ -224,7 +224,7 @@ func renderHistory(out io.Writer, matches []watcher.MatchResult, gaveUp []watche
 		if len(regions) > 25 {
 			regions = regions[:22] + "..."
 		}
-		fmt.Fprintf(out, "%-12s %-10s %-20s %-25s %-25s %s\n",
+		_, _ = fmt.Fprintf(out, "%-12s %-10s %-20s %-25s %-25s %s\n",
 			w.WatchID,
 			w.Status,
 			truncate(w.InstanceTypePattern, 20),

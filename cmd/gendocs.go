@@ -41,7 +41,7 @@ var gendocsCmd = &cobra.Command{
 				return fmt.Errorf("write %s: %w", path, err)
 			}
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "wrote %d reference fragments to %s\n", len(frags), gendocsOut)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "wrote %d reference fragments to %s\n", len(frags), gendocsOut)
 		return nil
 	},
 }

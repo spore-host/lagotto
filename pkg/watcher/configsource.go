@@ -81,7 +81,7 @@ func NewConfigReader(loadCfg func(ctx context.Context) (aws.Config, error), stdi
 			if err != nil {
 				return nil, fmt.Errorf("get %s: %w", ref, err)
 			}
-			defer out.Body.Close()
+			defer func() { _ = out.Body.Close() }()
 			return io.ReadAll(out.Body)
 		default:
 			return os.ReadFile(ref)

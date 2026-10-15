@@ -44,6 +44,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   step, including its fixture for an unread flag registered through a
   `PersistentFlags()` alias. Test-only; no change to the CLI.
 
+- **`make lint` is clean and CI now runs it** (#183). The issue counted 8
+  errcheck findings, but golangci-lint's default `max-same-issues=3` was hiding
+  repeats: the real count was 105, almost all unchecked `fmt.Fprint*` writes to
+  a command's output. Those now discard the result explicitly (`_, _ =`, as
+  truffle does), and two deferred `Body.Close()` calls use the
+  `defer func() { _ = x.Close() }()` form the rest of the repo already uses. No
+  output changes. A new CI `Lint` job runs `make lint` with golangci-lint pinned
+  to 2.14.0 and the download checked against a pinned SHA256; `make lint` now
+  shows every finding (`--max-same-issues=0`), also lints the
+  `lambda/capacity-poller` module, and warns when the local golangci-lint
+  version differs from CI's.
+
 ### Fixed
 
 - **`lagotto list` and `lagotto history` no longer drop watches past the first

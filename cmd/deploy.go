@@ -132,21 +132,21 @@ Continue?`,
 			deploy.PollerScheduleName, deploy.PollerFunctionName, deploy.AlertsTopicName,
 			runtimeiam.RoleName, runtimeiam.SchedulerInvokeRoleName,
 			bucket)) {
-			fmt.Fprintln(out, "Aborted.")
+			_, _ = fmt.Fprintln(out, "Aborted.")
 			return nil
 		}
 		fmt.Fprintf(os.Stderr, "Deleting the poller in %s / %s...\n", acctID, region)
 		deleted, terr := d.Teardown(ctx, region, acctID)
 		for _, what := range deleted {
-			fmt.Fprintf(out, "Deleted %s\n", what)
+			_, _ = fmt.Fprintf(out, "Deleted %s\n", what)
 		}
 		if terr != nil {
 			return terr
 		}
 		if len(deleted) == 0 {
-			fmt.Fprintln(out, "Nothing to delete — the poller, topic and schedule are already gone.")
+			_, _ = fmt.Fprintln(out, "Nothing to delete — the poller, topic and schedule are already gone.")
 		}
-		fmt.Fprintf(out, "Artifact bucket %s is retained; delete it manually if you want.\n", bucket)
+		_, _ = fmt.Fprintf(out, "Artifact bucket %s is retained; delete it manually if you want.\n", bucket)
 		printLegacyStackNote(ctx, out, d, deploy.LegacyStackTeardownWarning(deployStackName))
 		return nil
 	}
@@ -156,7 +156,7 @@ Continue?`,
 	}
 
 	if !confirm(fmt.Sprintf("Deploy the lagotto poller (v%s) into account %s / %s?", deployVersion, acctID, region)) {
-		fmt.Fprintln(out, "Aborted.")
+		_, _ = fmt.Fprintln(out, "Aborted.")
 		return nil
 	}
 
@@ -169,7 +169,7 @@ Continue?`,
 		if merr := d.MigrateFromStack(ctx, deployStackName); merr != nil {
 			return merr
 		}
-		fmt.Fprintf(out, "CloudFormation stack %s detached and deleted; the poller, topic and schedule were retained.\n", deployStackName)
+		_, _ = fmt.Fprintf(out, "CloudFormation stack %s detached and deleted; the poller, topic and schedule were retained.\n", deployStackName)
 	}
 
 	// Ensure the CLI-owned DynamoDB tables exist before deploying (#59). The poller
@@ -211,22 +211,22 @@ Continue?`,
 		return err
 	}
 
-	fmt.Fprintf(out, "\nPoller deployed into %s / %s.\n", acctID, region)
+	_, _ = fmt.Fprintf(out, "\nPoller deployed into %s / %s.\n", acctID, region)
 	keys := make([]string, 0, len(res.Outputs))
 	for k := range res.Outputs {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		fmt.Fprintf(out, "  %s: %s\n", k, res.Outputs[k])
+		_, _ = fmt.Fprintf(out, "  %s: %s\n", k, res.Outputs[k])
 	}
 	if len(res.Actions) > 0 {
-		fmt.Fprintln(out)
+		_, _ = fmt.Fprintln(out)
 		for _, a := range res.Actions {
-			fmt.Fprintf(out, "  %s\n", a)
+			_, _ = fmt.Fprintf(out, "  %s\n", a)
 		}
 	}
-	fmt.Fprintln(out, "\nArm a watch with 'lagotto watch …' — the poller schedule activates on the first watch.")
+	_, _ = fmt.Fprintln(out, "\nArm a watch with 'lagotto watch …' — the poller schedule activates on the first watch.")
 
 	// Legacy-stack detection runs LAST, after the deploy has succeeded, so a
 	// DescribeStacks failure can never be what the user sees instead of a real
@@ -249,5 +249,5 @@ func printLegacyStackNote(ctx context.Context, out io.Writer, d *deploy.Deployer
 	if !exists {
 		return
 	}
-	fmt.Fprintf(out, "\n%s\n", note)
+	_, _ = fmt.Fprintf(out, "\n%s\n", note)
 }

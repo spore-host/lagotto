@@ -105,7 +105,7 @@ func checkInstanceRoleAuthorized(ctx context.Context, client runtimeiam.IAMAPI, 
 		return res, nil
 	default:
 		res.Note = fmt.Sprintf("could not read the hosted poller's runtime policy: %v", err)
-		fmt.Fprintf(out, "warning: this watch's spawn_config names iam_role %q, but the hosted poller's policy could not be read, so\n"+
+		_, _ = fmt.Fprintf(out, "warning: this watch's spawn_config names iam_role %q, but the hosted poller's policy could not be read, so\n"+
 			"  whether it can use that role is unknown: %v\n", roleName, err)
 		return res, nil
 	}
@@ -113,7 +113,7 @@ func checkInstanceRoleAuthorized(ctx context.Context, client runtimeiam.IAMAPI, 
 	grants, err := runtimeiam.ParsePolicy(doc)
 	if err != nil {
 		res.Note = fmt.Sprintf("could not parse the hosted poller's runtime policy: %v", err)
-		fmt.Fprintf(out, "warning: could not parse the hosted poller's runtime policy, so iam_role %q was not verified: %v\n", roleName, err)
+		_, _ = fmt.Fprintf(out, "warning: could not parse the hosted poller's runtime policy, so iam_role %q was not verified: %v\n", roleName, err)
 		return res, nil
 	}
 
