@@ -28,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **lagotto now builds against spawn v0.131.0, truffle v0.59.0 and libs
+  v0.51.1** (from spawn v0.111.1, truffle v0.56.0 and libs v0.49.0), in the CLI
+  and in the `lambda/capacity-poller` module. It picks up twenty spawn
+  releases of launcher and AWS-client fixes; lagotto's own code needed no
+  changes.
+
 - **`watcher.Store.ListMatchHistory` now requires a watch ID** (#184). An
   empty ID used to Scan the whole match-history table across every user and
   return up to 100 of their records in arbitrary order. It now returns
