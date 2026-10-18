@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+- **DEPLOYMENT.md: verify with `lagotto doctor`, not `lagotto status`**
+  (spore-host#585). `status` takes a watch ID and shows one watch; `doctor` is
+  the read-only deployment check. The deploy, upgrade and CloudFormation examples
+  no longer pin `--version 0.60.0`/`0.61.0`: `deploy` already defaults to the
+  running binary's version, and the CloudFormation path uses a `VERSION`
+  placeholder. Removed the "AWS Account Reference" section, which named
+  maintainer accounts and wrongly said the poller only reads EC2 metadata, and
+  the monorepo-era `cd lagotto` from the integration-test command.
+- **README: the goal-driven fleet example runs as written** (spore-host#585). It
+  put `# comments` after the line-continuation backslashes, which ends the
+  command at the first one. The comment is now above the command.
+
 ## [0.64.0] - 2026-10-17
 
 ### Security

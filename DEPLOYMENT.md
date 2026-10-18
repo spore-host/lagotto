@@ -32,13 +32,16 @@ and the ARNs derivable without reading any stack outputs.
   above (Lambda, SNS, EventBridge Scheduler, IAM roles, DynamoDB tables, S3).
 - A **released** lagotto version: `deploy` downloads the published
   `capacity-poller_lambda_linux_arm64.zip` release asset (#29) rather than
-  building it. A `dev` build has no published artifact.
+  building it. `--version` defaults to the version of the `lagotto` binary you
+  run, so a released binary deploys its own matching poller. A `dev` build has no
+  published artifact.
 
 ## Deploy
 
 ```bash
-lagotto deploy --version 0.60.0 --region us-east-1
-lagotto setup                     # grant the poller its runtime permissions
+lagotto deploy --region us-east-1
+# Grant the poller its runtime permissions.
+lagotto setup
 ```
 
 `deploy` does, in order:
@@ -58,10 +61,12 @@ happened (`created`, `code updated`, `unchanged`).
 collides, and there is no stack to strand in a failed state — a half-finished
 deploy is fixed by running it again.
 
-**Updating the poller's code is just a `--version` bump:**
+**Updating the poller's code is just a new deploy.** Upgrade the `lagotto` CLI,
+then run `deploy` again (it defaults to the new binary's version), or name a
+release explicitly with `--version X.Y.Z`:
 
 ```bash
-lagotto deploy --version 0.61.0
+lagotto deploy
 ```
 
 That uploads the new zip and issues a single `UpdateFunctionCode`; the topic and
@@ -76,11 +81,18 @@ poller leaves it running.
 ### Verify
 
 ```bash
-lagotto status
+lagotto doctor
 
 aws lambda invoke --function-name lagotto-capacity-poller /tmp/lagotto-out.json
 cat /tmp/lagotto-out.json
 ```
+
+`lagotto doctor` is read-only. It reports drift between the deployed poller and
+what this `lagotto` binary expects: a runtime IAM policy that is missing grants
+(re-run `lagotto setup`), a poller Lambda older than the CLI, missing tables,
+roles, topic or schedule, a schedule that is off while watches are active, and a
+leftover CloudFormation stack. It exits non-zero if any check fails.
+(`lagotto status <watch-id>` shows a single watch, not the deployment.)
 
 ## Runtime permissions: `lagotto setup`
 
@@ -162,10 +174,12 @@ those first:
 lagotto setup --region us-east-1
 
 # 2. Get the published Lambda zip and stage it in a bucket you control.
-gh release download v0.60.0 --repo spore-host/lagotto \
+#    Set VERSION to the lagotto release you want, e.g. the one `lagotto version` prints.
+VERSION=X.Y.Z
+gh release download v$VERSION --repo spore-host/lagotto \
   --pattern 'capacity-poller_lambda_linux_arm64.zip'
 aws s3 cp capacity-poller_lambda_linux_arm64.zip \
-  s3://my-artifact-bucket/lagotto/capacity-poller-v0.60.0.zip
+  s3://my-artifact-bucket/lagotto/capacity-poller-v$VERSION.zip
 
 # 3. Deploy the stack.
 aws cloudformation deploy \
@@ -175,7 +189,7 @@ aws cloudformation deploy \
   --parameter-overrides \
       Environment=production \
       LambdaCodeBucket=my-artifact-bucket \
-      LambdaCodeKey=lagotto/capacity-poller-v0.60.0.zip \
+      LambdaCodeKey=lagotto/capacity-poller-v$VERSION.zip \
   --region us-east-1
 ```
 
@@ -202,7 +216,7 @@ would delete your live poller. `lagotto deploy` warns you whenever it sees such 
 stack. To detach it safely:
 
 ```bash
-lagotto deploy --migrate-from-cloudformation --version 0.60.0
+lagotto deploy --migrate-from-cloudformation
 ```
 
 That runs `UpdateStack` to put `DeletionPolicy: Retain` (and
@@ -216,25 +230,12 @@ only for a stack already in `DELETE_FAILED`.)
 
 ## Running Integration Tests
 
-Integration tests hit real DynamoDB tables:
+Integration tests hit real DynamoDB tables. From the repository root:
 
 ```bash
-cd lagotto
 AWS_PROFILE=spore-host-infra LAGOTTO_INTEGRATION_TEST=1 \
   go test -tags integration -v ./... -run TestIntegration
 ```
 
 Tests clean up after themselves (cancel their test watches). The `g7e.xlarge` watch
 may or may not find capacity — both outcomes are valid.
-
-## AWS Account Reference
-
-From `spawn/CLAUDE.md`:
-
-- **spore-host-infra** (966362334030): All lagotto infrastructure lives here —
-  DynamoDB, SNS, Lambda, EventBridge.
-- **spore-host-dev** (435415984226): EC2 only; not used by lagotto directly.
-
-The Lambda does not assume a cross-account role — it only reads EC2 metadata
-(instance types, spot pricing) via the `ec2:Describe*` APIs in the infra account's
-context.
