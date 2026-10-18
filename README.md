@@ -82,9 +82,10 @@ condition is true — relaunching toward the goal each poll, **including from ze
 if the whole fleet is reclaimed:
 
 ```bash
+# Keep ~4 workers alive until every manifest entry has a prepared output.
 lagotto watch m8g.8xlarge --action spawn --spawn-config prep.yaml \
-  --maintain 4 \                                            # keep ~4 workers alive…
-  --until 's3-empty: s3://bucket/manifest minus s3://bucket/prepared/' \  # …until done
+  --maintain 4 \
+  --until 's3-empty: s3://bucket/manifest minus s3://bucket/prepared/' \
   --regions us-west-2 --spot
 ```
 
