@@ -6,7 +6,7 @@ require (
 	github.com/aws/aws-lambda-go v1.55.1
 	github.com/aws/aws-sdk-go-v2 v1.47.3
 	github.com/aws/aws-sdk-go-v2/config v1.33.9
-	github.com/aws/aws-sdk-go-v2/service/scheduler v1.25.0
+	github.com/aws/aws-sdk-go-v2/service/scheduler v1.25.4
 	github.com/spore-host/lagotto v0.0.0-00010101000000-000000000000
 	github.com/spore-host/truffle v0.59.0
 )
@@ -19,7 +19,7 @@ require (
 	github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.22 // indirect
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.9 // indirect
-	github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue v1.21.5 // indirect
+	github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue v1.21.11 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.20.3 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager v0.4.16 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.5.6 // indirect
@@ -27,31 +27,31 @@ require (
 	github.com/aws/aws-sdk-go-v2/internal/v4a v1.5.6 // indirect
 	github.com/aws/aws-sdk-go-v2/service/account v1.32.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs v1.73.0 // indirect
-	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.69.0 // indirect
-	github.com/aws/aws-sdk-go-v2/service/dynamodbstreams v1.41.0 // indirect
+	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.70.3 // indirect
+	github.com/aws/aws-sdk-go-v2/service/dynamodbstreams v1.45.1 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ebs v1.34.7 // indirect
-	github.com/aws/aws-sdk-go-v2/service/ec2 v1.338.2 // indirect
+	github.com/aws/aws-sdk-go-v2/service/ec2 v1.338.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/efs v1.41.16 // indirect
 	github.com/aws/aws-sdk-go-v2/service/eventbridge v1.55.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/fsx v1.65.10 // indirect
-	github.com/aws/aws-sdk-go-v2/service/iam v1.64.0 // indirect
+	github.com/aws/aws-sdk-go-v2/service/iam v1.64.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/imagebuilder v1.55.6 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.21 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/checksum v1.11.7 // indirect
-	github.com/aws/aws-sdk-go-v2/service/internal/endpoint-discovery v1.13.3 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/endpoint-discovery v1.13.6 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.14.6 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.20.6 // indirect
 	github.com/aws/aws-sdk-go-v2/service/kms v1.52.0 // indirect
-	github.com/aws/aws-sdk-go-v2/service/lambda v1.108.0 // indirect
+	github.com/aws/aws-sdk-go-v2/service/lambda v1.112.1 // indirect
 	github.com/aws/aws-sdk-go-v2/service/pricing v1.49.2 // indirect
 	github.com/aws/aws-sdk-go-v2/service/resourcegroupstaggingapi v1.33.3 // indirect
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.3 // indirect
-	github.com/aws/aws-sdk-go-v2/service/sagemaker v1.278.0 // indirect
+	github.com/aws/aws-sdk-go-v2/service/sagemaker v1.282.3 // indirect
 	github.com/aws/aws-sdk-go-v2/service/servicequotas v1.43.2 // indirect
 	github.com/aws/aws-sdk-go-v2/service/signin v1.10.4 // indirect
-	github.com/aws/aws-sdk-go-v2/service/sns v1.47.1 // indirect
+	github.com/aws/aws-sdk-go-v2/service/sns v1.47.5 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sqs v1.42.27 // indirect
-	github.com/aws/aws-sdk-go-v2/service/ssm v1.78.0 // indirect
+	github.com/aws/aws-sdk-go-v2/service/ssm v1.79.3 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sso v1.38.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.43.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.51.4 // indirect

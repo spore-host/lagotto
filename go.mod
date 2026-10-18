@@ -6,17 +6,17 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.47.3
 	github.com/aws/aws-sdk-go-v2/config v1.33.9
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.9
-	github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue v1.21.5
-	github.com/aws/aws-sdk-go-v2/service/cloudformation v1.81.0
-	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.69.0
-	github.com/aws/aws-sdk-go-v2/service/ec2 v1.338.2
-	github.com/aws/aws-sdk-go-v2/service/iam v1.64.0
-	github.com/aws/aws-sdk-go-v2/service/lambda v1.108.0
+	github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue v1.21.11
+	github.com/aws/aws-sdk-go-v2/service/cloudformation v1.82.1
+	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.70.3
+	github.com/aws/aws-sdk-go-v2/service/ec2 v1.338.4
+	github.com/aws/aws-sdk-go-v2/service/iam v1.64.4
+	github.com/aws/aws-sdk-go-v2/service/lambda v1.112.1
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.3
-	github.com/aws/aws-sdk-go-v2/service/sagemaker v1.278.0
-	github.com/aws/aws-sdk-go-v2/service/scheduler v1.25.0
-	github.com/aws/aws-sdk-go-v2/service/sns v1.47.1
-	github.com/aws/aws-sdk-go-v2/service/ssm v1.78.0
+	github.com/aws/aws-sdk-go-v2/service/sagemaker v1.282.3
+	github.com/aws/aws-sdk-go-v2/service/scheduler v1.25.4
+	github.com/aws/aws-sdk-go-v2/service/sns v1.47.5
+	github.com/aws/aws-sdk-go-v2/service/ssm v1.79.3
 	github.com/aws/aws-sdk-go-v2/service/sts v1.51.4
 	github.com/aws/smithy-go v1.28.5
 	github.com/google/uuid v1.6.0
@@ -40,7 +40,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/internal/v4a v1.5.6 // indirect
 	github.com/aws/aws-sdk-go-v2/service/account v1.32.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs v1.73.0 // indirect
-	github.com/aws/aws-sdk-go-v2/service/dynamodbstreams v1.41.0 // indirect
+	github.com/aws/aws-sdk-go-v2/service/dynamodbstreams v1.45.1 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ebs v1.34.7 // indirect
 	github.com/aws/aws-sdk-go-v2/service/efs v1.41.16 // indirect
 	github.com/aws/aws-sdk-go-v2/service/eventbridge v1.55.0 // indirect
@@ -48,7 +48,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/imagebuilder v1.55.6 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.21 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/checksum v1.11.7 // indirect
-	github.com/aws/aws-sdk-go-v2/service/internal/endpoint-discovery v1.13.3 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/endpoint-discovery v1.13.6 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.14.6 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.20.6 // indirect
 	github.com/aws/aws-sdk-go-v2/service/kms v1.52.0 // indirect
