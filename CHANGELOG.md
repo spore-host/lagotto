@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.64.1] - 2026-10-20
+
 ### Documentation
 - **DEPLOYMENT.md: verify with `lagotto doctor`, not `lagotto status`**
   (spore-host#585). `status` takes a watch ID and shows one watch; `doctor` is
@@ -1279,7 +1281,8 @@ Initial tagged release from the standalone `spore-host/lagotto` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/lagotto/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.64.0...HEAD
+[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.64.1...HEAD
+[0.64.1]: https://github.com/spore-host/lagotto/compare/v0.64.0...v0.64.1
 [0.64.0]: https://github.com/spore-host/lagotto/compare/v0.63.1...v0.64.0
 [0.63.1]: https://github.com/spore-host/lagotto/compare/v0.63.0...v0.63.1
 [0.63.0]: https://github.com/spore-host/lagotto/compare/v0.62.0...v0.63.0
