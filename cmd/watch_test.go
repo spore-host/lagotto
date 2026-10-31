@@ -205,3 +205,19 @@ func TestWarnFleetQuotaFeasibility_CapsRegions(t *testing.T) {
 		t.Errorf("no region: report=%+v calls=%d, want nil/0", rep, l2.calls)
 	}
 }
+
+// TestLoadEC2SpawnConfig_RejectsUnknownKey pins that BOTH creation paths
+// (`watch --spawn-config` and `launch --spawn-config` call loadEC2SpawnConfig)
+// are strict (#202): an unknown key fails before anything is stored.
+func TestLoadEC2SpawnConfig_RejectsUnknownKey(t *testing.T) {
+	read := watcher.ConfigReader(func(_ context.Context, _ string) ([]byte, error) {
+		return []byte("instance_type: g5.xlarge\naz: us-east-1a\n"), nil
+	})
+	out, err := loadEC2SpawnConfig(context.Background(), read, "job.yaml")
+	if err == nil {
+		t.Fatalf("accepted a spawn config with an unknown key; stored %s", out)
+	}
+	if !strings.Contains(err.Error(), `"az"`) {
+		t.Errorf("error does not name the bad key: %v", err)
+	}
+}

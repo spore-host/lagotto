@@ -61,7 +61,7 @@ func init() {
 	f.StringVar(&launchAt, "at", "", "Fire once at this RFC3339 time (e.g. 2026-07-01T08:00:00Z)")
 	f.StringVar(&launchAfter, "after", "", "Fire once after this delay (e.g. 6h, 30m, 2d)")
 	f.StringVar(&launchCron, "cron", "", "Fire on this cron schedule (e.g. '0 9 ? * MON-FRI *')")
-	f.StringVar(&launchSpawnConfig, "spawn-config", "", "spawn LaunchConfig YAML (required): a local path, an s3://bucket/key URI, or '-' for stdin. Referenced user_data_file / iam_policy_file are read now and stored inline.")
+	f.StringVar(&launchSpawnConfig, "spawn-config", "", "lagotto spawn-config YAML (required; not spawn launch --config, see README for its keys — unknown keys are rejected): a local path, an s3://bucket/key URI, or '-' for stdin. Referenced user_data_file / iam_policy_file are read now and stored inline.")
 	f.StringVar(&launchRegion, "region", "", "AWS region to launch in (default: from your AWS config)")
 	f.StringVar(&launchAZ, "az", "", "Availability zone (required to match a Capacity Block's AZ)")
 	// Deliberately NOT MarkDeprecated: that hides the flag from --help and from

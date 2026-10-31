@@ -50,9 +50,9 @@ lagotto cancel <watch-id>          # prompts for confirmation; -y/--yes to skip
 lagotto history
 ```
 
-`my-job.yaml` is the same shape `spawn launch` reads, with lagotto's own
-lifecycle fields layered on top (snake_case, kebab-case, and CamelCase keys all
-work):
+`my-job.yaml` uses lagotto's own spawn-config schema. It is **not** the file
+`spawn launch --config` reads (that takes only a `plugins:` list). snake_case,
+kebab-case and CamelCase keys all work:
 
 ```yaml
 instance_type: g5.xlarge
@@ -73,6 +73,20 @@ tags:                             # extra EC2 tags, alongside spawn's own spawn:
 add a custom bootstrap payload appended after spored installs; `iam_role` /
 `iam_policy_file` grant a pre-built role or a scoped custom policy document
 instead of (or alongside) `iam_policy`'s built-in shorthands.
+
+An unknown key is an error at `watch`/`launch` time, naming the key and the
+nearest accepted one: `az:` (use `--azs`), `s3_read:`, `instance_profile:` or a
+typo is rejected rather than silently ignored. The accepted keys:
+
+<!-- spawn-config-keys:begin -->
+- Core: `name`, `instance_type`, `region`, `ami`, `spot`
+- Lifecycle: `ttl`, `idle_timeout`, `on_complete`, `pre_stop`, `pre_stop_timeout`, `completion_file`
+- Workload: `command`, `user_data`, `user_data_file`
+- IAM: `iam_policy`, `iam_role`, `iam_policy_file`, `iam_policy_document`
+- Storage: `efs_id`, `fsx_id`, `fsx_create`, `fsx_lifecycle`, `fsx_s3_bucket`, `fsx_import_path`, `fsx_export_path`, `fsx_mount_point`, `fsx_storage_capacity`, `volume_size`
+- Capacity: `reservation_id`, `capacity_block`, `spot_max_price`
+- Other: `cost_limit`, `key_name`, `session_timeout`, `tags`
+<!-- spawn-config-keys:end -->
 
 ## Goal-driven fleets
 

@@ -75,7 +75,7 @@ func init() {
 	watchCmd.Flags().StringVar(&watchAction, "action", "notify", "Action on match: notify, spawn, hold")
 	watchCmd.Flags().StringVar(&watchTTL, "ttl", "24h", "How long to keep watching (e.g., 24h, 7d)")
 	watchCmd.Flags().StringSliceVar(&watchNotify, "notify", nil, "Notification channels (e.g., email:user@example.com, webhook:https://...)")
-	watchCmd.Flags().StringVar(&watchSpawnConfig, "spawn-config", "", "spawn LaunchConfig YAML (required for --action spawn): a local path, an s3://bucket/key URI, or '-' for stdin. Any user_data_file / iam_policy_file it references is read now and stored inline, so a hosted poller can launch it with no access to this machine.")
+	watchCmd.Flags().StringVar(&watchSpawnConfig, "spawn-config", "", "lagotto spawn-config YAML (required for --action spawn; not spawn launch --config, see README for its keys — unknown keys are rejected): a local path, an s3://bucket/key URI, or '-' for stdin. Any user_data_file / iam_policy_file it references is read now and stored inline, so a hosted poller can launch it with no access to this machine.")
 	watchCmd.Flags().StringVar(&watchSageMakerConfig, "sagemaker-config", "", "YAML/JSON file with the SageMaker job definition (required for --service sagemaker)")
 	watchCmd.Flags().StringVar(&watchService, "service", "ec2", "Capacity service: ec2, or sagemaker (submits your SageMaker job for ml.* types)")
 	watchCmd.Flags().StringVar(&watchProject, "project", "", "Project label for scoping a local 'poll --daemon --project' in a shared account (default: $LAGOTTO_PROJECT)")
@@ -429,9 +429,12 @@ func printQuotaFeasibility(out io.Writer, w *watcher.Watch, region string, rep *
 // loadEC2SpawnConfig reads an EC2 --spawn-config YAML file, normalizes its keys
 // (so snake_case / kebab-case / CamelCase all map), validates it parses into a
 // SpawnConfigFile, and stores it as that struct's JSON so the spawner reads back
-// exactly the fields it will launch with. This is what fixes the "settings
-// silently dropped" gap (lagotto#19 issue #3): a key the struct doesn't know is
-// surfaced here at watch-creation rather than ignored at launch.
+// exactly the fields it will launch with. Normalization fixed the "settings
+// silently dropped" gap for real keys in another spelling (lagotto#19 issue #3);
+// ParseSpawnConfigYAML also rejects a key that matches no field, naming it and
+// the nearest known key (#202), so a mistyped or unsupported setting fails here
+// at watch-creation rather than being ignored at launch. Stored configs are
+// re-read tolerantly at match time (see watcher.Spawner.Spawn).
 func loadEC2SpawnConfig(ctx context.Context, read watcher.ConfigReader, source string) ([]byte, error) {
 	data, err := read(ctx, source)
 	if err != nil {
