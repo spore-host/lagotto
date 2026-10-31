@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/sts"
@@ -98,6 +99,12 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		_, _ = fmt.Fprintf(out, "Time to give up: %s\n", watcher.FormatWait(d))
 	}
 
+	writeLastMatch(out, w)
+	return nil
+}
+
+// writeLastMatch prints the "Last match" block of the status table.
+func writeLastMatch(out io.Writer, w *watcher.Watch) {
 	if w.LastMatch != nil {
 		m := w.LastMatch
 		_, _ = fmt.Fprintf(out, "\nLast match:\n")
@@ -110,7 +117,13 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		if m.InstanceID != "" {
 			_, _ = fmt.Fprintf(out, "  Instance ID: %s\n", m.InstanceID)
 		}
+		// A fired hold: the reservation is targeted, so its id is what the user
+		// needs to launch into it, or to know what `lagotto cancel` releases (#203).
+		if m.ReservationID != "" {
+			_, _ = fmt.Fprintf(out, "  Reservation: %s (%s)\n", m.ReservationID, m.AvailabilityZone)
+			if w.Status == watcher.StatusMatched {
+				_, _ = fmt.Fprintf(out, "  Release it early with: lagotto cancel %s\n", w.WatchID)
+			}
+		}
 	}
-
-	return nil
 }

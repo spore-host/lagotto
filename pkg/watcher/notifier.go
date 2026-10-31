@@ -52,8 +52,14 @@ func newSafeHTTPClient(timeout time.Duration) *http.Client {
 }
 
 // Notifier dispatches match notifications to configured channels.
+// snsPublisher is the SNS call the notifier makes; an interface so tests can
+// capture what is published (#203). *sns.Client satisfies it.
+type snsPublisher interface {
+	Publish(ctx context.Context, in *sns.PublishInput, optFns ...func(*sns.Options)) (*sns.PublishOutput, error)
+}
+
 type Notifier struct {
-	snsClient  *sns.Client
+	snsClient  snsPublisher
 	httpClient *http.Client
 	topicArn   string
 }
@@ -346,11 +352,6 @@ func (n *Notifier) sendExpiredWebhook(ctx context.Context, url string, w *Watch)
 }
 
 func (n *Notifier) sendEmail(ctx context.Context, email string, w *Watch, m *MatchResult) error {
-	spotLabel := "On-Demand"
-	if m.IsSpot {
-		spotLabel = "Spot"
-	}
-
 	if normalizeService(w.Service) == ServiceSageMaker {
 		// SageMaker: lagotto submitted the user's job and it got capacity.
 		subject := fmt.Sprintf("[lagotto] SageMaker job launched for %s in %s", m.InstanceType, m.Region)
@@ -376,6 +377,22 @@ Action Taken: %s
 		return err
 	}
 
+	subject, body := matchEmailSubjectBody(w, m)
+	_, err := n.snsClient.Publish(ctx, &sns.PublishInput{
+		TopicArn: aws.String(n.topicArn),
+		Subject:  aws.String(subject),
+		Message:  aws.String(body),
+	})
+	return err
+}
+
+// matchEmailSubjectBody is the EC2 match email's text, split out so the copy is
+// tested without SNS (snsClient is a concrete *sns.Client).
+func matchEmailSubjectBody(w *Watch, m *MatchResult) (string, string) {
+	spotLabel := "On-Demand"
+	if m.IsSpot {
+		spotLabel = "Spot"
+	}
 	subject := fmt.Sprintf("[lagotto] %s capacity found in %s", m.InstanceType, m.Region)
 	body := fmt.Sprintf(`Capacity found for your watch %s
 
@@ -401,35 +418,20 @@ Action Taken: %s
 	if m.InstanceID != "" {
 		body += fmt.Sprintf("Instance ID: %s\n", m.InstanceID)
 	}
-
-	_, err := n.snsClient.Publish(ctx, &sns.PublishInput{
-		TopicArn: aws.String(n.topicArn),
-		Subject:  aws.String(subject),
-		Message:  aws.String(body),
-	})
-	return err
+	// A hold is useless to the person notified without the reservation id: it is
+	// a TARGETED reservation, so only a launch that names it can use it (#203).
+	if m.ReservationID != "" {
+		body += fmt.Sprintf(`Capacity Reservation: %s in %s
+  Targeted: only a launch that names it can use it, e.g.
+    spawn launch --region %s --az %s --reservation-id %s
+  It bills at the On-Demand rate until it expires; release it early with: lagotto cancel %s
+`, m.ReservationID, m.AvailabilityZone, m.Region, m.AvailabilityZone, m.ReservationID, w.WatchID)
+	}
+	return subject, body
 }
 
 func (n *Notifier) sendWebhook(ctx context.Context, url string, w *Watch, m *MatchResult) error {
-	payload := map[string]interface{}{
-		"watch_id":          w.WatchID,
-		"instance_type":     m.InstanceType,
-		"region":            m.Region,
-		"availability_zone": m.AvailabilityZone,
-		"price":             m.Price,
-		"is_spot":           m.IsSpot,
-		"matched_at":        m.MatchedAt.Format(time.RFC3339),
-		"action_taken":      m.ActionTaken,
-		"pattern":           w.InstanceTypePattern,
-	}
-	if normalizeService(w.Service) == ServiceSageMaker {
-		payload["service"] = string(ServiceSageMaker)
-	}
-	if m.InstanceID != "" {
-		payload["instance_id"] = m.InstanceID
-	}
-
-	data, err := json.Marshal(payload)
+	data, err := json.Marshal(matchWebhookPayload(w, m))
 	if err != nil {
 		return fmt.Errorf("marshal webhook payload: %w", err)
 	}
@@ -447,17 +449,60 @@ func (n *Notifier) sendWebhook(ctx context.Context, url string, w *Watch, m *Mat
 	return nil
 }
 
-func (n *Notifier) sendSNS(ctx context.Context, topicArn string, w *Watch, m *MatchResult) error {
-	payload := map[string]interface{}{
-		"watch_id":      w.WatchID,
-		"instance_type": m.InstanceType,
-		"region":        m.Region,
-		"price":         m.Price,
-		"is_spot":       m.IsSpot,
-		"matched_at":    m.MatchedAt.Format(time.RFC3339),
-		"action_taken":  m.ActionTaken,
+// addReservation puts a hold's reservation id and AZ on a match payload (#203).
+// The AZ is the matched AZ: Holder.Hold creates the reservation there.
+func addReservation(payload map[string]interface{}, m *MatchResult) {
+	if m.ReservationID == "" {
+		return
 	}
-	data, err := json.Marshal(payload)
+	payload["reservation_id"] = m.ReservationID
+	payload["reservation_availability_zone"] = m.AvailabilityZone
+}
+
+// matchWebhookPayload is the JSON body of a match webhook.
+func matchWebhookPayload(w *Watch, m *MatchResult) map[string]interface{} {
+	payload := map[string]interface{}{
+		"watch_id":          w.WatchID,
+		"instance_type":     m.InstanceType,
+		"region":            m.Region,
+		"availability_zone": m.AvailabilityZone,
+		"price":             m.Price,
+		"is_spot":           m.IsSpot,
+		"matched_at":        m.MatchedAt.Format(time.RFC3339),
+		"action_taken":      m.ActionTaken,
+		"pattern":           w.InstanceTypePattern,
+	}
+	if normalizeService(w.Service) == ServiceSageMaker {
+		payload["service"] = string(ServiceSageMaker)
+	}
+	if m.InstanceID != "" {
+		payload["instance_id"] = m.InstanceID
+	}
+	addReservation(payload, m)
+	return payload
+}
+
+// matchSNSPayload is the JSON message published to a user's own SNS topic.
+func matchSNSPayload(w *Watch, m *MatchResult) map[string]interface{} {
+	payload := map[string]interface{}{
+		"watch_id":          w.WatchID,
+		"instance_type":     m.InstanceType,
+		"region":            m.Region,
+		"availability_zone": m.AvailabilityZone,
+		"price":             m.Price,
+		"is_spot":           m.IsSpot,
+		"matched_at":        m.MatchedAt.Format(time.RFC3339),
+		"action_taken":      m.ActionTaken,
+	}
+	if m.InstanceID != "" {
+		payload["instance_id"] = m.InstanceID
+	}
+	addReservation(payload, m)
+	return payload
+}
+
+func (n *Notifier) sendSNS(ctx context.Context, topicArn string, w *Watch, m *MatchResult) error {
+	data, err := json.Marshal(matchSNSPayload(w, m))
 	if err != nil {
 		return fmt.Errorf("marshal SNS message: %w", err)
 	}

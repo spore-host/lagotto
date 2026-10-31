@@ -1,6 +1,7 @@
 package watcher
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -8,7 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"context"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/sns"
 )
 
 // TestSendWebhook_Payload tests the HTTP dispatch directly (bypasses URL validation
@@ -325,5 +327,90 @@ func TestSendExpiredWebhook_Payload(t *testing.T) {
 	}
 	if received["watch_id"] != "w-hook-exp" {
 		t.Errorf("watch_id = %v, want w-hook-exp", received["watch_id"])
+	}
+}
+
+// capturePublisher records every SNS publish.
+type capturePublisher struct{ msgs []*sns.PublishInput }
+
+func (c *capturePublisher) Publish(_ context.Context, in *sns.PublishInput, _ ...func(*sns.Options)) (*sns.PublishOutput, error) {
+	c.msgs = append(c.msgs, in)
+	return &sns.PublishOutput{}, nil
+}
+
+func heldMatch() (*Watch, *MatchResult) {
+	w := &Watch{WatchID: "w-hold", InstanceTypePattern: "p5.48xlarge", Action: ActionHold}
+	m := &MatchResult{Region: "us-east-2", AvailabilityZone: "us-east-2b", InstanceType: "p5.48xlarge",
+		ActionTaken: "held", ReservationID: "cr-0abc123", MatchedAt: time.Unix(1700000000, 0)}
+	return w, m
+}
+
+// TestMatchNotifications_CarryReservation is #203: every match notification
+// body (the email via the default topic, a user's own SNS topic, and a
+// webhook) names a fired hold's reservation id and its AZ. Email and SNS run
+// through Notify itself, so this gates what is actually published, not a
+// helper that a send path might stop calling.
+func TestMatchNotifications_CarryReservation(t *testing.T) {
+	w, m := heldMatch()
+	w.NotifyChannels = []NotifyChannel{{Type: "email", Target: "a@example.com"}, {Type: "sns", Target: "arn:aws:sns:us-east-2:111122223333:mine"}}
+	pub := &capturePublisher{}
+	n := &Notifier{snsClient: pub, topicArn: "arn:aws:sns:us-east-2:111122223333:lagotto-capacity-alerts"}
+	if err := n.Notify(context.Background(), w, m); err != nil {
+		t.Fatalf("Notify: %v", err)
+	}
+	if len(pub.msgs) != len(w.NotifyChannels) {
+		t.Fatalf("published %d messages, want %d", len(pub.msgs), len(w.NotifyChannels))
+	}
+	for i, in := range pub.msgs {
+		body := aws.ToString(in.Message)
+		for _, want := range []string{"cr-0abc123", "us-east-2b"} {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s notification body lacks %q:\n%s", w.NotifyChannels[i].Type, want, body)
+			}
+		}
+	}
+	// The SNS channel is JSON: the id and AZ are fields, not just text.
+	var snsMsg map[string]interface{}
+	if err := json.Unmarshal([]byte(aws.ToString(pub.msgs[1].Message)), &snsMsg); err != nil {
+		t.Fatalf("sns message is not JSON: %v", err)
+	}
+	if snsMsg["reservation_id"] != "cr-0abc123" || snsMsg["reservation_availability_zone"] != "us-east-2b" {
+		t.Errorf("sns message reservation fields = %v / %v", snsMsg["reservation_id"], snsMsg["reservation_availability_zone"])
+	}
+
+	// Webhook: sendWebhook directly, as TestSendWebhook_Payload does
+	// (httptest servers are http://, which Notify's URL validation rejects).
+	var got map[string]interface{}
+	posts := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		posts++
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		rw.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+	wn := &Notifier{httpClient: ts.Client()}
+	if err := wn.sendWebhook(context.Background(), ts.URL, w, m); err != nil {
+		t.Fatalf("sendWebhook: %v", err)
+	}
+	if posts != 1 {
+		t.Fatalf("webhook posted %d times, want 1", posts)
+	}
+	if got["reservation_id"] != "cr-0abc123" || got["reservation_availability_zone"] != "us-east-2b" {
+		t.Errorf("webhook reservation fields = %v / %v", got["reservation_id"], got["reservation_availability_zone"])
+	}
+}
+
+// TestMatchNotifications_NoReservationWithoutHold: a match that held nothing
+// carries no reservation fields, so consumers can key on their presence.
+func TestMatchNotifications_NoReservationWithoutHold(t *testing.T) {
+	w, m := heldMatch()
+	m.ReservationID, m.ActionTaken = "", "notified"
+	for name, p := range map[string]map[string]interface{}{"webhook": matchWebhookPayload(w, m), "sns": matchSNSPayload(w, m)} {
+		if _, ok := p["reservation_id"]; ok {
+			t.Errorf("%s payload has reservation_id with no hold", name)
+		}
+	}
+	if _, body := matchEmailSubjectBody(w, m); strings.Contains(body, "Capacity Reservation") {
+		t.Errorf("email mentions a reservation with no hold:\n%s", body)
 	}
 }

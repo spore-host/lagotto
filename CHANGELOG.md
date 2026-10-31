@@ -7,7 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The `status` table and every match notification show a fired hold's
+  capacity reservation** (#203). `lagotto status` prints `Reservation: cr-… (AZ)`
+  under "Last match" (it was only in `-o json`). The email body names the
+  reservation, its AZ and how to launch into it. SNS and webhook payloads gain
+  `reservation_id` and `reservation_availability_zone`, and the SNS payload
+  also gains `availability_zone`. The hosted poller sends these too once its
+  Lambda is rebuilt from this release.
+
 ### Changed
+
 - **`--spawn-config` rejects unknown keys** (#202). `lagotto watch` and
   `lagotto launch` used to accept a key they didn't know and then ignore it, so
   `az:`, `s3_read:`, `completion_delay:` or a typo like `idle_timout:` looked
@@ -18,7 +29,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accepted. Watches already stored are not affected: the poller re-reads a
   stored config tolerantly, so a watch created before this change still fires.
 
+- **Go API: `watcher.Holder.Release` returns `(ReleaseOutcome, error)`**
+  (#203). It used to return only an error. The outcome reports whether the call
+  released the reservation or found it already ended. No other spore.host
+  module calls it.
+
+### Fixed
+
+- **`lagotto cancel` can release a fired `--action hold` reservation early**
+  (#203). A hold that fired leaves the watch `matched`, and `cancel` refused
+  any watch that wasn't active. That left the targeted reservation billing at
+  the On-Demand rate until its 30-minute window ended, unless you cancelled it
+  by hand with the EC2 CLI. `cancel` now releases it; the watch stays
+  `matched`. Releasing a reservation that already expired or was already
+  released reports that and succeeds, so running it twice is safe. It needs
+  `ec2:CancelCapacityReservation` on your own credentials; without it, cancel
+  names the permission and when the reservation will expire on its own.
+
 ### Documentation
+
 - **README: `--spawn-config` is lagotto's own schema, not `spawn launch`'s**
   (#202). The README said the file was "the same shape `spawn launch` reads";
   `spawn launch --config` accepts only a `plugins:` list. The README now lists
