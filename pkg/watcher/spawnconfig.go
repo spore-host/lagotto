@@ -334,7 +334,9 @@ func (p *flexSpotPrice) UnmarshalJSON(data []byte) error {
 // SpawnConfigFile, tolerating snake_case, kebab-case, and CamelCase keys
 // (instance_type / instance-type / InstanceType all work). It does this by
 // normalizing every top-level key to a lowercase, separator-free form that
-// matches the struct's json tags, then JSON-unmarshaling.
+// matches the struct's json tags, then JSON-unmarshaling. A key that matches no
+// field after normalization is an error naming the key and the nearest known
+// one (#202); SpawnConfigKeys lists the accepted keys.
 func ParseSpawnConfigYAML(data []byte) (*SpawnConfigFile, error) {
 	var raw map[string]interface{}
 	if err := yaml.Unmarshal(data, &raw); err != nil {
@@ -342,8 +344,25 @@ func ParseSpawnConfigYAML(data []byte) (*SpawnConfigFile, error) {
 	}
 
 	normalized := make(map[string]interface{}, len(raw))
+	var unknown []string
 	for k, v := range raw {
-		normalized[normalizeKey(k)] = v
+		nk := normalizeKey(k)
+		if _, ok := knownSpawnConfigKeys[nk]; !ok {
+			unknown = append(unknown, k)
+			continue
+		}
+		normalized[nk] = v
+	}
+	// Reject keys the struct doesn't know (#202). Before this, `az:`,
+	// `s3_read:` or `completion_delay:` decoded cleanly and then did nothing, so a
+	// user believed they had set a placement- or cost-relevant option and the
+	// launch went ahead without it. The check runs AFTER normalization so every
+	// spelling of a real key (instance_type / instance-type / InstanceType) is
+	// still accepted. This is the creation-time path only (`watch` and `launch`
+	// read the user's YAML here); a stored watch is re-read with plain
+	// json.Unmarshal, which stays tolerant — see Spawner.Spawn.
+	if len(unknown) > 0 {
+		return nil, unknownSpawnConfigKeysError(unknown)
 	}
 
 	jsonBytes, err := json.Marshal(normalized)
@@ -353,6 +372,7 @@ func ParseSpawnConfigYAML(data []byte) (*SpawnConfigFile, error) {
 
 	var cfg SpawnConfigFile
 	dec := json.NewDecoder(bytes.NewReader(jsonBytes))
+	dec.DisallowUnknownFields()
 	if err := dec.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("decode config: %w", err)
 	}

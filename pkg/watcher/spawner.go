@@ -184,6 +184,14 @@ func (s *Spawner) Spawn(ctx context.Context, w *Watch, m *MatchResult) error {
 		return fmt.Errorf("watch %s has no launch config", w.WatchID)
 	}
 
+	// Deliberately tolerant of unknown keys (plain json.Unmarshal, no
+	// DisallowUnknownFields). Unknown keys are rejected when the watch is
+	// CREATED (ParseSpawnConfigYAML, #202); this is the match-time re-read of a
+	// config that is already in DynamoDB, possibly written by an older or newer
+	// CLI whose struct had a field this one lacks. Failing here would kill an
+	// already-accepted watch at the moment capacity appears — the worst time to
+	// discover it, with nobody watching. TestSpawn_StoredConfigUnknownKeyTolerated
+	// pins this.
 	var file SpawnConfigFile
 	if err := json.Unmarshal(w.LaunchConfigJSON, &file); err != nil {
 		return fmt.Errorf("unmarshal spawn config: %w", err)
@@ -402,6 +410,8 @@ func (s *Spawner) LaunchScheduled(ctx context.Context, sl *ScheduledLaunch) (str
 	if len(sl.LaunchConfigJSON) == 0 {
 		return "", fmt.Errorf("scheduled launch %s has no launch config", sl.ScheduleID)
 	}
+	// Tolerant of unknown keys for the same reason as Spawn (#202): strictness
+	// belongs at creation, not at fire time.
 	var file SpawnConfigFile
 	if err := json.Unmarshal(sl.LaunchConfigJSON, &file); err != nil {
 		return "", fmt.Errorf("unmarshal spawn config: %w", err)

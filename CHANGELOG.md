@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **`--spawn-config` rejects unknown keys** (#202). `lagotto watch` and
+  `lagotto launch` used to accept a key they didn't know and then ignore it, so
+  `az:`, `s3_read:`, `completion_delay:` or a typo like `idle_timout:` looked
+  like it worked and the instance launched without it. Such a key is now an
+  error at watch/launch creation that names the key and the nearest accepted one
+  (or, for `az:`/`s3_read:`/`instance_profile:`, where that setting actually
+  lives). snake_case, kebab-case and CamelCase spellings of real keys are still
+  accepted. Watches already stored are not affected: the poller re-reads a
+  stored config tolerantly, so a watch created before this change still fires.
+
+### Documentation
+- **README: `--spawn-config` is lagotto's own schema, not `spawn launch`'s**
+  (#202). The README said the file was "the same shape `spawn launch` reads";
+  `spawn launch --config` accepts only a `plugins:` list. The README now lists
+  every accepted key, and a test keeps that list equal to the parser's fields.
+  The `--spawn-config` flag help says the same.
+
 ## [0.64.1] - 2026-10-20
 
 ### Documentation
