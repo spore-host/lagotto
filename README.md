@@ -46,7 +46,7 @@ lagotto watch "g6.8xlarge,g6.4xlarge,g6.2xlarge,g6.xlarge" --action spawn --spaw
 lagotto list
 lagotto status <watch-id>
 lagotto extend <watch-id> --ttl 48h
-lagotto cancel <watch-id>          # prompts for confirmation; -y/--yes to skip
+lagotto cancel <watch-id>          # also releases a fired hold's reservation; -y/--yes skips the prompt
 lagotto history
 ```
 
@@ -229,6 +229,16 @@ The three actions differ in what they *do* when a match appears:
   retry indefinitely for a type that `--action spawn` (`RunInstances`) would
   launch immediately. Use `spawn` to test launchability; use `hold` only when you
   specifically want reserved capacity.
+
+  Once a hold fires, `lagotto status <watch-id>` and every notification (email,
+  SNS and webhook `reservation_id` / `reservation_availability_zone`) name the
+  reservation and its AZ. Because it is *targeted*, only a launch that names it
+  uses it, e.g. `spawn launch --region <r> --az <az> --reservation-id <cr-…>`.
+  If you won't use it, `lagotto cancel <watch-id>` releases it early so it stops
+  billing. Releasing one that already expired or was already released is not an
+  error. Your AWS credentials need `ec2:CancelCapacityReservation` for that;
+  without it, cancel says so and the reservation still expires at the end of its
+  window.
 
 ## Deployment
 
