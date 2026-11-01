@@ -80,7 +80,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("resolve AWS account ID (every expected ARN is derived from it): %w", err)
 	}
 	if cfg.Region == "" {
-		return fmt.Errorf("no AWS region set; pass --region or configure one (the expected ARNs are region-scoped)")
+		return fmt.Errorf("no AWS region set; pass --region or configure one (the poller resources checked are per-region)")
 	}
 
 	store := watcher.NewStore(cfg, watchesTable, historyTable)

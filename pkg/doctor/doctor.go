@@ -475,6 +475,25 @@ func evalRuntimePolicy(st State) (Check, *runtimeiam.PolicyDiff) {
 				"these only enrich quota-cap reports with real vCPU numbers; the lookup fails open, so watches are unaffected")
 		}
 		c.Fix = []string{"lagotto setup"}
+		if hasRegionalGrant(diff.Missing) {
+			c.Detail = append(c.Detail,
+				"the role is IAM-global and shared by every region's poller; a 'lagotto setup' older than v0.65.1 in ANOTHER region scopes this policy to that region alone (lagotto#219)",
+				"one 'lagotto setup' with this lagotto, in any region, repairs every region")
+		}
+	}
+	if len(diff.RegionOnly) > 0 {
+		// Correct here, broken for a poller in any other region: nothing in THIS
+		// region is degraded, so WARN, never FAIL on its own (#219).
+		if c.Status == "" {
+			c.Status = StatusWarn
+			c.Summary = fmt.Sprintf("the deployed %s covers this region only: %d grant(s) are scoped to %s",
+				runtimeiam.PolicyName, len(diff.RegionOnly), st.Region)
+			c.Fix = []string{"lagotto setup   # in any one region; it rewrites the shared policy for all of them"}
+		}
+		c.Detail = append(c.Detail,
+			"the role is IAM-global and shared by every region's poller; a poller in any OTHER region of this account lacks these (lagotto#219)",
+			"written by a 'lagotto setup' older than v0.65.1",
+			"this region only: "+strings.Join(runtimeiam.DistinctActions(diff.RegionOnly), ", "))
 	}
 	if len(diff.Extra) > 0 {
 		if c.Status == "" {
@@ -495,6 +514,17 @@ func evalRuntimePolicy(st State) (Check, *runtimeiam.PolicyDiff) {
 		}
 	}
 	return c, diff
+}
+
+// hasRegionalGrant reports whether any grant names one of lagotto's any-region
+// resources (arn:aws:<svc>:*:…) — i.e. the drift is the #219 shape.
+func hasRegionalGrant(grants []runtimeiam.Grant) bool {
+	for _, g := range grants {
+		if parts := strings.SplitN(g.Resource, ":", 6); len(parts) == 6 && parts[0] == "arn" && parts[3] == "*" {
+			return true
+		}
+	}
+	return false
 }
 
 // evalPollerVersion compares the deployed poller artifact's version with this
