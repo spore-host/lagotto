@@ -89,7 +89,9 @@ func TestSageMakerWatch_SubmitsAndLaunches(t *testing.T) {
 }
 
 // TestSageMakerWatch_NotifyOnlyDoesNotSubmit verifies a notify-only SageMaker
-// watch doesn't submit a job (nothing to launch) and just stays active.
+// watch (only possible for one stored before #195) doesn't submit a job and
+// produces no match. The poller retires it with one notice instead of leaving
+// it active; TestPollAll_StoredSageMakerNotifyNotifiesOnce pins that.
 func TestSageMakerWatch_NotifyOnlyDoesNotSubmit(t *testing.T) {
 	env := testutil.SubstrateServer(t)
 	env.CreateWatchesTable(t, testWatchesTable)

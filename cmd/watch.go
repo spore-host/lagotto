@@ -54,7 +54,10 @@ prints a warning (a likely typo) but keeps watching in case the type appears.
 
 With --service sagemaker, lagotto submits your SageMaker job (--sagemaker-config)
 directly and retries it on CapacityError until SageMaker provisions it. SageMaker
-has its own AWS-managed compute pool, so the attempt targets SageMaker itself.`,
+has its own AWS-managed compute pool, so the attempt targets SageMaker itself.
+It needs --action spawn: SageMaker has no capacity signal short of submitting the
+job, so there is nothing for --action notify to fire on. Add --notify to be told
+when the job is provisioned.`,
 	Args: cobra.ExactArgs(1),
 	// A refused watch is a finding, not a usage error (same reasoning as
 	// doctor's SilenceUsage). The #170 instance-role refusal is a multi-line
@@ -113,10 +116,8 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid action %q: must be notify, spawn, or hold", watchAction)
 	}
 
-	// hold creates an EC2 On-Demand Capacity Reservation and has no SageMaker
-	// equivalent; reject it for SageMaker watches.
-	if service == watcher.ServiceSageMaker && action == watcher.ActionHold {
-		return fmt.Errorf("--action hold is not supported for --service sagemaker (no capacity-reservation equivalent)")
+	if err := validateServiceFlags(service, action, cmd.Flags().Changed("action"), watchSageMakerConfig); err != nil {
+		return err
 	}
 
 	// Load spawn config if action is spawn (EC2 watches).
@@ -135,13 +136,10 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	}
 
 	// Load the SageMaker job definition. lagotto submits this job on each attempt
-	// and retries on CapacityError until SageMaker provisions it. Required unless
-	// the user only wants to be notified.
+	// and retries on CapacityError until SageMaker provisions it. Always required:
+	// submitting the job is the only thing a SageMaker watch can do (#195).
 	var sageMakerJobJSON []byte
-	if service == watcher.ServiceSageMaker && action != watcher.ActionNotify {
-		if watchSageMakerConfig == "" {
-			return fmt.Errorf("--sagemaker-config is required for --service sagemaker (the job lagotto submits); use --action notify to only be told")
-		}
+	if service == watcher.ServiceSageMaker {
 		sageMakerJobJSON, err = loadSageMakerConfig(watchSageMakerConfig)
 		if err != nil {
 			return fmt.Errorf("load sagemaker config: %w", err)
@@ -468,6 +466,26 @@ func loadEC2SpawnConfig(ctx context.Context, read watcher.ConfigReader, source s
 		return nil, fmt.Errorf("marshal spawn config: %w", err)
 	}
 	return jsonBytes, nil
+}
+
+// validateServiceFlags is the service/action part of `watch`'s validation,
+// pure so it can be tested without reaching runWatch's AWS calls. SageMaker
+// supports only --action spawn (submit the job): hold has no SageMaker
+// equivalent, and notify has no capacity signal to fire on (#195). notify is
+// the default --action, so the refusal says so when the user didn't pick it.
+// The job definition is always required for SageMaker; the old error here
+// recommended --action notify, the one mode that never tells anyone.
+func validateServiceFlags(service watcher.Service, action watcher.ActionMode, actionSet bool, sageMakerConfig string) error {
+	if err := watcher.ValidateServiceAction(service, action); err != nil {
+		if action == watcher.ActionNotify && !actionSet {
+			return fmt.Errorf("%w (notify is the default --action)", err)
+		}
+		return err
+	}
+	if service == watcher.ServiceSageMaker && sageMakerConfig == "" {
+		return fmt.Errorf("--sagemaker-config is required for --service sagemaker: it is the job lagotto submits and retries until SageMaker provisions it (add --notify to be told when it does)")
+	}
+	return nil
 }
 
 // loadSageMakerConfig reads a SageMaker job YAML file and converts it to JSON

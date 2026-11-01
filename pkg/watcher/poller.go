@@ -58,6 +58,9 @@ type Poller struct {
 	// seam, same reason (ValidateWebhookURL refuses loopback, so an httptest server
 	// can't stand in for a real notify channel).
 	notifyExpired func(ctx context.Context, w *Watch) error
+	// notifyUnsupported overrides where a #195 retirement notice goes (a stored
+	// watch whose service/action can never fire) — same test seam pattern.
+	notifyUnsupported func(ctx context.Context, w *Watch, reason string) error
 	// quotas, when non-nil, enriches a quota-cap report with the account's actual
 	// vCPU limit/usage numbers (#153). OPTIONAL and nil-safe by design: the cap
 	// itself is detected from the RunInstances error, so a poller with no
@@ -335,9 +338,19 @@ func (p *Poller) pollSageMakerWatch(ctx context.Context, w *Watch, summary *Poll
 		MatchedAt:    now,
 	}
 
-	// notify-only SageMaker watches don't submit a job — there's nothing to do
-	// here beyond marking polled (a real capacity signal would require a launch).
-	if w.Action == ActionNotify || p.sagemaker == nil {
+	// A notify-only SageMaker watch can never fire: SageMaker has no capacity
+	// signal short of submitting a job (#14), and notify doesn't submit one.
+	// `watch` refuses the combination now (#195), but one stored before that
+	// used to be marked polled here every cycle and sit silently until its TTL.
+	// Retire it instead, and tell the user once why and what works. Once is
+	// structural, as for expiry: only ACTIVE watches are loaded, and this
+	// transition makes it failed.
+	if w.Action == ActionNotify {
+		p.retireUnsupported(ctx, w, sageMakerNotifyUnsupported, summary)
+		return
+	}
+	if p.sagemaker == nil {
+		// No SageMaker launcher wired: nothing this poller can do this cycle.
 		_ = p.store.UpdateLastPolled(ctx, w.WatchID)
 		summary.Retrying++
 		return
@@ -356,6 +369,29 @@ func (p *Poller) pollSageMakerWatch(ctx context.Context, w *Watch, summary *Poll
 	}
 
 	p.recordOutcome(ctx, w, m, outcome.Kind, summary)
+}
+
+// retireUnsupported stops a stored watch whose service/action combination can
+// never work (#195): it marks the watch failed, so it leaves the active set and
+// is never polled again, and sends one notice saying why. It never submits or
+// launches anything. Best-effort like the expiry notice: a notify failure is
+// logged, not retried.
+func (p *Poller) retireUnsupported(ctx context.Context, w *Watch, reason string, summary *PollSummary) {
+	fmt.Fprintf(os.Stderr, "Warning: watch %s can never fire, retiring it as failed: %s\n", w.WatchID, reason)
+	if err := p.store.UpdateWatchStatus(ctx, w.WatchID, StatusFailed); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to retire watch %s: %v\n", w.WatchID, err)
+		// Still active in the store: don't notify, or the next cycle would
+		// notify again. It is retried next cycle.
+		return
+	}
+	w.Status = StatusFailed
+	w.UpdatedAt = time.Now().UTC()
+	summary.Failed++
+	if notify := p.unsupportedNotifier(); notify != nil {
+		if err := notify(ctx, w, reason); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to notify retirement of watch %s: %v\n", w.WatchID, err)
+		}
+	}
 }
 
 // pollFleetWatch reconciles a goal-driven fleet watch (#70): evaluate the
@@ -613,6 +649,18 @@ func (p *Poller) quotaCapNotifier() func(ctx context.Context, w *Watch, running 
 	}
 	if p.notifier != nil {
 		return p.notifier.NotifyQuotaCap
+	}
+	return nil
+}
+
+// unsupportedNotifier resolves where a #195 retirement notice goes: the test
+// seam if set, else the wired Notifier, else nowhere.
+func (p *Poller) unsupportedNotifier() func(ctx context.Context, w *Watch, reason string) error {
+	if p.notifyUnsupported != nil {
+		return p.notifyUnsupported
+	}
+	if p.notifier != nil {
+		return p.notifier.NotifyUnsupported
 	}
 	return nil
 }
