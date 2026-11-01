@@ -233,7 +233,9 @@ The three actions differ in what they *do* when a match appears:
   Once a hold fires, `lagotto status <watch-id>` and every notification (email,
   SNS and webhook `reservation_id` / `reservation_availability_zone`) name the
   reservation and its AZ. Because it is *targeted*, only a launch that names it
-  uses it, e.g. `spawn launch --region <r> --az <az> --reservation-id <cr-…>`.
+  uses it, e.g. `spawn launch <watch-id> --region <region> --az <az> --instance-type <instance-type> --reservation-id <cr-…>`
+  (spawn needs a name and doesn't take the type from the reservation; the
+  email and `lagotto status` print this command filled in).
   If you won't use it, `lagotto cancel <watch-id>` releases it early so it stops
   billing. Releasing one that already expired or was already released is not an
   error. Your AWS credentials need `ec2:CancelCapacityReservation` for that;
