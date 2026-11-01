@@ -56,11 +56,16 @@ re-deploy the others. `lagotto doctor` reports the problem in each region
 deletes or rewrites the shared roles or their policies, so tearing down one region
 cannot cut off a poller in another.
 
-This does **not** yet apply to the runtime permissions policy that `lagotto setup`
-writes onto `lagotto-capacity-poller-role`. That policy is still scoped to the
-region `setup` runs in, so running `setup` in a second region revokes the first
-region's grants (lagotto#219). Until that is fixed, run `setup` in one region
-only.
+The runtime permissions policy that `lagotto setup` writes onto
+`lagotto-capacity-poller-role` works the same way since v0.65.1: it names
+lagotto's tables, topic and schedules in every region (lagotto#219). See the
+multi-region bullet under
+[Runtime permissions: `lagotto setup`](#runtime-permissions-lagotto-setup).
+
+**To repair an account that runs pollers in several regions, after upgrading to
+v0.65.1: run one `lagotto deploy` and one `lagotto setup`, in any one region.**
+Together they rewrite both shared policies for every region. You do not need to
+repeat them in the other regions.
 
 ## Prerequisites
 

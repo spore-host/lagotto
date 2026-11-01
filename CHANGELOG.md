@@ -23,9 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   account, run `lagotto deploy` with v0.65.1 in any one region**: it rewrites the
   shared policy for all regions. Re-deploying the others is not needed.
   `lagotto deploy --teardown` still never touches the shared IAM roles, so
-  tearing down one region cannot cut off another. The runtime policy that `lagotto setup` writes
-  onto the shared execution role is still per-region: run `setup` in one region
-  only until #219 is fixed.
+  tearing down one region cannot cut off another. The runtime policy that
+  `lagotto setup` writes has the same fix (#219, below), so after upgrading,
+  one `deploy` plus one `setup` in any region repairs every region.
 - **`lagotto doctor` catches it** (#218). The new `invoke-policy` check evaluates
   the invoke role's policy locally against this region's poller and FAILs when
   Scheduler is not allowed to invoke it. It WARNs when the policy covers this
