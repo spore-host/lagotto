@@ -122,6 +122,7 @@ func writeLastMatch(out io.Writer, w *watcher.Watch) {
 		if m.ReservationID != "" {
 			_, _ = fmt.Fprintf(out, "  Reservation: %s (%s)\n", m.ReservationID, m.AvailabilityZone)
 			if w.Status == watcher.StatusMatched {
+				_, _ = fmt.Fprintf(out, "  Launch into it:  %s\n", watcher.HoldLaunchCommandFor(w, m))
 				_, _ = fmt.Fprintf(out, "  Release it early with: lagotto cancel %s\n", w.WatchID)
 			}
 		}

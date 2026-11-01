@@ -61,6 +61,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   notify-only SageMaker watch already stored is retired as `failed` on its next
   poll, with one notification saying why; nothing is submitted. The hosted
   poller does this once its Lambda is rebuilt from this release.
+- **The hold launch command in emails and the README now launches as
+  written** (#208). It was `spawn launch --region … --az … --reservation-id …`,
+  which spawn rejects: it needs a spore name and doesn't take the instance type
+  from the reservation. The command is now `spawn launch <watch-id> --region …
+  --az … --instance-type … --reservation-id …`. The email, the README and a new
+  `Launch into it:` line in `lagotto status` (shown while the hold is live) all
+  print it from one builder.
 
 - **`lagotto cancel` can release a fired `--action hold` reservation early**
   (#203). A hold that fired leaves the watch `matched`, and `cancel` refused

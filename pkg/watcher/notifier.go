@@ -423,9 +423,9 @@ Action Taken: %s
 	if m.ReservationID != "" {
 		body += fmt.Sprintf(`Capacity Reservation: %s in %s
   Targeted: only a launch that names it can use it, e.g.
-    spawn launch --region %s --az %s --reservation-id %s
+    %s
   It bills at the On-Demand rate until it expires; release it early with: lagotto cancel %s
-`, m.ReservationID, m.AvailabilityZone, m.Region, m.AvailabilityZone, m.ReservationID, w.WatchID)
+`, m.ReservationID, m.AvailabilityZone, HoldLaunchCommandFor(w, m), w.WatchID)
 	}
 	return subject, body
 }
