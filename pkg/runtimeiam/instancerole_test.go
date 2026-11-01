@@ -15,7 +15,7 @@ const (
 
 func irPolicy(t *testing.T, roles []string) string {
 	t.Helper()
-	doc, err := PolicyDocument(irRegion, irAccount, roles)
+	doc, err := PolicyDocument(irAccount, roles)
 	if err != nil {
 		t.Fatalf("PolicyDocument: %v", err)
 	}

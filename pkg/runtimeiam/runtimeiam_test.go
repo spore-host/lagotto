@@ -12,7 +12,7 @@ import (
 )
 
 func TestPolicyDocument_ValidAndScoped(t *testing.T) {
-	doc, err := PolicyDocument("us-west-2", "123456789012", nil)
+	doc, err := PolicyDocument("123456789012", nil)
 	if err != nil {
 		t.Fatalf("PolicyDocument: %v", err)
 	}
@@ -68,9 +68,10 @@ func TestPolicyDocument_ValidAndScoped(t *testing.T) {
 		}
 	}
 
-	// Region + account scoping shows up in the ARNs.
-	if !strings.Contains(doc, "us-west-2") {
-		t.Error("policy doesn't reference the region in any ARN")
+	// Account scoping shows up in the ARNs; the regional ones carry a wildcard
+	// region, never the region of whoever ran setup (#219).
+	if !strings.Contains(doc, "arn:aws:dynamodb:*:123456789012:table/lagotto-watches") {
+		t.Error("the DynamoDB grants are not any-region, account-scoped ARNs")
 	}
 	if !strings.Contains(doc, "123456789012") {
 		t.Error("policy doesn't reference the account ID in any ARN")
@@ -277,7 +278,7 @@ func TestRoleARNs(t *testing.T) {
 	}
 	// The policy document already grants PassRole on the scheduler-invoke role by
 	// the same ARN; keep them in lockstep.
-	doc, err := PolicyDocument("us-east-1", "123456789012", nil)
+	doc, err := PolicyDocument("123456789012", nil)
 	if err != nil {
 		t.Fatalf("PolicyDocument: %v", err)
 	}
