@@ -32,6 +32,41 @@ func parseTTL(s string) (time.Duration, error) {
 	return ParseDuration(s)
 }
 
+// storedLaunchTTL turns the ttl string of a config that is already stored (a
+// watch or scheduled launch in DynamoDB) into the TTL handed to spawn's
+// launcher at match/fire time, and returns a warning when it had to be lenient.
+//
+// The TTL string is not used by lagotto past creation: it goes to spawn's
+// launcher, which parses it with spawn's own parser and refuses to launch when
+// that fails. That parser knows Go durations plus d, but not lagotto's w, so a
+// stored "1w" would fail every launch. A value only lagotto understands is
+// therefore rewritten in Go's canonical form ("168h0m0s"), which every spawn
+// and spored version reads the same way.
+//
+// Strictness belongs at creation (ValidateAndDefaultTTL, #201), not here: a
+// value the old, truncating parser accepted ("5abcd" as 5d) may already be
+// stored, and failing it now would kill an accepted watch at the moment
+// capacity appears, with nobody watching. Such a value launches with the
+// duration it was accepted as when the watch was created, plus a warning. An
+// empty ttl gets DefaultInstanceTTL (#38).
+func storedLaunchTTL(s string) (ttl, warning string) {
+	if strings.TrimSpace(s) == "" {
+		return DefaultInstanceTTL, ""
+	}
+	if _, err := time.ParseDuration(s); err == nil {
+		return s, ""
+	}
+	if d, err := ParseDuration(s); err == nil {
+		return d.String(), ""
+	}
+	if d, err := parseDurationLegacy(s); err == nil && d > 0 {
+		return d.String(), fmt.Sprintf("stored ttl %q is not a valid duration (#201); launching with %s, the value it was accepted as when it was created", s, d)
+	}
+	// Never valid, even under the old parser: pass it through and let spawn's
+	// launcher refuse it with its own error rather than guess a lifetime.
+	return s, ""
+}
+
 // ValidateAndDefaultTTL ensures the config carries a usable instance TTL (#38).
 // An empty TTL is defaulted to DefaultInstanceTTL (a watch already has its own
 // stopping clock, so matching it is sensible, not a user error). A non-empty TTL

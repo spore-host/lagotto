@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
+	"os"
 	"sync"
 	"time"
 
@@ -204,8 +204,13 @@ func (s *Spawner) Spawn(ctx context.Context, w *Watch, m *MatchResult) error {
 	// empty TTL, and an instance with no death clock runs unbounded. This is the
 	// single chokepoint every launch passes through, so enforcing here makes "no
 	// TTL reaches launcher.Provision" a hard invariant regardless of config origin.
-	if strings.TrimSpace(cfg.TTL) == "" {
-		cfg.TTL = DefaultInstanceTTL
+	// storedLaunchTTL also re-reads a ttl stored before ParseDuration became
+	// strict (#201) tolerantly, and rewrites lagotto-only forms ("1w") into
+	// one spawn's launcher accepts.
+	var ttlWarning string
+	cfg.TTL, ttlWarning = storedLaunchTTL(cfg.TTL)
+	if ttlWarning != "" {
+		fmt.Fprintf(os.Stderr, "Warning: watch %s: %s\n", w.WatchID, ttlWarning)
 	}
 
 	// Override region and pin the matched instance type (the watch pattern may
@@ -417,8 +422,10 @@ func (s *Spawner) LaunchScheduled(ctx context.Context, sl *ScheduledLaunch) (str
 		return "", fmt.Errorf("unmarshal spawn config: %w", err)
 	}
 	cfg := file.ToLaunchConfig()
-	if strings.TrimSpace(cfg.TTL) == "" {
-		cfg.TTL = DefaultInstanceTTL // #38 hard floor
+	var ttlWarning string
+	cfg.TTL, ttlWarning = storedLaunchTTL(cfg.TTL) // #38 hard floor, #201 tolerant re-read
+	if ttlWarning != "" {
+		fmt.Fprintf(os.Stderr, "Warning: scheduled launch %s: %s\n", sl.ScheduleID, ttlWarning)
 	}
 	if sl.Region != "" {
 		cfg.Region = sl.Region

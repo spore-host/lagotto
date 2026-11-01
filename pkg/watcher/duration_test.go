@@ -1,36 +1,71 @@
 package watcher
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
 
+// TestParseDuration is the #201 table: every accepted form parses to exactly
+// the duration it spells, and anything that does not match the whole grammar
+// is an error that names the input. Before #201, fmt.Sscanf("%d") stopped at
+// the first non-digit without an error, so the "truncated" rows below parsed
+// to a shorter duration instead of failing or meaning what they say.
 func TestParseDuration(t *testing.T) {
-	ok := map[string]time.Duration{
-		"1w":  7 * 24 * time.Hour,
-		"2w":  14 * 24 * time.Hour,
-		"7d":  7 * 24 * time.Hour,
-		"24h": 24 * time.Hour,
-		"30m": 30 * time.Minute,
-		"45s": 45 * time.Second,
+	ok := []struct {
+		in   string
+		want time.Duration
+	}{
+		{"1w", 7 * 24 * time.Hour},
+		{"2w", 14 * 24 * time.Hour},
+		{"7d", 7 * 24 * time.Hour},
+		{"24h", 24 * time.Hour},
+		{"30m", 30 * time.Minute},
+		{"45s", 45 * time.Second},
+		{"0d", 0},
+		// Fractions, as time.ParseDuration does for hours (was truncated).
+		{"1.5d", 36 * time.Hour},
+		{"2.5w", 420 * time.Hour},
+		{"0.5d", 12 * time.Hour},
+		{".5d", 12 * time.Hour},
+		// Compound segments, as time.ParseDuration does ("1h30m"); "2d12h"
+		// was truncated to 2h.
+		{"2d12h", 60 * time.Hour},
+		{"1w1d", 8 * 24 * time.Hour},
+		{"1d30m", 24*time.Hour + 30*time.Minute},
+		{"1h30m", 90 * time.Minute},
+		{"1500ms", 1500 * time.Millisecond},
 	}
-	for in, want := range ok {
-		got, err := ParseDuration(in)
+	for _, tt := range ok {
+		got, err := ParseDuration(tt.in)
 		if err != nil {
-			t.Errorf("ParseDuration(%q) error: %v", in, err)
+			t.Errorf("ParseDuration(%q) error: %v", tt.in, err)
 			continue
 		}
-		if got != want {
-			t.Errorf("ParseDuration(%q) = %v, want %v", in, got, want)
+		if got != tt.want {
+			t.Errorf("ParseDuration(%q) = %v, want %v", tt.in, got, tt.want)
 		}
 	}
 
-	// Note: ParseDuration takes integer counts only; fractional values like
-	// "1.5h" are truncated by Sscanf (pre-existing behavior), not errored.
-	bad := []string{"", "h", "10", "10x", "abc"}
+	bad := []string{
+		"", "h", "d", "10", "1.5", "10x", "10y", "abc", "xh",
+		// trailing or embedded garbage (was silently truncated)
+		"5abcd", "1dx", "1d12", "1dd", "1d ", " 1d", "1 d", "1e3h", "1,5d",
+		"1.5.5d", "..d",
+		// signs
+		"-1d", "+1d",
+		// overflow
+		"9999999999w", "106752d", "99999999999999999999h",
+	}
 	for _, in := range bad {
-		if _, err := ParseDuration(in); err == nil {
-			t.Errorf("ParseDuration(%q) expected error, got nil", in)
+		got, err := ParseDuration(in)
+		if err == nil {
+			t.Errorf("ParseDuration(%q) = %v, want an error", in, got)
+			continue
+		}
+		if !strings.Contains(err.Error(), fmt.Sprintf("%q", in)) {
+			t.Errorf("ParseDuration(%q) error does not name the input: %v", in, err)
 		}
 	}
 }

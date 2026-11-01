@@ -36,6 +36,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Durations no longer truncate silently** (#201). `--ttl` on `watch` and
+  `extend`, `launch --after`, and a `--spawn-config` `ttl:` read the number
+  with a parser that stopped at the first non-digit, so `1.5d` meant 24h,
+  `2d12h` meant 2h and `5abcd` meant 5d, with no warning. The whole value must
+  now parse: fractions and compound values mean what they say (`1.5d` is 36h,
+  `2d12h` is 60h, as `1.5h` and `1h30m` already were), and anything else
+  (trailing text, a missing or unknown unit, a sign, overflow) is an error
+  naming the value. Watches and scheduled launches already stored are not
+  broken by this: a stored `ttl:` only the old parser accepted still launches,
+  with the duration it was accepted as and a warning in the poller log.
+- **A `--spawn-config` `ttl:` in weeks no longer fails every launch** (#201).
+  lagotto accepted `ttl: 1w`, but spawn's launcher has no week unit and refused
+  to launch it at match time. lagotto now hands spawn the TTL in a form it
+  reads (`168h0m0s`), for new and already-stored watches alike.
+
 - **`lagotto cancel` can release a fired `--action hold` reservation early**
   (#203). A hold that fired leaves the watch `matched`, and `cancel` refused
   any watch that wasn't active. That left the targeted reservation billing at
