@@ -19,18 +19,37 @@ type holderReleaseAPI interface {
 	DescribeCapacityReservations(ctx context.Context, in *ec2.DescribeCapacityReservationsInput, optFns ...func(*ec2.Options)) (*ec2.DescribeCapacityReservationsOutput, error)
 }
 
+// holderCreateAPI is the slice of EC2 that Hold calls, so tests can count
+// reservations created through a fake. *ec2.Client satisfies it.
+type holderCreateAPI interface {
+	CreateCapacityReservation(ctx context.Context, in *ec2.CreateCapacityReservationInput, optFns ...func(*ec2.Options)) (*ec2.CreateCapacityReservationOutput, error)
+}
+
 // Holder creates On-Demand Capacity Reservations to hold capacity.
 type Holder struct {
 	cfg aws.Config
 	// releaseClient returns the EC2 client Release uses for a region.
 	// Indirected for tests; defaults to ec2.NewFromConfig with the region set.
 	releaseClient func(region string) holderReleaseAPI
+	// createClient returns the EC2 client Hold uses for a region. Indirected
+	// for tests; defaults to ec2.NewFromConfig with the region set.
+	createClient func(region string) holderCreateAPI
+	// launchableAZs returns the AZs in a region that have a default subnet,
+	// the same lookup the spawner uses (#150). Hold only reserves in one of
+	// them, so the reservation can be launched into without creating a subnet
+	// first (#209). Nil, or an empty result (lookup failed), skips the check.
+	launchableAZs func(ctx context.Context, region string) map[string]bool
 }
 
 // NewHolder creates a Holder.
 func NewHolder(cfg aws.Config) *Holder {
-	h := &Holder{cfg: cfg}
+	h := &Holder{cfg: cfg, launchableAZs: newDefaultSubnetAZLookup(cfg)}
 	h.releaseClient = func(region string) holderReleaseAPI {
+		c := h.cfg.Copy()
+		c.Region = region
+		return ec2.NewFromConfig(c)
+	}
+	h.createClient = func(region string) holderCreateAPI {
 		c := h.cfg.Copy()
 		c.Region = region
 		return ec2.NewFromConfig(c)
@@ -38,25 +57,66 @@ func NewHolder(cfg aws.Config) *Holder {
 	return h
 }
 
-// Hold creates a targeted ODCR for the matched instance type and AZ.
-// The reservation expires after 30 minutes — the user must launch within that window.
-// Updates the MatchResult with the reservation ID on success.
+// chooseHoldAZ picks the AZ to reserve in: the first candidate AZ (in the
+// match's preference order) that has a default subnet. A reservation is only
+// useful if an instance can be launched into it, and the launch lagotto prints
+// (HoldLaunchCommand) names --az but no subnet, so it needs the AZ's default
+// subnet. An opted-in Local Zone has none, and truffle offers types there (#209).
+//
+// If the subnet lookup is unavailable or returns nothing (an API error, or an
+// account with no default VPC), the first candidate is used, as before: the
+// check must not block holds it cannot evaluate. If the lookup succeeds and no
+// candidate has a default subnet, it returns an error and nothing is reserved.
+func (h *Holder) chooseHoldAZ(ctx context.Context, m *MatchResult) (string, error) {
+	candidates := m.CandidateAZs
+	if len(candidates) == 0 {
+		candidates = []string{m.AvailabilityZone}
+	}
+	if h.launchableAZs == nil {
+		return candidates[0], nil
+	}
+	usable := h.launchableAZs(ctx, m.Region)
+	if len(usable) == 0 {
+		return candidates[0], nil
+	}
+	for _, az := range keepLaunchableAZs(usable, candidates) {
+		if az != "" {
+			return az, nil
+		}
+	}
+	return "", fmt.Errorf("not reserving %s in %s: none of the offered AZs %v has a default subnet, "+
+		"so the reservation could not be launched into without creating a subnet first "+
+		"(an opted-in Local Zone has no default subnet)", m.InstanceType, m.Region, candidates)
+}
+
+// Hold creates a targeted ODCR for the matched instance type, in the first
+// candidate AZ that has a default subnet (#209); m.AvailabilityZone is set to
+// that AZ. The reservation expires after 30 minutes — the user must launch
+// within that window. Updates the MatchResult with the reservation ID on success.
 func (h *Holder) Hold(ctx context.Context, w *Watch, m *MatchResult) error {
-	if m.AvailabilityZone == "" {
+	if m.AvailabilityZone == "" && len(m.CandidateAZs) == 0 {
 		return fmt.Errorf("cannot create capacity reservation without availability zone")
 	}
+	az, err := h.chooseHoldAZ(ctx, m)
+	if err != nil {
+		m.ActionTaken = "hold_failed"
+		return err
+	}
+	if az == "" {
+		return fmt.Errorf("cannot create capacity reservation without availability zone")
+	}
+	// The match payload, the email and `lagotto status` report the reservation
+	// at m.AvailabilityZone, so it must be the AZ actually reserved.
+	m.AvailabilityZone = az
 
-	// Create a region-specific EC2 client
-	cfg := h.cfg.Copy()
-	cfg.Region = m.Region
-	client := ec2.NewFromConfig(cfg)
+	client := h.createClient(m.Region)
 
 	endDate := time.Now().UTC().Add(30 * time.Minute)
 
 	result, err := client.CreateCapacityReservation(ctx, &ec2.CreateCapacityReservationInput{
 		InstanceType:          aws.String(m.InstanceType),
 		InstancePlatform:      ec2types.CapacityReservationInstancePlatformLinuxUnix,
-		AvailabilityZone:      aws.String(m.AvailabilityZone),
+		AvailabilityZone:      aws.String(az),
 		InstanceCount:         aws.Int32(1),
 		EndDateType:           ec2types.EndDateTypeLimited,
 		EndDate:               aws.Time(endDate),

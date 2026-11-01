@@ -36,6 +36,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`--action hold` no longer reserves in an AZ you can't launch into** (#209).
+  A hold took the first AZ truffle offered the type in, which could be an
+  opted-in Local Zone such as `us-west-2-lax-1b`. A default VPC has no subnet
+  there, so the printed `spawn launch --reservation-id …` failed with
+  `InvalidInput` while the reservation billed On-Demand. A hold now reserves in
+  the first offered AZ that has a default subnet, the same check `--action
+  spawn` already makes (#150), and the match reports that AZ. If none of the
+  offered AZs has one, nothing is reserved and the hold fails with a message
+  saying so (retried next cycle, up to the watch's failure cap). If the subnets
+  can't be listed (for example `ec2:DescribeSubnets` is denied, or the account
+  has no default VPC), the hold behaves as before. The hosted poller gets this
+  once its Lambda is rebuilt from this release.
 - **Durations no longer truncate silently** (#201). `--ttl` on `watch` and
   `extend`, `launch --after`, and a `--spawn-config` `ttl:` read the number
   with a parser that stopped at the first non-digit, so `1.5d` meant 24h,

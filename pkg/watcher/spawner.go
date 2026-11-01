@@ -114,14 +114,23 @@ func (s *Spawner) filterLaunchableAZs(ctx context.Context, region string, attemp
 	if len(usable) == 0 {
 		return attempts
 	}
+	filtered := keepLaunchableAZs(usable, attempts)
+	if len(filtered) == 0 {
+		return attempts
+	}
+	return filtered
+}
+
+// keepLaunchableAZs returns the attempts whose AZ is in usable (the AZs with a
+// default subnet), in order; "" (let-EC2-choose) is always kept. It can return
+// an empty list: the spawn sweep then fails open (filterLaunchableAZs), while a
+// hold refuses to reserve (Holder.chooseHoldAZ, #209).
+func keepLaunchableAZs(usable map[string]bool, attempts []string) []string {
 	filtered := make([]string, 0, len(attempts))
 	for _, a := range attempts {
 		if a == "" || usable[a] {
 			filtered = append(filtered, a)
 		}
-	}
-	if len(filtered) == 0 {
-		return attempts
 	}
 	return filtered
 }
