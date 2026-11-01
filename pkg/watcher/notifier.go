@@ -513,3 +513,100 @@ func (n *Notifier) sendSNS(ctx context.Context, topicArn string, w *Watch, m *Ma
 	})
 	return err
 }
+
+// NotifyUnsupported tells the user that the poller retired a watch because its
+// service/action combination can never fire (#195): a notify-only SageMaker
+// watch stored before `watch` refused the combination. A sibling of Notify, not
+// a synthesized MatchResult, for the same reason as NotifyExpired: no capacity
+// was found, and the SageMaker match email would say a job was provisioned.
+// Same channel fan-out and webhook re-validation as Notify. Once is structural:
+// the poller marks the watch failed first, and only active watches are loaded.
+func (n *Notifier) NotifyUnsupported(ctx context.Context, w *Watch, reason string) error {
+	if len(w.NotifyChannels) == 0 {
+		return nil
+	}
+	subject := unsupportedSubject(w)
+	body := unsupportedBody(w, reason)
+	payload, err := json.Marshal(unsupportedPayload(w, reason))
+	if err != nil {
+		return fmt.Errorf("marshal retirement payload: %w", err)
+	}
+
+	var lastErr error
+	for _, ch := range w.NotifyChannels {
+		var err error
+		switch ch.Type {
+		case "email":
+			_, err = n.snsClient.Publish(ctx, &sns.PublishInput{
+				TopicArn: aws.String(n.topicArn),
+				Subject:  aws.String(subject),
+				Message:  aws.String(body),
+			})
+		case "webhook":
+			if verr := ValidateWebhookURL(ch.Target); verr != nil {
+				err = fmt.Errorf("blocked unsafe webhook URL: %w", verr)
+			} else {
+				err = n.postWebhookJSON(ch.Target, payload)
+			}
+		case "sns":
+			_, err = n.snsClient.Publish(ctx, &sns.PublishInput{
+				TopicArn: aws.String(ch.Target),
+				Message:  aws.String(string(payload)),
+			})
+		default:
+			continue
+		}
+		if err != nil {
+			lastErr = err
+		}
+	}
+	return lastErr
+}
+
+// unsupportedSubject renders the retirement subject line. Pure, for tests.
+func unsupportedSubject(w *Watch) string {
+	return fmt.Sprintf("[lagotto] watch %s stopped: it could never fire", w.WatchID)
+}
+
+// unsupportedBody renders the retirement body: what was stopped, why, and what
+// to run instead.
+func unsupportedBody(w *Watch, reason string) string {
+	return fmt.Sprintf(`Your watch %s has been stopped (status=failed) because it could never fire.
+
+Pattern:  %s
+Service:  %s
+Action:   %s
+
+%s.
+
+Nothing was submitted or launched. Create a new watch with a mode that works.
+`,
+		w.WatchID, w.InstanceTypePattern, normalizeService(w.Service), w.Action, reason)
+}
+
+// unsupportedPayload is the machine-readable retirement event. Like the expiry
+// and quota-cap payloads, the "event" key is new to THIS payload only.
+func unsupportedPayload(w *Watch, reason string) map[string]interface{} {
+	return map[string]interface{}{
+		"watch_id": w.WatchID,
+		"event":    "unsupported",
+		"pattern":  w.InstanceTypePattern,
+		"service":  string(normalizeService(w.Service)),
+		"action":   string(w.Action),
+		"reason":   reason,
+	}
+}
+
+// postWebhookJSON posts an already-marshaled event to a webhook target.
+func (n *Notifier) postWebhookJSON(url string, data []byte) error {
+	resp, err := n.httpClient.Post(url, "application/json", bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("post to webhook: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("webhook returned %d: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}

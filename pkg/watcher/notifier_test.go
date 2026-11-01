@@ -414,3 +414,38 @@ func TestMatchNotifications_NoReservationWithoutHold(t *testing.T) {
 		t.Errorf("email mentions a reservation with no hold:\n%s", body)
 	}
 }
+
+// TestNotifyUnsupported_Content: the #195 retirement notice says the watch was
+// stopped, why, and what works, and its payload can't be read as a match.
+func TestNotifyUnsupported_Content(t *testing.T) {
+	w := &Watch{WatchID: "w-sm", InstanceTypePattern: "ml.g5.2xlarge", Service: ServiceSageMaker, Action: ActionNotify}
+	if got := unsupportedSubject(w); !strings.Contains(got, "w-sm") || !strings.Contains(got, "stopped") {
+		t.Errorf("unsupportedSubject = %q", got)
+	}
+	body := unsupportedBody(w, sageMakerNotifyUnsupported)
+	for _, want := range []string{"w-sm", "ml.g5.2xlarge", "sagemaker", "status=failed", "--action spawn", "Nothing was submitted"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("unsupportedBody missing %q:\n%s", want, body)
+		}
+	}
+	p := unsupportedPayload(w, sageMakerNotifyUnsupported)
+	if p["event"] != "unsupported" || p["service"] != "sagemaker" || p["action"] != "notify" {
+		t.Errorf("payload = %v", p)
+	}
+	if _, ok := p["instance_type"]; ok {
+		t.Error(`retirement payload has an "instance_type" key; it must not look like a match`)
+	}
+}
+
+// TestNotifyUnsupported_Channels: no channels is silent; an unsafe webhook is
+// re-checked at send time, as for Notify.
+func TestNotifyUnsupported_Channels(t *testing.T) {
+	if err := (&Notifier{}).NotifyUnsupported(context.Background(), &Watch{WatchID: "w-none"}, "r"); err != nil {
+		t.Errorf("want nil error with no channels, got %v", err)
+	}
+	n := &Notifier{httpClient: &http.Client{}}
+	w := &Watch{WatchID: "w-bad", NotifyChannels: []NotifyChannel{{Type: "webhook", Target: "http://169.254.169.254/latest/meta-data/"}}}
+	if err := n.NotifyUnsupported(context.Background(), w, "r"); err == nil || !strings.Contains(err.Error(), "blocked unsafe webhook URL") {
+		t.Errorf("NotifyUnsupported error = %v, want blocked unsafe webhook URL", err)
+	}
+}

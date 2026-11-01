@@ -50,6 +50,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lagotto accepted `ttl: 1w`, but spawn's launcher has no week unit and refused
   to launch it at match time. lagotto now hands spawn the TTL in a form it
   reads (`168h0m0s`), for new and already-stored watches alike.
+- **A notify-only SageMaker watch is refused instead of never notifying**
+  (#195). SageMaker has no capacity signal short of submitting a job, so
+  `lagotto watch ml.* --service sagemaker` with `--action notify` (the default)
+  was accepted and then sat silently until its TTL; the missing
+  `--sagemaker-config` error even recommended `--action notify`. `watch` now
+  refuses notify for SageMaker and names the mode that works (`--action spawn
+  --sagemaker-config job.yaml`, plus `--notify` to be told when SageMaker
+  provisions the job), and that error no longer recommends notify. A
+  notify-only SageMaker watch already stored is retired as `failed` on its next
+  poll, with one notification saying why; nothing is submitted. The hosted
+  poller does this once its Lambda is rebuilt from this release.
 
 - **`lagotto cancel` can release a fired `--action hold` reservation early**
   (#203). A hold that fired leaves the watch `matched`, and `cancel` refused

@@ -64,3 +64,30 @@ func ValidateWatchPattern(service Service, pattern string) error {
 	}
 	return nil
 }
+
+// sageMakerNotifyUnsupported explains why a notify-only SageMaker watch can't
+// work and names the mode that does. Shared by the creation-time refusal
+// (ValidateServiceAction) and the notice a stored watch gets when the poller
+// retires it, so the two never disagree.
+const sageMakerNotifyUnsupported = "--action notify is not supported for --service sagemaker: " +
+	"SageMaker has no capacity signal short of submitting a job, so a notify-only watch has nothing to notify on and could never fire (#195). " +
+	"Use --action spawn --sagemaker-config <job.yaml> to submit your job and retry it until SageMaker provisions it; " +
+	"add --notify to be told when it does"
+
+// ValidateServiceAction rejects an action the service can't carry out, at watch
+// creation. SageMaker supports only --action spawn (submit the job): hold
+// creates an EC2 Capacity Reservation, which has no SageMaker equivalent, and
+// notify has no capacity signal to fire on (#195), so before this a notify-only
+// SageMaker watch was accepted and then sat silently until its TTL.
+func ValidateServiceAction(service Service, action ActionMode) error {
+	if normalizeService(service) != ServiceSageMaker {
+		return nil
+	}
+	switch action {
+	case ActionHold:
+		return fmt.Errorf("--action hold is not supported for --service sagemaker (no capacity-reservation equivalent)")
+	case ActionNotify:
+		return fmt.Errorf("%s", sageMakerNotifyUnsupported)
+	}
+	return nil
+}
