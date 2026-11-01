@@ -48,6 +48,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   can't be listed (for example `ec2:DescribeSubnets` is denied, or the account
   has no default VPC), the hold behaves as before. The hosted poller gets this
   once its Lambda is rebuilt from this release.
+- **`lagotto launch --reservation-id` now launches into the reservation**
+  (#210). The flag only timed and gated the launch: unless the spawn config
+  also set `reservation_id`, the instance launched On-Demand outside the
+  reservation, for example outside a paid Capacity Block. lagotto now reads the
+  reservation when the launch is scheduled and sets the launch's
+  `reservation_id`, sets `capacity_block` for a Capacity Block, and takes the
+  instance type and AZ from the reservation when the spawn config and `--az`
+  leave them out. A value that could not launch into the reservation is refused
+  then, naming the conflict: a different `reservation_id`, `instance_type` or
+  `--az`, `spot: true`, or `capacity_block: true` on a reservation that isn't a
+  Capacity Block. The flag's help said "to launch into" all along and now
+  describes this. Launches already scheduled this way also launch into their
+  reservation once the hosted poller's Lambda is rebuilt from this release.
 - **Durations no longer truncate silently** (#201). `--ttl` on `watch` and
   `extend`, `launch --after`, and a `--spawn-config` `ttl:` read the number
   with a parser that stopped at the first non-digit, so `1.5d` meant 24h,

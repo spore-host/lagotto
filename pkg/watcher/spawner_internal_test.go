@@ -621,3 +621,60 @@ func TestFilterLaunchableAZs(t *testing.T) {
 		t.Errorf("all-unusable must fail open (not empty), got %v", g)
 	}
 }
+
+// TestLaunchScheduled_ReservationIDReachesLauncher is #210 at the launcher
+// seam. A config the CLI stored with reservation_id/capacity_block (what
+// `lagotto launch --reservation-id` now writes) reaches launcher.Provision
+// intact; and a record from an older CLI, which kept the id only on the
+// schedule, is still launched into its reservation, with the Capacity Block
+// market type and the reservation's AZ read from the reservation.
+func TestLaunchScheduled_ReservationIDReachesLauncher(t *testing.T) {
+	type got struct {
+		cfg spawnaws.LaunchConfig
+		n   int
+	}
+	run := func(t *testing.T, file SpawnConfigFile, sl ScheduledLaunch) got {
+		t.Helper()
+		var g got
+		sp := newSpawnerWithProvision(func(_ context.Context, _ *spawnaws.Client, cfg spawnaws.LaunchConfig, _ launcher.Options) (*spawnaws.LaunchResult, error) {
+			g.cfg = cfg
+			g.n++
+			return &spawnaws.LaunchResult{InstanceID: "i-0abc"}, nil
+		})
+		sp.describeReservation = func(_ context.Context, _, id string) (*spawnaws.CapacityReservation, error) {
+			return &spawnaws.CapacityReservation{ReservationID: id, State: "active", ReservationType: "capacity-block", InstanceType: "p5.48xlarge", AvailabilityZone: "us-east-1a"}, nil
+		}
+		raw, err := json.Marshal(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sl.ScheduleID, sl.Region, sl.LaunchConfigJSON = "sl-210", "us-east-1", raw
+		if _, err := sp.LaunchScheduled(context.Background(), &sl); err != nil {
+			t.Fatalf("LaunchScheduled: %v", err)
+		}
+		if g.n != 1 {
+			t.Fatalf("provision called %d times, want 1", g.n)
+		}
+		return g
+	}
+
+	t.Run("config written by the CLI", func(t *testing.T) {
+		g := run(t, SpawnConfigFile{InstanceType: "p5.48xlarge", TTL: "6h", ReservationID: "cr-0block", CapacityBlock: true},
+			ScheduledLaunch{ReservationID: "cr-0block", AvailabilityZone: "us-east-1a"})
+		if g.cfg.ReservationID != "cr-0block" || !g.cfg.CapacityBlock || g.cfg.AvailabilityZone != "us-east-1a" {
+			t.Errorf("launcher got ReservationID=%q CapacityBlock=%v AZ=%q, want cr-0block, true, us-east-1a", g.cfg.ReservationID, g.cfg.CapacityBlock, g.cfg.AvailabilityZone)
+		}
+	})
+	t.Run("older record: id only on the schedule", func(t *testing.T) {
+		g := run(t, SpawnConfigFile{InstanceType: "p5.48xlarge", TTL: "6h"}, ScheduledLaunch{ReservationID: "cr-0block"})
+		if g.cfg.ReservationID != "cr-0block" || !g.cfg.CapacityBlock || g.cfg.AvailabilityZone != "us-east-1a" {
+			t.Errorf("launcher got ReservationID=%q CapacityBlock=%v AZ=%q, want cr-0block, true, us-east-1a", g.cfg.ReservationID, g.cfg.CapacityBlock, g.cfg.AvailabilityZone)
+		}
+	})
+	t.Run("no reservation", func(t *testing.T) {
+		g := run(t, SpawnConfigFile{InstanceType: "t3.micro", TTL: "1h"}, ScheduledLaunch{})
+		if g.cfg.ReservationID != "" || g.cfg.CapacityBlock {
+			t.Errorf("launcher got ReservationID=%q CapacityBlock=%v, want none", g.cfg.ReservationID, g.cfg.CapacityBlock)
+		}
+	})
+}

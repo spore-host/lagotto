@@ -45,9 +45,13 @@ var launchCmd = &cobra.Command{
 when capacity appears. The motivating case is launching into an EC2 Capacity
 Block at its reserved start time:
 
-  lagotto launch --at 2026-07-01T08:00:00Z --spawn-config block.yaml
+  lagotto launch --reservation-id cr-0123456789abcdef0 --at-reservation-start \
+    --spawn-config block.yaml
 
-where block.yaml sets reservation_id + capacity_block.
+--reservation-id makes the instance launch into that reservation: lagotto reads
+it and sets reservation_id, capacity_block (for a Capacity Block), the instance
+type and the AZ to match. Setting reservation_id + capacity_block in the spawn
+config and passing --at also works.
 
 This is driven by EventBridge Scheduler in the hosted poller stack, so it
 requires 'lagotto deploy' to have been run (the schedule targets the poller
@@ -72,7 +76,7 @@ func init() {
 	f.StringVar(&launchName, "name", "", "Instance Name tag (the overlap dedup key); defaults to the spawn config's name")
 	f.StringVar(&launchIfExists, "if-exists", "", "If an instance with this Name already exists at fire time: skip|launch|replace (default: skip for --at/--after, launch for --cron)")
 	// #62 Capacity-Block start-time launch.
-	f.StringVar(&launchReservationID, "reservation-id", "", "Capacity Block reservation id (cr-…) to launch into")
+	f.StringVar(&launchReservationID, "reservation-id", "", "Capacity Reservation or Capacity Block id (cr-…) to launch into: sets the spawn config's reservation_id (and capacity_block for a Capacity Block), and its instance type and --az from the reservation; a different value in the spawn config is an error")
 	f.BoolVar(&launchAtReserveStart, "at-reservation-start", false, "Fire at the reservation's start time (derived from the reservation), retrying through the window open until the instance runs (requires --reservation-id)")
 	f.DurationVar(&launchFireEarly, "fire-early", 2*time.Minute, "With --at-reservation-start: fire this long before the window open so a Scheduler delay doesn't burn paid time")
 	f.DurationVar(&launchRetryInterval, "retry-interval", 30*time.Second, "With --at-reservation-start: how often to retry through the boundary until the launch succeeds")
@@ -116,7 +120,7 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 	read := watcher.NewConfigReader(func(ctx context.Context) (aws.Config, error) {
 		return awscfg.Load(ctx, launchRegion)
 	}, os.Stdin)
-	launchConfigJSON, err := loadEC2SpawnConfig(ctx, read, launchSpawnConfig)
+	spawnFile, err := loadEC2SpawnConfigFile(ctx, read, launchSpawnConfig)
 	if err != nil {
 		return fmt.Errorf("load spawn config: %w", err)
 	}
@@ -128,10 +132,7 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 	// defaults to launch.
 	instanceName := launchName
 	if instanceName == "" {
-		var sc watcher.SpawnConfigFile
-		if jerr := json.Unmarshal(launchConfigJSON, &sc); jerr == nil {
-			instanceName = sc.Name
-		}
+		instanceName = spawnFile.Name
 	}
 	ifExists, err := resolveIfExists(launchIfExists, oneShot)
 	if err != nil {
@@ -148,19 +149,19 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no AWS region set; pass --region or configure one")
 	}
 
+	// --reservation-id (#210): the launch itself must target the reservation, not
+	// just be timed by it. Read the reservation and make the stored config launch
+	// into it, with the reservation's instance type and AZ.
+	describe := spawnaws.NewClientFromConfig(cfg).DescribeCapacityReservation
+	launchConfigJSON, cr, err := prepareLaunchConfig(ctx, describe, region, spawnFile, launchReservationID, &launchAZ)
+	if err != nil {
+		return err
+	}
+
 	// --at-reservation-start (#62): derive the schedule + boundary-retry window from
 	// the Capacity Block reservation itself, so the user never transcribes a time.
 	var retryUntil time.Time
 	if launchAtReserveStart {
-		spawnClient := spawnaws.NewClientFromConfig(cfg)
-		cr, cerr := spawnClient.DescribeCapacityReservation(ctx, region, launchReservationID)
-		if cerr != nil {
-			return fmt.Errorf("describe reservation %s: %w", launchReservationID, cerr)
-		}
-		switch cr.State {
-		case "expired", "payment-failed", "cancelled":
-			return fmt.Errorf("reservation %s is %s — not launchable", launchReservationID, cr.State)
-		}
 		if cr.StartDate == "" {
 			return fmt.Errorf("reservation %s has no start date; cannot derive a launch time", launchReservationID)
 		}
@@ -186,10 +187,6 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 		}
 		if retryUntil.IsZero() {
 			retryUntil = start.Add(1 * time.Hour)
-		}
-		// Pin the launch AZ to the reservation's AZ if the user didn't.
-		if launchAZ == "" {
-			launchAZ = cr.AvailabilityZone
 		}
 		_, _ = fmt.Fprintf(out, "Reservation %s: state=%s window %s → %s; firing %s (retry until %s)\n",
 			launchReservationID, cr.State, cr.StartDate, cr.EndDate, expr, retryUntil.UTC().Format(time.RFC3339))
@@ -308,4 +305,85 @@ func resolveIfExists(flag string, oneShot bool) (string, error) {
 	default:
 		return "", fmt.Errorf("invalid --if-exists %q: want skip, launch, or replace", flag)
 	}
+}
+
+// describeReservationFunc reads a Capacity Reservation; spawn's
+// Client.DescribeCapacityReservation in production, a fake in tests.
+type describeReservationFunc func(ctx context.Context, region, reservationID string) (*spawnaws.CapacityReservation, error)
+
+// prepareLaunchConfig produces the spawn config JSON a scheduled launch stores
+// and the poller later hands to spawn's launcher. With a reservation id it
+// reads the reservation, refuses a dead one, and applies it to the config and
+// *az (applyReservationID, #210); it returns the reservation for the
+// --at-reservation-start timing. Without one it returns the config as loaded.
+func prepareLaunchConfig(ctx context.Context, describe describeReservationFunc, region string, file *watcher.SpawnConfigFile, reservationID string, az *string) ([]byte, *spawnaws.CapacityReservation, error) {
+	var cr *spawnaws.CapacityReservation
+	if reservationID != "" {
+		var err error
+		cr, err = describe(ctx, region, reservationID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("describe reservation %s: %w", reservationID, err)
+		}
+		switch cr.State {
+		case "expired", "payment-failed", "cancelled":
+			return nil, nil, fmt.Errorf("reservation %s is %s — not launchable", reservationID, cr.State)
+		}
+		if *az, err = applyReservationID(file, reservationID, cr, *az); err != nil {
+			return nil, nil, err
+		}
+	}
+	out, err := json.Marshal(file)
+	if err != nil {
+		return nil, nil, fmt.Errorf("marshal spawn config: %w", err)
+	}
+	return out, cr, nil
+}
+
+// applyReservationID makes a scheduled launch launch into the --reservation-id
+// reservation (#210). Before this, the flag only gated and timed the launch,
+// and the instance launched On-Demand outside the reservation unless the spawn
+// config also set reservation_id.
+//
+// RunInstances only places an instance in a targeted reservation when the
+// instance matches it, so the config is made to match what the reservation
+// implies, and a conflicting value is refused here rather than at fire time:
+//   - reservation_id: set from the flag; a different one in the file is an error.
+//   - capacity_block: set for a Capacity Block (consuming one needs
+//     MarketType=capacity-block); set for any other reservation type is an error.
+//   - instance_type: the reservation's, when the file omits it; a different one
+//     is an error.
+//   - the AZ (--az): the reservation's, when not given; a different one is an
+//     error. spawn does not infer the AZ from the reservation.
+//   - spot: an error; reserved capacity is not Spot.
+//
+// It returns the AZ to launch in.
+func applyReservationID(file *watcher.SpawnConfigFile, reservationID string, cr *spawnaws.CapacityReservation, az string) (string, error) {
+	if file.ReservationID != "" && file.ReservationID != reservationID {
+		return "", fmt.Errorf("--reservation-id %s conflicts with the spawn config's reservation_id %s; remove one", reservationID, file.ReservationID)
+	}
+	if file.Spot {
+		return "", fmt.Errorf("the spawn config sets spot: true, but reservation %s holds On-Demand capacity; remove spot to launch into it", reservationID)
+	}
+	isBlock := cr.ReservationType == "capacity-block"
+	if file.CapacityBlock && !isBlock {
+		return "", fmt.Errorf("the spawn config sets capacity_block: true, but reservation %s is not a Capacity Block (type %q); remove capacity_block", reservationID, cr.ReservationType)
+	}
+	if cr.InstanceType != "" && file.InstanceType != "" && file.InstanceType != cr.InstanceType {
+		return "", fmt.Errorf("the spawn config's instance_type %s does not match reservation %s (%s); an instance only launches into a reservation of its own type", file.InstanceType, reservationID, cr.InstanceType)
+	}
+	if cr.AvailabilityZone != "" && az != "" && az != cr.AvailabilityZone {
+		return "", fmt.Errorf("--az %s does not match reservation %s, which is in %s", az, reservationID, cr.AvailabilityZone)
+	}
+
+	file.ReservationID = reservationID
+	if isBlock {
+		file.CapacityBlock = true
+	}
+	if file.InstanceType == "" {
+		file.InstanceType = cr.InstanceType
+	}
+	if az == "" {
+		az = cr.AvailabilityZone
+	}
+	return az, nil
 }

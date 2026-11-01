@@ -169,7 +169,8 @@ at its reserved start time.
 ```bash
 # Launch into a Capacity Block reliably at its window open — derives the start
 # time from the reservation, fires slightly early, and retries through the
-# boundary until the instance runs (block.yaml sets reservation_id + capacity_block)
+# boundary until the instance runs. --reservation-id sets the launch's
+# reservation_id, capacity_block, instance type and AZ from the reservation.
 lagotto launch --reservation-id cr-0abc123 --at-reservation-start --spawn-config block.yaml
 
 # Launch at an explicit clock time

@@ -439,6 +439,23 @@ func (s *Spawner) LaunchScheduled(ctx context.Context, sl *ScheduledLaunch) (str
 	if sl.Region != "" {
 		cfg.Region = sl.Region
 	}
+	az := sl.AvailabilityZone
+	if sl.ReservationID != "" && cfg.ReservationID == "" {
+		// A launch scheduled with `lagotto launch --reservation-id` before #210
+		// stored the id only on the schedule, not in its config, so it launched
+		// outside the reservation. The CLI now writes it into the config; this
+		// covers the records it didn't. The reservation tells us whether it is a
+		// Capacity Block and its AZ; if it can't be read, target it anyway.
+		cfg.ReservationID = sl.ReservationID
+		if s.describeReservation != nil {
+			if cr, err := s.describeReservation(ctx, sl.Region, sl.ReservationID); err == nil && cr != nil {
+				cfg.CapacityBlock = cfg.CapacityBlock || cr.ReservationType == "capacity-block"
+				if az == "" {
+					az = cr.AvailabilityZone
+				}
+			}
+		}
+	}
 	if profile, err := s.buildIAMProfile(ctx, &file); err != nil {
 		return "", err
 	} else if profile != "" {
@@ -474,8 +491,8 @@ func (s *Spawner) LaunchScheduled(ctx context.Context, sl *ScheduledLaunch) (str
 	}
 
 	var attempts []string
-	if sl.AvailabilityZone != "" {
-		attempts = []string{sl.AvailabilityZone}
+	if az != "" {
+		attempts = []string{az}
 	}
 	instanceID, _, err := s.launchAcrossAZs(ctx, cfg, attempts, customUserData)
 	return instanceID, err
