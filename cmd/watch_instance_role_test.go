@@ -80,7 +80,7 @@ func watchWithIAMRole(t *testing.T, role string) *watcher.Watch {
 
 func irStockPolicy(t *testing.T) string {
 	t.Helper()
-	doc, err := runtimeiam.PolicyDocument(irTestRegion, irTestAccount, nil)
+	doc, err := runtimeiam.PolicyDocument(irTestAccount, nil)
 	if err != nil {
 		t.Fatalf("PolicyDocument: %v", err)
 	}
@@ -89,7 +89,7 @@ func irStockPolicy(t *testing.T) string {
 
 func irAuthorizedPolicy(t *testing.T, roles ...string) string {
 	t.Helper()
-	doc, err := runtimeiam.PolicyDocument(irTestRegion, irTestAccount, roles)
+	doc, err := runtimeiam.PolicyDocument(irTestAccount, roles)
 	if err != nil {
 		t.Fatalf("PolicyDocument: %v", err)
 	}

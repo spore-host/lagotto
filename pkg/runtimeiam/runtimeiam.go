@@ -236,8 +236,11 @@ func SchedulerInvokePolicyDocument(accountID string) (string, error) {
 // EnsureRuntimeRole ensures the poller execution role exists (creating it if
 // absent, so `lagotto setup` works standalone on a fresh account) and writes the
 // runtime permissions policy onto it (idempotent PutRolePolicy — an
-// update-in-place on re-run). region and accountID scope the policy's ARNs
-// (scheduler, PassRole, spored* resources).
+// update-in-place on re-run). accountID scopes the policy's ARNs.
+//
+// region is validated but does not shape what is written (#219): the role is
+// IAM-global and shared by every region's poller, so the policy covers lagotto's
+// resources in every region and `setup` in any one region serves all of them.
 func EnsureRuntimeRole(ctx context.Context, client IAMAPI, region, accountID string, instanceRoles []string) error {
 	if region == "" || accountID == "" {
 		return fmt.Errorf("runtimeiam: region and accountID are required")
@@ -245,7 +248,7 @@ func EnsureRuntimeRole(ctx context.Context, client IAMAPI, region, accountID str
 	if err := ensurePollerRole(ctx, client); err != nil {
 		return err
 	}
-	doc, err := PolicyDocument(region, accountID, instanceRoles)
+	doc, err := PolicyDocument(accountID, instanceRoles)
 	if err != nil {
 		return fmt.Errorf("runtimeiam: build policy: %w", err)
 	}
@@ -335,6 +338,17 @@ func normalizeInstanceRoles(names []string) []string {
 	return out
 }
 
+// anyRegion is the region segment of every regional ARN in the runtime policy.
+const anyRegion = "*"
+
+// RegionalARN builds an ARN for one of lagotto's fixed-name regional resources
+// in accountID, in ANY region (#219): arn:aws:<service>:*:<account>:<resource>.
+// The resource name and account stay exact, so the grant still reaches only
+// lagotto's own tables, topic and schedules.
+func RegionalARN(service, accountID, resource string) string {
+	return fmt.Sprintf("arn:aws:%s:%s:%s:%s", service, anyRegion, accountID, resource)
+}
+
 // statement is a single IAM policy statement (minimal shape we emit).
 type statement struct {
 	Effect    string      `json:"Effect"`
@@ -343,16 +357,27 @@ type statement struct {
 	Condition interface{} `json:"Condition,omitempty"`
 }
 
-// PolicyDocument returns the runtime policy as a JSON string, scoped to region
-// and accountID. It is the Go source of truth mirroring the set previously in
+// PolicyDocument returns the runtime policy as a JSON string, scoped to
+// accountID. It is the Go source of truth mirroring the set previously in
 // deployment/cloudformation/lagotto-stack.yaml (the poller's Policies: block):
 // DynamoDB CRUD (3 tables), SNS publish, EC2/SSM read discovery, scheduler
 // manage + PassRole, the spawn launch set (RunInstances/tags/SG + spored* role
 // setup + PassRole to ec2), capacity reservations, and SageMaker submit + PassRole.
-func PolicyDocument(region, accountID string, instanceRoles []string) (string, error) {
+//
+// # No region (#219)
+//
+// The execution role is IAM-global and shared by the poller in every region of
+// the account, but `setup` used to write this policy with the region it ran in
+// baked into every DynamoDB, SNS and Scheduler ARN. `setup` in region B then
+// revoked region A's poller's access to its own tables, topic and schedules, and
+// doctor in A prescribed `setup`, which broke B — the regions took turns. The
+// regional ARNs therefore carry a `*` region (see [RegionalARN]) while keeping
+// lagotto's fixed resource names and the account exact, so every region's
+// `setup` writes the same document and one run serves them all.
+func PolicyDocument(accountID string, instanceRoles []string) (string, error) {
 	arn := func(f string, a ...interface{}) string { return fmt.Sprintf(f, a...) }
-	schedulerARN := arn("arn:aws:scheduler:%s:%s:schedule/default/lagotto-capacity-poller", region, accountID)
-	launchSchedARN := arn("arn:aws:scheduler:%s:%s:schedule/default/lagotto-launch-*", region, accountID)
+	schedulerARN := RegionalARN("scheduler", accountID, "schedule/default/lagotto-capacity-poller")
+	launchSchedARN := RegionalARN("scheduler", accountID, "schedule/default/lagotto-launch-*")
 	schedulerInvokeRoleARN := arn("arn:aws:iam::%s:role/lagotto-capacity-poller-scheduler-invoke", accountID)
 	sporedRoleARN := arn("arn:aws:iam::%s:role/spored*", accountID)
 	sporedProfileARN := arn("arn:aws:iam::%s:instance-profile/spored*", accountID)
@@ -377,16 +402,16 @@ func PolicyDocument(region, accountID string, instanceRoles []string) (string, e
 			"dynamodb:Query", "dynamodb:Scan", "dynamodb:BatchGetItem", "dynamodb:BatchWriteItem",
 			"dynamodb:DescribeTable", "dynamodb:ConditionCheckItem",
 		}, Resource: []string{
-			arn("arn:aws:dynamodb:%s:%s:table/lagotto-watches", region, accountID),
-			arn("arn:aws:dynamodb:%s:%s:table/lagotto-watches/index/*", region, accountID),
-			arn("arn:aws:dynamodb:%s:%s:table/lagotto-match-history", region, accountID),
-			arn("arn:aws:dynamodb:%s:%s:table/lagotto-match-history/index/*", region, accountID),
-			arn("arn:aws:dynamodb:%s:%s:table/lagotto-scheduled-launches", region, accountID),
-			arn("arn:aws:dynamodb:%s:%s:table/lagotto-scheduled-launches/index/*", region, accountID),
+			RegionalARN("dynamodb", accountID, "table/lagotto-watches"),
+			RegionalARN("dynamodb", accountID, "table/lagotto-watches/index/*"),
+			RegionalARN("dynamodb", accountID, "table/lagotto-match-history"),
+			RegionalARN("dynamodb", accountID, "table/lagotto-match-history/index/*"),
+			RegionalARN("dynamodb", accountID, "table/lagotto-scheduled-launches"),
+			RegionalARN("dynamodb", accountID, "table/lagotto-scheduled-launches/index/*"),
 		}},
 		// SNS capacity alerts.
 		{Effect: "Allow", Action: []string{"sns:Publish"},
-			Resource: arn("arn:aws:sns:%s:%s:lagotto-capacity-alerts", region, accountID)},
+			Resource: RegionalARN("sns", accountID, "lagotto-capacity-alerts")},
 		// Capacity discovery (truffle) + spawn launcher read APIs. Region-agnostic
 		// describe reads — Resource "*" as in the template.
 		{Effect: "Allow", Action: []string{

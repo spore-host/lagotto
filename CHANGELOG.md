@@ -36,6 +36,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   also counts any other schedule in that group). It needs
   `cloudwatch:GetMetricStatistics` on your credentials; without it the check
   warns and doctor still passes.
+- **`lagotto setup` in one region no longer revokes the poller's permissions in
+  every other region** (#219). The poller's execution role
+  `lagotto-capacity-poller-role` is IAM-global and shared by every region's
+  poller, but `setup` wrote its `lagotto-runtime-policy` with the region it ran
+  in. Each `setup` cut every other region's poller off from its own DynamoDB
+  tables, SNS alerts topic and schedules, and `lagotto doctor` there then
+  prescribed `setup`, which broke the first region again. The policy now names
+  lagotto's tables, topic and schedules in any region (for example
+  `arn:aws:dynamodb:*:<account>:table/lagotto-watches`). It is still scoped to
+  lagotto's own resource names in your account, no action was added, and
+  `--instance-role` authorizations are carried over exactly as before. **After
+  deploying v0.65.1, run `lagotto setup` once, in any one region**: it rewrites
+  the shared policy for every region.
+- **`lagotto doctor`'s `runtime-policy` check evaluates the policy for this
+  region** (#219). It FAILs when this region's tables, topic or schedules are
+  not covered, and names the cause. It WARNs when they are covered for this
+  region only, which is what an older `setup` wrote. Previously it reported that
+  shape as missing grants plus extra grants "from a newer lagotto".
 
 ## [0.65.0] - 2026-11-01
 

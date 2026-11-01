@@ -36,7 +36,7 @@ func expectedInvokePolicy(t *testing.T) string {
 
 func expectedPolicy(t *testing.T) string {
 	t.Helper()
-	doc, err := runtimeiam.PolicyDocument(testRegion, testAccount, nil)
+	doc, err := runtimeiam.PolicyDocument(testAccount, nil)
 	if err != nil {
 		t.Fatalf("PolicyDocument: %v", err)
 	}

@@ -99,11 +99,19 @@ type PolicyDiff struct {
 	Missing []Grant `json:"missing,omitempty"`
 	// Extra: present in the deployed policy, unknown to this binary.
 	Extra []Grant `json:"extra,omitempty"`
+	// RegionOnly: expected by this binary for EVERY region, but the deployed
+	// policy grants it only in the region asked about (#219). Nothing is broken
+	// here; a poller in any other region of the account lacks it. This is what a
+	// `lagotto setup` older than v0.65.1 wrote.
+	RegionOnly []Grant `json:"region_only,omitempty"`
 }
 
 // Empty reports whether the deployed policy is semantically identical to what
 // this binary would apply.
 func (d *PolicyDiff) Empty() bool {
+	if len(d.RegionOnly) > 0 {
+		return false
+	}
 	return d == nil || (len(d.Missing) == 0 && len(d.Extra) == 0)
 }
 
@@ -222,11 +230,116 @@ func DiffRuntimePolicy(deployed, region, accountID string) (*PolicyDiff, error) 
 	if err != nil {
 		return nil, fmt.Errorf("read authorized instance roles: %w", err)
 	}
-	expected, err := PolicyDocument(region, accountID, authorized)
+	expected, err := PolicyDocument(accountID, authorized)
 	if err != nil {
 		return nil, fmt.Errorf("build expected policy: %w", err)
 	}
-	return DiffPolicy(deployed, expected)
+	deployedGrants, err := ParsePolicy(deployed)
+	if err != nil {
+		return nil, fmt.Errorf("parse deployed policy: %w", err)
+	}
+	expectedGrants, err := ParsePolicy(expected)
+	if err != nil {
+		return nil, fmt.Errorf("parse expected policy: %w", err)
+	}
+	return regionAwareDiff(deployedGrants, expectedGrants, region), nil
+}
+
+// regionAwareDiff is diffGrants with #219's region semantics layered on for the
+// grants whose expected Resource has a wildcard region (lagotto's tables, topic
+// and schedules). Every other grant keeps exact-identity semantics.
+//
+// For an expected any-region grant the deployed policy lacks verbatim:
+//
+//   - covered in every region by some other deployed grant → not drift;
+//   - covered for `region` only (the pre-v0.65.1 single-region shape) → RegionOnly;
+//   - not covered for `region` → Missing, exactly as before.
+//
+// And a deployed grant naming one concrete region that an expected any-region
+// grant subsumes is not Extra: `setup` replacing it loses nothing.
+func regionAwareDiff(deployed, expected []Grant, region string) *PolicyDiff {
+	diff := diffGrants(deployed, expected)
+
+	missing := diff.Missing[:0:0]
+	for _, g := range diff.Missing {
+		here, regional := arnInRegion(g.Resource, region)
+		if !regional || g.Resource == here {
+			missing = append(missing, g)
+			continue
+		}
+		switch {
+		case grantCovered(deployed, g, g.Resource):
+			// covered everywhere by a broader deployed grant
+		case grantCovered(deployed, g, here):
+			diff.RegionOnly = append(diff.RegionOnly, g)
+		default:
+			missing = append(missing, g)
+		}
+	}
+	diff.Missing = missing
+
+	extra := diff.Extra[:0:0]
+	for _, d := range diff.Extra {
+		if !subsumedByAnyRegionGrant(expected, d) {
+			extra = append(extra, d)
+		}
+	}
+	diff.Extra = extra
+	sortGrants(diff.RegionOnly)
+	return diff
+}
+
+// arnInRegion returns resource with its region segment replaced by region, and
+// whether resource is an ARN whose region segment is a bare wildcard.
+func arnInRegion(resource, region string) (string, bool) {
+	parts := strings.SplitN(resource, ":", 6)
+	if len(parts) != 6 || parts[0] != "arn" || parts[3] != anyRegion {
+		return "", false
+	}
+	parts[3] = region
+	return strings.Join(parts, ":"), true
+}
+
+// grantCovered reports whether deployed allows want's action on resource (a
+// literal, which may itself contain `*`, matched against deployed patterns)
+// under want's condition: an Allow with no condition or the identical one, and
+// no matching Deny whatever its condition.
+func grantCovered(deployed []Grant, want Grant, resource string) bool {
+	allowed := false
+	for _, d := range deployed {
+		if !wildcardMatchFold(d.Action, want.Action) || !wildcardMatch(d.Resource, resource) {
+			continue
+		}
+		if strings.EqualFold(d.Effect, "Deny") {
+			return false
+		}
+		if strings.EqualFold(d.Effect, "Allow") && (d.Condition == "" || d.Condition == want.Condition) {
+			allowed = true
+		}
+	}
+	return allowed
+}
+
+// subsumedByAnyRegionGrant reports whether d is a concrete-region instance of an
+// expected any-region Allow grant with the same action and condition.
+func subsumedByAnyRegionGrant(expected []Grant, d Grant) bool {
+	if !strings.EqualFold(d.Effect, "Allow") {
+		return false
+	}
+	parts := strings.SplitN(d.Resource, ":", 6)
+	if len(parts) != 6 || parts[0] != "arn" || parts[3] == "" || parts[3] == anyRegion {
+		return false
+	}
+	for _, e := range expected {
+		if _, regional := arnInRegion(e.Resource, parts[3]); !regional {
+			continue
+		}
+		if strings.EqualFold(e.Effect, "Allow") && strings.EqualFold(e.Action, d.Action) &&
+			e.Condition == d.Condition && wildcardMatch(e.Resource, d.Resource) {
+			return true
+		}
+	}
+	return false
 }
 
 // AuthorizedInstanceRoles returns the instance-role names a deployed policy has

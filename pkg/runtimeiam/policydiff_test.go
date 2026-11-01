@@ -18,7 +18,7 @@ const (
 // mustPolicy returns this binary's expected policy document.
 func mustPolicy(t *testing.T) string {
 	t.Helper()
-	doc, err := PolicyDocument(testRegion, testAccount, nil)
+	doc, err := PolicyDocument(testAccount, nil)
 	if err != nil {
 		t.Fatalf("PolicyDocument: %v", err)
 	}
@@ -310,7 +310,7 @@ func TestDiffRuntimePolicy_UsesThisBinarysPolicy(t *testing.T) {
 		t.Errorf("own policy reported as drifted: %v / %v", diff.MissingSummary(), diff.ExtraSummary())
 	}
 
-	otherAccount, err := PolicyDocument(testRegion, "999999999999", nil)
+	otherAccount, err := PolicyDocument("999999999999", nil)
 	if err != nil {
 		t.Fatalf("PolicyDocument: %v", err)
 	}

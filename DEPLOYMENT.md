@@ -153,6 +153,27 @@ Three things to know:
   - **Never run an *older* lagotto's `setup` against a newer-deployed poller.** It
     will overwrite the policy with the older version's set and silently revoke the
     newer grants. (This bit a beta tester during #148.)
+- **More than one region in an account:** the execution role is IAM-global and
+  shared by the poller in every region, so the policy names lagotto's tables,
+  topic and schedules in **any** region:
+
+  ```text
+  arn:aws:dynamodb:*:<account>:table/lagotto-watches              (+ /index/*)
+  arn:aws:dynamodb:*:<account>:table/lagotto-match-history        (+ /index/*)
+  arn:aws:dynamodb:*:<account>:table/lagotto-scheduled-launches   (+ /index/*)
+  arn:aws:sns:*:<account>:lagotto-capacity-alerts
+  arn:aws:scheduler:*:<account>:schedule/default/lagotto-capacity-poller
+  arn:aws:scheduler:*:<account>:schedule/default/lagotto-launch-*
+  ```
+
+  The resource names and the account are still exact. Every `setup` writes this
+  same document whichever region it runs in, so `setup` in region A and then
+  region B converges. **Before v0.65.1** `setup` wrote these for its own region
+  only, so each run cut every other region's poller off from its own tables,
+  topic and schedules (lagotto#219). **After a v0.65.1 deploy, one `lagotto setup`
+  in any one region repairs every region.** `lagotto doctor`'s `runtime-policy`
+  check FAILs in a region the policy doesn't cover, and WARNs where it covers
+  that region only.
 
 ## Scheduled launches (`lagotto launch`, #49)
 
