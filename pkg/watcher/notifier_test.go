@@ -449,3 +449,43 @@ func TestNotifyUnsupported_Channels(t *testing.T) {
 		t.Errorf("NotifyUnsupported error = %v, want blocked unsafe webhook URL", err)
 	}
 }
+
+// TestNotifyUnsupported_Publishes runs the email and sns channels through
+// NotifyUnsupported itself (one publish each: the human text to the default
+// topic, the JSON event to the user's topic) and the webhook dispatch directly.
+func TestNotifyUnsupported_Publishes(t *testing.T) {
+	w := &Watch{WatchID: "w-sm", InstanceTypePattern: "ml.g5.2xlarge", Service: ServiceSageMaker, Action: ActionNotify,
+		NotifyChannels: []NotifyChannel{{Type: "email", Target: "a@example.com"}, {Type: "sns", Target: "arn:aws:sns:us-east-1:111122223333:mine"}}}
+	pub := &capturePublisher{}
+	n := &Notifier{snsClient: pub, topicArn: "arn:aws:sns:us-east-1:111122223333:lagotto-capacity-alerts"}
+	if err := n.NotifyUnsupported(context.Background(), w, sageMakerNotifyUnsupported); err != nil {
+		t.Fatalf("NotifyUnsupported: %v", err)
+	}
+	if len(pub.msgs) != 2 {
+		t.Fatalf("published %d messages, want 2", len(pub.msgs))
+	}
+	if aws.ToString(pub.msgs[0].TopicArn) != n.topicArn || !strings.Contains(aws.ToString(pub.msgs[0].Message), "--action spawn") {
+		t.Errorf("email publish = %s / %q", aws.ToString(pub.msgs[0].TopicArn), aws.ToString(pub.msgs[0].Message))
+	}
+	var ev map[string]interface{}
+	if err := json.Unmarshal([]byte(aws.ToString(pub.msgs[1].Message)), &ev); err != nil || ev["event"] != "unsupported" {
+		t.Errorf("sns message = %q (%v), want the unsupported event", aws.ToString(pub.msgs[1].Message), err)
+	}
+
+	var got map[string]interface{}
+	status := http.StatusOK
+	ts := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		rw.WriteHeader(status)
+	}))
+	defer ts.Close()
+	wn := &Notifier{httpClient: ts.Client()}
+	data, _ := json.Marshal(unsupportedPayload(w, "r"))
+	if err := wn.postWebhookJSON(ts.URL, data); err != nil || got["event"] != "unsupported" {
+		t.Errorf("postWebhookJSON: err=%v payload=%v", err, got)
+	}
+	status = http.StatusInternalServerError
+	if err := wn.postWebhookJSON(ts.URL, data); err == nil || !strings.Contains(err.Error(), "500") {
+		t.Errorf("postWebhookJSON on 500: err=%v, want a 500 error", err)
+	}
+}
