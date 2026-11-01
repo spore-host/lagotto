@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.65.0] - 2026-11-01
+
 ### Added
 
 - **The `status` table and every match notification show a fired hold's
@@ -1386,7 +1388,8 @@ Initial tagged release from the standalone `spore-host/lagotto` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/lagotto/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.64.1...HEAD
+[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.65.0...HEAD
+[0.65.0]: https://github.com/spore-host/lagotto/compare/v0.64.1...v0.65.0
 [0.64.1]: https://github.com/spore-host/lagotto/compare/v0.64.0...v0.64.1
 [0.64.0]: https://github.com/spore-host/lagotto/compare/v0.63.1...v0.64.0
 [0.63.1]: https://github.com/spore-host/lagotto/compare/v0.63.0...v0.63.1
