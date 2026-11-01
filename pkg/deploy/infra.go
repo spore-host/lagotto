@@ -56,11 +56,10 @@ const (
 
 // PollerFunctionARN returns the constructed ARN of the poller Lambda.
 //
-// NOTE: pkg/runtimeiam builds this same ARN inline (in its scheduler-invoke
-// inline policy and in PolicyDocument's scheduler statements). That duplication
-// is deliberate for now — runtimeiam must not import pkg/deploy (deploy imports
-// runtimeiam), and collapsing it would mean moving the names to a third package
-// right on top of the just-landed #153 work. Left for a later cleanup.
+// NOTE: pkg/runtimeiam carries its own copy of the function name, for its
+// scheduler-invoke inline policy (which matches this ARN in ANY region, #218) —
+// runtimeiam must not import pkg/deploy (deploy imports runtimeiam).
+// TestInvokePolicyCoversEveryPollerTarget asserts the two agree.
 func PollerFunctionARN(region, accountID string) string {
 	return fmt.Sprintf("arn:aws:lambda:%s:%s:function:%s", region, accountID, PollerFunctionName)
 }
