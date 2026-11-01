@@ -119,12 +119,13 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	if deployTeardown {
 		// Say exactly what survives. Each of these has burned somebody: the tables
 		// hold the watches, the IAM roles are shared with per-launch schedules
-		// (#146), and the artifact bucket was never stack-owned so no previous
-		// teardown removed it either.
+		// (#146) and with the poller in every OTHER region of the account (#218 —
+		// teardown is per-region, so it never touches them), and the artifact
+		// bucket was never stack-owned so no previous teardown removed it either.
 		if !confirm(fmt.Sprintf(`Delete the lagotto poller in %s (account %s)?
 This deletes the schedule %s, the Lambda %s and the SNS topic %s.
 RETAINED: your DynamoDB tables (watches/history/scheduled — 'lagotto teardown' owns those),
-RETAINED: the IAM roles %s and %s (CLI-owned, shared with per-launch scheduled launches),
+RETAINED: the IAM roles %s and %s (CLI-owned, IAM-global: shared by every region's poller and by per-launch scheduled launches),
 RETAINED: the artifact bucket %s,
 RETAINED: any per-launch 'lagotto-launch-sl-*' schedules.
 Continue?`,

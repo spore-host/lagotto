@@ -38,8 +38,14 @@ const (
 	// the poller (and the #49 per-launch schedules), CLI-owned and referenced by
 	// the stack's Scheduler target by ARN.
 	SchedulerInvokeRoleName = "lagotto-capacity-poller-scheduler-invoke"
-	// schedulerInvokePolicyName is the inline lambda:InvokeFunction policy on it.
-	schedulerInvokePolicyName = "InvokeLambda"
+	// SchedulerInvokePolicyName is the inline lambda:InvokeFunction policy on it.
+	SchedulerInvokePolicyName = "InvokeLambda"
+	// SchedulerInvokeAction is the one action that policy grants.
+	SchedulerInvokeAction = "lambda:InvokeFunction"
+	// pollerFunctionName is the poller Lambda's fixed name. pkg/deploy owns the
+	// same constant (deploy.PollerFunctionName) but imports this package, so it
+	// cannot be shared by reference; pkg/deploy's tests assert the two agree.
+	pollerFunctionName = "lagotto-capacity-poller"
 	// lambdaBasicExecutionARN is the AWS-managed policy giving the poller role
 	// CloudWatch Logs basic execution (matching the old CFN ManagedPolicyArns).
 	lambdaBasicExecutionARN = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
@@ -103,7 +109,12 @@ func roleExists(ctx context.Context, client IAMAPI, name string) (bool, error) {
 // EnsureRoles creates the two CLI-owned poller roles if absent — the poller
 // execution role (Lambda trust + basic-execution logging) and the Scheduler
 // invoke role (Scheduler trust + lambda:InvokeFunction on the poller) — so the
-// stack can reference them by ARN. Idempotent: an existing role is left as-is.
+// stack can reference them by ARN. Idempotent: an existing role is left as-is,
+// apart from the invoke role's inline policy, which is rewritten on every call so
+// a deploy repairs a policy written by an older lagotto (#218).
+//
+// region is validated but writes nothing region-specific: both roles are
+// IAM-global and shared by every region's poller.
 // It deliberately does NOT attach the full runtime permissions policy; that
 // stays with EnsureRuntimeRole (setup), preserving the #16 division where the
 // broad spawn/hold/sagemaker grant is applied by the human admin. Called by
@@ -115,7 +126,7 @@ func EnsureRoles(ctx context.Context, client IAMAPI, region, accountID string) e
 	if err := ensurePollerRole(ctx, client); err != nil {
 		return err
 	}
-	return ensureSchedulerInvokeRole(ctx, client, region, accountID)
+	return ensureSchedulerInvokeRole(ctx, client, accountID)
 }
 
 // ensurePollerRole get-or-creates RoleName with the Lambda trust relationship
@@ -149,9 +160,17 @@ func ensurePollerRole(ctx context.Context, client IAMAPI) error {
 }
 
 // ensureSchedulerInvokeRole get-or-creates SchedulerInvokeRoleName with the
-// Scheduler trust relationship and an inline policy allowing it to invoke the
-// poller (referenced by constructed ARN, matching the old template).
-func ensureSchedulerInvokeRole(ctx context.Context, client IAMAPI, region, accountID string) error {
+// Scheduler trust relationship and writes [SchedulerInvokePolicyDocument] onto it.
+//
+// It deliberately takes no region (#218). IAM is global, so this one role is
+// shared by the poller schedule in EVERY region of the account and by every
+// per-launch schedule. It used to be written with this deploy's region in the
+// Resource, so the last region deployed silently broke every other region's
+// schedule: each scheduled run failed with a Scheduler target error and the
+// poller there was never invoked. A document that cannot depend on the region is
+// the structural fix — deploying region A then region B converges, with nothing
+// to flip-flop.
+func ensureSchedulerInvokeRole(ctx context.Context, client IAMAPI, accountID string) error {
 	exists, err := roleExists(ctx, client, SchedulerInvokeRoleName)
 	if err != nil {
 		return fmt.Errorf("runtimeiam: check role %s: %w", SchedulerInvokeRoleName, err)
@@ -164,26 +183,54 @@ func ensureSchedulerInvokeRole(ctx context.Context, client IAMAPI, region, accou
 			return fmt.Errorf("runtimeiam: create role %s: %w", SchedulerInvokeRoleName, err)
 		}
 	}
-	invokeDoc := map[string]interface{}{
-		"Version": "2012-10-17",
-		"Statement": []map[string]interface{}{{
-			"Effect":   "Allow",
-			"Action":   "lambda:InvokeFunction",
-			"Resource": fmt.Sprintf("arn:aws:lambda:%s:%s:function:lagotto-capacity-poller", region, accountID),
-		}},
-	}
-	b, err := json.Marshal(invokeDoc)
+	doc, err := SchedulerInvokePolicyDocument(accountID)
 	if err != nil {
-		return fmt.Errorf("runtimeiam: build scheduler-invoke policy: %w", err)
+		return err
 	}
 	if _, err := client.PutRolePolicy(ctx, &iam.PutRolePolicyInput{
 		RoleName:       aws.String(SchedulerInvokeRoleName),
-		PolicyName:     aws.String(schedulerInvokePolicyName),
-		PolicyDocument: aws.String(string(b)),
+		PolicyName:     aws.String(SchedulerInvokePolicyName),
+		PolicyDocument: aws.String(doc),
 	}); err != nil {
 		return fmt.Errorf("runtimeiam: put invoke policy on %s: %w", SchedulerInvokeRoleName, err)
 	}
 	return nil
+}
+
+// SchedulerInvokeFunctionARN is the Resource of the Scheduler invoke policy:
+// lagotto's poller function in this account, in ANY region (#218).
+//
+// The region is a wildcard because the role is IAM-global and shared by every
+// region's poller schedule; the function name and the account stay exact, so the
+// grant still reaches only lagotto's own poller. Both things this role is used
+// for invoke that function: the poller schedule, and the #49 per-launch
+// `lagotto-launch-*` schedules (and the poller's #62 re-arm of those), which
+// target the same function with a routing payload.
+func SchedulerInvokeFunctionARN(accountID string) string {
+	return fmt.Sprintf("arn:aws:lambda:*:%s:function:%s", accountID, pollerFunctionName)
+}
+
+// SchedulerInvokePolicyDocument returns the inline policy written onto the
+// Scheduler invoke role. It is a function of the account alone — never of the
+// region the writing command runs in — so every region's deploy writes the same
+// bytes (#218).
+func SchedulerInvokePolicyDocument(accountID string) (string, error) {
+	if accountID == "" {
+		return "", fmt.Errorf("runtimeiam: accountID is required for the scheduler-invoke policy")
+	}
+	doc := map[string]interface{}{
+		"Version": "2012-10-17",
+		"Statement": []map[string]interface{}{{
+			"Effect":   "Allow",
+			"Action":   SchedulerInvokeAction,
+			"Resource": SchedulerInvokeFunctionARN(accountID),
+		}},
+	}
+	b, err := json.Marshal(doc)
+	if err != nil {
+		return "", fmt.Errorf("runtimeiam: build scheduler-invoke policy: %w", err)
+	}
+	return string(b), nil
 }
 
 // EnsureRuntimeRole ensures the poller execution role exists (creating it if

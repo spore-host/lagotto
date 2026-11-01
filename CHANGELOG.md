@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **In an account with pollers in more than one region, deploying one region
+  no longer breaks every other region's poller** (#218). The EventBridge
+  Scheduler invoke role `lagotto-capacity-poller-scheduler-invoke` is IAM-global
+  and shared by every region's poller schedule and every per-launch
+  (`lagotto launch`) schedule, but `lagotto deploy` wrote its `InvokeLambda`
+  policy for the deploying region's poller only. The last region deployed won:
+  in every other region each scheduled run failed with a Scheduler target error,
+  the poller was never invoked, its watches were never polled, and nothing
+  reported it. `deploy` now writes the same policy from every region:
+  `lambda:InvokeFunction` on `arn:aws:lambda:*:<account>:function:lagotto-capacity-poller`
+  (still only lagotto's own poller, in your account). **To repair an affected
+  account, run `lagotto deploy` with v0.65.1 in any one region**: it rewrites the
+  shared policy for all regions. Re-deploying the others is not needed.
+  `lagotto deploy --teardown` still never touches the shared IAM roles, so
+  tearing down one region cannot cut off another. The runtime policy that `lagotto setup` writes
+  onto the shared execution role is still per-region: run `setup` in one region
+  only until #219 is fixed.
+- **`lagotto doctor` catches it** (#218). The new `invoke-policy` check evaluates
+  the invoke role's policy locally against this region's poller and FAILs when
+  Scheduler is not allowed to invoke it. It WARNs when the policy covers this
+  region only, which is what an older `deploy` wrote. Previously `iam-roles`
+  passed because the role existed. A new best-effort `scheduler-errors` check
+  reports EventBridge Scheduler target errors over the last 24 hours (CloudWatch
+  `AWS/Scheduler` `TargetErrorCount` for the `default` schedule group, which
+  also counts any other schedule in that group). It needs
+  `cloudwatch:GetMetricStatistics` on your credentials; without it the check
+  warns and doctor still passes.
+
 ## [0.65.0] - 2026-11-01
 
 ### Added

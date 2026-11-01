@@ -42,8 +42,11 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
+	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	dynamodbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
@@ -72,10 +75,12 @@ const (
 	CheckPollerVersion = "poller-version"
 	CheckTables        = "tables"
 	CheckIAMRoles      = "iam-roles"
+	CheckInvokePolicy  = "invoke-policy"
 	CheckPollerLambda  = "poller-lambda"
 	CheckAlertsTopic   = "alerts-topic"
 	CheckSchedule      = "schedule"
 	CheckScheduleState = "schedule-state"
+	CheckSchedulerErrs = "scheduler-errors"
 	CheckLegacyStack   = "legacy-stack"
 )
 
@@ -143,6 +148,40 @@ type Infra interface {
 	LegacyStackState(ctx context.Context, stackName string) (bool, string, error)
 }
 
+// MetricsAPI is the read-only slice of CloudWatch doctor needs, for the
+// best-effort Scheduler target-error count. *cloudwatch.Client satisfies it.
+type MetricsAPI interface {
+	GetMetricStatistics(ctx context.Context, in *cloudwatch.GetMetricStatisticsInput, optFns ...func(*cloudwatch.Options)) (*cloudwatch.GetMetricStatisticsOutput, error)
+}
+
+// Scheduler target-error lookup (#218). EventBridge Scheduler publishes its
+// metrics per account and per schedule GROUP, not per schedule, so this counts
+// every schedule in the default group: the poller's, lagotto's per-launch
+// lagotto-launch-* schedules, and anything else the account keeps there.
+const (
+	schedulerMetricsNamespace = "AWS/Scheduler"
+	schedulerTargetErrors     = "TargetErrorCount"
+	schedulerGroupDimension   = "ScheduleGroup"
+	pollerScheduleGroup       = "default"
+	// SchedulerErrorsWindow is how far back the target-error count looks.
+	SchedulerErrorsWindow = 24 * time.Hour
+)
+
+// SchedulerErrorsQuery is the GetMetricStatistics request doctor makes: the Sum
+// of TargetErrorCount for the poller's schedule group over the last
+// SchedulerErrorsWindow, in hourly buckets.
+func SchedulerErrorsQuery(now time.Time) *cloudwatch.GetMetricStatisticsInput {
+	return &cloudwatch.GetMetricStatisticsInput{
+		Namespace:  aws.String(schedulerMetricsNamespace),
+		MetricName: aws.String(schedulerTargetErrors),
+		Dimensions: []cwtypes.Dimension{{Name: aws.String(schedulerGroupDimension), Value: aws.String(pollerScheduleGroup)}},
+		StartTime:  aws.Time(now.Add(-SchedulerErrorsWindow)),
+		EndTime:    aws.Time(now),
+		Period:     aws.Int32(3600),
+		Statistics: []cwtypes.Statistic{cwtypes.StatisticSum},
+	}
+}
+
 // Options is everything Gather needs. Every AWS dependency is an interface or a
 // function field so the whole command runs offline in tests.
 type Options struct {
@@ -162,6 +201,12 @@ type Options struct {
 	// field rather than an interface because watcher.Store wraps a concrete
 	// DynamoDB client; the CLI passes a closure over store.ListActiveWatches.
 	ActiveWatches func(ctx context.Context) (int, error)
+	// Metrics, when set, is read for the Scheduler target-error count. Best
+	// effort: it needs cloudwatch:GetMetricStatistics on the caller's
+	// credentials, which a user running doctor may well not have.
+	Metrics MetricsAPI
+	// Now is the clock for the metrics window (time.Now when nil).
+	Now func() time.Time
 }
 
 // State is the raw, read-only observation Evaluate turns into a Report. Each
@@ -179,6 +224,12 @@ type State struct {
 	// definitively absent, or a read failure.
 	PolicyDoc string
 	PolicyErr error
+
+	// InvokePolicyDoc is the Scheduler invoke role's InvokeLambda policy
+	// (decoded JSON); InvokePolicyErr is runtimeiam.ErrInvokeRoleNotFound /
+	// ErrInvokePolicyNotFound when definitively absent, or a read failure.
+	InvokePolicyDoc string
+	InvokePolicyErr error
 
 	// Roles maps role name → present. RoleErrs maps role name → read failure.
 	Roles    map[string]bool
@@ -201,9 +252,20 @@ type State struct {
 	ActiveWatches    int
 	ActiveWatchesErr error
 
+	// SchedulerErrors is the best-effort Scheduler target-error count.
+	SchedulerErrors SchedulerErrors
+
 	LegacyStack       bool
 	LegacyStackStatus string
 	LegacyStackErr    error
+}
+
+// SchedulerErrors is the observed TargetErrorCount for the poller's schedule
+// group. Checked is false when no metrics client was supplied.
+type SchedulerErrors struct {
+	Checked bool
+	Count   float64
+	Err     error
 }
 
 // Gather performs every read. It makes no mutating call of any kind.
@@ -232,6 +294,10 @@ func Gather(ctx context.Context, o Options) State {
 			}
 			st.Roles[name] = present
 		}
+
+		// 2b. Does the shared invoke role's policy let Scheduler invoke THIS
+		// region's poller (#218)?
+		st.InvokePolicyDoc, st.InvokePolicyErr = runtimeiam.ReadSchedulerInvokePolicy(ctx, o.IAM)
 	}
 
 	// 3. The three CLI-owned tables.
@@ -270,6 +336,23 @@ func Gather(ctx context.Context, o Options) State {
 	if o.ActiveWatches != nil {
 		st.ActiveWatches, st.ActiveWatchesErr = o.ActiveWatches(ctx)
 	}
+
+	// 6. Best effort: is Scheduler failing to invoke its targets?
+	if o.Metrics != nil {
+		now := time.Now
+		if o.Now != nil {
+			now = o.Now
+		}
+		st.SchedulerErrors.Checked = true
+		out, err := o.Metrics.GetMetricStatistics(ctx, SchedulerErrorsQuery(now()))
+		if err != nil {
+			st.SchedulerErrors.Err = err
+		} else {
+			for _, dp := range out.Datapoints {
+				st.SchedulerErrors.Count += aws.ToFloat64(dp.Sum)
+			}
+		}
+	}
 	return st
 }
 
@@ -290,11 +373,19 @@ func Evaluate(st State) *Report {
 	r.Checks = append(r.Checks,
 		evalTables(st),
 		evalRoles(st),
+	)
+	if c, ok := evalInvokePolicy(st); ok {
+		r.Checks = append(r.Checks, c)
+	}
+	r.Checks = append(r.Checks,
 		evalPollerLambda(st),
 		evalAlertsTopic(st),
 		evalSchedule(st),
 	)
 	if c, ok := evalScheduleState(st); ok {
+		r.Checks = append(r.Checks, c)
+	}
+	if c, ok := evalSchedulerErrors(st); ok {
 		r.Checks = append(r.Checks, c)
 	}
 	if c, ok := evalLegacyStack(st); ok {
@@ -513,6 +604,122 @@ func evalRoles(st State) Check {
 		c.Summary = "both CLI-owned IAM roles exist (" + strings.Join(want, ", ") + ")"
 	}
 	return c
+}
+
+// evalInvokePolicy checks that the Scheduler invoke role's policy actually lets
+// Scheduler invoke THIS region's poller (#218), evaluated locally against the
+// function ARN — no call to IAM's policy simulator.
+//
+// The role is IAM-global and shared by every region's poller. Before v0.65.1,
+// deploy wrote it with only the deploying region's function, so the iam-roles
+// check passed while every scheduled run in every other region failed with a
+// Scheduler target error, and the poller there was never invoked:
+//
+//   - this region's function not allowed → FAIL (the #218 case);
+//   - allowed here but only here → WARN: correct in this region, broken in any
+//     other region this account runs a poller in;
+//   - allowed in every region → PASS.
+//
+// ok is false when the role itself is absent (iam-roles reports that) or the
+// policy was not read at all.
+func evalInvokePolicy(st State) (Check, bool) {
+	if errors.Is(st.InvokePolicyErr, runtimeiam.ErrInvokeRoleNotFound) ||
+		(st.InvokePolicyErr == nil && st.InvokePolicyDoc == "") { // not observed (no IAM client)
+		return Check{}, false
+	}
+	c := Check{Name: CheckInvokePolicy}
+	fnARN := deploy.PollerFunctionARN(st.Region, st.AccountID)
+	redeploy := fmt.Sprintf("lagotto deploy --version %s   # in any one region; it rewrites the shared policy for all of them", deployVersionHint(st.CLIVersion))
+	switch {
+	case errors.Is(st.InvokePolicyErr, runtimeiam.ErrInvokePolicyNotFound):
+		c.Status = StatusFail
+		c.Summary = fmt.Sprintf("role %s carries no %s policy — EventBridge Scheduler cannot invoke the poller, so every scheduled run fails",
+			runtimeiam.SchedulerInvokeRoleName, runtimeiam.SchedulerInvokePolicyName)
+		c.Fix = []string{redeploy}
+		return c, true
+	case st.InvokePolicyErr != nil:
+		c.Status = StatusWarn
+		c.Summary = fmt.Sprintf("could not read %s on %s: %v", runtimeiam.SchedulerInvokePolicyName, runtimeiam.SchedulerInvokeRoleName, st.InvokePolicyErr)
+		c.Detail = []string{"doctor could not tell whether Scheduler may invoke the poller (iam:GetRolePolicy is needed)"}
+		return c, true
+	}
+	cov, err := runtimeiam.EvaluateInvokePolicy(st.InvokePolicyDoc, fnARN)
+	if err != nil {
+		c.Status = StatusWarn
+		c.Summary = fmt.Sprintf("could not evaluate %s on %s: %v", runtimeiam.SchedulerInvokePolicyName, runtimeiam.SchedulerInvokeRoleName, err)
+		return c, true
+	}
+	switch {
+	case !cov.ThisRegion:
+		c.Status = StatusFail
+		c.Summary = fmt.Sprintf("%s does not allow invoking this region's poller %s — every scheduled run here fails and the poller is never invoked",
+			runtimeiam.SchedulerInvokeRoleName, fnARN)
+		c.Detail = []string{
+			"the role is IAM-global and shared by every region's poller schedule and every per-launch schedule",
+			"a 'lagotto deploy' in another region by lagotto older than v0.65.1 scoped it to that region alone (lagotto#218)",
+			"nothing reports this: the schedule stays ENABLED, watches look armed, and Scheduler logs only a target error",
+		}
+		c.Fix = []string{redeploy}
+	case !cov.AllRegions:
+		c.Status = StatusWarn
+		c.Summary = fmt.Sprintf("%s allows invoking the poller in this region only", runtimeiam.SchedulerInvokeRoleName)
+		c.Detail = []string{
+			"the role is shared by every region's poller; a poller in any OTHER region of this account is not being invoked (lagotto#218)",
+			"written by a 'lagotto deploy' older than v0.65.1",
+		}
+		c.Fix = []string{redeploy}
+	default:
+		c.Status = StatusPass
+		c.Summary = fmt.Sprintf("%s allows Scheduler to invoke the poller in every region, including this one", runtimeiam.SchedulerInvokeRoleName)
+	}
+	return c, true
+}
+
+// evalSchedulerErrors surfaces EventBridge Scheduler target errors (#218): the
+// one place a schedule that cannot invoke its target shows up at all. Best
+// effort by design — doctor runs on the user's credentials, which may lack
+// cloudwatch:GetMetricStatistics — so a read failure is a WARN that says so, and
+// a non-zero count is a WARN too: the metric is per schedule GROUP (EventBridge
+// Scheduler publishes nothing per schedule), so it may be another schedule's.
+// invoke-policy is the check that FAILs when the cause is lagotto's.
+//
+// ok is false when no metrics client was supplied, or there is no poller
+// schedule to talk about.
+func evalSchedulerErrors(st State) (Check, bool) {
+	se := st.SchedulerErrors
+	if !se.Checked || st.ScheduleErr != nil || !st.Schedule.Exists {
+		return Check{}, false
+	}
+	c := Check{Name: CheckSchedulerErrs}
+	window := fmt.Sprintf("%dh", int(SchedulerErrorsWindow.Hours()))
+	switch {
+	case se.Err != nil:
+		c.Status = StatusWarn
+		c.Summary = fmt.Sprintf("could not read Scheduler target errors (best effort; needs cloudwatch:GetMetricStatistics on your credentials): %v", se.Err)
+	case se.Count > 0:
+		c.Status = StatusWarn
+		c.Summary = fmt.Sprintf("EventBridge Scheduler reported %.0f target error(s) in schedule group %q in the last %s",
+			se.Count, pollerScheduleGroup, window)
+		c.Detail = []string{
+			"a target error means a schedule fired and could not invoke its target — for the poller, that run never happened",
+			fmt.Sprintf("the metric (%s %s) is per schedule group, not per schedule: it includes per-launch lagotto-launch-* schedules and any other schedule in %q",
+				schedulerMetricsNamespace, schedulerTargetErrors, pollerScheduleGroup),
+			"if invoke-policy above FAILs, that is the cause",
+		}
+	default:
+		c.Status = StatusPass
+		c.Summary = fmt.Sprintf("no Scheduler target errors in schedule group %q in the last %s", pollerScheduleGroup, window)
+	}
+	return c, true
+}
+
+// deployVersionHint is the --version to suggest in a deploy fix line.
+func deployVersionHint(cliVersion string) string {
+	v := strings.TrimPrefix(cliVersion, "v")
+	if v == "" || v == "dev" {
+		return "<release>"
+	}
+	return v
 }
 
 func evalPollerLambda(st State) Check {

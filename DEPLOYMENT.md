@@ -26,6 +26,42 @@ There are two paths:
 Every one of these has a **fixed name**, which is what makes the deploy idempotent
 and the ARNs derivable without reading any stack outputs.
 
+### More than one region in an account
+
+IAM is global, so the two roles are shared by every region you deploy a poller
+to. In particular `lagotto-capacity-poller-scheduler-invoke`, the role EventBridge
+Scheduler assumes to invoke the poller, is used by the poller schedule in every
+region and by every per-launch `lagotto-launch-sl-*` schedule. Its inline
+`InvokeLambda` policy therefore names the poller in **every** region:
+
+```json
+{"Effect": "Allow", "Action": "lambda:InvokeFunction",
+ "Resource": "arn:aws:lambda:*:<account>:function:lagotto-capacity-poller"}
+```
+
+It is still scoped to lagotto's own function in your account. Every `deploy`
+writes this same document whichever region it runs in, so deploying region A
+and then region B converges.
+
+**Before v0.65.1** `deploy` wrote that policy for the deploying region only, and
+the last region deployed silently broke the schedule in every other region
+(lagotto#218). Each scheduled run failed with a Scheduler target error and the
+poller there was never invoked. **One `lagotto deploy` with v0.65.1 or later, in
+any one region, rewrites the shared policy for all regions**; you do not need to
+re-deploy the others. `lagotto doctor` reports the problem in each region
+(`invoke-policy`), and on a best-effort basis the Scheduler target errors
+(`scheduler-errors`).
+
+`lagotto deploy --teardown` deletes only that region's poller resources. It never
+deletes or rewrites the shared roles or their policies, so tearing down one region
+cannot cut off a poller in another.
+
+This does **not** yet apply to the runtime permissions policy that `lagotto setup`
+writes onto `lagotto-capacity-poller-role`. That policy is still scoped to the
+region `setup` runs in, so running `setup` in a second region revokes the first
+region's grants (lagotto#219). Until that is fixed, run `setup` in one region
+only.
+
 ## Prerequisites
 
 - AWS credentials for the target account, with permission to create the resources
@@ -149,9 +185,11 @@ succeeds.
 - **The DynamoDB tables** — they hold your watches and match history. Use
   `lagotto teardown` to delete those (when empty, or with `--force`).
 - **Both IAM roles** — `lagotto-capacity-poller-role` and
-  `lagotto-capacity-poller-scheduler-invoke`. They are CLI-owned, and the invoke
-  role is shared with per-launch scheduled launches. Delete them by hand if you
-  really want them gone.
+  `lagotto-capacity-poller-scheduler-invoke`. They are CLI-owned and IAM-global:
+  shared by the poller in every region of the account, and the invoke role also by
+  per-launch scheduled launches. Teardown is per-region, so it cannot know that no
+  other region still needs them, and it never touches them (#218). Delete them by
+  hand once no region runs a poller.
 - **The artifact bucket** (`lagotto-lambda-<account>-<region>`) — it is created
   outside the poller's lifecycle. Delete it manually if you want.
 - **Per-launch `lagotto-launch-sl-*` schedules.**

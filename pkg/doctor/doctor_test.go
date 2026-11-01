@@ -25,6 +25,15 @@ const (
 	testVersion = "0.60.0"
 )
 
+func expectedInvokePolicy(t *testing.T) string {
+	t.Helper()
+	doc, err := runtimeiam.SchedulerInvokePolicyDocument(testAccount)
+	if err != nil {
+		t.Fatalf("SchedulerInvokePolicyDocument: %v", err)
+	}
+	return doc
+}
+
 func expectedPolicy(t *testing.T) string {
 	t.Helper()
 	doc, err := runtimeiam.PolicyDocument(testRegion, testAccount, nil)
@@ -44,6 +53,7 @@ func healthyState(t *testing.T) State {
 		CLIVersion:      testVersion,
 		LegacyStackName: "lagotto",
 		PolicyDoc:       expectedPolicy(t),
+		InvokePolicyDoc: expectedInvokePolicy(t),
 		Roles: map[string]bool{
 			runtimeiam.RoleName:                true,
 			runtimeiam.SchedulerInvokeRoleName: true,
@@ -52,12 +62,13 @@ func healthyState(t *testing.T) State {
 		Tables: map[string]bool{
 			"lagotto-watches": true, "lagotto-match-history": true, "lagotto-scheduled-launches": true,
 		},
-		TableOrder:    []string{"lagotto-watches", "lagotto-match-history", "lagotto-scheduled-launches"},
-		TableErrs:     map[string]error{},
-		Poller:        deploy.PollerInfo{Exists: true, Version: testVersion, RoleARN: runtimeiam.RoleARN(testAccount)},
-		Schedule:      deploy.ScheduleInfo{Exists: true, State: "ENABLED", Expression: "rate(5 minutes)"},
-		TopicPresent:  true,
-		ActiveWatches: 2,
+		TableOrder:      []string{"lagotto-watches", "lagotto-match-history", "lagotto-scheduled-launches"},
+		TableErrs:       map[string]error{},
+		Poller:          deploy.PollerInfo{Exists: true, Version: testVersion, RoleARN: runtimeiam.RoleARN(testAccount)},
+		Schedule:        deploy.ScheduleInfo{Exists: true, State: "ENABLED", Expression: "rate(5 minutes)"},
+		TopicPresent:    true,
+		ActiveWatches:   2,
+		SchedulerErrors: SchedulerErrors{Checked: true},
 	}
 }
 
