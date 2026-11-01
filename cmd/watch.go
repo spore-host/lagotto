@@ -434,6 +434,20 @@ func printQuotaFeasibility(out io.Writer, w *watcher.Watch, region string, rep *
 // at watch-creation rather than being ignored at launch. Stored configs are
 // re-read tolerantly at match time (see watcher.Spawner.Spawn).
 func loadEC2SpawnConfig(ctx context.Context, read watcher.ConfigReader, source string) ([]byte, error) {
+	cfg, err := loadEC2SpawnConfigFile(ctx, read, source)
+	if err != nil {
+		return nil, err
+	}
+	jsonBytes, err := json.Marshal(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("marshal spawn config: %w", err)
+	}
+	return jsonBytes, nil
+}
+
+// loadEC2SpawnConfigFile is loadEC2SpawnConfig before the final marshal, for a
+// caller that adjusts the config first (`lagotto launch --reservation-id`, #210).
+func loadEC2SpawnConfigFile(ctx context.Context, read watcher.ConfigReader, source string) (*watcher.SpawnConfigFile, error) {
 	data, err := read(ctx, source)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", source, err)
@@ -461,11 +475,7 @@ func loadEC2SpawnConfig(ctx context.Context, read watcher.ConfigReader, source s
 	if err := cfg.MakeSelfContained(ctx, read); err != nil {
 		return nil, fmt.Errorf("resolve spawn config references: %w", err)
 	}
-	jsonBytes, err := json.Marshal(cfg)
-	if err != nil {
-		return nil, fmt.Errorf("marshal spawn config: %w", err)
-	}
-	return jsonBytes, nil
+	return cfg, nil
 }
 
 // validateServiceFlags is the service/action part of `watch`'s validation,
