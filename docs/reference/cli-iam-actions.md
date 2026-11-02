@@ -64,7 +64,7 @@ Not everyday use:
 | Command | IAM actions |
 | --- | --- |
 | `lagotto cancel` | `dynamodb:GetItem`, `dynamodb:UpdateItem`, `ec2:CancelCapacityReservation`, `ec2:DescribeCapacityReservations` |
-| `lagotto deploy` | `cloudformation:DeleteStack`, `cloudformation:DescribeStacks`, `cloudformation:GetTemplate`, `cloudformation:UpdateStack`, `dynamodb:CreateTable`, `dynamodb:DescribeTable`, `dynamodb:DescribeTimeToLive`, `dynamodb:TagResource`, `dynamodb:UpdateTimeToLive`, `iam:AttachRolePolicy`, `iam:CreateRole`, `iam:GetRole`, `iam:PassRole`, `iam:PutRolePolicy`, `iam:TagRole`, `lambda:CreateFunction`, `lambda:DeleteFunction`, `lambda:GetFunction`, `lambda:TagResource`, `lambda:UpdateFunctionCode`, `lambda:UpdateFunctionConfiguration`, `s3:CreateBucket`, `s3:ListBucket`, `s3:PutObject`, `s3:PutObjectTagging`, `s3:TagResource`, `scheduler:CreateSchedule`, `scheduler:DeleteSchedule`, `scheduler:GetSchedule`, `scheduler:UpdateSchedule`, `sns:CreateTopic`, `sns:DeleteTopic`, `sns:GetTopicAttributes`, `sns:SetTopicAttributes`, `sns:TagResource` |
+| `lagotto deploy` | `cloudformation:CreateChangeSet`, `cloudformation:DeleteChangeSet`, `cloudformation:DeleteStack`, `cloudformation:DescribeChangeSet`, `cloudformation:DescribeStackDriftDetectionStatus`, `cloudformation:DescribeStackResourceDrifts`, `cloudformation:DescribeStacks`, `cloudformation:DetectStackDrift`, `cloudformation:ExecuteChangeSet`, `cloudformation:GetTemplate`, `cloudformation:ListStackResources`, `dynamodb:CreateTable`, `dynamodb:DescribeTable`, `dynamodb:DescribeTimeToLive`, `dynamodb:TagResource`, `dynamodb:UpdateTimeToLive`, `iam:AttachRolePolicy`, `iam:CreateRole`, `iam:GetRole`, `iam:GetRolePolicy`, `iam:ListAttachedRolePolicies`, `iam:ListRolePolicies`, `iam:PassRole`, `iam:PutRolePolicy`, `iam:TagRole`, `lambda:CreateFunction`, `lambda:DeleteFunction`, `lambda:GetFunction`, `lambda:TagResource`, `lambda:UpdateFunctionCode`, `lambda:UpdateFunctionConfiguration`, `s3:CreateBucket`, `s3:ListBucket`, `s3:PutObject`, `s3:PutObjectTagging`, `s3:TagResource`, `scheduler:CreateSchedule`, `scheduler:DeleteSchedule`, `scheduler:GetSchedule`, `scheduler:UpdateSchedule`, `sns:CreateTopic`, `sns:DeleteTopic`, `sns:GetTopicAttributes`, `sns:SetTopicAttributes`, `sns:TagResource` |
 | `lagotto doctor` | `cloudformation:DescribeStacks`, `cloudwatch:GetMetricStatistics`, `dynamodb:DescribeTable`, `dynamodb:Query`, `iam:GetRole`, `iam:GetRolePolicy`, `lambda:GetFunction`, `scheduler:GetSchedule`, `sns:GetTopicAttributes` |
 | `lagotto extend` | `dynamodb:GetItem`, `dynamodb:UpdateItem`, `iam:PassRole`, `scheduler:GetSchedule`, `scheduler:UpdateSchedule` |
 | `lagotto history` | `dynamodb:GetItem`, `dynamodb:Query` |
@@ -82,10 +82,17 @@ Not everyday use:
 | IAM action | Commands |
 | --- | --- |
 | `account:GetAccountInformation` | `lagotto poll` |
+| `cloudformation:CreateChangeSet` | `lagotto deploy` |
+| `cloudformation:DeleteChangeSet` | `lagotto deploy` |
 | `cloudformation:DeleteStack` | `lagotto deploy` |
+| `cloudformation:DescribeChangeSet` | `lagotto deploy` |
+| `cloudformation:DescribeStackDriftDetectionStatus` | `lagotto deploy` |
+| `cloudformation:DescribeStackResourceDrifts` | `lagotto deploy` |
 | `cloudformation:DescribeStacks` | `lagotto deploy`, `lagotto doctor` |
+| `cloudformation:DetectStackDrift` | `lagotto deploy` |
+| `cloudformation:ExecuteChangeSet` | `lagotto deploy` |
 | `cloudformation:GetTemplate` | `lagotto deploy` |
-| `cloudformation:UpdateStack` | `lagotto deploy` |
+| `cloudformation:ListStackResources` | `lagotto deploy` |
 | `cloudwatch:GetMetricStatistics` | `lagotto doctor` |
 | `dynamodb:CreateTable` | `lagotto deploy`, `lagotto launch`, `lagotto setup`, `lagotto watch` |
 | `dynamodb:DeleteTable` | `lagotto teardown` |
@@ -123,7 +130,9 @@ Not everyday use:
 | `iam:CreateRole` | `lagotto deploy`, `lagotto poll`, `lagotto setup` |
 | `iam:GetInstanceProfile` | `lagotto poll` |
 | `iam:GetRole` | `lagotto deploy`, `lagotto doctor`, `lagotto poll`, `lagotto setup`, `lagotto watch` |
-| `iam:GetRolePolicy` | `lagotto doctor`, `lagotto setup`, `lagotto watch` |
+| `iam:GetRolePolicy` | `lagotto deploy`, `lagotto doctor`, `lagotto setup`, `lagotto watch` |
+| `iam:ListAttachedRolePolicies` | `lagotto deploy` |
+| `iam:ListRolePolicies` | `lagotto deploy` |
 | `iam:PassRole` | `lagotto deploy`, `lagotto extend`, `lagotto launch`, `lagotto poll`, `lagotto watch` |
 | `iam:PutRolePolicy` | `lagotto deploy`, `lagotto poll`, `lagotto setup` |
 | `iam:TagInstanceProfile` | `lagotto poll` |
