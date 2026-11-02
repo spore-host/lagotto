@@ -319,7 +319,7 @@ func TestSubstrate_Deploy_IsIdempotent(t *testing.T) {
 // the Deploy level (EnsurePollerSchedule has its own narrower version):
 //
 //	lagotto deploy  → schedule created DISABLED
-//	lagotto watch   → enablePollingSchedule flips it to ENABLED
+//	lagotto watch   → enablePollSchedule flips it to ENABLED
 //	lagotto deploy  → MUST NOT turn the running poller back off
 func TestSubstrate_Deploy_PreservesEnabledSchedule(t *testing.T) {
 	d := substrateDeployer(t)
@@ -330,7 +330,7 @@ func TestSubstrate_Deploy_PreservesEnabledSchedule(t *testing.T) {
 		t.Fatalf("first Deploy: %v", err)
 	}
 
-	// Exactly what cmd/watch.go's enablePollingSchedule does, out of band.
+	// Exactly what cmd/pollschedule.go's enablePollSchedule does, out of band.
 	cur, err := d.sched.GetSchedule(ctx, &scheduler.GetScheduleInput{Name: aws.String(PollerScheduleName)})
 	if err != nil {
 		t.Fatalf("GetSchedule: %v", err)
@@ -894,7 +894,7 @@ func TestSubstrate_EnsurePollerSchedule(t *testing.T) {
 // of the #154 central guarantee, reproducing the real sequence:
 //
 //	lagotto deploy  → schedule created DISABLED
-//	lagotto watch   → enablePollingSchedule flips it to ENABLED
+//	lagotto watch   → enablePollSchedule flips it to ENABLED
 //	lagotto deploy  → MUST NOT turn the running poller back off
 func TestSubstrate_EnsurePollerSchedule_PreservesEnabledState(t *testing.T) {
 	d := substrateDeployer(t)
@@ -906,7 +906,7 @@ func TestSubstrate_EnsurePollerSchedule_PreservesEnabledState(t *testing.T) {
 		t.Fatalf("EnsurePollerSchedule: %v", err)
 	}
 
-	// Exactly what cmd/watch.go's enablePollingSchedule does, out of band.
+	// Exactly what cmd/pollschedule.go's enablePollSchedule does, out of band.
 	cur, err := d.sched.GetSchedule(ctx, &scheduler.GetScheduleInput{Name: aws.String(PollerScheduleName)})
 	if err != nil {
 		t.Fatalf("GetSchedule: %v", err)

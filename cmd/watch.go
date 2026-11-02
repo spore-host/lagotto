@@ -11,7 +11,6 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/scheduler"
-	schedulertypes "github.com/aws/aws-sdk-go-v2/service/scheduler/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
@@ -238,13 +237,20 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if err := store.PutWatch(ctx, w); err != nil {
-		return fmt.Errorf("create watch: %w", err)
-	}
-
-	// Try to enable the polling schedule (best-effort; fails gracefully if not deployed)
-	if err := enablePollingSchedule(ctx, cfg); err != nil && verbose {
-		fmt.Fprintf(os.Stderr, "Note: could not enable polling schedule: %v\n", err)
+	// Store the watch and make sure the hosted poller will poll it (#231): a
+	// caller who cannot read or switch on the poller's schedule is refused, and
+	// no active watch is left behind for nothing to poll.
+	if err := armWatchPolling(ctx, scheduler.NewFromConfig(cfg), os.Stderr,
+		"create watch "+w.WatchID, "no watch was created",
+		func(ctx context.Context) error {
+			if err := store.PutWatch(ctx, w); err != nil {
+				return fmt.Errorf("create watch: %w", err)
+			}
+			return nil
+		},
+		func(ctx context.Context) error { return cancelUnpolledWatch(ctx, store.PutWatch, w) },
+	); err != nil {
+		return err
 	}
 
 	if getOutputFormat() == "json" {
@@ -530,39 +536,13 @@ func loadSageMakerConfig(path string) ([]byte, error) {
 	return jsonBytes, nil
 }
 
-// enablePollingSchedule re-enables the EventBridge schedule if it was self-disabled.
-func enablePollingSchedule(ctx context.Context, cfg aws.Config) error {
-	scheduleName := os.Getenv("LAGOTTO_SCHEDULE_NAME")
-	if scheduleName == "" {
-		scheduleName = "lagotto-capacity-poller"
-	}
-
-	client := scheduler.NewFromConfig(cfg)
-
-	current, err := client.GetSchedule(ctx, &scheduler.GetScheduleInput{
-		Name: aws.String(scheduleName),
-	})
-	if err != nil {
-		// Schedule doesn't exist (not deployed yet) — that's fine
-		return nil
-	}
-
-	if current.State == schedulertypes.ScheduleStateDisabled {
-		_, err = client.UpdateSchedule(ctx, &scheduler.UpdateScheduleInput{
-			Name:               current.Name,
-			ScheduleExpression: current.ScheduleExpression,
-			FlexibleTimeWindow: current.FlexibleTimeWindow,
-			Target:             current.Target,
-			State:              schedulertypes.ScheduleStateEnabled,
-		})
-		if err != nil {
-			return fmt.Errorf("enable schedule: %w", err)
-		}
-		if verbose {
-			fmt.Fprintf(os.Stderr, "Enabled polling schedule %s\n", scheduleName)
-		}
-	}
-	return nil
+// cancelUnpolledWatch rolls back a just-created watch the poller will not
+// poll. It rewrites the record through PutWatch — the same call (and the same
+// dynamodb:PutItem permission) that created it — as cancelled, so the caller
+// needs no permission they did not just use.
+func cancelUnpolledWatch(ctx context.Context, put func(context.Context, *watcher.Watch) error, w *watcher.Watch) error {
+	w.Status = watcher.StatusCancelled
+	return put(ctx, w)
 }
 
 func displayRegions(regions []string) string {

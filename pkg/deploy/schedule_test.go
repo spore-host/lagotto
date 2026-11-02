@@ -100,7 +100,7 @@ func TestEnsurePollerSchedule_EnabledAndConvergedIssuesNoCall(t *testing.T) {
 // TestEnsurePollerSchedule_PreservesEnabledStateOnUpdate is the other one, and
 // the single most valuable guarantee in #154: `lagotto deploy` must NEVER be able
 // to turn off a running poller. The state is owned out of band
-// (cmd/watch.go's enablePollingSchedule, cmd/extend.go, and the poller's own
+// (cmd/pollschedule.go's enablePollSchedule, cmd/extend.go, and the poller's own
 // self-disable), so a convergence update has to pass the CURRENT state through —
 // never the template's literal DISABLED.
 func TestEnsurePollerSchedule_PreservesEnabledStateOnUpdate(t *testing.T) {

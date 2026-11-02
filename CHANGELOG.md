@@ -27,6 +27,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`lagotto watch` and `lagotto extend` no longer create a watch that is never
+  polled when you lack EventBridge Scheduler permissions** (#231). The hosted
+  poller switches its schedule off when no watches are active, and arming a
+  watch has to switch it back on. Both commands used to treat any `GetSchedule`
+  error, AccessDenied included, as "poller not deployed", and reported an
+  `UpdateSchedule` failure only under `--verbose`: the watch was stored active,
+  the poller stayed off, and the watch expired without ever being polled. Now
+  only a missing schedule (ResourceNotFound) means "not deployed" and proceeds
+  as before. Any other `GetSchedule` error refuses the command before anything
+  is stored; an `UpdateSchedule` failure rolls the write back (a new watch is
+  rewritten as cancelled, a reactivated one is set back to expired) and refuses.
+  An AccessDenied refusal names the missing permissions (`scheduler:GetSchedule`
+  and `scheduler:UpdateSchedule` on `lagotto-capacity-poller`, and `iam:PassRole`
+  on `lagotto-capacity-poller-scheduler-invoke`). Re-enabling the schedule also
+  keeps its description, group and other optional fields instead of dropping
+  them.
 - **lagotto's unit tests can no longer reach a live AWS account** (#214). On
   2026-11-01 a test reached `runWatch`, built a real AWS config from the ambient
   `AWS_PROFILE`, and wrote a real watch record. Three layers now stop that:
