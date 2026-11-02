@@ -311,19 +311,39 @@ not need to do anything for the poller to keep working: all three resources have
 fixed names, so `lagotto deploy` **adopts** them. Nothing is duplicated and nothing
 is recreated.
 
-But the stack still believes it owns them, so `aws cloudformation delete-stack`
-would delete your live poller. `lagotto deploy` warns you whenever it sees such a
-stack. To detach it safely:
+But the stack still believes it owns them, and a stack created by an older
+lagotto may own more: the account-wide IAM roles `lagotto-capacity-poller-role`
+and `lagotto-capacity-poller-scheduler-invoke`, which every region's poller uses,
+and (older still) the DynamoDB tables. `aws cloudformation delete-stack` would
+delete all of it. `lagotto deploy` warns you whenever it sees such a stack. To
+detach it safely:
 
 ```bash
 lagotto deploy --migrate-from-cloudformation
 ```
 
-That runs `UpdateStack` to put `DeletionPolicy: Retain` (and
-`UpdateReplacePolicy: Retain`) on the three resources, **reads the deployed template
-back to verify the policies actually landed**, and only then deletes the stack —
-aborting without deleting anything if the verification fails. It finishes by
-confirming the Lambda, schedule and topic all still resolve.
+That:
+
+1. lists every resource the stack owns (`ListStackResources`), and reads each
+   one's live state;
+2. takes the stack's **own** deployed template and adds only
+   `DeletionPolicy: Retain` and `UpdateReplacePolicy: Retain` to every resource;
+3. creates a **change set** with every parameter at `UsePreviousValue`, and
+   refuses unless every change is a Modify with no replacement that touches only
+   those two policies. If CloudFormation will re-evaluate a dependent's
+   `!GetAtt` at execution (a Dynamic change), it runs drift detection on that
+   resource and refuses unless the stack's stored properties match the live
+   resource, so the re-evaluation cannot revert anything;
+4. confirms the change set's **processed** template (after the SAM transform)
+   retains every owned resource, executes it, and confirms the stack's processed
+   template does too;
+5. deletes the stack, then verifies every resource it owned still exists,
+   unchanged.
+
+Every refusal before step 4 deletes the change set unexecuted and leaves the
+stack untouched, and prints the manual procedure. A Dynamic re-evaluation
+commonly refuses on the schedule's `State`: the legacy template stores it
+`DISABLED`, so run the migration while no watch is active.
 
 (`delete-stack --retain-resources` is not usable here: CloudFormation accepts it
 only for a stack already in `DELETE_FAILED`.)

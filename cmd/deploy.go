@@ -66,7 +66,7 @@ func init() {
 	f.StringVar(&deployEnv, "environment", "production", "Environment tag (production, staging, development)")
 	f.StringVar(&deployBucket, "lambda-bucket", "", "S3 bucket for the Lambda artifact (default: lagotto-lambda-<account>-<region>, created if absent)")
 	f.BoolVar(&deployTeardown, "teardown", false, "Delete the poller, SNS topic and schedule instead of deploying them")
-	f.BoolVar(&deployMigrate, "migrate-from-cloudformation", false, "Detach the legacy --stack-name stack from the poller resources (retain-update, verify, delete) before deploying")
+	f.BoolVar(&deployMigrate, "migrate-from-cloudformation", false, "Detach the legacy --stack-name stack from every resource it owns (retain-only change set, verify, delete) before deploying")
 	f.BoolVarP(&deployYes, "yes", "y", false, "Skip the confirmation prompt")
 }
 
@@ -167,10 +167,14 @@ Continue?`,
 	// way the stack is detached first and the deploy below converges to --version.
 	if deployMigrate {
 		fmt.Fprintf(os.Stderr, "Detaching CloudFormation stack %s from the poller resources...\n", deployStackName)
-		if merr := d.MigrateFromStack(ctx, deployStackName); merr != nil {
+		report, merr := d.MigrateFromStack(ctx, deployStackName, iam.NewFromConfig(cfg))
+		if merr != nil {
 			return merr
 		}
-		_, _ = fmt.Fprintf(out, "CloudFormation stack %s detached and deleted; the poller, topic and schedule were retained.\n", deployStackName)
+		_, _ = fmt.Fprintf(out, "CloudFormation stack %s detached and deleted. Retained, and verified unchanged:\n", deployStackName)
+		for _, r := range report.Retained {
+			_, _ = fmt.Fprintf(out, "  %-28s %-26s %s\n", r.LogicalID, r.Type, r.PhysicalID)
+		}
 	}
 
 	// Ensure the CLI-owned DynamoDB tables exist before deploying (#59). The poller
