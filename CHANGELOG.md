@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The IAM actions each CLI command needs from your own credentials are now
+  documented, generated from the code** (#206). Before, lagotto documented IAM only
+  for the hosted poller. Nothing said, for example, that `lagotto cancel` of a fired
+  hold needs `ec2:CancelCapacityReservation` and `ec2:DescribeCapacityReservations`,
+  or that `watch` and `extend` need `scheduler:UpdateSchedule` and `iam:PassRole` on
+  the invoke role to re-enable a self-disabled poller.
+  [docs/reference/cli-iam-actions.md](docs/reference/cli-iam-actions.md) lists every
+  action by command and by action, and has a table of what each everyday command
+  needs beyond lagotto's DynamoDB tables. The page is discovered, not hand-written:
+  `internal/iamcoverage` (ported from spawn) type-checks the CLI for each shipped
+  OS, builds its call graph, and records every AWS SDK operation reachable from
+  each command, including through spawn and truffle. CI fails when the page is
+  stale (`make cli-iam-actions` regenerates it), or when the README's permissions
+  summary names an action the code does not call. lagotto does not provision a
+  CLI-user policy yet (#232).
+
 ### Fixed
 
 - **lagotto's unit tests can no longer reach a live AWS account** (#214). On

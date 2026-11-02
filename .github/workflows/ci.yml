@@ -135,6 +135,10 @@ jobs:
           mods=$(find . -name go.mod -not -path './.git/*' | sort)
           [ -n "$mods" ] || { echo "found no go.mod — the discovery is broken" >&2; exit 1; }
           for m in $mods; do (cd "$(dirname "$m")" && go mod download); done
+          # The CLI IAM inventory (cmd/cli_iam_actions_test.go, #206) type-checks
+          # the CLI for every shipped GOOS offline, so the platform-only deps a
+          # Linux build never needs must be cached too.
+          for os in linux darwin windows; do GOOS=$os go list -deps -test ./... >/dev/null; done
 
       - name: Build hermetic test wrapper
         # Every unit test runs under it (#214): fake credentials, and

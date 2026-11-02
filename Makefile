@@ -19,6 +19,14 @@ LDFLAGS=-ldflags "-X github.com/spore-host/lagotto/cmd.Version=$(VERSION) -s -w"
 # Default target
 all: test build
 
+## cli-iam-actions: Regenerate docs/reference/cli-iam-actions.md, the IAM actions
+## each CLI command calls with the caller's credentials, discovered from the code
+## (internal/iamcoverage, #206). TestCLIActionInventoryIsCurrent fails when stale.
+.PHONY: cli-iam-actions
+cli-iam-actions:
+	$(GOTEST) ./cmd -run TestCLIActionInventoryIsCurrent -count=1 -args -update-cli-iam
+	@echo "docs/reference/cli-iam-actions.md regenerated: review the diff before committing."
+
 ## gen-docs: Regenerate the committed command/flag reference (docs-gen/) from the CLI.
 gen-docs:
 	$(GOCMD) run . gen-docs --out docs-gen
