@@ -66,10 +66,22 @@ clean:
 	@rm -rf $(BUILD_DIR)
 	@echo "Clean complete"
 
-## test: Run tests
-test:
+## test: Run unit tests of both modules under the hermetic wrapper (#214)
+# Every test binary runs under test/hermetic (`go test -exec`): ambient AWS
+# credentials, profile and config are replaced with fakes, and a test that sends
+# a request off this machine FAILS, named. On 2026-11-01 a test reached runWatch
+# and wrote a real watch to a live account; this is what makes that impossible.
+# lambda/capacity-poller is a separate module, so it is tested explicitly.
+HERMETIC_EXEC := $(CURDIR)/$(BUILD_DIR)/hermetic-exec
+.PHONY: hermetic-exec
+hermetic-exec:
+	@mkdir -p $(BUILD_DIR)
+	@$(GOBUILD) -o $(HERMETIC_EXEC) ./test/hermetic
+
+test: hermetic-exec
 	@echo "Running tests..."
-	$(GOTEST) -v ./...
+	$(GOTEST) -v -exec $(HERMETIC_EXEC) ./...
+	cd lambda/capacity-poller && $(GOTEST) -v -exec $(HERMETIC_EXEC) ./...
 
 ## lint: Run linter (root module and lambda/capacity-poller)
 # Keep in step with the version pinned in .github/workflows/ci.yml (Lint job);
