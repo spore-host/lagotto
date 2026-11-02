@@ -35,7 +35,7 @@ func main() {
 func run(bin string, args []string, stdout, stderr io.Writer) int {
 	rec, err := hermetic.Start()
 	if err != nil {
-		fmt.Fprintf(stderr, "hermetic: listen: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "hermetic: listen: %v\n", err)
 		return 2
 	}
 	defer rec.Close()
@@ -49,7 +49,7 @@ func run(bin string, args []string, stdout, stderr io.Writer) int {
 	if err := cmd.Run(); err != nil {
 		ee, ok := err.(*exec.ExitError)
 		if !ok {
-			fmt.Fprintf(stderr, "hermetic: run %s: %v\n", bin, err)
+			_, _ = fmt.Fprintf(stderr, "hermetic: run %s: %v\n", bin, err)
 			return 2
 		}
 		code = ee.ExitCode()

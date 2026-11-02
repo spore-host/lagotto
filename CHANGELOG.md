@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **lagotto's unit tests can no longer reach a live AWS account** (#214). On
+  2026-11-01 a test reached `runWatch`, built a real AWS config from the ambient
+  `AWS_PROFILE`, and wrote a real watch record. Three layers now stop that:
+  `awscfg.Load`, which every CLI command loads its AWS config through, panics
+  under `go test` unless the test installs a fake with `awscfg.SetLoaderForTest`;
+  every test package that can reach an AWS config loader has a `TestMain` that
+  replaces the ambient credentials, profile and config with fakes and fails the
+  binary on any request that would leave the machine; and `make test` and CI run
+  both modules' tests under a `go test -exec` wrapper (`test/hermetic`, ported
+  from spawn) that does the same from before package init. CI's test job also
+  runs with no AWS config at all. A gate (`internal/hermetic`) discovers every
+  function in both modules that can build an AWS config, directly or through
+  spawn/truffle, and fails if one bypasses `awscfg.Load`, runs at package init,
+  or is linked into a test binary without the hermetic `TestMain`. The
+  capacity-poller Lambda now builds its clients from `main` instead of `init`
+  (the only way its tests could be hermetic); its runtime behaviour is unchanged.
+
 ## [0.65.1] - 2026-11-01
 
 ### Fixed

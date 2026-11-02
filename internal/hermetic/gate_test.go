@@ -536,7 +536,11 @@ func TestNoTestCanReachARealAWSConfig(t *testing.T) {
 		checked++
 		checkedBins = append(checkedBins, strings.TrimPrefix(bin, "github.com/spore-host/lagotto"))
 		if !hasHermeticTestMain(t, s.dirs[bin]) {
-			t.Errorf("the test binary for %s links a config-loading entry point but has no `func TestMain(m *testing.M) { hermetic.Main(m) }`; add one (internal/hermetic, #214)", bin)
+			why := "links a config-loading entry point"
+			if r := s.testsReach[bin]; r != "" {
+				why = "has a test that reaches a config loader (" + r + ")"
+			}
+			t.Errorf("the test binary for %s %s but has no `func TestMain(m *testing.M) { hermetic.Main(m) }`; add one (internal/hermetic, #214)", bin, why)
 		}
 	}
 	if checked == 0 {

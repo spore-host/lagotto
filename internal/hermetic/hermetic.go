@@ -179,12 +179,12 @@ func (r *Recorder) Report(w io.Writer, who string) bool {
 	if len(reqs) == 0 {
 		return false
 	}
-	fmt.Fprintf(w, "\nHERMETIC GATE FAILED (#214): %s made %d network request(s) that would have left this machine.\n", who, len(reqs))
-	fmt.Fprintln(w, "A unit test must not reach AWS: with real credentials these are real control-plane calls")
-	fmt.Fprintln(w, "(on 2026-11-01 one wrote a real watch to a live account). Inject a fake (awscfg.SetLoaderForTest,")
-	fmt.Fprintln(w, "the package's client interfaces), or point the client at an httptest server or the Substrate emulator.")
+	_, _ = fmt.Fprintf(w, "\nHERMETIC GATE FAILED (#214): %s made %d network request(s) that would have left this machine.\n", who, len(reqs))
+	_, _ = fmt.Fprintln(w, "A unit test must not reach AWS: with real credentials these are real control-plane calls")
+	_, _ = fmt.Fprintln(w, "(on 2026-11-01 one wrote a real watch to a live account). Inject a fake (awscfg.SetLoaderForTest,")
+	_, _ = fmt.Fprintln(w, "the package's client interfaces), or point the client at an httptest server or the Substrate emulator.")
 	for _, q := range reqs {
-		fmt.Fprintf(w, "  - %s\n", q)
+		_, _ = fmt.Fprintf(w, "  - %s\n", q)
 	}
 	return true
 }
