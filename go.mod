@@ -26,6 +26,7 @@ require (
 	github.com/spore-host/libs v0.51.1
 	github.com/spore-host/spawn v0.135.1
 	github.com/spore-host/truffle v0.61.0
+	golang.org/x/tools v0.49.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 

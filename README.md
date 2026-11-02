@@ -251,6 +251,29 @@ code-only update. A CloudFormation template is still shipped as an optional
 declarative path for IaC/enterprise environments. See
 [DEPLOYMENT.md](DEPLOYMENT.md) for both.
 
+### Permissions your own credentials need
+
+Every `lagotto` command runs with **your** AWS credentials. The hosted poller has
+its own role, whose permissions `lagotto setup` writes, but that role does not
+cover the CLI. [docs/reference/cli-iam-actions.md](docs/reference/cli-iam-actions.md)
+lists the IAM actions each command can call. It is generated from the code
+(`make cli-iam-actions`), and CI fails when the two disagree. In short:
+
+- `deploy`, `setup` and `teardown` are administrator commands: they create or
+  delete IAM roles, policies and tables.
+- `poll` runs the poller on your machine, so it needs what the poller's role has,
+  including launching instances.
+- The everyday commands need `dynamodb:*` on lagotto's three tables plus a few
+  more actions, which the generated page lists per command. For example, `watch`
+  and `extend` re-enable the poller's schedule (`scheduler:UpdateSchedule`, plus
+  `iam:PassRole` on `lagotto-capacity-poller-scheduler-invoke`), `launch` creates
+  a schedule, and `cancel` of a fired hold releases its capacity reservation.
+
+lagotto does not yet provision a policy for CLI users (lagotto#232); until it
+does, an administrator has to grant these actions. Without the Scheduler
+permissions, a new watch can leave a self-disabled poller off without saying so
+(lagotto#231); `lagotto doctor` reports it.
+
 ### Checking a deployment
 
 `lagotto doctor` reports drift between the poller deployed in your account and
