@@ -35,7 +35,12 @@ var (
 // nowUTC returns the current time in UTC (wrapped for testability/consistency).
 func nowUTC() time.Time { return time.Now().UTC() }
 
-func init() {
+// setup loads the AWS config and builds the store, notifier, spawner and poller.
+// It runs from main, NOT from init (#214): package init also runs in this
+// package's test binary, before any TestMain can make the environment hermetic,
+// so an init that loads the default config would build a real one from the
+// developer's ambient profile every time the tests ran.
+func setup() {
 	ctx := context.Background()
 
 	var err error
@@ -322,5 +327,6 @@ func getEnv(key, fallback string) string {
 }
 
 func main() {
+	setup()
 	lambda.Start(handler)
 }
