@@ -489,3 +489,54 @@ func TestNotifyUnsupported_Publishes(t *testing.T) {
 		t.Errorf("postWebhookJSON on 500: err=%v, want a 500 error", err)
 	}
 }
+
+// TestSageMakerMatchEmail_FollowsOutcome is #212, through Notify and the SNS
+// fake: only a job that actually got capacity is reported as launched. Every
+// terminal SageMaker outcome also reaches Notify (recordOutcome notifies on
+// failure), and it used to send "SageMaker job launched ... has been
+// provisioned" for a job that SageMaker had rejected.
+func TestSageMakerMatchEmail_FollowsOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		actionTaken string
+		launched    bool
+		reason      string // a phrase the failure body must carry
+	}{
+		{"sagemaker_launched", true, ""},
+		{"sagemaker_submit_failed", false, "rejected the job"},
+		{"sagemaker_failed", false, "other than capacity"},
+		{"", false, "could not submit the job"}, // no job spec / unparsable spec
+	} {
+		t.Run("action="+tc.actionTaken, func(t *testing.T) {
+			w := &Watch{WatchID: "w-sm", Service: ServiceSageMaker, Action: ActionSpawn, InstanceTypePattern: "ml.g5.2xlarge",
+				NotifyChannels: []NotifyChannel{{Type: "email", Target: "a@example.com"}}}
+			m := &MatchResult{Service: ServiceSageMaker, Region: "us-east-1", InstanceType: "ml.g5.2xlarge",
+				ActionTaken: tc.actionTaken, MatchedAt: time.Unix(1700000000, 0)}
+			pub := &capturePublisher{}
+			n := &Notifier{snsClient: pub, topicArn: "arn:aws:sns:us-east-1:111122223333:lagotto-capacity-alerts"}
+			if err := n.Notify(context.Background(), w, m); err != nil {
+				t.Fatalf("Notify: %v", err)
+			}
+			if len(pub.msgs) != 1 {
+				t.Fatalf("published %d messages, want 1", len(pub.msgs))
+			}
+			subject, body := aws.ToString(pub.msgs[0].Subject), aws.ToString(pub.msgs[0].Message)
+			saysLaunched := strings.Contains(subject, "job launched") || strings.Contains(body, "has been provisioned")
+			if saysLaunched != tc.launched {
+				t.Errorf("ActionTaken %q: email claims launch = %v, want %v\nsubject: %s\n%s", tc.actionTaken, saysLaunched, tc.launched, subject, body)
+			}
+			if tc.launched {
+				return
+			}
+			for _, want := range []string{"NOT launched", "watch stopped"} {
+				if !strings.Contains(subject, want) {
+					t.Errorf("failure subject lacks %q: %s", want, subject)
+				}
+			}
+			for _, want := range []string{"was not provisioned", "status: failed", tc.reason, "Action Taken: " + tc.actionTaken} {
+				if !strings.Contains(body, want) {
+					t.Errorf("failure body lacks %q:\n%s", want, body)
+				}
+			}
+		})
+	}
+}

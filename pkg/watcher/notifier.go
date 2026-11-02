@@ -353,22 +353,7 @@ func (n *Notifier) sendExpiredWebhook(ctx context.Context, url string, w *Watch)
 
 func (n *Notifier) sendEmail(ctx context.Context, email string, w *Watch, m *MatchResult) error {
 	if normalizeService(w.Service) == ServiceSageMaker {
-		// SageMaker: lagotto submitted the user's job and it got capacity.
-		subject := fmt.Sprintf("[lagotto] SageMaker job launched for %s in %s", m.InstanceType, m.Region)
-		body := fmt.Sprintf(`Your SageMaker job for watch %s has been provisioned.
-
-Instance Type: %s
-Region: %s
-Matched At: %s
-Watch Pattern: %s
-Action Taken: %s
-`,
-			w.WatchID, m.InstanceType, m.Region,
-			m.MatchedAt.Format(time.RFC3339), w.InstanceTypePattern, m.ActionTaken,
-		)
-		if m.InstanceID != "" {
-			body += fmt.Sprintf("SageMaker Job ARN: %s\n", m.InstanceID)
-		}
+		subject, body := sageMakerEmailSubjectBody(w, m)
 		_, err := n.snsClient.Publish(ctx, &sns.PublishInput{
 			TopicArn: aws.String(n.topicArn),
 			Subject:  aws.String(subject),
@@ -384,6 +369,54 @@ Action Taken: %s
 		Message:  aws.String(body),
 	})
 	return err
+}
+
+// sageMakerLaunched is the one SageMaker outcome in which the user's job got
+// capacity (SageMakerLauncher.check: InProgress/Completed/...).
+const sageMakerLaunched = "sagemaker_launched"
+
+// sageMakerEmailSubjectBody is the SageMaker match email's text. Its wording
+// follows the outcome (#212): Notify is called for terminal failures too, and
+// the email used to say "job launched ... has been provisioned" regardless,
+// so a user whose CreateTrainingJob was rejected was told it ran.
+func sageMakerEmailSubjectBody(w *Watch, m *MatchResult) (string, string) {
+	details := fmt.Sprintf(`Instance Type: %s
+Region: %s
+Matched At: %s
+Watch Pattern: %s
+Action Taken: %s
+`,
+		m.InstanceType, m.Region,
+		m.MatchedAt.Format(time.RFC3339), w.InstanceTypePattern, m.ActionTaken,
+	)
+	if m.InstanceID != "" {
+		details += fmt.Sprintf("SageMaker Job ARN: %s\n", m.InstanceID)
+	}
+
+	if m.ActionTaken == sageMakerLaunched {
+		subject := fmt.Sprintf("[lagotto] SageMaker job launched for %s in %s", m.InstanceType, m.Region)
+		return subject, fmt.Sprintf("Your SageMaker job for watch %s has been provisioned.\n\n", w.WatchID) + details
+	}
+
+	// Anything else that reaches Notify is final and is not a launch: the
+	// poller has stopped the watch as failed.
+	var why string
+	switch m.ActionTaken {
+	case "sagemaker_submit_failed":
+		why = "SageMaker rejected the job when lagotto submitted it (CreateTrainingJob failed: for example an invalid RoleArn, a validation error in the job definition, or a quota limit). Retrying would not help."
+	case "sagemaker_failed":
+		why = "The job was submitted but failed for a reason other than capacity, so lagotto did not resubmit it."
+	default:
+		why = "lagotto could not submit the job (for example the watch has no usable job definition)."
+	}
+	subject := fmt.Sprintf("[lagotto] SageMaker job NOT launched for %s in %s: watch stopped", m.InstanceType, m.Region)
+	body := fmt.Sprintf(`Your SageMaker job for watch %s was not provisioned, and the watch has stopped (status: failed).
+
+%s
+Fix the job definition (--sagemaker-config) and create a new watch.
+
+`, w.WatchID, why) + details
+	return subject, body
 }
 
 // matchEmailSubjectBody is the EC2 match email's text, split out so the copy is

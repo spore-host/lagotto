@@ -25,6 +25,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or is linked into a test binary without the hermetic `TestMain`. The
   capacity-poller Lambda now builds its clients from `main` instead of `init`
   (the only way its tests could be hermetic); its runtime behaviour is unchanged.
+- **A SageMaker watch's email no longer says the job launched when it did not**
+  (#212). The match email always read "SageMaker job launched for ..." and
+  "Your SageMaker job ... has been provisioned", including when SageMaker had
+  rejected the submit (`CreateTrainingJob` failed: a bad `RoleArn`, a validation
+  error, a quota limit) or the job failed for a reason other than capacity, and
+  the watch had stopped as failed. The only clue was the `Action Taken:` line.
+  Now only a job that got capacity is reported as launched; any other final
+  outcome sends "SageMaker job NOT launched ...: watch stopped", says why, and
+  points at the job definition. The hosted poller sends this email, so the
+  capacity-poller Lambda must be redeployed (`lagotto deploy`) to pick it up.
 
 ## [0.65.1] - 2026-11-01
 
