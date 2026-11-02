@@ -1,0 +1,216 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: 'Lagotto capacity watcher - DynamoDB, SNS, Lambda, EventBridge'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues:
+      - production
+      - staging
+      - development
+    Description: Environment name for resource tagging
+
+  LambdaCodeBucket:
+    Type: String
+    Default: ''
+    Description: S3 bucket containing Lambda code (leave empty to skip Lambda deployment)
+
+  LambdaCodeKey:
+    Type: String
+    Default: ''
+    Description: S3 key for Lambda zip file
+
+  # DynamoDB tables are owned by the CLI, not this stack (#59). The CLI
+  # auto-creates them on first `lagotto watch`/`launch` (#12) and `lagotto deploy`
+  # ensures they exist before deploying this stack, so the stack only *references*
+  # them by name (env vars + IAM). This reconciles #12 and #48 — the natural
+  # watch-then-deploy flow no longer collides on AlreadyExists. The names are
+  # parameters so a non-default table set (--watches-table/--history-table) still
+  # wires the poller correctly.
+  WatchesTableName:
+    Type: String
+    Default: lagotto-watches
+    Description: Name of the (CLI-owned) watches DynamoDB table
+  HistoryTableName:
+    Type: String
+    Default: lagotto-match-history
+    Description: Name of the (CLI-owned) match-history DynamoDB table
+  ScheduledTableName:
+    Type: String
+    Default: lagotto-scheduled-launches
+    Description: Name of the (CLI-owned) scheduled-launches DynamoDB table
+
+Conditions:
+  DeployLambda: !Not [!Equals [!Ref LambdaCodeBucket, '']]
+
+Resources:
+  # SNS Topic
+
+  # trivy:ignore:AVD-AWS-0136 -- lagotto uses AWS-managed SNS key (alias/aws/sns); CMK not required for this tool
+  LagottoCapacityAlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: lagotto-capacity-alerts
+      DisplayName: Lagotto Capacity Alerts
+      KmsMasterKeyId: alias/aws/sns
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: lagotto
+        - Key: Component
+          Value: alerts
+
+  # Lambda Function (conditional)
+
+  CapacityPollerFunction:
+    Type: AWS::Serverless::Function
+    Condition: DeployLambda
+    Properties:
+      FunctionName: lagotto-capacity-poller
+      Runtime: provided.al2023
+      Architectures:
+        - arm64
+      Handler: bootstrap
+      Timeout: 900
+      MemorySize: 512
+      CodeUri:
+        Bucket: !Ref LambdaCodeBucket
+        Key: !Ref LambdaCodeKey
+      Environment:
+        Variables:
+          WATCHES_TABLE: !Ref WatchesTableName
+          HISTORY_TABLE: !Ref HistoryTableName
+          SCHEDULED_TABLE: !Ref ScheduledTableName
+          SNS_TOPIC_ARN: !Ref LagottoCapacityAlertsTopic
+          SCHEDULE_NAME: lagotto-capacity-poller
+          # For the #62 Capacity-Block boundary retry: the poller re-arms a fresh
+          # EventBridge schedule targeting itself. Construct its own ARN by name
+          # (a !GetAtt self-reference would be a CFN circular dependency).
+          POLLER_FUNCTION_ARN: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:lagotto-capacity-poller'
+          SCHEDULER_INVOKE_ROLE_ARN: !GetAtt SchedulerInvokeRole.Arn
+      # The runtime PERMISSIONS policy is owned by `lagotto setup`, not this
+      # template (#16): lagotto codifies "what the poller may call" in Go
+      # (pkg/runtimeiam) as the single source of truth, the same way it owns its
+      # DynamoDB tables, so a new SDK call is a one-file code change rather than a
+      # template edit. CFN only creates the MINIMAL execution role below (Lambda
+      # trust + basic-execution logging); `setup` attaches the lagotto-runtime-policy
+      # to it. NOTE: after a fresh `lagotto deploy`, run `lagotto setup` (or create
+      # a watch — the CLI applies it) so the poller gains its spawn/hold/sagemaker
+      # permissions; until then it can only send notifications.
+      Role: !GetAtt CapacityPollerRole.Arn
+      Tags:
+        Environment: !Ref Environment
+        Application: lagotto
+        Component: capacity-poller
+
+  # EventBridge Schedule — starts DISABLED; CLI enables on first watch
+
+  CapacityPollerSchedule:
+    Type: AWS::Scheduler::Schedule
+    Condition: DeployLambda
+    Properties:
+      Name: lagotto-capacity-poller
+      Description: Polls for EC2 capacity matching active lagotto watches
+      ScheduleExpression: rate(5 minutes)
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      Target:
+        Arn: !GetAtt CapacityPollerFunction.Arn
+        RoleArn: !GetAtt SchedulerInvokeRole.Arn
+      State: DISABLED
+
+  # Minimal execution role for the poller Lambda. Its PERMISSIONS policy
+  # (DynamoDB/EC2/SNS/scheduler/spawn/hold/sagemaker) is attached by
+  # `lagotto setup` (pkg/runtimeiam), not here (#16) — CFN only provides the
+  # Lambda trust relationship + CloudWatch Logs basic execution. Named so the
+  # function can reference it and `setup` can find it by a stable name.
+  CapacityPollerRole:
+    Type: AWS::IAM::Role
+    Condition: DeployLambda
+    Properties:
+      RoleName: lagotto-capacity-poller-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Tags:
+        - Key: Application
+          Value: lagotto
+        - Key: Component
+          Value: capacity-poller
+
+  SchedulerInvokeRole:
+    Type: AWS::IAM::Role
+    Condition: DeployLambda
+    Properties:
+      RoleName: lagotto-capacity-poller-scheduler-invoke
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeLambda
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                # Reference the poller by CONSTRUCTED ARN, not !GetAtt, to break a
+                # CloudFormation circular dependency (#67). The function references
+                # SchedulerInvokeRole via the #62 SCHEDULER_INVOKE_ROLE_ARN env var
+                # + iam:PassRole; if this role also !GetAtt'd the function, the
+                # resources [Function, SchedulerInvokeRole, Schedule] form a cycle
+                # and the stack rolls back on a clean create. The function name is
+                # fixed (lagotto-capacity-poller), so its ARN is derivable without a
+                # dependency edge — making the graph a DAG.
+                Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:lagotto-capacity-poller'
+
+Outputs:
+  WatchesTableName:
+    Description: Name of the (CLI-owned) watches table the poller is wired to
+    Value: !Ref WatchesTableName
+    Export:
+      Name: !Sub '${AWS::StackName}-watches-table'
+
+  MatchHistoryTableName:
+    Description: Name of the (CLI-owned) match history table the poller is wired to
+    Value: !Ref HistoryTableName
+    Export:
+      Name: !Sub '${AWS::StackName}-match-history-table'
+
+  ScheduledTableName:
+    Description: Name of the (CLI-owned) scheduled-launches table the poller is wired to
+    Value: !Ref ScheduledTableName
+    Export:
+      Name: !Sub '${AWS::StackName}-scheduled-table'
+
+  CapacityAlertsTopicArn:
+    Description: ARN of the capacity alerts SNS topic
+    Value: !Ref LagottoCapacityAlertsTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-capacity-alerts-topic'
+
+  CapacityPollerFunctionArn:
+    Condition: DeployLambda
+    Description: ARN of the capacity poller Lambda
+    Value: !GetAtt CapacityPollerFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-capacity-poller-function'
+
+  SchedulerInvokeRoleArn:
+    Condition: DeployLambda
+    Description: Role EventBridge Scheduler assumes to invoke the poller (reused by per-launch scheduled launches, #49)
+    Value: !GetAtt SchedulerInvokeRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-scheduler-invoke-role'

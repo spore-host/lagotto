@@ -40,6 +40,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/cloudformation"
 	cfntypes "github.com/aws/aws-sdk-go-v2/service/cloudformation/types"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
@@ -135,6 +136,7 @@ type Deployer struct {
 	lambda  lambdaAPI
 	sns     snsAPI
 	sched   schedulerAPI
+	ddb     dynamoTableAPI
 	httpGet func(url string) (*http.Response, error)
 	sleep   func(time.Duration)
 }
@@ -147,6 +149,7 @@ func New(cfg aws.Config) *Deployer {
 		lambda:  lambda.NewFromConfig(cfg),
 		sns:     sns.NewFromConfig(cfg),
 		sched:   scheduler.NewFromConfig(cfg),
+		ddb:     dynamodb.NewFromConfig(cfg),
 		httpGet: http.Get,
 		sleep:   time.Sleep,
 	}

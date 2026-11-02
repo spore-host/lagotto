@@ -236,6 +236,7 @@ type fakeCFN struct {
 	status    cfntypes.StackStatus
 	params    []cfntypes.Parameter
 	outputs   []cfntypes.Output
+	tags      []cfntypes.Tag
 	// template is what GetTemplate returns; UpdateStack replaces it, exactly as
 	// CloudFormation would.
 	template string
@@ -253,6 +254,122 @@ type fakeCFN struct {
 	updateCalls      []*cloudformation.UpdateStackInput
 	getTemplateCalls []*cloudformation.GetTemplateInput
 	deleteCalls      []*cloudformation.DeleteStackInput
+
+	// --- the #226 migration surface ---
+
+	// resources is what ListStackResources reports. CloudFormation semantics are
+	// modelled on it: a resource the PROCESSED template stops declaring is deleted
+	// by an update/execute, and one whose processed DeletionPolicy isn't Retain is
+	// deleted by DeleteStack. Each deletion calls onDeleteResource.
+	resources        []cfntypes.StackResourceSummary
+	onDeleteResource func(r cfntypes.StackResourceSummary)
+	// process is the transform (SAM): body -> processed body. nil = identity.
+	process func(body string) string
+	// changes is what DescribeChangeSet reports; csStatus/csReason its status
+	// (default CREATE_COMPLETE).
+	changes  []cfntypes.Change
+	csStatus cfntypes.ChangeSetStatus
+	csReason string
+	csBody   string
+	// onExecute runs when the change set executes (a Dynamic re-evaluation that
+	// touches a live resource, say).
+	onExecute func()
+	// drifts is what DescribeStackResourceDrifts reports.
+	drifts      []cfntypes.StackResourceDrift
+	driftStatus cfntypes.StackDriftDetectionStatus
+
+	createCSCalls    []*cloudformation.CreateChangeSetInput
+	executeCSCalls   int
+	deleteCSCalls    int
+	detectDriftCalls []*cloudformation.DetectStackDriftInput
+}
+
+func (f *fakeCFN) processed(body string) string {
+	if f.process == nil {
+		return body
+	}
+	return f.process(body)
+}
+
+// applyTemplate is an update to body: resources the processed body no longer
+// declares are deleted, as CloudFormation does.
+func (f *fakeCFN) applyTemplate(body string) {
+	declared := declaredResources(f.processed(body))
+	var kept []cfntypes.StackResourceSummary
+	for _, r := range f.resources {
+		if declared[deref(r.LogicalResourceId)] {
+			kept = append(kept, r)
+			continue
+		}
+		if f.onDeleteResource != nil {
+			f.onDeleteResource(r)
+		}
+	}
+	f.resources = kept
+	f.template = body
+	f.status = cfntypes.StackStatusUpdateComplete
+}
+
+// declaredResources is the logical IDs a template body declares.
+func declaredResources(body string) map[string]bool {
+	ids := map[string]bool{}
+	res, err := yamlResources(body)
+	if err != nil {
+		return ids
+	}
+	for i := 0; i+1 < len(res.Content); i += 2 {
+		ids[res.Content[i].Value] = true
+	}
+	return ids
+}
+
+func (f *fakeCFN) ListStackResources(_ context.Context, _ *cloudformation.ListStackResourcesInput, _ ...func(*cloudformation.Options)) (*cloudformation.ListStackResourcesOutput, error) {
+	return &cloudformation.ListStackResourcesOutput{StackResourceSummaries: f.resources}, nil
+}
+
+func (f *fakeCFN) CreateChangeSet(_ context.Context, in *cloudformation.CreateChangeSetInput, _ ...func(*cloudformation.Options)) (*cloudformation.CreateChangeSetOutput, error) {
+	f.createCSCalls = append(f.createCSCalls, in)
+	f.csBody = deref(in.TemplateBody)
+	return &cloudformation.CreateChangeSetOutput{}, nil
+}
+
+func (f *fakeCFN) DescribeChangeSet(_ context.Context, _ *cloudformation.DescribeChangeSetInput, _ ...func(*cloudformation.Options)) (*cloudformation.DescribeChangeSetOutput, error) {
+	st := f.csStatus
+	if st == "" {
+		st = cfntypes.ChangeSetStatusCreateComplete
+	}
+	return &cloudformation.DescribeChangeSetOutput{Status: st, StatusReason: strptr(f.csReason), Changes: f.changes}, nil
+}
+
+func (f *fakeCFN) ExecuteChangeSet(_ context.Context, _ *cloudformation.ExecuteChangeSetInput, _ ...func(*cloudformation.Options)) (*cloudformation.ExecuteChangeSetOutput, error) {
+	f.executeCSCalls++
+	f.applyTemplate(f.csBody)
+	if f.onExecute != nil {
+		f.onExecute()
+	}
+	return &cloudformation.ExecuteChangeSetOutput{}, nil
+}
+
+func (f *fakeCFN) DeleteChangeSet(_ context.Context, _ *cloudformation.DeleteChangeSetInput, _ ...func(*cloudformation.Options)) (*cloudformation.DeleteChangeSetOutput, error) {
+	f.deleteCSCalls++
+	return &cloudformation.DeleteChangeSetOutput{}, nil
+}
+
+func (f *fakeCFN) DetectStackDrift(_ context.Context, in *cloudformation.DetectStackDriftInput, _ ...func(*cloudformation.Options)) (*cloudformation.DetectStackDriftOutput, error) {
+	f.detectDriftCalls = append(f.detectDriftCalls, in)
+	return &cloudformation.DetectStackDriftOutput{StackDriftDetectionId: strptr("drift-1")}, nil
+}
+
+func (f *fakeCFN) DescribeStackDriftDetectionStatus(_ context.Context, _ *cloudformation.DescribeStackDriftDetectionStatusInput, _ ...func(*cloudformation.Options)) (*cloudformation.DescribeStackDriftDetectionStatusOutput, error) {
+	st := f.driftStatus
+	if st == "" {
+		st = cfntypes.StackDriftDetectionStatusDetectionComplete
+	}
+	return &cloudformation.DescribeStackDriftDetectionStatusOutput{DetectionStatus: st}, nil
+}
+
+func (f *fakeCFN) DescribeStackResourceDrifts(_ context.Context, _ *cloudformation.DescribeStackResourceDriftsInput, _ ...func(*cloudformation.Options)) (*cloudformation.DescribeStackResourceDriftsOutput, error) {
+	return &cloudformation.DescribeStackResourceDriftsOutput{StackResourceDrifts: f.drifts}, nil
 }
 
 func (f *fakeCFN) DescribeStacks(_ context.Context, _ *cloudformation.DescribeStacksInput, _ ...func(*cloudformation.Options)) (*cloudformation.DescribeStacksOutput, error) {
@@ -268,6 +385,7 @@ func (f *fakeCFN) DescribeStacks(_ context.Context, _ *cloudformation.DescribeSt
 		StackStatus: f.status,
 		Parameters:  f.params,
 		Outputs:     f.outputs,
+		Tags:        f.tags,
 	}}}, nil
 }
 
@@ -276,7 +394,14 @@ func (f *fakeCFN) GetTemplate(_ context.Context, in *cloudformation.GetTemplateI
 	if f.getTemplateErr != nil {
 		return nil, f.getTemplateErr
 	}
-	return &cloudformation.GetTemplateOutput{TemplateBody: strptr(f.template)}, nil
+	body := f.template
+	if in.ChangeSetName != nil {
+		body = f.csBody
+	}
+	if in.TemplateStage == cfntypes.TemplateStageProcessed {
+		body = f.processed(body)
+	}
+	return &cloudformation.GetTemplateOutput{TemplateBody: strptr(body)}, nil
 }
 
 func (f *fakeCFN) CreateStack(_ context.Context, in *cloudformation.CreateStackInput, _ ...func(*cloudformation.Options)) (*cloudformation.CreateStackOutput, error) {
@@ -292,8 +417,7 @@ func (f *fakeCFN) UpdateStack(_ context.Context, in *cloudformation.UpdateStackI
 	if f.updateErr != nil {
 		return nil, f.updateErr
 	}
-	f.status = cfntypes.StackStatusUpdateComplete
-	f.template = deref(in.TemplateBody)
+	f.applyTemplate(deref(in.TemplateBody))
 	return &cloudformation.UpdateStackOutput{}, nil
 }
 
@@ -302,6 +426,22 @@ func (f *fakeCFN) DeleteStack(_ context.Context, in *cloudformation.DeleteStackI
 	if f.deleteErr != nil {
 		return nil, f.deleteErr
 	}
+	// Every resource without a processed DeletionPolicy: Retain goes with it.
+	retained := map[string]bool{}
+	if missing, err := resourcesMissingRetain(f.processed(f.template), nil); err == nil {
+		for id := range declaredResources(f.processed(f.template)) {
+			retained[id] = true
+		}
+		for _, id := range missing {
+			retained[id] = false
+		}
+	}
+	for _, r := range f.resources {
+		if !retained[deref(r.LogicalResourceId)] && f.onDeleteResource != nil {
+			f.onDeleteResource(r)
+		}
+	}
+	f.resources = nil
 	// The SDK's delete waiter matches on DELETE_COMPLETE.
 	f.status = cfntypes.StackStatusDeleteComplete
 	return &cloudformation.DeleteStackOutput{}, nil

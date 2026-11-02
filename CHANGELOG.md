@@ -43,6 +43,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on `lagotto-capacity-poller-scheduler-invoke`). Re-enabling the schedule also
   keeps its description, group and other optional fields instead of dropping
   them.
+- **`lagotto deploy --migrate-from-cloudformation` can no longer delete live
+  resources** (#226). It used to retain a fixed three logical IDs and run
+  `UpdateStack` with lagotto's *current* template and no preview. On a legacy
+  stack that also owned the account-wide IAM roles
+  (`lagotto-capacity-poller-role`, `lagotto-capacity-poller-scheduler-invoke`)
+  or the DynamoDB tables, that update dropped them from the template, so
+  CloudFormation deleted them, breaking every region's poller. Any property
+  that differed between the old and current templates was also applied to the
+  live poller unreviewed. The migration now:
+  - lists what the stack really owns;
+  - adds only `DeletionPolicy`/`UpdateReplacePolicy: Retain` to **every**
+    resource in the stack's **own** deployed template (YAML or JSON, SAM or
+    not), and proves nothing else changed;
+  - previews the change in a change set (all parameters `UsePreviousValue`)
+    and refuses unless every change is a policy-only Modify with no
+    replacement;
+  - runs CloudFormation drift detection on any resource the change set will
+    re-evaluate dynamically, and refuses unless its stored properties match
+    the live resource;
+  - confirms Retain on the processed (post-transform) template before
+    executing and again before deleting;
+  - verifies that every formerly owned resource, IAM roles and tables
+    included, still exists unchanged.
+
+  Every refusal leaves the stack untouched and prints the manual procedure.
+  `lagotto deploy`'s and `lagotto doctor`'s legacy-stack warning now says the
+  stack may own the shared IAM roles. `deploy --teardown`'s warning no longer
+  calls a leftover stack an "empty shell" safe to delete; it says to check
+  `list-stack-resources` first.
 - **lagotto's unit tests can no longer reach a live AWS account** (#214). On
   2026-11-01 a test reached `runWatch`, built a real AWS config from the ambient
   `AWS_PROFILE`, and wrote a real watch record. Three layers now stop that:

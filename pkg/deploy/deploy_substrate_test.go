@@ -399,60 +399,50 @@ func TestSubstrate_Teardown_RemovesAllThreeAndIsRepeatable(t *testing.T) {
 	}
 }
 
-// TestSubstrate_MigrateFromStack_DetachesWithoutDeletingResources is the whole
-// point of migrate.go: an account with a real CloudFormation stack ends up with no
-// stack and a fully intact poller.
+// TestSubstrate_MigrateFromStack_FailsClosed runs the migration against a real
+// wire protocol and asserts the property that matters most when it cannot prove
+// safety: it refuses, and NOTHING is deleted — the stack and all three poller
+// resources are still there.
 //
-// What this DOES cover: the whole five-step sequence against a real wire protocol
-// — DescribeStacks, the retain UpdateStack, GetTemplate(Original) read back and
-// gated (substrate stores the body we send and returns it, so the gate genuinely
-// has to pass), DeleteStack + waiter, and the post-delete verification.
-//
-// What it does NOT cover, and the reason the safety gate's own test uses fakes:
-// substrate's CloudFormation emulator does not MATERIALIZE template resources at
-// all (a stack create leaves no Lambda behind), so its DeleteStack cannot model
-// DeletionPolicy: Retain either. The resources survive here because the SDK path
-// created them, not because CloudFormation was told to retain them. Retain
-// semantics are only provable against real AWS; the offline guarantees are the
-// overlay's shape invariant (TestRetainOverlay_AddsExactlySixLines) and the gate's
-// refusal to delete (TestMigrateFromStack_RefusesToDeleteWithoutTheRetainGate).
-func TestSubstrate_MigrateFromStack_DetachesWithoutDeletingResources(t *testing.T) {
+// It used to drive the whole sequence to a successful detach. Since #226 the
+// migration lists the stack's resources (ListStackResources), vets a change
+// set's per-resource Details, reads the change set's Processed template and
+// runs drift detection on specific logical IDs; substrate v0.124.0 models none
+// of those (scttfrdmn/substrate#1446), so the success path is covered by the
+// in-package fakes in migrate_test.go, which model CloudFormation's deletion
+// semantics (a resource dropped from the processed template, or lacking a
+// processed DeletionPolicy: Retain at delete-stack, is deleted). When substrate
+// gains them, this should go back to asserting a successful detach.
+func TestSubstrate_MigrateFromStack_FailsClosed(t *testing.T) {
 	d := substrateDeployer(t)
 	ctx := context.Background()
 
 	createLegacyStack(t, d, "lagotto")
-
-	// The SDK path adopts what the stack created (fixed names), which is the state
-	// a user is in after upgrading and re-running deploy.
 	if _, err := d.Deploy(ctx, substrateDeployOptions()); err != nil {
 		t.Fatalf("Deploy (adopting the stack's resources): %v", err)
 	}
 
-	if err := d.MigrateFromStack(ctx, "lagotto"); err != nil {
-		t.Fatalf("MigrateFromStack: %v", err)
+	if _, err := d.MigrateFromStack(ctx, "lagotto", nil); err == nil {
+		t.Skip("substrate now supports the full migration surface (scttfrdmn/substrate#1446): restore the successful-detach assertions")
 	}
 
-	// (1) the stack is gone.
 	exists, _, err := d.stackState(ctx, "lagotto")
 	if err != nil {
-		t.Fatalf("stackState after migrate: %v", err)
+		t.Fatalf("stackState after the refused migrate: %v", err)
 	}
-	if exists {
-		t.Error("the CloudFormation stack still exists after MigrateFromStack")
+	if !exists {
+		t.Error("the stack was deleted by a migration that could not prove it safe")
 	}
-	// (2) all three resources survived. MigrateFromStack verifies this itself, so a
-	// failure above would already have errored — assert independently anyway, since
-	// "the verification is the feature" is exactly the kind of thing that rots.
 	if _, err := d.lambda.GetFunction(ctx, &lambda.GetFunctionInput{FunctionName: aws.String(PollerFunctionName)}); err != nil {
-		t.Errorf("the poller Lambda did not survive the migration: %v", err)
+		t.Errorf("the poller Lambda did not survive the refused migration: %v", err)
 	}
 	if _, err := d.sched.GetSchedule(ctx, &scheduler.GetScheduleInput{Name: aws.String(PollerScheduleName)}); err != nil {
-		t.Errorf("the poller schedule did not survive the migration: %v", err)
+		t.Errorf("the poller schedule did not survive the refused migration: %v", err)
 	}
 	if _, err := d.sns.GetTopicAttributes(ctx, &sns.GetTopicAttributesInput{
 		TopicArn: aws.String(AlertsTopicARN("us-east-1", "123456789012")),
 	}); err != nil {
-		t.Errorf("the alerts topic did not survive the migration: %v", err)
+		t.Errorf("the alerts topic did not survive the refused migration: %v", err)
 	}
 }
 
