@@ -36,6 +36,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   points at the job definition. The hosted poller sends this email, so the
   capacity-poller Lambda must be redeployed (`lagotto deploy`) to pick it up.
 
+### Documentation
+
+- **DEPLOYMENT.md's CloudFormation path no longer says `lagotto setup` creates
+  everything the stack references** (#220). `setup` creates the watches and
+  match-history tables and the poller's execution role and runtime policy, but not
+  the EventBridge Scheduler invoke role `lagotto-capacity-poller-scheduler-invoke`
+  or the `lagotto-scheduled-launches` table. Only `lagotto deploy` creates those.
+  In an account that has never run `deploy`, the stack's schedule referenced a
+  role that did not exist, so the poller was never invoked. The guide now shows
+  what `setup` and `deploy` each create, and explains that the missing table is
+  harmless and the missing role is not. For an account that has never run
+  `deploy`, it gives a CLI-only way to create the role: one `deploy` and then a
+  `deploy --teardown`, which keeps the roles. lagotto#229 tracks having `setup`
+  create the role. The "What gets deployed" table now names which command
+  creates each role and table.
+
 ## [0.65.1] - 2026-11-01
 
 ### Fixed

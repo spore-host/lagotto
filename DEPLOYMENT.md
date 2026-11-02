@@ -19,8 +19,10 @@ There are two paths:
 | Lambda | `lagotto-capacity-poller` (arm64, `provided.al2023`, 512 MB, 900 s) | `lagotto deploy` |
 | SNS topic | `lagotto-capacity-alerts` (KMS encrypted with `alias/aws/sns`) | `lagotto deploy` |
 | EventBridge schedule | `lagotto-capacity-poller` at `rate(5 minutes)`, starts **DISABLED** | `lagotto deploy` |
-| IAM roles | `lagotto-capacity-poller-role`, `lagotto-capacity-poller-scheduler-invoke` | `pkg/runtimeiam` (`deploy`/`setup`) |
-| DynamoDB tables | `lagotto-watches`, `lagotto-match-history`, `lagotto-scheduled-launches` | the CLI (`watch`/`launch`/`deploy`) |
+| IAM role | `lagotto-capacity-poller-role` (execution role; its permissions policy is written by `setup`) | `pkg/runtimeiam`: created by `deploy` or `setup` |
+| IAM role | `lagotto-capacity-poller-scheduler-invoke` (assumed by EventBridge Scheduler) | `pkg/runtimeiam`: created by `deploy` **only** |
+| DynamoDB tables | `lagotto-watches`, `lagotto-match-history` | the CLI: `deploy`, `setup` or `watch` |
+| DynamoDB table | `lagotto-scheduled-launches` | the CLI: `deploy` or the first `launch` |
 | S3 artifact bucket | `lagotto-lambda-<account>-<region>` | `lagotto deploy` |
 
 Every one of these has a **fixed name**, which is what makes the deploy idempotent
@@ -188,8 +190,11 @@ per-launch EventBridge schedule (`lagotto-launch-sl-<id>`) that invokes the poll
 with a routing payload. It needs the poller function and the
 `lagotto-capacity-poller-scheduler-invoke` role, both of which have fixed names, so
 `launch` derives their ARNs from your account and region and simply checks the
-function exists. A third DynamoDB table, `lagotto-scheduled-launches`
-(PAY_PER_REQUEST, TTL on `ttl_timestamp`), is created on first `launch`.
+function exists. The invoke role is created by `lagotto deploy`, and nothing else
+(see the CloudFormation path below). A third DynamoDB table,
+`lagotto-scheduled-launches` (PAY_PER_REQUEST, TTL on `ttl_timestamp`), is created
+by `lagotto deploy` or on the first `launch`. Until then the poller treats the
+missing table as "no launches pending".
 
 The poller's self-teardown reference-counts pending scheduled launches alongside
 active watches: the schedule is only disabled / CLI-managed tables deleted when
@@ -231,15 +236,46 @@ CI-driven `aws cloudformation deploy`.
 
 The template declares the same three resources and **references** the IAM roles and
 DynamoDB tables by name without creating them, so the CLI still has to prepare
-those first:
+those first. `lagotto deploy` creates all of them, but it also deploys the poller
+itself, which is what the stack is for. `lagotto setup` creates only some of them:
+
+| Referenced by the stack | `lagotto setup` | `lagotto deploy` |
+|---|---|---|
+| `lagotto-watches`, `lagotto-match-history` tables | creates | creates |
+| `lagotto-capacity-poller-role` + its `lagotto-runtime-policy` | creates the role and writes the policy | creates the role; does **not** write the policy |
+| `lagotto-capacity-poller-scheduler-invoke` role + its `InvokeLambda` policy | **does not create** | creates |
+| `lagotto-scheduled-launches` table | does not create | creates |
+
+The scheduled-launches table can wait: the poller treats a missing table as "no
+launches pending", and the first `lagotto launch` creates it. **The invoke role
+cannot wait.** The stack's `PollerSchedule` assumes it to invoke the poller, and the
+Lambda's `SCHEDULER_INVOKE_ROLE_ARN` names it. Without it the schedule cannot invoke
+the poller, so no watch is ever polled. lagotto#229 tracks making `setup` create it.
+Until then, the only lagotto command that creates it is `deploy`:
+
+- The role is IAM-global, and `lagotto deploy --teardown` never deletes it. **If
+  `lagotto deploy` has ever run in any region of this account, the role already
+  exists.** `lagotto doctor`'s `iam-roles` check confirms it.
+- Otherwise, run one `lagotto deploy` and then tear its poller down before creating
+  the stack (step 1b below). Teardown deletes only the schedule, function and topic
+  it just created, and keeps both roles and the tables. Pass `--lambda-bucket` with
+  the bucket you stage the zip in (step 2), so `deploy` does not create its own
+  `lagotto-lambda-<account>-<region>` artifact bucket. It uploads the Lambda zip there.
 
 ```bash
-# 1. The tables and roles are CLI-owned; create them before the stack.
+# Set VERSION to the lagotto release you want, e.g. the one `lagotto version` prints.
+VERSION=X.Y.Z
+
+# 1. Tables, the poller's execution role and its runtime permissions policy.
 lagotto setup --region us-east-1
 
+# 1b. Only if `lagotto deploy` has never run in this account: create the
+#     Scheduler invoke role (and the scheduled-launches table), then remove the
+#     poller it deployed, so the stack can own those three resources.
+lagotto deploy --version $VERSION --lambda-bucket my-artifact-bucket --region us-east-1
+lagotto deploy --teardown --region us-east-1
+
 # 2. Get the published Lambda zip and stage it in a bucket you control.
-#    Set VERSION to the lagotto release you want, e.g. the one `lagotto version` prints.
-VERSION=X.Y.Z
 gh release download v$VERSION --repo spore-host/lagotto \
   --pattern 'capacity-poller_lambda_linux_arm64.zip'
 aws s3 cp capacity-poller_lambda_linux_arm64.zip \
