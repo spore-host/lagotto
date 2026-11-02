@@ -17,6 +17,14 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    # No AWS credentials or config, ever (#214). This job has no AWS secret, and
+    # these make the SDK's default chain resolve nothing even if a runner image
+    # ships a config file or an instance role. The hermetic wrapper below then
+    # replaces even this with fakes and fails any test that tries to send a request.
+    env:
+      AWS_CONFIG_FILE: /dev/null
+      AWS_SHARED_CREDENTIALS_FILE: /dev/null
+      AWS_EC2_METADATA_DISABLED: 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -119,8 +127,24 @@ jobs:
       - name: Build
         run: go build ./...
 
+      # internal/hermetic's gate lists both modules' packages offline (GOPROXY=off,
+      # under the hermetic wrapper), so every module's dependencies must be in the
+      # module cache before the root tests run. Discovered, not listed.
+      - name: Download module dependencies
+        run: |
+          mods=$(find . -name go.mod -not -path './.git/*' | sort)
+          [ -n "$mods" ] || { echo "found no go.mod — the discovery is broken" >&2; exit 1; }
+          for m in $mods; do (cd "$(dirname "$m")" && go mod download); done
+
+      - name: Build hermetic test wrapper
+        # Every unit test runs under it (#214): fake credentials, and
+        # AWS_ENDPOINT_URL and HTTP(S)_PROXY pointed at a loopback recorder, so a
+        # test that reaches AWS fails here, named, instead of passing because the
+        # call happened to fail for lack of credentials.
+        run: go build -o "$RUNNER_TEMP/hermetic-exec" ./test/hermetic
+
       - name: Test
-        run: go test -short -coverprofile=coverage.out ./...
+        run: go test -short -exec "$RUNNER_TEMP/hermetic-exec" -coverprofile=coverage.out ./...
 
       - name: Coverage gate
         env:
@@ -157,7 +181,7 @@ jobs:
         run: |
           go build ./...
           go vet ./...
-          go test -short ./...
+          go test -short -exec "$RUNNER_TEMP/hermetic-exec" ./...
 
   # Lint gate (#183). `make lint` existed but nothing ran it, so findings piled up
   # unnoticed on main and every PR's local `make lint` failed for reasons that had

@@ -2,8 +2,16 @@ package awscfg
 
 import (
 	"context"
+	"strings"
 	"testing"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+
+	"github.com/spore-host/lagotto/internal/hermetic"
 )
+
+func TestMain(m *testing.M) { hermetic.Main(m) }
 
 // TestSetFlagsResolved verifies the CLI flag values recorded via SetFlags flow
 // through to Resolved (the flag layer of flag > env > file > default).
@@ -26,26 +34,72 @@ func TestSetFlagsResolved(t *testing.T) {
 	}
 }
 
-// TestLoadRegionOverride verifies Load's region precedence: an explicit override
-// wins over the shared region, and Load succeeds offline (it only builds config,
-// makes no AWS call). We can't read the region back off aws.Config portably, so
-// this asserts the code path resolves without error for both override and shared.
+// resolvedOptions installs a capturing fake loader and returns the
+// LoadOptions that Load(regionOverride) would have handed the real loader.
+func resolvedOptions(t *testing.T, regionOverride string) awsconfig.LoadOptions {
+	t.Helper()
+	var got awsconfig.LoadOptions
+	SetLoaderForTest(t, func(_ context.Context, optFns ...func(*awsconfig.LoadOptions) error) (aws.Config, error) {
+		got = awsconfig.LoadOptions{}
+		for _, fn := range optFns {
+			if err := fn(&got); err != nil {
+				return aws.Config{}, err
+			}
+		}
+		return aws.Config{Region: got.Region}, nil
+	})
+	if _, err := Load(context.Background(), regionOverride); err != nil {
+		t.Fatalf("Load(%q): %v", regionOverride, err)
+	}
+	return got
+}
+
+// TestLoadRegionOverride verifies Load's precedence: an explicit override wins
+// over the shared region, the shared region applies when there is no override,
+// a shared profile is passed through, and nothing at all means the ambient chain.
 func TestLoadRegionOverride(t *testing.T) {
 	t.Cleanup(func() { SetFlags("", "") })
-	SetFlags("", "us-east-1") // shared region
+	SetFlags("acme-prof", "us-east-1") // shared profile + region
 
-	// Explicit override path.
-	if _, err := Load(context.Background(), "us-west-2"); err != nil {
-		t.Fatalf("Load with override: %v", err)
+	if o := resolvedOptions(t, "us-west-2"); o.Region != "us-west-2" || o.SharedConfigProfile != "acme-prof" {
+		t.Errorf("override: region=%q profile=%q, want us-west-2 / acme-prof", o.Region, o.SharedConfigProfile)
 	}
-	// Shared-region path (empty override → uses SetFlags region).
-	if _, err := Load(context.Background(), ""); err != nil {
-		t.Fatalf("Load with shared region: %v", err)
+	if o := resolvedOptions(t, ""); o.Region != "us-east-1" {
+		t.Errorf("shared: region=%q, want us-east-1", o.Region)
 	}
-	// No region anywhere → ambient chain, still builds.
 	SetFlags("", "")
-	if _, err := Load(context.Background(), ""); err != nil {
-		t.Fatalf("Load with no region: %v", err)
+	if o := resolvedOptions(t, ""); o.Region != "" || o.SharedConfigProfile != "" {
+		t.Errorf("ambient: region=%q profile=%q, want both empty (the hermetic env strips AWS_REGION and AWS_PROFILE)", o.Region, o.SharedConfigProfile)
+	}
+}
+
+// TestLoadPanicsInATestWithoutAFake is the #214 seam: a test that reaches Load
+// without installing a loader must fail at the point it would have built a
+// real AWS config, not go on to read and write a live account.
+func TestLoadPanicsInATestWithoutAFake(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("Load returned under a test with no fake loader; it must panic (#214)")
+		}
+		if s, _ := r.(string); !strings.Contains(s, "#214") {
+			t.Fatalf("panic value %v does not name the hermetic guard", r)
+		}
+	}()
+	_, _ = Load(context.Background(), "us-east-1")
+}
+
+// TestSetLoaderForTestRestores: the fake is scoped to the test that installed
+// it, so a later test without one still hits the guard.
+func TestSetLoaderForTestRestores(t *testing.T) {
+	t.Run("installs", func(t *testing.T) {
+		_ = resolvedOptions(t, "us-east-1")
+	})
+	mu.RLock()
+	l := testLoader
+	mu.RUnlock()
+	if l != nil {
+		t.Fatal("SetLoaderForTest left its loader installed after the subtest ended")
 	}
 }
 
