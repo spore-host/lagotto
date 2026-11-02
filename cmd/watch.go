@@ -239,18 +239,21 @@ func runWatch(cmd *cobra.Command, args []string) error {
 
 	// Store the watch and make sure the hosted poller will poll it (#231): a
 	// caller who cannot read or switch on the poller's schedule is refused, and
-	// no active watch is left behind for nothing to poll.
-	if err := armWatchPolling(ctx, scheduler.NewFromConfig(cfg), os.Stderr,
-		"create watch "+w.WatchID, "no watch was created",
-		func(ctx context.Context) error {
-			if err := store.PutWatch(ctx, w); err != nil {
-				return fmt.Errorf("create watch: %w", err)
-			}
-			return nil
-		},
-		func(ctx context.Context) error { return cancelUnpolledWatch(ctx, store.PutWatch, w) },
-	); err != nil {
+	// no active watch is left behind for nothing to poll. See pollschedule.go.
+	sched := scheduler.NewFromConfig(cfg)
+	armAction := "create watch " + w.WatchID
+	pollSched, err := pollSchedulePreflight(ctx, sched, armAction)
+	if err != nil {
 		return err
+	}
+	if err := store.PutWatch(ctx, w); err != nil {
+		return fmt.Errorf("create watch: %w", err)
+	}
+	if err := enablePollScheduleIfOff(ctx, sched, os.Stderr, pollSched); err != nil {
+		// Roll back through PutWatch, the call (and dynamodb:PutItem permission)
+		// that just created it, so the rollback needs nothing the caller lacks.
+		w.Status = watcher.StatusCancelled
+		return pollScheduleUpdateRefusal(armAction, "no watch was created", store.PutWatch(ctx, w), err)
 	}
 
 	if getOutputFormat() == "json" {
@@ -534,15 +537,6 @@ func loadSageMakerConfig(path string) ([]byte, error) {
 		return nil, fmt.Errorf("marshal to JSON: %w", err)
 	}
 	return jsonBytes, nil
-}
-
-// cancelUnpolledWatch rolls back a just-created watch the poller will not
-// poll. It rewrites the record through PutWatch — the same call (and the same
-// dynamodb:PutItem permission) that created it — as cancelled, so the caller
-// needs no permission they did not just use.
-func cancelUnpolledWatch(ctx context.Context, put func(context.Context, *watcher.Watch) error, w *watcher.Watch) error {
-	w.Status = watcher.StatusCancelled
-	return put(ctx, w)
 }
 
 func displayRegions(regions []string) string {

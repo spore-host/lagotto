@@ -15,7 +15,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
-	"github.com/aws/aws-sdk-go-v2/service/scheduler"
 	"github.com/spore-host/lagotto/pkg/awscfg"
 	"github.com/spore-host/lagotto/pkg/runtimeiam"
 )
@@ -410,15 +409,10 @@ func TestExtendActiveSkipsSchedule(t *testing.T) {
 	}
 }
 
-// TestArmWatchPollingRollbackFailure: if even the rollback fails the message
-// says the watch is active and unpolled, and how to cancel it.
-func TestArmWatchPollingRollbackFailure(t *testing.T) {
-	f := &fakeAWS{scheduleState: "DISABLED", updateErr: "AccessDeniedException"}
-	installFakeAWS(t, f)
-	cfg, _ := awscfg.Load(context.Background(), "")
-	err := armWatchPolling(context.Background(), scheduler.NewFromConfig(cfg), io.Discard, "create watch w-1", "no watch was created",
-		func(context.Context) error { return nil },
-		func(context.Context) error { return io.ErrUnexpectedEOF })
+// TestPollScheduleUpdateRefusalRollbackFailure: if even the rollback fails the
+// message says the watch is active and unpolled, and how to cancel it.
+func TestPollScheduleUpdateRefusalRollbackFailure(t *testing.T) {
+	err := pollScheduleUpdateRefusal("create watch w-1", "no watch was created", io.ErrUnexpectedEOF, io.EOF)
 	if err == nil || !strings.Contains(err.Error(), "lagotto cancel") || !strings.Contains(err.Error(), "will not be polled") {
 		t.Errorf("rollback failure not reported: %v", err)
 	}

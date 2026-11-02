@@ -30,65 +30,74 @@ func pollScheduleName() string {
 	return "lagotto-capacity-poller"
 }
 
-// armWatchPolling stores a watch that the hosted poller must service and makes
-// sure the poller's schedule is ENABLED, without ever leaving an active watch
-// behind that nothing will poll (#231).
-//
-// The hosted poller switches its own schedule off when no watches are active,
-// so a new or reactivated watch is only polled if this command switches it back
-// on. It used to treat ANY GetSchedule error as "poller not deployed" and report
-// an UpdateSchedule failure only under --verbose: a user without the Scheduler
+// Arming a watch the hosted poller must service (#231). The hosted poller
+// switches its own schedule off when no watches are active, so a new or
+// reactivated watch is only polled if the command arming it switches it back on.
+// It used to treat ANY GetSchedule error as "poller not deployed" and report an
+// UpdateSchedule failure only under --verbose: a user without the Scheduler
 // permissions got an active watch, a schedule left off, and no message.
 //
-// The order is deliberate:
+// The callers (runWatch, runExtend) sequence three steps, in this order:
 //
-//  1. GetSchedule, BEFORE persisting. ResourceNotFound really means the hosted
-//     poller is not deployed (the watch is for 'lagotto poll --daemon'), so the
-//     watch is stored as before. Any other error, AccessDenied included, means
-//     we cannot know whether the watch will be polled: refuse, and store
+//  1. pollSchedulePreflight, BEFORE persisting. ResourceNotFound really means the
+//     hosted poller is not deployed (the watch is for 'lagotto poll --daemon'),
+//     so the watch is stored as before. Any other error, AccessDenied included,
+//     means we cannot know whether the watch will be polled: refuse, and store
 //     nothing.
 //  2. persist (PutWatch / ExtendWatch). Storing first and enabling second means
 //     a poller run that starts after the enable always sees the watch; the
 //     other order lets a run that starts in between find no watch and switch
 //     the schedule straight back off.
-//  3. If the schedule is DISABLED, UpdateSchedule it to ENABLED. If that fails
-//     (scheduler:UpdateSchedule, or iam:PassRole on the invoke role the
-//     schedule assumes), undo the persist with rollback so no active watch is
-//     left orphaned, and refuse.
+//  3. enablePollScheduleIfOff. If it fails (scheduler:UpdateSchedule, or
+//     iam:PassRole on the invoke role the schedule assumes), the caller undoes
+//     the persist, so no active watch is left orphaned, and refuses with
+//     pollScheduleUpdateRefusal.
 //
-// action names what is being refused in the messages ("create watch w-1",
-// "reactivate watch w-1"); undone describes the state rollback leaves.
-func armWatchPolling(ctx context.Context, sched pollScheduleAPI, stderr io.Writer, action, undone string,
-	persist, rollback func(context.Context) error) error {
-	name := pollScheduleName()
+// The steps are separate functions rather than one taking persist/rollback
+// callbacks so that the generated IAM inventory (internal/iamcoverage), which
+// cannot follow function values precisely, attributes each command only the
+// calls it makes.
 
+// pollSchedulePreflight reads the poller's schedule. (nil, nil) means it is not
+// deployed. Any other error is the refusal to return to the user. action names
+// what is refused ("create watch w-1").
+func pollSchedulePreflight(ctx context.Context, sched pollScheduleAPI, action string) (*scheduler.GetScheduleOutput, error) {
+	name := pollScheduleName()
 	cur, err := sched.GetSchedule(ctx, &scheduler.GetScheduleInput{Name: aws.String(name)})
 	if err != nil {
 		var notFound *schedulertypes.ResourceNotFoundException
-		if !errors.As(err, &notFound) {
-			return pollScheduleError(action, "nothing was changed", "scheduler:GetSchedule", name, err)
+		if errors.As(err, &notFound) {
+			return nil, nil
 		}
-		cur = nil // not deployed: no schedule to enable
+		return nil, pollScheduleError(action, "nothing was changed", "scheduler:GetSchedule", name, err)
 	}
+	return cur, nil
+}
 
-	if err := persist(ctx); err != nil {
-		return err
-	}
+// enablePollScheduleIfOff switches a DISABLED schedule on; a nil (not deployed)
+// or already-enabled one is left alone.
+func enablePollScheduleIfOff(ctx context.Context, sched pollScheduleAPI, stderr io.Writer, cur *scheduler.GetScheduleOutput) error {
 	if cur == nil || cur.State != schedulertypes.ScheduleStateDisabled {
 		return nil
 	}
-
 	if err := enablePollSchedule(ctx, sched, cur); err != nil {
-		state := undone
-		if rerr := rollback(ctx); rerr != nil {
-			state = fmt.Sprintf("the watch could NOT be rolled back (%v): it is active but will not be polled — cancel it with 'lagotto cancel'", rerr)
-		}
-		return pollScheduleError(action, state, "scheduler:UpdateSchedule", name, err)
+		return err
 	}
 	if verbose {
-		_, _ = fmt.Fprintf(stderr, "Enabled polling schedule %s\n", name)
+		_, _ = fmt.Fprintf(stderr, "Enabled polling schedule %s\n", aws.ToString(cur.Name))
 	}
 	return nil
+}
+
+// pollScheduleUpdateRefusal is the refusal after enablePollScheduleIfOff
+// failed. undone describes the state the caller's rollback left; rollbackErr is
+// that rollback's own failure, if any.
+func pollScheduleUpdateRefusal(action, undone string, rollbackErr, err error) error {
+	state := undone
+	if rollbackErr != nil {
+		state = fmt.Sprintf("the watch could NOT be rolled back (%v): it is active but will not be polled — cancel it with 'lagotto cancel'", rollbackErr)
+	}
+	return pollScheduleError(action, state, "scheduler:UpdateSchedule", pollScheduleName(), err)
 }
 
 // enablePollSchedule switches the schedule on. UpdateSchedule is a full PUT,

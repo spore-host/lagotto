@@ -66,30 +66,31 @@ func runExtend(cmd *cobra.Command, args []string) error {
 	newExpiry := time.Now().UTC().Add(ttl)
 	reactivate := w.Status == watcher.StatusExpired
 
-	persist := func(ctx context.Context) error {
-		if err := store.ExtendWatch(ctx, watchID, newExpiry, reactivate); err != nil {
-			return fmt.Errorf("extend watch: %w", err)
+	// A reactivated watch is only polled if the poller's schedule, which the
+	// poller switched off when it had nothing to poll, is switched back on
+	// (#231). If that cannot be done the watch is put back to expired rather than
+	// left active and unpolled. See pollschedule.go.
+	sched := scheduler.NewFromConfig(cfg)
+	armAction := "reactivate watch " + watchID
+	var pollSched *scheduler.GetScheduleOutput
+	if reactivate {
+		if pollSched, err = pollSchedulePreflight(ctx, sched, armAction); err != nil {
+			return err
 		}
-		return nil
+	}
+
+	if err := store.ExtendWatch(ctx, watchID, newExpiry, reactivate); err != nil {
+		return fmt.Errorf("extend watch: %w", err)
 	}
 
 	if reactivate {
-		// A reactivated watch is only polled if the poller's schedule, which the
-		// poller switched off when it had nothing to poll, is switched back on
-		// (#231). If that cannot be done the watch is put back to expired rather
-		// than left active and unpolled.
-		if err := armWatchPolling(ctx, scheduler.NewFromConfig(cfg), os.Stderr,
-			"reactivate watch "+watchID, "the watch is still expired",
-			persist,
-			func(ctx context.Context) error { return store.UpdateWatchStatus(ctx, watchID, watcher.StatusExpired) },
-		); err != nil {
-			return err
+		if err := enablePollScheduleIfOff(ctx, sched, os.Stderr, pollSched); err != nil {
+			return pollScheduleUpdateRefusal(armAction, "the watch is still expired",
+				store.UpdateWatchStatus(ctx, watchID, watcher.StatusExpired), err)
 		}
 		_, _ = fmt.Fprintln(cmd.OutOrStdout(), i18n.T("lagotto.extend.reactivated", map[string]interface{}{
 			"WatchID": watchID,
 		}))
-	} else if err := persist(ctx); err != nil {
-		return err
 	}
 
 	_, _ = fmt.Fprintln(cmd.OutOrStdout(), i18n.T("lagotto.extend.extended", map[string]interface{}{
