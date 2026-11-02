@@ -72,6 +72,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stack may own the shared IAM roles. `deploy --teardown`'s warning no longer
   calls a leftover stack an "empty shell" safe to delete; it says to check
   `list-stack-resources` first.
+  The migration's administrator needs the CloudFormation change-set and drift
+  actions, plus read access to the roles it verifies. They are listed under
+  `lagotto deploy` in `docs/reference/cli-iam-actions.md`.
 - **lagotto's unit tests can no longer reach a live AWS account** (#214). On
   2026-11-01 a test reached `runWatch`, built a real AWS config from the ambient
   `AWS_PROFILE`, and wrote a real watch record. Three layers now stop that:
