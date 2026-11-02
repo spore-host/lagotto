@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/service/scheduler"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spf13/cobra"
 	"github.com/spore-host/lagotto/pkg/awscfg"
@@ -65,18 +66,31 @@ func runExtend(cmd *cobra.Command, args []string) error {
 	newExpiry := time.Now().UTC().Add(ttl)
 	reactivate := w.Status == watcher.StatusExpired
 
+	// A reactivated watch is only polled if the poller's schedule, which the
+	// poller switched off when it had nothing to poll, is switched back on
+	// (#231). If that cannot be done the watch is put back to expired rather than
+	// left active and unpolled. See pollschedule.go.
+	sched := scheduler.NewFromConfig(cfg)
+	armAction := "reactivate watch " + watchID
+	var pollSched *scheduler.GetScheduleOutput
+	if reactivate {
+		if pollSched, err = pollSchedulePreflight(ctx, sched, armAction); err != nil {
+			return err
+		}
+	}
+
 	if err := store.ExtendWatch(ctx, watchID, newExpiry, reactivate); err != nil {
 		return fmt.Errorf("extend watch: %w", err)
 	}
 
 	if reactivate {
+		if err := enablePollScheduleIfOff(ctx, sched, os.Stderr, pollSched); err != nil {
+			return pollScheduleUpdateRefusal(armAction, "the watch is still expired",
+				store.UpdateWatchStatus(ctx, watchID, watcher.StatusExpired), err)
+		}
 		_, _ = fmt.Fprintln(cmd.OutOrStdout(), i18n.T("lagotto.extend.reactivated", map[string]interface{}{
 			"WatchID": watchID,
 		}))
-		// Re-enable polling schedule since we reactivated a watch
-		if err := enablePollingSchedule(ctx, cfg); err != nil && verbose {
-			fmt.Fprintf(os.Stderr, "Note: could not enable polling schedule: %v\n", err)
-		}
 	}
 
 	_, _ = fmt.Fprintln(cmd.OutOrStdout(), i18n.T("lagotto.extend.extended", map[string]interface{}{

@@ -25,7 +25,7 @@ const (
 // turn off a running poller.
 //
 // The schedule's State is owned OUT OF BAND, not by deploy:
-// cmd/watch.go's enablePollingSchedule (also reached from cmd/extend.go) flips it
+// cmd/pollschedule.go's enablePollSchedule (also reached from cmd/extend.go) flips it
 // to ENABLED when a watch is armed, and the poller itself flips it back to
 // DISABLED when it goes idle. A CloudFormation stack that declares
 // `State: DISABLED` is therefore permanently drifted from reality, and any
@@ -117,7 +117,7 @@ func scheduleDiffers(cur *scheduler.GetScheduleOutput, fnARN, roleARN string) bo
 
 // updatePollerSchedule issues the UpdateSchedule. UpdateSchedule is a full PUT,
 // not a patch: every required field must be resupplied (the same reason
-// cmd/watch.go's enablePollingSchedule copies the current values across), and any
+// cmd/pollschedule.go's enablePollSchedule copies the current values across), and any
 // optional field omitted here is DROPPED. So a user's own tweaks — a target
 // Input, a retry policy, a DLQ, a timezone, a non-default group, a CMK, a
 // start/end date, an action-after-completion — are round-tripped from the current
