@@ -478,10 +478,3 @@ func testDeployer(l lambdaAPI, sn snsAPI, sc schedulerAPI) (*Deployer, *fakeSlee
 	sl := &fakeSleeper{}
 	return &Deployer{lambda: l, sns: sn, sched: sc, sleep: sl.sleep}, sl
 }
-
-// testMigrator builds a Deployer wired to all four fakes, for the CloudFormation
-// migration path.
-func testMigrator(c cfnAPI, l lambdaAPI, sn snsAPI, sc schedulerAPI) *Deployer {
-	sl := &fakeSleeper{}
-	return &Deployer{cfn: c, lambda: l, sns: sn, sched: sc, sleep: sl.sleep}
-}
