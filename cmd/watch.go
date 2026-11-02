@@ -57,7 +57,8 @@ directly and retries it on CapacityError until SageMaker provisions it. SageMake
 has its own AWS-managed compute pool, so the attempt targets SageMaker itself.
 It needs --action spawn: SageMaker has no capacity signal short of submitting the
 job, so there is nothing for --action notify to fire on. Add --notify to be told
-when the job is provisioned.`,
+when the job is provisioned, or that it was not (a rejected submit or a
+non-capacity job failure stops the watch as failed).`,
 	Args: cobra.ExactArgs(1),
 	// A refused watch is a finding, not a usage error (same reasoning as
 	// doctor's SilenceUsage). The #170 instance-role refusal is a multi-line
