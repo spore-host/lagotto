@@ -897,118 +897,173 @@ func (p *Poller) pollGroup(ctx context.Context, regions []string, pattern string
 	now := time.Now().UTC()
 
 	for _, w := range watches {
-		var bestMatch *MatchResult
+		// Every candidate this watch matches, one per (type, region), cheapest
+		// first. The head is the bestMatch the pre-#238 poller picked.
+		candidates := rankedCandidates(w, results, spotResults, spot, now)
+		if len(candidates) == 0 {
+			_ = p.store.UpdateLastPolled(ctx, w.WatchID)
+			continue
+		}
 
-		if spot && len(spotResults) > 0 {
-			// Evaluate Spot results
-			for i := range spotResults {
-				candidate := MatchCandidate{SpotPrice: &spotResults[i]}
-				// Find the corresponding InstanceTypeResult
-				for j := range results {
-					if results[j].InstanceType == spotResults[i].InstanceType && results[j].Region == spotResults[i].Region {
-						candidate.InstanceType = results[j]
-						break
-					}
-				}
-				if m := Evaluate(w, candidate); m != nil {
-					m.MatchedAt = now
-					if bestMatch == nil || m.Price < bestMatch.Price {
-						bestMatch = m
-					}
-				}
+		// Skip candidates EC2 recently refused on quota (#238): a refusal is
+		// remembered for QuotaCapReprobeInterval, then the candidate is re-probed.
+		live := liveQuotaInfeasible(w, now)
+		eligible := candidates[:0:0]
+		for _, c := range candidates {
+			if _, blocked := live[matchKey(c)]; !blocked {
+				eligible = append(eligible, c)
 			}
-		} else if !spot {
-			// Evaluate On-Demand results
-			for i := range results {
-				candidate := MatchCandidate{InstanceType: results[i]}
-				if m := Evaluate(w, candidate); m != nil {
-					m.MatchedAt = now
-					if bestMatch == nil || m.Price < bestMatch.Price {
-						bestMatch = m
+		}
+		if len(eligible) == 0 {
+			// Every matched candidate is still quota-blocked. Wait for the re-probe
+			// rather than fail: the watch only fails right after a fresh refusal,
+			// so a transiently thinner search result can't kill it.
+			if p.verbose {
+				fmt.Fprintf(os.Stderr, "Watch %s: all %d matched candidate(s) are quota-infeasible; waiting for re-probe\n", w.WatchID, len(candidates))
+			}
+			summary.Retrying++
+			_ = p.store.UpdateLastPolled(ctx, w.WatchID)
+			continue
+		}
+		bestMatch := eligible[0]
+
+		if p.verbose {
+			fmt.Fprintf(os.Stderr, "Match found for watch %s: %s in %s at $%.4f/hr\n",
+				w.WatchID, bestMatch.InstanceType, bestMatch.Region, bestMatch.Price)
+		}
+
+		// Double-poller guard (#47): claim a short lease before acting so two
+		// pollers (two daemons, or a daemon + the hosted Lambda) can't both fire
+		// the same watch — the duplicate-RunInstances / double-launch class.
+		// Skip this watch if another poller holds a live lease; we'll re-evaluate
+		// next cycle. Released after the action so a still-active (retrying) watch
+		// is immediately claimable. No-op when leasing is disabled.
+		if p.leaseOwner != "" {
+			if err := p.store.ClaimLease(ctx, w.WatchID, p.leaseOwner, time.Now().Add(leaseTTL)); err != nil {
+				if errors.Is(err, ErrLeaseHeld) {
+					if p.verbose {
+						fmt.Fprintf(os.Stderr, "Watch %s: lease held by another poller; skipping this cycle\n", w.WatchID)
 					}
+					summary.Retrying++
+					continue
 				}
+				fmt.Fprintf(os.Stderr, "Warning: could not claim lease on %s: %v\n", w.WatchID, err)
+				continue
 			}
 		}
 
-		if bestMatch != nil {
-			if p.verbose {
-				fmt.Fprintf(os.Stderr, "Match found for watch %s: %s in %s at $%.4f/hr\n",
-					w.WatchID, bestMatch.InstanceType, bestMatch.Region, bestMatch.Price)
-			}
+		p.actOnCandidates(ctx, w, eligible, results, spotResults, spot, summary)
 
-			// Double-poller guard (#47): claim a short lease before acting so two
-			// pollers (two daemons, or a daemon + the hosted Lambda) can't both fire
-			// the same watch — the duplicate-RunInstances / double-launch class.
-			// Skip this watch if another poller holds a live lease; we'll re-evaluate
-			// next cycle. Released after the action so a still-active (retrying) watch
-			// is immediately claimable. No-op when leasing is disabled.
-			if p.leaseOwner != "" {
-				if err := p.store.ClaimLease(ctx, w.WatchID, p.leaseOwner, time.Now().Add(leaseTTL)); err != nil {
-					if errors.Is(err, ErrLeaseHeld) {
-						if p.verbose {
-							fmt.Fprintf(os.Stderr, "Watch %s: lease held by another poller; skipping this cycle\n", w.WatchID)
-						}
-						summary.Retrying++
-						continue
-					}
-					fmt.Fprintf(os.Stderr, "Warning: could not claim lease on %s: %v\n", w.WatchID, err)
-					continue
-				}
+		// Release the lease now (#47): a capacity-retrying watch stays active, so
+		// freeing the lease lets the next cycle (this poller or another) re-claim
+		// it immediately rather than waiting out leaseTTL. A matched/failed watch
+		// is no longer active, so this is just tidy-up.
+		if p.leaseOwner != "" {
+			if err := p.store.ReleaseLease(ctx, w.WatchID, p.leaseOwner); err != nil && p.verbose {
+				fmt.Fprintf(os.Stderr, "Warning: could not release lease on %s: %v\n", w.WatchID, err)
 			}
-
-			// Execute the action. The launch IS the capacity test: cheap signals
-			// (offerings, spot price) only decide it's worth attempting — they
-			// never prove capacity. So a capacity failure here is expected and
-			// must be retried, not treated as terminal.
-			failure := FailureNone
-			switch w.Action {
-			case ActionSpawn:
-				if p.spawner != nil {
-					if err := p.spawner.Spawn(ctx, w, bestMatch); err != nil {
-						failure = ClassifyFailure(err)
-						fmt.Fprintf(os.Stderr, "Warning: auto-spawn failed for %s (%s): %v\n", w.WatchID, failureLabel(failure), err)
-						bestMatch.ActionTaken = "spawn_failed"
-					}
-				} else {
-					bestMatch.ActionTaken = "notified"
-				}
-			case ActionHold:
-				if p.holder != nil {
-					if err := p.holder.Hold(ctx, w, bestMatch); err != nil {
-						failure = ClassifyFailure(err)
-						fmt.Fprintf(os.Stderr, "Warning: hold failed for %s (%s): %v\n", w.WatchID, failureLabel(failure), err)
-						if failure == FailureCapacity {
-							// Capacity-reservation admission is stricter than launchability:
-							// a hold can be refused for a type that RunInstances would launch.
-							// Don't let this read as "the type can't be launched" (#136).
-							fmt.Fprintf(os.Stderr, "  note: capacity reservation not admitted (stricter than launch; the type may still be launchable via --action spawn)\n")
-						}
-						bestMatch.ActionTaken = "hold_failed"
-					}
-				} else {
-					bestMatch.ActionTaken = "notified"
-				}
-			default:
-				bestMatch.ActionTaken = "notified"
-			}
-
-			p.recordOutcome(ctx, w, bestMatch, failure, summary)
-
-			// Release the lease now (#47): a capacity-retrying watch stays active, so
-			// freeing the lease lets the next cycle (this poller or another) re-claim
-			// it immediately rather than waiting out leaseTTL. A matched/failed watch
-			// is no longer active, so this is just tidy-up.
-			if p.leaseOwner != "" {
-				if err := p.store.ReleaseLease(ctx, w.WatchID, p.leaseOwner); err != nil && p.verbose {
-					fmt.Fprintf(os.Stderr, "Warning: could not release lease on %s: %v\n", w.WatchID, err)
-				}
-			}
-		} else {
-			_ = p.store.UpdateLastPolled(ctx, w.WatchID)
 		}
 	}
 
 	return nil
+}
+
+// actOnCandidates runs the watch's action against its eligible candidates in
+// order (#238). The first attempt is the cheapest eligible candidate, exactly as
+// before. A quota refusal no longer ends the watch: it marks that (type, region)
+// infeasible and, within the same cycle, moves to the next candidate, because a
+// quota refusal is a fast synchronous rejection that creates nothing billable.
+// At most maxQuotaFallthroughsPerCycle such fall-throughs happen per cycle; the
+// rest wait for the next one. Any other outcome (launched, capacity, unknown,
+// non-quota terminal) goes through recordOutcome as it always has, and ends the
+// cycle for this watch.
+//
+// The watch fails on quota only when every candidate in its universe has a live
+// quota-infeasible entry. For a watch with one candidate that is the first
+// refusal, the same as before #238.
+func (p *Poller) actOnCandidates(ctx context.Context, w *Watch, eligible []*MatchResult,
+	results []truffleaws.InstanceTypeResult, spotResults []truffleaws.SpotPriceResult, spot bool, summary *PollSummary) {
+	for i, cand := range eligible {
+		if i > maxQuotaFallthroughsPerCycle {
+			fmt.Fprintf(os.Stderr, "Watch %s: %d candidate(s) refused by quota this cycle; trying the rest next cycle\n", w.WatchID, i)
+			summary.Retrying++
+			return
+		}
+		if i > 0 {
+			// A distinct history sort key per attempt (matched_at is the range key).
+			cand.MatchedAt = time.Now().UTC()
+			if p.verbose {
+				fmt.Fprintf(os.Stderr, "Watch %s: trying next candidate %s in %s at $%.4f/hr\n",
+					w.WatchID, cand.InstanceType, cand.Region, cand.Price)
+			}
+		}
+
+		failure, err := p.runAction(ctx, w, cand)
+		if err == nil || !IsQuotaExceeded(err) {
+			p.recordOutcome(ctx, w, cand, failure, summary)
+			return
+		}
+
+		// Quota refusal: this candidate is infeasible until the re-probe interval.
+		now := time.Now().UTC()
+		q := p.newQuotaInfeasibility(ctx, w, cand, err, now)
+		cand.QuotaDetail = q.Describe()
+		w.QuotaInfeasible = upsertQuotaInfeasible(w.QuotaInfeasible, q, now)
+		// Log unconditionally: for the hosted poller CloudWatch is a real audience.
+		fmt.Fprintf(os.Stderr, "Watch %s: %s; candidate is infeasible until %s\n",
+			w.WatchID, q.Describe(), q.ReprobeAt().Format(time.RFC3339))
+
+		universe := candidateUniverse(w, results, spotResults, spot)
+		if allQuotaInfeasible(universe, liveQuotaInfeasible(w, now)) {
+			p.failQuotaInfeasible(ctx, w, cand, universe, summary)
+			return
+		}
+		p.markQuotaInfeasible(ctx, w, cand)
+	}
+	// Every eligible candidate this cycle was quota-refused, but the universe
+	// still holds one that is not (e.g. a spot candidate above --max-price now).
+	// Stay active.
+	summary.Retrying++
+}
+
+// runAction executes the watch's action for one candidate and classifies any
+// failure. The launch IS the capacity test: cheap signals (offerings, spot price)
+// only decide it's worth attempting — they never prove capacity. So a capacity
+// failure here is expected and must be retried, not treated as terminal.
+func (p *Poller) runAction(ctx context.Context, w *Watch, m *MatchResult) (FailureKind, error) {
+	switch w.Action {
+	case ActionSpawn:
+		if p.spawner == nil {
+			m.ActionTaken = "notified"
+			return FailureNone, nil
+		}
+		if err := p.spawner.Spawn(ctx, w, m); err != nil {
+			failure := ClassifyFailure(err)
+			fmt.Fprintf(os.Stderr, "Warning: auto-spawn failed for %s (%s): %v\n", w.WatchID, failureLabel(failure), err)
+			m.ActionTaken = "spawn_failed"
+			return failure, err
+		}
+	case ActionHold:
+		if p.holder == nil {
+			m.ActionTaken = "notified"
+			return FailureNone, nil
+		}
+		if err := p.holder.Hold(ctx, w, m); err != nil {
+			failure := ClassifyFailure(err)
+			fmt.Fprintf(os.Stderr, "Warning: hold failed for %s (%s): %v\n", w.WatchID, failureLabel(failure), err)
+			if failure == FailureCapacity {
+				// Capacity-reservation admission is stricter than launchability:
+				// a hold can be refused for a type that RunInstances would launch.
+				// Don't let this read as "the type can't be launched" (#136).
+				fmt.Fprintf(os.Stderr, "  note: capacity reservation not admitted (stricter than launch; the type may still be launchable via --action spawn)\n")
+			}
+			m.ActionTaken = "hold_failed"
+			return failure, err
+		}
+	default:
+		m.ActionTaken = "notified"
+	}
+	return FailureNone, nil
 }
 
 // warnUnmatchablePattern emits a one-time (first-poll) warning that a watch's

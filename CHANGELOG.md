@@ -83,6 +83,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   The hosted poller is unchanged: `lagotto deploy` always sets its topic.
 
+- **A quota refusal no longer kills a multi-region or multi-type watch (#238).**
+  When EC2 refuses a single-shot `--action spawn` or `--action hold` launch
+  with `VcpuLimitExceeded`, `InstanceLimitExceeded` or
+  `MaxSpotInstanceCountExceeded`, lagotto now marks only that candidate
+  (instance type, region) as quota-infeasible and moves on to the next
+  cheapest candidate in the same poll cycle. It moves past at most 3 refused
+  candidates per watch per cycle, and the rest wait for the next cycle. Before
+  this, the first refusal failed the whole watch, as on w-c66f3217 and
+  w-b5c463bc, where a 96-vCPU g7.24xlarge hit a 64-vCPU quota in eu-north-1
+  while us-west-2 had 768 vCPU free.
+  - A refused candidate is skipped for 30 minutes (the same re-probe interval
+    as the fleet quota cap from #153). After that it is tried again, so a
+    granted quota increase is picked up without any action from you.
+  - The watch fails only when **every** candidate has been refused. It then
+    sends the quota notification once, listing each candidate with the vCPUs
+    it needs and, when the poller can read Service Quotas, the quota limit and
+    usage, plus the command to raise it. A watch with a single candidate still
+    fails on its first refusal, as before, because there is nothing else to
+    try. For spot watches, a candidate priced above `--max-price` has never
+    been tried, so it keeps the watch alive.
+  - `lagotto status` lists the candidates being skipped and when each will be
+    re-probed. `lagotto history` records each refusal as a `quota_infeasible`
+    row with its detail, instead of a generic `spawn_failed`.
+  - Fleet watches (`--maintain`) are unchanged.
+  - The new watch field `quota_infeasible` and history field `quota_detail`
+    are optional. A poller older than this release ignores them and keeps the
+    old fail-on-first-quota-refusal behaviour, so the hosted pollers need a
+    redeploy before the fix takes effect.
+
 ### Security
 
 - **golang.org/x/net v0.62.0 (from v0.60.0)** in both modules, for

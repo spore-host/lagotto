@@ -517,6 +517,53 @@ func (s *Store) ClearQuotaCap(ctx context.Context, watchID string) error {
 	return nil
 }
 
+// SetQuotaInfeasible persists a single-shot watch's quota-infeasible candidate
+// list (#238), also touching last_polled_at. The list is written whole (it is
+// small: at most one entry per candidate), and an empty list removes the
+// attribute so the record matches its pre-#238 shape.
+func (s *Store) SetQuotaInfeasible(ctx context.Context, watchID string, entries []QuotaInfeasibility) error {
+	now := &types.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)}
+	in := &dynamodb.UpdateItemInput{
+		TableName: &s.watchesTable,
+		Key: map[string]types.AttributeValue{
+			"watch_id": &types.AttributeValueMemberS{Value: watchID},
+		},
+	}
+	if len(entries) == 0 {
+		in.UpdateExpression = aws.String("REMOVE quota_infeasible SET last_polled_at = :now")
+		in.ExpressionAttributeValues = map[string]types.AttributeValue{":now": now}
+	} else {
+		list, err := attributevalue.Marshal(entries)
+		if err != nil {
+			return fmt.Errorf("marshal quota-infeasible list: %w", err)
+		}
+		in.UpdateExpression = aws.String("SET last_polled_at = :now, quota_infeasible = :q")
+		in.ExpressionAttributeValues = map[string]types.AttributeValue{":now": now, ":q": list}
+	}
+	if _, err := s.client.UpdateItem(ctx, in); err != nil {
+		return fmt.Errorf("set quota infeasible: %w", err)
+	}
+	return nil
+}
+
+// RecordHistory writes one match-history row WITHOUT updating the watch record
+// (no match count, no last match). Used for an attempt that does not resolve the
+// watch, such as a quota-refused candidate the watch moves past (#238).
+func (s *Store) RecordHistory(ctx context.Context, m *MatchResult) error {
+	m.TTLTimestamp = time.Now().UTC().Add(retentionWindow).Unix()
+	item, err := attributevalue.MarshalMap(m)
+	if err != nil {
+		return fmt.Errorf("marshal history row: %w", err)
+	}
+	if _, err := s.client.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName: &s.historyTable,
+		Item:      item,
+	}); err != nil {
+		return fmt.Errorf("put history row: %w", err)
+	}
+	return nil
+}
+
 // UpdateSageMakerJob sets (or clears, with an empty name) the in-flight
 // SageMaker job name tracked on a watch between poll cycles.
 func (s *Store) UpdateSageMakerJob(ctx context.Context, watchID, jobName string) error {
