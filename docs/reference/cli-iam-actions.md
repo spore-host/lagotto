@@ -70,7 +70,7 @@ Not everyday use:
 | `lagotto history` | `dynamodb:GetItem`, `dynamodb:Query` |
 | `lagotto launch` | `dynamodb:CreateTable`, `dynamodb:DescribeTable`, `dynamodb:DescribeTimeToLive`, `dynamodb:PutItem`, `dynamodb:TagResource`, `dynamodb:UpdateItem`, `dynamodb:UpdateTimeToLive`, `ec2:DescribeCapacityReservations`, `iam:PassRole`, `lambda:GetFunction`, `s3:GetObject`, `scheduler:CreateSchedule` |
 | `lagotto list` | `dynamodb:Query` |
-| `lagotto poll` | `account:GetAccountInformation`, `dynamodb:PutItem`, `dynamodb:Query`, `dynamodb:UpdateItem`, `ec2:AuthorizeSecurityGroupIngress`, `ec2:CancelSpotInstanceRequests`, `ec2:CreateCapacityReservation`, `ec2:CreateTags`, `ec2:DescribeImages`, `ec2:DescribeInstanceTypeOfferings`, `ec2:DescribeInstanceTypes`, `ec2:DescribeInstances`, `ec2:DescribeRegions`, `ec2:DescribeSnapshots`, `ec2:DescribeSpotPriceHistory`, `ec2:DescribeSubnets`, `ec2:DescribeVpcs`, `ec2:RunInstances`, `ec2:TerminateInstances`, `fsx:CreateFileSystem`, `fsx:DeleteFileSystem`, `iam:AddRoleToInstanceProfile`, `iam:AttachRolePolicy`, `iam:CreateInstanceProfile`, `iam:CreateRole`, `iam:GetInstanceProfile`, `iam:GetRole`, `iam:PassRole`, `iam:PutRolePolicy`, `iam:TagInstanceProfile`, `iam:TagRole`, `pricing:GetProducts`, `s3:CreateBucket`, `s3:ListBucket`, `s3:PutBucketTagging`, `s3:TagResource`, `sagemaker:AddTags`, `sagemaker:CreateTrainingJob`, `sagemaker:DescribeTrainingJob`, `servicequotas:GetServiceQuota`, `sns:Publish`, `ssm:GetParameter` |
+| `lagotto poll` | `account:GetAccountInformation`, `dynamodb:PutItem`, `dynamodb:Query`, `dynamodb:UpdateItem`, `ec2:AllocateAddress`, `ec2:AssociateAddress`, `ec2:AuthorizeSecurityGroupIngress`, `ec2:CancelSpotInstanceRequests`, `ec2:CreateCapacityReservation`, `ec2:CreateTags`, `ec2:DescribeAddresses`, `ec2:DescribeImages`, `ec2:DescribeInstanceTypeOfferings`, `ec2:DescribeInstanceTypes`, `ec2:DescribeInstances`, `ec2:DescribeRegions`, `ec2:DescribeRouteTables`, `ec2:DescribeSnapshots`, `ec2:DescribeSpotPriceHistory`, `ec2:DescribeSubnets`, `ec2:DescribeVpcEndpoints`, `ec2:DescribeVpcs`, `ec2:DisassociateAddress`, `ec2:ReleaseAddress`, `ec2:RunInstances`, `ec2:TerminateInstances`, `fsx:CreateFileSystem`, `fsx:DeleteFileSystem`, `iam:AddRoleToInstanceProfile`, `iam:AttachRolePolicy`, `iam:CreateInstanceProfile`, `iam:CreateRole`, `iam:GetInstanceProfile`, `iam:GetRole`, `iam:PassRole`, `iam:PutRolePolicy`, `iam:TagInstanceProfile`, `iam:TagRole`, `pricing:GetProducts`, `s3:CreateBucket`, `s3:GetBucketTagging`, `s3:GetLifecycleConfiguration`, `s3:ListBucket`, `s3:PutBucketOwnershipControls`, `s3:PutBucketPublicAccessBlock`, `s3:PutBucketTagging`, `s3:PutEncryptionConfiguration`, `s3:PutLifecycleConfiguration`, `s3:PutObject`, `s3:PutObjectTagging`, `s3:TagResource`, `sagemaker:AddTags`, `sagemaker:CreateTrainingJob`, `sagemaker:DescribeTrainingJob`, `servicequotas:GetServiceQuota`, `sns:Publish`, `ssm:GetParameter` |
 | `lagotto setup` | `dynamodb:CreateTable`, `dynamodb:DescribeTable`, `dynamodb:DescribeTimeToLive`, `dynamodb:TagResource`, `dynamodb:UpdateTimeToLive`, `iam:AttachRolePolicy`, `iam:CreateRole`, `iam:GetRole`, `iam:GetRolePolicy`, `iam:PutRolePolicy`, `iam:TagRole` |
 | `lagotto status` | `dynamodb:GetItem` |
 | `lagotto teardown` | `dynamodb:DeleteTable`, `dynamodb:Scan` |
@@ -105,21 +105,28 @@ Not everyday use:
 | `dynamodb:TagResource` | `lagotto deploy`, `lagotto launch`, `lagotto setup`, `lagotto watch` |
 | `dynamodb:UpdateItem` | `lagotto cancel`, `lagotto extend`, `lagotto launch`, `lagotto poll` |
 | `dynamodb:UpdateTimeToLive` | `lagotto deploy`, `lagotto launch`, `lagotto setup`, `lagotto watch` |
+| `ec2:AllocateAddress` | `lagotto poll` |
+| `ec2:AssociateAddress` | `lagotto poll` |
 | `ec2:AuthorizeSecurityGroupIngress` | `lagotto poll` |
 | `ec2:CancelCapacityReservation` | `lagotto cancel` |
 | `ec2:CancelSpotInstanceRequests` | `lagotto poll` |
 | `ec2:CreateCapacityReservation` | `lagotto poll` |
 | `ec2:CreateTags` | `lagotto poll` |
+| `ec2:DescribeAddresses` | `lagotto poll` |
 | `ec2:DescribeCapacityReservations` | `lagotto cancel`, `lagotto launch` |
 | `ec2:DescribeImages` | `lagotto poll` |
 | `ec2:DescribeInstanceTypeOfferings` | `lagotto poll` |
 | `ec2:DescribeInstanceTypes` | `lagotto poll` |
 | `ec2:DescribeInstances` | `lagotto poll`, `lagotto watch` |
 | `ec2:DescribeRegions` | `lagotto poll` |
+| `ec2:DescribeRouteTables` | `lagotto poll` |
 | `ec2:DescribeSnapshots` | `lagotto poll` |
 | `ec2:DescribeSpotPriceHistory` | `lagotto poll` |
 | `ec2:DescribeSubnets` | `lagotto poll` |
+| `ec2:DescribeVpcEndpoints` | `lagotto poll` |
 | `ec2:DescribeVpcs` | `lagotto poll` |
+| `ec2:DisassociateAddress` | `lagotto poll` |
+| `ec2:ReleaseAddress` | `lagotto poll` |
 | `ec2:RunInstances` | `lagotto poll` |
 | `ec2:TerminateInstances` | `lagotto poll` |
 | `fsx:CreateFileSystem` | `lagotto poll` |
@@ -145,11 +152,17 @@ Not everyday use:
 | `lambda:UpdateFunctionConfiguration` | `lagotto deploy` |
 | `pricing:GetProducts` | `lagotto poll` |
 | `s3:CreateBucket` | `lagotto deploy`, `lagotto poll` |
+| `s3:GetBucketTagging` | `lagotto poll` |
+| `s3:GetLifecycleConfiguration` | `lagotto poll` |
 | `s3:GetObject` | `lagotto launch`, `lagotto watch` |
 | `s3:ListBucket` | `lagotto deploy`, `lagotto poll` |
+| `s3:PutBucketOwnershipControls` | `lagotto poll` |
+| `s3:PutBucketPublicAccessBlock` | `lagotto poll` |
 | `s3:PutBucketTagging` | `lagotto poll` |
-| `s3:PutObject` | `lagotto deploy` |
-| `s3:PutObjectTagging` | `lagotto deploy` |
+| `s3:PutEncryptionConfiguration` | `lagotto poll` |
+| `s3:PutLifecycleConfiguration` | `lagotto poll` |
+| `s3:PutObject` | `lagotto deploy`, `lagotto poll` |
+| `s3:PutObjectTagging` | `lagotto deploy`, `lagotto poll` |
 | `s3:TagResource` | `lagotto deploy`, `lagotto poll` |
 | `sagemaker:AddTags` | `lagotto poll` |
 | `sagemaker:CreateTrainingJob` | `lagotto poll` |
