@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/sts"
@@ -83,6 +84,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			_, _ = fmt.Fprintf(out, "  The watch stays active and keeps its running workers; a granted quota increase is picked up automatically.\n")
 		}
 	}
+	writeQuotaInfeasible(out, w, time.Now().UTC())
 	_, _ = fmt.Fprintf(out, "Created:  %s\n", w.CreatedAt.Format(time.RFC3339))
 	_, _ = fmt.Fprintf(out, "Expires:  %s\n", w.ExpiresAt.Format(time.RFC3339))
 	if !w.LastPolledAt.IsZero() {
@@ -126,5 +128,34 @@ func writeLastMatch(out io.Writer, w *watcher.Watch) {
 				_, _ = fmt.Fprintf(out, "  Release it early with: lagotto cancel %s\n", w.WatchID)
 			}
 		}
+	}
+}
+
+// writeQuotaInfeasible prints which single-shot candidates EC2 refused on quota
+// (#238). For an active watch it lists the candidates currently skipped and when
+// each is re-probed; for a watch that failed because every candidate was refused
+// it prints the terminal message, which lists them all with their quotas.
+func writeQuotaInfeasible(out io.Writer, w *watcher.Watch, now time.Time) {
+	if w.DesiredCount > 0 || len(w.QuotaInfeasible) == 0 {
+		return
+	}
+	if w.Status == watcher.StatusFailed && w.QuotaCapReason != "" {
+		_, _ = fmt.Fprintf(out, "Quota:    watch failed: every candidate was refused by an EC2 quota\n")
+		for _, line := range strings.Split(w.QuotaCapReason, "\n") {
+			_, _ = fmt.Fprintf(out, "  %s\n", strings.TrimLeft(line, " "))
+		}
+		return
+	}
+	if w.Status != watcher.StatusActive {
+		return
+	}
+	live := w.LiveQuotaInfeasible(now)
+	if len(live) == 0 {
+		_, _ = fmt.Fprintf(out, "Quota:    no candidate is currently blocked (earlier quota refusals are due for re-probe)\n")
+		return
+	}
+	_, _ = fmt.Fprintf(out, "Quota:    %d candidate(s) skipped as quota-infeasible; the watch keeps trying the others\n", len(live))
+	for _, q := range live {
+		_, _ = fmt.Fprintf(out, "  %s (re-probe after %s)\n", q.Describe(), q.ReprobeAt().Format(time.RFC3339))
 	}
 }

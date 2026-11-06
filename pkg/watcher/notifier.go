@@ -153,6 +153,9 @@ func (n *Notifier) Notify(ctx context.Context, w *Watch, m *MatchResult) error {
 //
 // Same channel fan-out and the same defence-in-depth webhook re-validation as
 // Notify, for watches created before the URL validation fix shipped.
+//
+// It is also sent, once, when a single-shot watch fails because EC2 refused every
+// candidate on quota (#238); running is 0 and the wording says so.
 func (n *Notifier) NotifyQuotaCap(ctx context.Context, w *Watch, running int, reason string) error {
 	if len(w.NotifyChannels) == 0 {
 		return nil
@@ -196,7 +199,13 @@ func (n *Notifier) NotifyQuotaCap(ctx context.Context, w *Watch, running int, re
 // quotaCapSubject renders the notification subject line, e.g.
 // "[lagotto] fleet capped at 2/5 by EC2 quota". Pure, so it's testable without
 // SNS (snsClient is a concrete *sns.Client).
+//
+// A single-shot watch (DesiredCount 0) only reaches this when every candidate was
+// refused by an EC2 quota and the watch failed (#238), so it gets its own wording.
 func quotaCapSubject(w *Watch, running int) string {
+	if w.DesiredCount == 0 {
+		return fmt.Sprintf("[lagotto] watch %s failed: every candidate refused by EC2 quota", w.WatchID)
+	}
 	return fmt.Sprintf("[lagotto] fleet capped at %d/%d by EC2 quota", running, w.DesiredCount)
 }
 
@@ -205,6 +214,21 @@ func quotaCapSubject(w *Watch, running int) string {
 // string (which carries the family, the numbers when known, and the
 // quota-increase hint).
 func quotaCapBody(w *Watch, running int, reason string) string {
+	if w.DesiredCount == 0 {
+		return fmt.Sprintf(`Your watch %s stopped: EC2 refused every candidate because of an account quota.
+
+Pattern:  %s
+Regions:  %v
+Spot:     %v
+
+%s
+
+Nothing was launched. lagotto tried each candidate (instance type, region),
+skipped the ones a quota refused, and stopped only when none was left. Raise the
+quota (or narrow the watch to sizes that fit) and create the watch again.
+`,
+			w.WatchID, w.InstanceTypePattern, w.Regions, w.Spot, reason)
+	}
 	return fmt.Sprintf(`Your fleet watch %s is capped by an EC2 service quota.
 
 Running:  %d of %d requested workers
@@ -226,7 +250,20 @@ quota increase automatically.
 // to THIS payload only — the existing match payload is deliberately left
 // untouched (no retrofitted "event":"match") so no existing webhook consumer
 // changes shape.
+//
+// A single-shot watch that failed because every candidate was quota-refused
+// (#238) sends event "quota_infeasible" with the per-candidate list instead.
 func quotaCapPayload(w *Watch, running int, reason string) map[string]interface{} {
+	if w.DesiredCount == 0 {
+		return map[string]interface{}{
+			"watch_id":   w.WatchID,
+			"event":      "quota_infeasible",
+			"status":     string(StatusFailed),
+			"pattern":    w.InstanceTypePattern,
+			"reason":     reason,
+			"candidates": w.QuotaInfeasible,
+		}
+	}
 	return map[string]interface{}{
 		"watch_id": w.WatchID,
 		"event":    "quota_capped",

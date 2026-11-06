@@ -180,14 +180,16 @@ func renderHistory(out io.Writer, matches []watcher.MatchResult, gaveUp []watche
 	}
 
 	if len(matches) > 0 {
-		_, _ = fmt.Fprintf(out, "%-12s %-18s %-15s %-15s %-10s %-10s %-25s %s\n",
+		// ACTION is 16 wide so "quota_infeasible" (#238) doesn't push the columns.
+		_, _ = fmt.Fprintf(out, "%-12s %-18s %-15s %-15s %-10s %-16s %-25s %s\n",
 			"WATCH ID", "INSTANCE TYPE", "REGION", "AZ", "PRICE", "ACTION", "MATCHED AT", "WAIT")
 		for _, m := range matches {
 			wait := "-"
-			if m.WaitToAcquireSeconds != nil {
+			// A quota refusal acquired nothing, so it has no wait-to-acquire.
+			if m.WaitToAcquireSeconds != nil && m.ActionTaken != watcher.ActionQuotaInfeasible {
 				wait = watcher.FormatWait(time.Duration(*m.WaitToAcquireSeconds * float64(time.Second)))
 			}
-			_, _ = fmt.Fprintf(out, "%-12s %-18s %-15s %-15s $%-9.4f %-10s %-25s %s\n",
+			_, _ = fmt.Fprintf(out, "%-12s %-18s %-15s %-15s $%-9.4f %-16s %-25s %s\n",
 				m.WatchID,
 				m.InstanceType,
 				m.Region,
@@ -197,6 +199,9 @@ func renderHistory(out io.Writer, matches []watcher.MatchResult, gaveUp []watche
 				m.MatchedAt.Format(time.RFC3339),
 				wait,
 			)
+			if m.QuotaDetail != "" {
+				_, _ = fmt.Fprintf(out, "  %s\n", m.QuotaDetail)
+			}
 		}
 	}
 

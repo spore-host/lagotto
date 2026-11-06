@@ -29,8 +29,10 @@ const (
 	StatusExpired WatchStatus = "expired"
 	// StatusCancelled means the user cancelled the watch.
 	StatusCancelled WatchStatus = "cancelled"
-	// StatusFailed means a launch/hold hit a terminal error (bad AMI/IAM,
-	// exhausted quota) that retrying cannot resolve. The watch stops polling.
+	// StatusFailed means a launch/hold hit a terminal error (bad AMI/IAM) that
+	// retrying cannot resolve, or that EC2 refused EVERY candidate on quota
+	// (#238; a single quota refusal only skips that candidate). The watch stops
+	// polling.
 	StatusFailed WatchStatus = "failed"
 	// StatusCompleted means a goal-driven fleet watch's completion condition
 	// (--until) became true: the work is done, so the watch stops maintaining the
@@ -129,6 +131,14 @@ type Watch struct {
 	// QuotaCapReason is the human explanation (family, numbers when known, and the
 	// quota-increase hint) shown by `lagotto status`.
 	QuotaCapReason string `json:"quota_cap_reason,omitempty" dynamodbav:"quota_cap_reason,omitempty"`
+	// QuotaInfeasible lists the single-shot candidates (instance type, region)
+	// that EC2 refused because of an account quota (#238). A live entry (younger
+	// than QuotaCapReprobeInterval) makes the poller skip that candidate and try
+	// the next; the watch fails only when every candidate has a live entry.
+	// omitempty, so pre-#238 records read back empty, and a pre-#238 poller
+	// ignores it (and keeps its old terminal-on-quota behaviour). When the watch
+	// does fail this way, QuotaCapReason holds the message listing them all.
+	QuotaInfeasible []QuotaInfeasibility `json:"quota_infeasible,omitempty" dynamodbav:"quota_infeasible,omitempty"`
 	// LeaseOwner / LeaseExpiresAt guard the double-poller race (#47): before a
 	// poller acts on a match it claims a short lease, so two daemons (or a daemon
 	// + the hosted Lambda) can't both fire the same watch. A lease past its expiry
@@ -168,7 +178,10 @@ type MatchResult struct {
 	ActionTaken   string    `json:"action_taken" dynamodbav:"action_taken"`
 	InstanceID    string    `json:"instance_id,omitempty" dynamodbav:"instance_id,omitempty"`
 	ReservationID string    `json:"reservation_id,omitempty" dynamodbav:"reservation_id,omitempty"`
-	TTLTimestamp  int64     `json:"ttl_timestamp" dynamodbav:"ttl_timestamp"`
+	// QuotaDetail explains a quota_infeasible row (#238): the error code, the
+	// vCPUs the type needs, and the quota numbers when known. Empty otherwise.
+	QuotaDetail  string `json:"quota_detail,omitempty" dynamodbav:"quota_detail,omitempty"`
+	TTLTimestamp int64  `json:"ttl_timestamp" dynamodbav:"ttl_timestamp"`
 	// WaitToAcquireSeconds is the DERIVED time from the parent watch's creation to
 	// this match, in seconds (#139). Display-only, filled by the history command
 	// from the watch's created_at; never persisted (dynamodbav "-").
