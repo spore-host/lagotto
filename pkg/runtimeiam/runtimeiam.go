@@ -123,19 +123,57 @@ func EnsureRoles(ctx context.Context, client IAMAPI, region, accountID string) e
 	if region == "" || accountID == "" {
 		return fmt.Errorf("runtimeiam: region and accountID are required")
 	}
-	if err := ensurePollerRole(ctx, client); err != nil {
+	if _, err := ensurePollerRole(ctx, client); err != nil {
 		return err
 	}
-	return ensureSchedulerInvokeRole(ctx, client, accountID)
+	_, err := ensureSchedulerInvokeRole(ctx, client, accountID)
+	return err
+}
+
+// EnsureSetupRoles is what `lagotto setup` applies (#229): both CLI-owned roles,
+// get-or-created, the runtime permissions policy on the poller role
+// ([EnsureRuntimeRole]) and the invoke policy on the Scheduler invoke role
+// ([SchedulerInvokePolicyDocument]). It returns the names of the roles it
+// CREATED, in that order; an existing role is reused and not listed.
+//
+// Before #229 setup ensured only the poller role, so in an account set up for
+// the CloudFormation path no command short of `lagotto deploy` created the
+// invoke role the stack's schedule and the Lambda's SCHEDULER_INVOKE_ROLE_ARN
+// both name. Both policies are functions of the account alone (#218, #219), so
+// setup in any region writes the same bytes and cannot flip-flop another
+// region's grants. Idempotent: a re-run creates nothing and rewrites both
+// policies in place.
+func EnsureSetupRoles(ctx context.Context, client IAMAPI, region, accountID string, instanceRoles []string) ([]string, error) {
+	if region == "" || accountID == "" {
+		return nil, fmt.Errorf("runtimeiam: region and accountID are required")
+	}
+	var created []string
+	made, err := ensurePollerRole(ctx, client)
+	if err != nil {
+		return nil, err
+	}
+	if made {
+		created = append(created, RoleName)
+	}
+	if err := putRuntimePolicy(ctx, client, accountID, instanceRoles); err != nil {
+		return created, err
+	}
+	made, err = ensureSchedulerInvokeRole(ctx, client, accountID)
+	if made {
+		created = append(created, SchedulerInvokeRoleName)
+	}
+	return created, err
 }
 
 // ensurePollerRole get-or-creates RoleName with the Lambda trust relationship
 // and the AWS-managed basic-execution policy (its permissions policy is added by
 // EnsureRuntimeRole).
-func ensurePollerRole(ctx context.Context, client IAMAPI) error {
+//
+// created reports whether this call created the role.
+func ensurePollerRole(ctx context.Context, client IAMAPI) (created bool, err error) {
 	exists, err := roleExists(ctx, client, RoleName)
 	if err != nil {
-		return fmt.Errorf("runtimeiam: check role %s: %w", RoleName, err)
+		return false, fmt.Errorf("runtimeiam: check role %s: %w", RoleName, err)
 	}
 	if !exists {
 		if _, err := client.CreateRole(ctx, &iam.CreateRoleInput{
@@ -146,7 +184,7 @@ func ensurePollerRole(ctx context.Context, client IAMAPI) error {
 				{Key: aws.String("Component"), Value: aws.String("capacity-poller")},
 			},
 		}); err != nil {
-			return fmt.Errorf("runtimeiam: create role %s: %w", RoleName, err)
+			return false, fmt.Errorf("runtimeiam: create role %s: %w", RoleName, err)
 		}
 	}
 	// AttachRolePolicy is idempotent (re-attaching the same managed policy is a no-op).
@@ -154,9 +192,9 @@ func ensurePollerRole(ctx context.Context, client IAMAPI) error {
 		RoleName:  aws.String(RoleName),
 		PolicyArn: aws.String(lambdaBasicExecutionARN),
 	}); err != nil {
-		return fmt.Errorf("runtimeiam: attach basic-execution to %s: %w", RoleName, err)
+		return !exists, fmt.Errorf("runtimeiam: attach basic-execution to %s: %w", RoleName, err)
 	}
-	return nil
+	return !exists, nil
 }
 
 // ensureSchedulerInvokeRole get-or-creates SchedulerInvokeRoleName with the
@@ -170,31 +208,33 @@ func ensurePollerRole(ctx context.Context, client IAMAPI) error {
 // poller there was never invoked. A document that cannot depend on the region is
 // the structural fix — deploying region A then region B converges, with nothing
 // to flip-flop.
-func ensureSchedulerInvokeRole(ctx context.Context, client IAMAPI, accountID string) error {
+//
+// created reports whether this call created the role.
+func ensureSchedulerInvokeRole(ctx context.Context, client IAMAPI, accountID string) (created bool, err error) {
+	doc, err := SchedulerInvokePolicyDocument(accountID)
+	if err != nil {
+		return false, err
+	}
 	exists, err := roleExists(ctx, client, SchedulerInvokeRoleName)
 	if err != nil {
-		return fmt.Errorf("runtimeiam: check role %s: %w", SchedulerInvokeRoleName, err)
+		return false, fmt.Errorf("runtimeiam: check role %s: %w", SchedulerInvokeRoleName, err)
 	}
 	if !exists {
 		if _, err := client.CreateRole(ctx, &iam.CreateRoleInput{
 			RoleName:                 aws.String(SchedulerInvokeRoleName),
 			AssumeRolePolicyDocument: aws.String(trust("scheduler.amazonaws.com")),
 		}); err != nil {
-			return fmt.Errorf("runtimeiam: create role %s: %w", SchedulerInvokeRoleName, err)
+			return false, fmt.Errorf("runtimeiam: create role %s: %w", SchedulerInvokeRoleName, err)
 		}
-	}
-	doc, err := SchedulerInvokePolicyDocument(accountID)
-	if err != nil {
-		return err
 	}
 	if _, err := client.PutRolePolicy(ctx, &iam.PutRolePolicyInput{
 		RoleName:       aws.String(SchedulerInvokeRoleName),
 		PolicyName:     aws.String(SchedulerInvokePolicyName),
 		PolicyDocument: aws.String(doc),
 	}); err != nil {
-		return fmt.Errorf("runtimeiam: put invoke policy on %s: %w", SchedulerInvokeRoleName, err)
+		return !exists, fmt.Errorf("runtimeiam: put invoke policy on %s: %w", SchedulerInvokeRoleName, err)
 	}
-	return nil
+	return !exists, nil
 }
 
 // SchedulerInvokeFunctionARN is the Resource of the Scheduler invoke policy:
@@ -245,9 +285,15 @@ func EnsureRuntimeRole(ctx context.Context, client IAMAPI, region, accountID str
 	if region == "" || accountID == "" {
 		return fmt.Errorf("runtimeiam: region and accountID are required")
 	}
-	if err := ensurePollerRole(ctx, client); err != nil {
+	if _, err := ensurePollerRole(ctx, client); err != nil {
 		return err
 	}
+	return putRuntimePolicy(ctx, client, accountID, instanceRoles)
+}
+
+// putRuntimePolicy writes PolicyDocument onto RoleName (a wholesale,
+// idempotent PutRolePolicy).
+func putRuntimePolicy(ctx context.Context, client IAMAPI, accountID string, instanceRoles []string) error {
 	doc, err := PolicyDocument(accountID, instanceRoles)
 	if err != nil {
 		return fmt.Errorf("runtimeiam: build policy: %w", err)
