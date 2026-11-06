@@ -87,3 +87,20 @@ func TestRenderHistory_QuotaInfeasibleRow(t *testing.T) {
 		t.Errorf("a quota refusal shows a wait-to-acquire:\n%s", s)
 	}
 }
+
+// An active watch whose entries have all passed the re-probe interval says so;
+// a cancelled or expired watch prints no quota section.
+func TestStatus_QuotaInfeasibleExpiredAndInactive(t *testing.T) {
+	now := time.Now().UTC()
+	old := []watcher.QuotaInfeasibility{{InstanceType: "g7.24xlarge", Region: "eu-north-1", At: now.Add(-2 * watcher.QuotaCapReprobeInterval)}}
+	var out bytes.Buffer
+	writeQuotaInfeasible(&out, &watcher.Watch{Status: watcher.StatusActive, QuotaInfeasible: old}, now)
+	if !strings.Contains(out.String(), "no candidate is currently blocked") {
+		t.Errorf("status = %q", out.String())
+	}
+	out.Reset()
+	writeQuotaInfeasible(&out, &watcher.Watch{Status: watcher.StatusCancelled, QuotaInfeasible: old}, now)
+	if out.Len() != 0 {
+		t.Errorf("cancelled watch printed %q", out.String())
+	}
+}
