@@ -643,3 +643,25 @@ func TestHeartbeat_OldRecordsAndOldPollers(t *testing.T) {
 		}
 	}
 }
+
+// The small fallbacks: a nil heartbeat changes nothing, a quota refusal with no
+// recorded entry still says "quota", and a failed Increment keeps a local count.
+func TestHeartbeat_Fallbacks(t *testing.T) {
+	w := &Watch{Attempts: 3}
+	w.noteAttempt(nil, time.Now())
+	if w.Attempts != 3 || !w.LastAttemptAt.IsZero() {
+		t.Errorf("nil heartbeat changed the watch: %+v", w)
+	}
+	if got := quotaAttemptError(&Watch{}, &MatchResult{InstanceType: "a", Region: "b"}); got != ErrClassQuota {
+		t.Errorf("no entry = %q", got)
+	}
+
+	env := fleetStore(t)
+	bad := &Store{client: env.client, watchesTable: "no-such-table", historyTable: "no-such-history"}
+	p := &Poller{store: bad}
+	w = &Watch{WatchID: "w-x", Attempts: 4}
+	p.recordOutcome(context.Background(), w, &MatchResult{WatchID: "w-x"}, FailureUnknown, errors.New("boom"), &PollSummary{})
+	if w.Attempts != 5 || w.LastError != "unknown: boom" || w.ConsecutiveFailures != 1 {
+		t.Errorf("after a failed Increment: attempts=%d last_error=%q consecutive=%d", w.Attempts, w.LastError, w.ConsecutiveFailures)
+	}
+}
