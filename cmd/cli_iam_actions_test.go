@@ -193,8 +193,8 @@ func TestCLIActionInventoryIsCurrent(t *testing.T) {
 // lagotto's DynamoDB tables would still be missing.
 var nonEverydayCommands = map[string]string{
 	"lagotto deploy":   "administrator: creates the poller's Lambda, topic, schedule, tables and IAM roles",
-	"lagotto setup":    "administrator: creates the tables and the poller role, and writes its permissions policy",
-	"lagotto teardown": "administrator: deletes lagotto's DynamoDB tables",
+	"lagotto setup":    "administrator: creates the tables and both IAM roles, and writes their policies",
+	"lagotto teardown": "administrator: deletes lagotto's DynamoDB tables and, with --iam-roles, its IAM roles",
 	"lagotto poll":     "runs the poller locally, so it needs what the hosted poller's role has",
 }
 
