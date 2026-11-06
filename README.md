@@ -138,6 +138,28 @@ lagotto poll
 extra infrastructure. The hosted Lambda poller (`lagotto deploy`) remains the
 option for teams — see [DEPLOYMENT.md](DEPLOYMENT.md).
 
+### Notifications from a local poller
+
+`lagotto poll` and `poll --daemon` deliver a watch's `--notify` channels the way
+the hosted poller does:
+
+- **`webhook:` and `sns:` channels are always delivered.** Each names its own
+  target (a URL, or your own SNS topic ARN), so no lagotto infrastructure is
+  needed.
+- **`email:` channels are published to the alerts topic,
+  `lagotto-capacity-alerts`**, which `lagotto deploy` creates in your account and
+  region. `poll` uses that topic when it exists. It checks with
+  `sns:GetTopicAttributes`; if you may not call that, it uses the topic by name.
+  To publish to a different topic, set `LAGOTTO_SNS_TOPIC_ARN`:
+
+  ```bash
+  LAGOTTO_SNS_TOPIC_ARN=arn:aws:sns:us-west-2:111122223333:my-alerts lagotto poll --daemon
+  ```
+
+If no topic is found, `poll` warns at start and names every in-scope watch
+whose email channel will not be delivered. Each email it skips is also reported
+as a failed notification. Its webhook and sns channels are still delivered.
+
 ### Scoping a daemon in a shared account
 
 By default `poll --daemon` services **every** active watch in the account. In an

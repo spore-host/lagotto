@@ -56,6 +56,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     them lagotto's `--spawn-config` can actually reach. The hosted poller's IAM
     policy is unchanged.
 
+### Fixed
+
+- **`lagotto poll` and `poll --daemon` now send notifications without
+  `LAGOTTO_SNS_TOPIC_ARN`** (#241). The local poller built its notifier only
+  when that undocumented variable was set. Without it, no channel fired, not
+  even a webhook or your own `sns:` topic, neither of which needs lagotto's
+  topic. A `--action notify` watch was consumed (`status=matched`) and nobody
+  was told. Spawn and hold watches launched or reserved with no notice,
+  including the hold notice that carries the reservation id. Expiry and
+  quota-cap notices were dropped the same way. Now:
+  - **Webhook and `sns:` channels are always delivered.**
+  - **`email:` channels go to `lagotto-capacity-alerts`**, the topic
+    `lagotto deploy` creates and the hosted poller publishes to. `poll` uses
+    that topic in your account and region when it exists. If you may not call
+    `sns:GetTopicAttributes`, it uses the topic by name.
+    `LAGOTTO_SNS_TOPIC_ARN` still overrides it, and is now documented in
+    `lagotto poll --help` and the README.
+  - **No topic is said out loud.** `poll` warns at start and names each
+    in-scope watch whose email channel will not be delivered. Each skipped
+    email is reported as a failed notification, and the watch's other
+    channels are still delivered.
+  - `docs/reference/cli-iam-actions.md`: `lagotto poll` gains
+    `sns:GetTopicAttributes`, the check `lagotto deploy` and `lagotto doctor`
+    already make.
+
+  The hosted poller is unchanged: `lagotto deploy` always sets its topic.
+
 ### Security
 
 - **golang.org/x/net v0.62.0 (from v0.60.0)** in both modules, for
