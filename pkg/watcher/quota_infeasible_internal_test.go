@@ -44,7 +44,6 @@ type qiHarness struct {
 	poller   *Poller
 	attempts []string // "type@region", in order
 	notified []string // reasons passed to the quota-cap notifier
-	matches  int      // generic match notifications
 }
 
 func newQIHarness(t *testing.T, results []truffleaws.InstanceTypeResult, outcome func(typ, region string) error) *qiHarness {
