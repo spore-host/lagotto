@@ -368,7 +368,12 @@ func (p *Poller) pollSageMakerWatch(ctx context.Context, w *Watch, summary *Poll
 		_ = p.store.UpdateSageMakerJob(ctx, w.WatchID, outcome.JobName)
 	}
 
-	p.recordOutcome(ctx, w, m, outcome.Kind, summary)
+	if err == nil && outcome.ClearJobName {
+		// A job that failed for capacity reports no error (it is retried), but it
+		// is still the attempt's failure, so give the heartbeat something to say.
+		err = errors.New("SageMaker job failed for lack of capacity; resubmitting")
+	}
+	p.recordOutcome(ctx, w, m, outcome.Kind, err, summary)
 }
 
 // retireUnsupported stops a stored watch whose service/action combination can
@@ -503,7 +508,7 @@ func (p *Poller) pollFleetWatch(ctx context.Context, w *Watch, summary *PollSumm
 	bestMatch, err := p.searchBestMatch(ctx, w)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: watch %s capacity search failed: %v\n", w.WatchID, err)
-		_ = p.store.UpdateLastPolled(ctx, w.WatchID)
+		p.recordPollError(ctx, []*Watch{w}, err)
 		return
 	}
 	if bestMatch == nil {
@@ -531,8 +536,10 @@ func (p *Poller) pollFleetWatch(ctx context.Context, w *Watch, summary *PollSumm
 		p.clearQuotaCap(ctx, w)
 	}
 	// The watch stays active (never flips to matched) — it only retires when the
-	// completion condition holds (step 1) or its TTL elapses.
-	_ = p.store.UpdateLastPolled(ctx, w.WatchID)
+	// completion condition holds (step 1) or its TTL elapses. The cycle's launch
+	// attempts ride on this closing write (#239), which used to be a plain
+	// last_polled_at touch.
+	_ = p.store.recordFleetCycle(ctx, w.WatchID, out.Attempts, out.LastErr)
 }
 
 // fillOutcome is what one gap-fill cycle produced: how many workers launched,
@@ -541,6 +548,10 @@ func (p *Poller) pollFleetWatch(ctx context.Context, w *Watch, summary *PollSumm
 // re-failing the same launch every poll.
 type fillOutcome struct {
 	Launched int
+	// Attempts is how many Spawn calls the cycle made (launched + the one that
+	// stopped it, if any), and LastErr describes that stopping failure (#239).
+	Attempts int
+	LastErr  string
 	// QuotaErr is non-nil only for a quota-exceeded refusal (IsQuotaExceeded).
 	// Every other failure (capacity, terminal, unknown) leaves it nil and keeps the
 	// pre-existing "warn and stop filling this cycle" behavior exactly as it was.
@@ -566,10 +577,11 @@ func (p *Poller) fillFleetGap(ctx context.Context, w *Watch, bestMatch *MatchRes
 			failure := ClassifyFailure(err)
 			fmt.Fprintf(os.Stderr, "Warning: fleet top-up launch %d/%d for %s failed (%s): %v\n",
 				i+1, gap, w.WatchID, failureLabel(failure), err)
+			out := fillOutcome{Launched: launched, Attempts: launched + 1, LastErr: describeAttemptError(failure, err)}
 			if IsQuotaExceeded(err) {
-				return fillOutcome{Launched: launched, QuotaErr: err}
+				out.QuotaErr = err
 			}
-			break
+			return out
 		}
 		launched++
 		summary.Launched++
@@ -578,7 +590,7 @@ func (p *Poller) fillFleetGap(ctx context.Context, w *Watch, bestMatch *MatchRes
 			fmt.Fprintf(os.Stderr, "Warning: failed to record fleet match for %s: %v\n", w.WatchID, err)
 		}
 	}
-	return fillOutcome{Launched: launched}
+	return fillOutcome{Launched: launched, Attempts: launched}
 }
 
 // recordQuotaCap reports that a fleet watch has hit its EC2 vCPU quota ceiling
@@ -783,7 +795,21 @@ func (p *Poller) searchBestMatch(ctx context.Context, w *Watch) (*MatchResult, e
 // increments the per-watch cap, stopping the watch once it reaches
 // MaxConsecutiveFailures; a terminal failure stops it as failed; success records
 // the match, notifies, marks matched, and clears the streak.
-func (p *Poller) recordOutcome(ctx context.Context, w *Watch, m *MatchResult, failure FailureKind, summary *PollSummary) {
+//
+// Every call is one action attempt, so it also carries the heartbeat (#239):
+// attempts, last_attempt_at and, for a failure, last_error. They ride on the
+// write each branch already makes (the Reset/Increment UpdateItem, or
+// RecordMatch's PutWatch), never on a write of their own. err is the attempt's
+// error, used only to describe it.
+func (p *Poller) recordOutcome(ctx context.Context, w *Watch, m *MatchResult, failure FailureKind, err error, summary *PollSummary) {
+	var hb *attempt
+	if failure == FailureNone {
+		hb = &attempt{}
+	} else {
+		hb = failedAttempt(failure, err)
+	}
+	now := time.Now().UTC()
+
 	if failure == FailureCapacity {
 		if p.verbose {
 			fmt.Fprintf(os.Stderr, "Watch %s: capacity unavailable; will retry next cycle\n", w.WatchID)
@@ -792,16 +818,24 @@ func (p *Poller) recordOutcome(ctx context.Context, w *Watch, m *MatchResult, fa
 		// A genuine capacity failure clears any prior unknown-failure streak: the
 		// cap only counts *consecutive* unclassified faults.
 		w.ConsecutiveFailures = 0
-		_ = p.store.ResetConsecutiveFailures(ctx, w.WatchID)
+		w.noteAttempt(hb, now)
+		_ = p.store.resetConsecutiveFailures(ctx, w.WatchID, hb)
 		return
 	}
 
+	// counted is set once the heartbeat has been written by the Increment below,
+	// so the terminal path's PutWatch doesn't count the same attempt twice.
+	counted := false
 	if failure == FailureUnknown {
-		n, err := p.store.IncrementConsecutiveFailures(ctx, w.WatchID)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to record failure count for %s: %v\n", w.WatchID, err)
+		n, attempts, ierr := p.store.incrementConsecutiveFailures(ctx, w.WatchID, hb)
+		w.noteAttempt(hb, now)
+		if ierr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to record failure count for %s: %v\n", w.WatchID, ierr)
 			n = w.ConsecutiveFailures + 1 // best-effort local estimate
+		} else if attempts > 0 {
+			w.Attempts = attempts // the store's atomic count wins over the local one
 		}
+		counted = true
 		w.ConsecutiveFailures = n
 		if n < MaxConsecutiveFailures {
 			if p.verbose {
@@ -820,6 +854,10 @@ func (p *Poller) recordOutcome(ctx context.Context, w *Watch, m *MatchResult, fa
 	// Success clears the streak so it persists via RecordMatch's PutWatch.
 	if failure == FailureNone {
 		w.ConsecutiveFailures = 0
+	}
+	// RecordMatch writes the whole record, so the heartbeat travels on it.
+	if !counted {
+		w.noteAttempt(hb, now)
 	}
 
 	if err := p.store.RecordMatch(ctx, w, m); err != nil {
@@ -865,6 +903,7 @@ func (p *Poller) pollGroup(ctx context.Context, regions []string, pattern string
 		Verbose:    p.verbose,
 	})
 	if err != nil {
+		p.recordPollError(ctx, watches, err)
 		return fmt.Errorf("search instance types: %w", err)
 	}
 
@@ -889,6 +928,7 @@ func (p *Poller) pollGroup(ctx context.Context, regions []string, pattern string
 			Verbose:    p.verbose,
 		})
 		if err != nil {
+			p.recordPollError(ctx, watches, err)
 			return fmt.Errorf("get spot pricing: %w", err)
 		}
 	}
@@ -1000,7 +1040,7 @@ func (p *Poller) actOnCandidates(ctx context.Context, w *Watch, eligible []*Matc
 
 		failure, err := p.runAction(ctx, w, cand)
 		if err == nil || !IsQuotaExceeded(err) {
-			p.recordOutcome(ctx, w, cand, failure, summary)
+			p.recordOutcome(ctx, w, cand, failure, err, summary)
 			return
 		}
 
@@ -1084,6 +1124,24 @@ func warnUnmatchablePattern(w *Watch) {
 	fmt.Fprintf(os.Stderr,
 		"Warning: watch %s pattern %q matches no known instance type in %s — check for typos; still watching in case it becomes available\n",
 		w.WatchID, w.InstanceTypePattern, regions)
+}
+
+// recordPollError stamps last_poll_error on each watch whose capacity search
+// failed this cycle (#239). Before this, such a cycle wrote nothing at all, so a
+// watch whose search kept failing looked exactly like an idle one. Best-effort:
+// a failed stamp is logged under -v and never stops the sweep.
+func (p *Poller) recordPollError(ctx context.Context, watches []*Watch, searchErr error) {
+	msg := describePollError(searchErr)
+	now := time.Now().UTC()
+	for _, w := range watches {
+		if err := p.store.recordPollError(ctx, w.WatchID, msg); err != nil {
+			if p.verbose {
+				fmt.Fprintf(os.Stderr, "Warning: could not record poll error on %s: %v\n", w.WatchID, err)
+			}
+			continue
+		}
+		w.LastPollError, w.LastPollErrorAt = msg, now
+	}
 }
 
 // SplitInstanceTypePatterns splits a watch pattern into its comma-separated

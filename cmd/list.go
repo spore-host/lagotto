@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/sts"
@@ -21,7 +24,20 @@ var (
 var listCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List your watches",
-	RunE:  runList,
+	Long: `List your watches.
+
+Besides each watch's definition, the table shows its heartbeat:
+
+  LAST POLL  how long ago the poller last checked it ("4m", "2h"). An active
+             watch is flagged "!" when that is over 15 minutes: the poller is
+             disabled or failing, or its capacity search keeps failing.
+  TRIES      how many launch/hold/notify attempts it has made.
+  LAST ERR   the class of its latest error: capacity, quota, terminal,
+             unknown, or search (the capacity search itself failed).
+
+Use -o wide for the full latest error, or -o json for every field.
+"lagotto status <watch-id>" shows the full errors and when they happened.`,
+	RunE: runList,
 }
 
 func init() {
@@ -85,9 +101,27 @@ func runList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%-12s %-10s %-15s %-20s %-20s %-25s %-6s %-10s %s\n",
-		"WATCH ID", "STATUS", "PROJECT", "OWNER", "PATTERN", "REGIONS", "SPOT", "ACTION", "EXPIRES")
-	for _, w := range watches {
+	writeWatchTable(cmd.OutOrStdout(), watches, time.Now().UTC(), getOutputFormat() == "wide")
+	return nil
+}
+
+// stalePollAfter is how old an active watch's last poll may be before `list`
+// flags it with "!" (#239). The hosted poller runs every 5 minutes, so 15 is
+// three missed cycles: the poller is disabled, broken, or its search is failing.
+const stalePollAfter = 15 * time.Minute
+
+// writeWatchTable renders the `list` table. now is a parameter so the ages are
+// testable against a fixed clock. wide (`-o wide`) adds the full last error.
+func writeWatchTable(out io.Writer, watches []watcher.Watch, now time.Time, wide bool) {
+	const row = "%-12s %-10s %-15s %-20s %-20s %-25s %-6v %-10s %-20s %-9s %5s %-8s"
+	header := fmt.Sprintf(row, "WATCH ID", "STATUS", "PROJECT", "OWNER", "PATTERN", "REGIONS", "SPOT", "ACTION", "EXPIRES",
+		"LAST POLL", "TRIES", "LAST ERR")
+	if wide {
+		header += " LAST ERROR"
+	}
+	_, _ = fmt.Fprintln(out, strings.TrimRight(header, " "))
+	for i := range watches {
+		w := &watches[i]
 		regions := displayRegions(w.Regions)
 		if len(regions) > 25 {
 			regions = regions[:22] + "..."
@@ -98,7 +132,8 @@ func runList(cmd *cobra.Command, args []string) error {
 		if w.DesiredCount > 0 {
 			actionCol = fmt.Sprintf("%s×%d", w.Action, w.DesiredCount)
 		}
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%-12s %-10s %-15s %-20s %-20s %-25s %-6v %-10s %s\n",
+		latest, latestAt := w.LatestError()
+		line := fmt.Sprintf(row,
 			w.WatchID,
 			w.Status,
 			dashIfEmpty(truncate(w.Project, 15)),
@@ -108,9 +143,52 @@ func runList(cmd *cobra.Command, args []string) error {
 			w.Spot,
 			actionCol,
 			w.ExpiresAt.Format(time.RFC3339),
+			lastPollCol(w, now),
+			strconv.Itoa(w.Attempts),
+			dashIfEmpty(truncate(watcher.ErrorClass(latest), 8)),
 		)
+		if wide && latest != "" {
+			line += fmt.Sprintf(" %s (%s ago)", latest, formatAge(now.Sub(latestAt)))
+		}
+		_, _ = fmt.Fprintln(out, strings.TrimRight(line, " "))
 	}
-	return nil
+}
+
+// lastPollCol renders LAST POLL as an age ("4m", "2h", "3d"), or "never". An
+// ACTIVE watch whose last poll is older than stalePollAfter is flagged "!"; so is
+// an active one never polled though created longer ago than that. A finished
+// watch is not polled any more, so its age is shown unflagged.
+func lastPollCol(w *watcher.Watch, now time.Time) string {
+	active := w.Status == watcher.StatusActive
+	if w.LastPolledAt.IsZero() {
+		if active && !w.CreatedAt.IsZero() && now.Sub(w.CreatedAt) > stalePollAfter {
+			return "never!"
+		}
+		return "never"
+	}
+	age := now.Sub(w.LastPolledAt)
+	s := formatAge(age)
+	if active && age > stalePollAfter {
+		s += "!"
+	}
+	return s
+}
+
+// formatAge renders a duration as one coarse unit: "45s", "12m", "5h", "3d".
+// Negative durations (clock skew between the poller and this machine) read "0s".
+func formatAge(d time.Duration) string {
+	switch {
+	case d < 0:
+		return "0s"
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d/time.Second))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d/time.Minute))
+	case d < 48*time.Hour:
+		return fmt.Sprintf("%dh", int(d/time.Hour))
+	default:
+		return fmt.Sprintf("%dd", int(d/(24*time.Hour)))
+	}
 }
 
 // listStatusFilter maps --all to the store's status filter: the empty filter means
