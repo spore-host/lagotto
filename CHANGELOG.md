@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Built against spawn v0.160.0 (from v0.135.1), libs v0.51.4 (from v0.51.1)
+  and truffle v0.63.0 (from v0.61.0)**, in the root module and in
+  `lambda/capacity-poller`. Supersedes Dependabot's #236. What reaches
+  instances lagotto launches, and the poller:
+  - **The Linux bootstrap fails closed.** An instance that cannot read its
+    instance ID or its tags, or has no `aws` CLI and cannot install the pinned
+    one, now stops with a failed `bootstrap` completion record, so
+    `on_complete` fires, instead of running on defaults until its TTL. On an
+    image with no `aws` CLI (stock Ubuntu) the bootstrap installs the pinned
+    AWS CLI 2.39.3 from `awscli.amazonaws.com`, checked against its sha256.
+    The instance fetches the bootstrap body spawn v0.160.0 published and checks
+    it against the sha256 compiled into this build; lagotto pins neither.
+  - **New launches install spawn v0.160.0's spored**, because the installed
+    spored follows the spawn module lagotto is built with.
+  - **Some launches are refused before RunInstances instead of by EC2:** user
+    data over EC2's 16 KB limit, or an instance that would carry more than 50
+    tags.
+  - **`--account` / `SPORE_ACCOUNT` / `account =` in the shared spore config now
+    guards the spawn client the poller launches with.** When one is set and the
+    credentials belong to another account, the launch is refused. When none is
+    set, nothing changes and no STS call is made.
+  - **`docs/reference/cli-iam-actions.md` is regenerated.** `lagotto poll` gains
+    Elastic IP, route-table and VPC-endpoint, and S3 staging-bucket actions that
+    the new spawn code can reach in a static call graph. The PR lists which of
+    them lagotto's `--spawn-config` can actually reach. The hosted poller's IAM
+    policy is unchanged.
+
+### Security
+
+- **golang.org/x/net v0.62.0 (from v0.60.0)** in both modules, for
+  CVE-2026-78661 (HIGH, a denial of service in `x/net/html`). It pulls in
+  x/crypto v0.58.0, x/sync v0.24.0, x/sys v0.49.0, x/term v0.47.0,
+  x/text v0.43.0 and x/tools v0.51.0.
+
 ## [0.66.0] - 2026-11-02
 
 ### Added
