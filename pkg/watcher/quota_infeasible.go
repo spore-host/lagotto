@@ -386,6 +386,8 @@ func (p *Poller) failQuotaInfeasible(ctx context.Context, w *Watch, m *MatchResu
 
 	m.ActionTaken = ActionQuotaInfeasible
 	w.ConsecutiveFailures = 0
+	// The final refusal is an attempt too (#239); RecordMatch's PutWatch carries it.
+	w.noteAttempt(&attempt{Err: quotaAttemptError(w, m)}, now)
 	if err := p.store.RecordMatch(ctx, w, m); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to record quota-infeasible outcome for %s: %v\n", w.WatchID, err)
 	}
@@ -416,12 +418,40 @@ const maxQuotaInfeasibleReasonBytes = 4096
 // the watch: it persists the updated infeasibility list (so the next cycle skips
 // the candidate) and writes a quota_infeasible history row, without touching the
 // watch's match count or last match.
+//
+// The refusal is an attempt (#239): its heartbeat rides on the same UpdateItem
+// that persists the list, with last_error set to the quota code.
 func (p *Poller) markQuotaInfeasible(ctx context.Context, w *Watch, m *MatchResult) {
 	m.ActionTaken = ActionQuotaInfeasible
-	if err := p.store.SetQuotaInfeasible(ctx, w.WatchID, w.QuotaInfeasible); err != nil {
+	hb := &attempt{Err: quotaAttemptError(w, m)}
+	w.noteAttempt(hb, time.Now().UTC())
+	if err := p.store.setQuotaInfeasible(ctx, w.WatchID, w.QuotaInfeasible, hb); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to record quota-infeasible candidate for %s: %v\n", w.WatchID, err)
 	}
 	if err := p.store.RecordHistory(ctx, m); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to record quota-infeasible history for %s: %v\n", w.WatchID, err)
 	}
+}
+
+// quotaAttemptError is the LastError for a quota-refused candidate (#239):
+// "quota: <code>: <type> in <region>; needs N vCPU, ..." built from the #238
+// entry just recorded for that candidate.
+func quotaAttemptError(w *Watch, m *MatchResult) string {
+	for _, q := range w.QuotaInfeasible {
+		if q.key() != matchKey(m) {
+			continue
+		}
+		detail := q.Describe()
+		refused := ": refused by EC2 quota"
+		if q.Code != "" {
+			refused += " (" + q.Code + ")"
+		}
+		detail = strings.Replace(detail, refused, "", 1)
+		head := ErrClassQuota
+		if q.Code != "" {
+			head += ": " + q.Code
+		}
+		return truncateBytes(head+": "+oneLine(detail), MaxLastErrorBytes)
+	}
+	return ErrClassQuota
 }

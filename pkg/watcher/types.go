@@ -113,6 +113,27 @@ type Watch struct {
 	// MaxConsecutiveFailures the watch is stopped as failed (#41). Genuine
 	// capacity failures never touch it, so a real capacity wait stays uncapped.
 	ConsecutiveFailures int `json:"consecutive_failures,omitempty" dynamodbav:"consecutive_failures,omitempty"`
+	// Heartbeat (#239 phase 1): how hard the watch has been trying, and what last
+	// went wrong, so a long-lived hunt is visibly alive. They ride on the write
+	// each poll cycle already makes (no extra DynamoDB writes), and are omitempty,
+	// so pre-#239 records read back as zero and a pre-#239 poller ignores them.
+	//
+	// Attempts counts action attempts (a launch, hold, SageMaker submit/check or
+	// notify), not poll cycles: a cycle with no candidate, or a skipped one, makes
+	// no attempt. It is bumped with an atomic ADD on the retrying paths.
+	Attempts      int       `json:"attempts,omitempty" dynamodbav:"attempts,omitempty"`
+	LastAttemptAt time.Time `json:"last_attempt_at,omitzero" dynamodbav:"last_attempt_at,omitempty"`
+	// LastError is the most recent failed attempt, as "<class>: <AWS code>:
+	// <message>" (class is one of capacity, quota, terminal, unknown), truncated
+	// to MaxLastErrorBytes. A later success leaves it in place; LastErrorAt says
+	// when it happened.
+	LastError   string    `json:"last_error,omitempty" dynamodbav:"last_error,omitempty"`
+	LastErrorAt time.Time `json:"last_error_at,omitzero" dynamodbav:"last_error_at,omitempty"`
+	// LastPollError is stamped when the capacity search itself (truffle) fails,
+	// as "search: <message>". That cycle deliberately does NOT touch
+	// LastPolledAt, so a search that keeps failing shows as a stale LAST POLL.
+	LastPollError   string    `json:"last_poll_error,omitempty" dynamodbav:"last_poll_error,omitempty"`
+	LastPollErrorAt time.Time `json:"last_poll_error_at,omitzero" dynamodbav:"last_poll_error_at,omitempty"`
 	// QuotaCappedCount / QuotaCappedAt / QuotaCapReason record that a fleet
 	// watch has hit its EC2 vCPU quota ceiling (#153). These are PERSISTED (unlike
 	// the derived duration fields below) precisely because the hosted poller is

@@ -48,7 +48,7 @@ func TestRecordOutcome_UnknownFailureCap(t *testing.T) {
 	// First MaxConsecutiveFailures-1 unknown failures keep the watch active.
 	for i := 1; i < MaxConsecutiveFailures; i++ {
 		summary := &PollSummary{}
-		p.recordOutcome(ctx, w, &MatchResult{WatchID: w.WatchID}, FailureUnknown, summary)
+		p.recordOutcome(ctx, w, &MatchResult{WatchID: w.WatchID}, FailureUnknown, nil, summary)
 		if summary.Retrying != 1 || summary.Failed != 0 {
 			t.Fatalf("failure %d: got Retrying=%d Failed=%d, want Retrying=1 Failed=0", i, summary.Retrying, summary.Failed)
 		}
@@ -63,7 +63,7 @@ func TestRecordOutcome_UnknownFailureCap(t *testing.T) {
 
 	// The cap-reaching failure stops the watch as failed.
 	summary := &PollSummary{}
-	p.recordOutcome(ctx, w, &MatchResult{WatchID: w.WatchID}, FailureUnknown, summary)
+	p.recordOutcome(ctx, w, &MatchResult{WatchID: w.WatchID}, FailureUnknown, nil, summary)
 	if summary.Failed != 1 {
 		t.Fatalf("cap-reaching failure: Failed = %d, want 1", summary.Failed)
 	}
@@ -88,11 +88,11 @@ func TestRecordOutcome_CapacityResetsStreak(t *testing.T) {
 
 	// Rack up some unknown failures short of the cap.
 	for i := 0; i < MaxConsecutiveFailures-1; i++ {
-		p.recordOutcome(ctx, w, &MatchResult{WatchID: w.WatchID}, FailureUnknown, &PollSummary{})
+		p.recordOutcome(ctx, w, &MatchResult{WatchID: w.WatchID}, FailureUnknown, nil, &PollSummary{})
 	}
 	// A genuine capacity failure resets the streak.
 	summary := &PollSummary{}
-	p.recordOutcome(ctx, w, &MatchResult{WatchID: w.WatchID}, FailureCapacity, summary)
+	p.recordOutcome(ctx, w, &MatchResult{WatchID: w.WatchID}, FailureCapacity, nil, summary)
 	if summary.Retrying != 1 {
 		t.Errorf("capacity failure: Retrying = %d, want 1", summary.Retrying)
 	}

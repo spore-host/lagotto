@@ -420,47 +420,134 @@ func (s *Store) UpdateLastPolled(ctx context.Context, watchID string) error {
 // atomic ADD is race-safe against two pollers acting on the same watch and treats
 // an absent attribute as zero, so pre-#41 watch records need no migration.
 func (s *Store) IncrementConsecutiveFailures(ctx context.Context, watchID string) (int, error) {
+	n, _, err := s.incrementConsecutiveFailures(ctx, watchID, nil)
+	return n, err
+}
+
+// incrementConsecutiveFailures is IncrementConsecutiveFailures with the attempt's
+// heartbeat (#239) folded into the same UpdateItem. It returns the new failure
+// count and the new attempts count (0 when a is nil).
+func (s *Store) incrementConsecutiveFailures(ctx context.Context, watchID string, a *attempt) (int, int, error) {
+	values := map[string]types.AttributeValue{
+		":now": &types.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)},
+		":one": &types.AttributeValueMemberN{Value: "1"},
+	}
+	set, add := withAttempt([]string{"last_polled_at = :now"}, []string{"consecutive_failures :one"}, values, a)
 	out, err := s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: &s.watchesTable,
 		Key: map[string]types.AttributeValue{
 			"watch_id": &types.AttributeValueMemberS{Value: watchID},
 		},
-		UpdateExpression: aws.String("SET last_polled_at = :now ADD consecutive_failures :one"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":now": &types.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)},
-			":one": &types.AttributeValueMemberN{Value: "1"},
-		},
-		ReturnValues: types.ReturnValueUpdatedNew,
+		UpdateExpression:          aws.String(updateExpr(nil, set, add)),
+		ExpressionAttributeValues: values,
+		ReturnValues:              types.ReturnValueUpdatedNew,
 	})
 	if err != nil {
-		return 0, fmt.Errorf("increment consecutive failures: %w", err)
+		return 0, 0, fmt.Errorf("increment consecutive failures: %w", err)
 	}
 	var updated struct {
 		ConsecutiveFailures int `dynamodbav:"consecutive_failures"`
+		Attempts            int `dynamodbav:"attempts"`
 	}
 	if err := attributevalue.UnmarshalMap(out.Attributes, &updated); err != nil {
-		return 0, fmt.Errorf("unmarshal updated failure count: %w", err)
+		return 0, 0, fmt.Errorf("unmarshal updated failure count: %w", err)
 	}
-	return updated.ConsecutiveFailures, nil
+	return updated.ConsecutiveFailures, updated.Attempts, nil
 }
 
 // ResetConsecutiveFailures zeroes the watch's unclassified-failure counter (also
 // touching last_polled_at), used on a genuine capacity failure or a successful
 // launch so an unknown-failure streak only counts *consecutive* faults (#41).
 func (s *Store) ResetConsecutiveFailures(ctx context.Context, watchID string) error {
+	return s.resetConsecutiveFailures(ctx, watchID, nil)
+}
+
+// resetConsecutiveFailures is ResetConsecutiveFailures with the attempt's
+// heartbeat (#239) folded into the same UpdateItem.
+func (s *Store) resetConsecutiveFailures(ctx context.Context, watchID string, a *attempt) error {
+	values := map[string]types.AttributeValue{
+		":now":  &types.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)},
+		":zero": &types.AttributeValueMemberN{Value: "0"},
+	}
+	set, add := withAttempt([]string{"last_polled_at = :now", "consecutive_failures = :zero"}, nil, values, a)
 	_, err := s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: &s.watchesTable,
 		Key: map[string]types.AttributeValue{
 			"watch_id": &types.AttributeValueMemberS{Value: watchID},
 		},
-		UpdateExpression: aws.String("SET last_polled_at = :now, consecutive_failures = :zero"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":now":  &types.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)},
-			":zero": &types.AttributeValueMemberN{Value: "0"},
-		},
+		UpdateExpression:          aws.String(updateExpr(nil, set, add)),
+		ExpressionAttributeValues: values,
 	})
 	if err != nil {
 		return fmt.Errorf("reset consecutive failures: %w", err)
+	}
+	return nil
+}
+
+// withAttempt folds an attempt's heartbeat (#239) into an update's SET and ADD
+// clauses: last_attempt_at (and, for a failure, last_error / last_error_at) take
+// the write's own :now, and attempts is bumped with an atomic ADD, which treats a
+// missing attribute as zero, so pre-#239 records need no migration. A nil
+// attempt leaves the clauses exactly as given.
+func withAttempt(set, add []string, values map[string]types.AttributeValue, a *attempt) ([]string, []string) {
+	return withAttempts(set, add, values, a, 1)
+}
+
+// withAttempts is withAttempt for n attempts in one write (a fleet top-up cycle).
+func withAttempts(set, add []string, values map[string]types.AttributeValue, a *attempt, n int) ([]string, []string) {
+	if a == nil || n <= 0 {
+		return set, add
+	}
+	set = append(set, "last_attempt_at = :now")
+	if a.Err != "" {
+		set = append(set, "last_error = :lasterr", "last_error_at = :now")
+		values[":lasterr"] = &types.AttributeValueMemberS{Value: a.Err}
+	}
+	add = append(add, "attempts :attempts")
+	values[":attempts"] = &types.AttributeValueMemberN{Value: strconv.Itoa(n)}
+	return set, add
+}
+
+// recordFleetCycle closes a fleet top-up cycle (#70) that made n launch attempts:
+// it touches last_polled_at, as the cycle always did, and folds in the attempts
+// heartbeat (#239). lastErr is the last failed attempt's LastError, or "".
+func (s *Store) recordFleetCycle(ctx context.Context, watchID string, n int, lastErr string) error {
+	values := map[string]types.AttributeValue{
+		":now": &types.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)},
+	}
+	set, add := withAttempts([]string{"last_polled_at = :now"}, nil, values, &attempt{Err: lastErr}, n)
+	if _, err := s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: &s.watchesTable,
+		Key: map[string]types.AttributeValue{
+			"watch_id": &types.AttributeValueMemberS{Value: watchID},
+		},
+		UpdateExpression:          aws.String(updateExpr(nil, set, add)),
+		ExpressionAttributeValues: values,
+	}); err != nil {
+		return fmt.Errorf("record fleet cycle: %w", err)
+	}
+	return nil
+}
+
+// recordPollError stamps last_poll_error when the capacity search for a watch
+// failed (#239). It deliberately does NOT touch last_polled_at, so a search that
+// keeps failing shows up as a stale LAST POLL. This is the only write such a
+// cycle makes: before #239 it made none, and a normal cycle makes one.
+func (s *Store) recordPollError(ctx context.Context, watchID, msg string) error {
+	if _, err := s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: &s.watchesTable,
+		Key: map[string]types.AttributeValue{
+			"watch_id": &types.AttributeValueMemberS{Value: watchID},
+		},
+		// Only an existing watch: a search failure must never create a stub item.
+		ConditionExpression: aws.String("attribute_exists(watch_id)"),
+		UpdateExpression:    aws.String("SET last_poll_error = :err, last_poll_error_at = :now"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":err": &types.AttributeValueMemberS{Value: msg},
+			":now": &types.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)},
+		},
+	}); err != nil {
+		return fmt.Errorf("record poll error: %w", err)
 	}
 	return nil
 }
@@ -522,23 +609,35 @@ func (s *Store) ClearQuotaCap(ctx context.Context, watchID string) error {
 // small: at most one entry per candidate), and an empty list removes the
 // attribute so the record matches its pre-#238 shape.
 func (s *Store) SetQuotaInfeasible(ctx context.Context, watchID string, entries []QuotaInfeasibility) error {
-	now := &types.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)}
-	in := &dynamodb.UpdateItemInput{
-		TableName: &s.watchesTable,
-		Key: map[string]types.AttributeValue{
-			"watch_id": &types.AttributeValueMemberS{Value: watchID},
-		},
+	return s.setQuotaInfeasible(ctx, watchID, entries, nil)
+}
+
+// setQuotaInfeasible is SetQuotaInfeasible with the refused attempt's heartbeat
+// (#239) folded into the same UpdateItem: a quota refusal is an attempt.
+func (s *Store) setQuotaInfeasible(ctx context.Context, watchID string, entries []QuotaInfeasibility, a *attempt) error {
+	values := map[string]types.AttributeValue{
+		":now": &types.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)},
 	}
+	var remove []string
+	set := []string{"last_polled_at = :now"}
 	if len(entries) == 0 {
-		in.UpdateExpression = aws.String("REMOVE quota_infeasible SET last_polled_at = :now")
-		in.ExpressionAttributeValues = map[string]types.AttributeValue{":now": now}
+		remove = []string{"quota_infeasible"}
 	} else {
 		list, err := attributevalue.Marshal(entries)
 		if err != nil {
 			return fmt.Errorf("marshal quota-infeasible list: %w", err)
 		}
-		in.UpdateExpression = aws.String("SET last_polled_at = :now, quota_infeasible = :q")
-		in.ExpressionAttributeValues = map[string]types.AttributeValue{":now": now, ":q": list}
+		set = append(set, "quota_infeasible = :q")
+		values[":q"] = list
+	}
+	set, add := withAttempt(set, nil, values, a)
+	in := &dynamodb.UpdateItemInput{
+		TableName: &s.watchesTable,
+		Key: map[string]types.AttributeValue{
+			"watch_id": &types.AttributeValueMemberS{Value: watchID},
+		},
+		UpdateExpression:          aws.String(updateExpr(remove, set, add)),
+		ExpressionAttributeValues: values,
 	}
 	if _, err := s.client.UpdateItem(ctx, in); err != nil {
 		return fmt.Errorf("set quota infeasible: %w", err)
