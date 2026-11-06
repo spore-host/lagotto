@@ -426,7 +426,7 @@ func TestEvaluate_MissingResourcesFailWithRemediation(t *testing.T) {
 		{"a missing table", func(st *State) { st.Tables["lagotto-match-history"] = false },
 			CheckTables, "lagotto setup", "lagotto-match-history"},
 		{"a missing IAM role", func(st *State) { st.Roles[runtimeiam.SchedulerInvokeRoleName] = false },
-			CheckIAMRoles, "lagotto deploy", runtimeiam.SchedulerInvokeRoleName},
+			CheckIAMRoles, "lagotto setup", runtimeiam.SchedulerInvokeRoleName},
 		{"no poller Lambda", func(st *State) { st.Poller = deploy.PollerInfo{} },
 			CheckPollerLambda, "lagotto deploy", deploy.PollerFunctionName},
 		{"no SNS topic", func(st *State) { st.TopicPresent = false },
