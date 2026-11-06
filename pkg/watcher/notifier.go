@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -64,13 +65,52 @@ type Notifier struct {
 	topicArn   string
 }
 
-// NewNotifier creates a Notifier. topicArn is the default SNS topic for email notifications.
+// ErrNoAlertsTopic is the error an email channel returns when the Notifier has
+// no alerts topic (#241). Email is the one channel that needs it: an email
+// notification is published to lagotto-capacity-alerts, whose subscriptions
+// deliver it. Webhook and sns channels name their own target, so they are
+// delivered without one.
+var ErrNoAlertsTopic = errors.New("email channel not delivered: no alerts topic (lagotto-capacity-alerts) is configured; " +
+	"run `lagotto deploy` in this account and region, or set LAGOTTO_SNS_TOPIC_ARN")
+
+// NewNotifier creates a Notifier. topicArn is the alerts topic email
+// notifications are published to. It may be empty: webhook and sns channels
+// are still delivered, and an email channel returns ErrNoAlertsTopic (#241).
 func NewNotifier(cfg aws.Config, topicArn string) *Notifier {
 	return &Notifier{
 		snsClient:  sns.NewFromConfig(cfg),
 		httpClient: newSafeHTTPClient(10 * time.Second),
 		topicArn:   topicArn,
 	}
+}
+
+// HasAlertsTopic reports whether email channels can be delivered.
+func (n *Notifier) HasAlertsTopic() bool { return n.topicArn != "" }
+
+// publishEmail publishes an email notification to the alerts topic, or
+// returns ErrNoAlertsTopic when there is none. Every email send goes through
+// here, so no Publish is ever made with an empty TopicArn.
+func (n *Notifier) publishEmail(ctx context.Context, subject, body string) error {
+	if n.topicArn == "" {
+		return ErrNoAlertsTopic
+	}
+	_, err := n.snsClient.Publish(ctx, &sns.PublishInput{
+		TopicArn: aws.String(n.topicArn),
+		Subject:  aws.String(subject),
+		Message:  aws.String(body),
+	})
+	return err
+}
+
+// NeedsAlertsTopic reports whether w has a channel that can only be delivered
+// through the alerts topic: an email channel.
+func NeedsAlertsTopic(w *Watch) bool {
+	for _, ch := range w.NotifyChannels {
+		if ch.Type == "email" {
+			return true
+		}
+	}
+	return false
 }
 
 // Notify sends notifications for a match to all channels configured on the watch.
@@ -126,11 +166,7 @@ func (n *Notifier) NotifyQuotaCap(ctx context.Context, w *Watch, running int, re
 		var err error
 		switch ch.Type {
 		case "email":
-			_, err = n.snsClient.Publish(ctx, &sns.PublishInput{
-				TopicArn: aws.String(n.topicArn),
-				Subject:  aws.String(subject),
-				Message:  aws.String(body),
-			})
+			err = n.publishEmail(ctx, subject, body)
 		case "webhook":
 			if verr := ValidateWebhookURL(ch.Target); verr != nil {
 				err = fmt.Errorf("blocked unsafe webhook URL: %w", verr)
@@ -245,11 +281,7 @@ func (n *Notifier) NotifyExpired(ctx context.Context, w *Watch) error {
 		var err error
 		switch ch.Type {
 		case "email":
-			_, err = n.snsClient.Publish(ctx, &sns.PublishInput{
-				TopicArn: aws.String(n.topicArn),
-				Subject:  aws.String(subject),
-				Message:  aws.String(body),
-			})
+			err = n.publishEmail(ctx, subject, body)
 		case "webhook":
 			// Same defence-in-depth re-validation as Notify, for watches created
 			// before the URL validation fix shipped.
@@ -354,21 +386,11 @@ func (n *Notifier) sendExpiredWebhook(ctx context.Context, url string, w *Watch)
 func (n *Notifier) sendEmail(ctx context.Context, email string, w *Watch, m *MatchResult) error {
 	if normalizeService(w.Service) == ServiceSageMaker {
 		subject, body := sageMakerEmailSubjectBody(w, m)
-		_, err := n.snsClient.Publish(ctx, &sns.PublishInput{
-			TopicArn: aws.String(n.topicArn),
-			Subject:  aws.String(subject),
-			Message:  aws.String(body),
-		})
-		return err
+		return n.publishEmail(ctx, subject, body)
 	}
 
 	subject, body := matchEmailSubjectBody(w, m)
-	_, err := n.snsClient.Publish(ctx, &sns.PublishInput{
-		TopicArn: aws.String(n.topicArn),
-		Subject:  aws.String(subject),
-		Message:  aws.String(body),
-	})
-	return err
+	return n.publishEmail(ctx, subject, body)
 }
 
 // sageMakerLaunched is the one SageMaker outcome in which the user's job got
@@ -570,11 +592,7 @@ func (n *Notifier) NotifyUnsupported(ctx context.Context, w *Watch, reason strin
 		var err error
 		switch ch.Type {
 		case "email":
-			_, err = n.snsClient.Publish(ctx, &sns.PublishInput{
-				TopicArn: aws.String(n.topicArn),
-				Subject:  aws.String(subject),
-				Message:  aws.String(body),
-			})
+			err = n.publishEmail(ctx, subject, body)
 		case "webhook":
 			if verr := ValidateWebhookURL(ch.Target); verr != nil {
 				err = fmt.Errorf("blocked unsafe webhook URL: %w", verr)

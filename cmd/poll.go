@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spf13/cobra"
 	"github.com/spore-host/lagotto/pkg/awscfg"
+	"github.com/spore-host/lagotto/pkg/deploy"
 	"github.com/spore-host/lagotto/pkg/watcher"
 	truffleaws "github.com/spore-host/truffle/pkg/aws"
 	"github.com/spore-host/truffle/pkg/quotas"
@@ -44,7 +45,14 @@ In a shared account, scope a local daemon to your own watches so it doesn't
 drive other projects' watches (#47): --project NAME, --mine (only watches you
 created), or --watch w-aaa,w-bbb. When scoped, the daemon exits once no active
 watches in scope remain. A short processing lease guards against two pollers
-firing the same watch; --no-lease disables it.`,
+firing the same watch; --no-lease disables it.
+
+Notifications: webhook and sns channels are always delivered. Email channels
+are published to the alerts SNS topic, lagotto-capacity-alerts, which
+'lagotto deploy' creates; poll uses that topic in your account and region when
+it exists. Set LAGOTTO_SNS_TOPIC_ARN to use another topic. When no topic is
+found, poll says so at start, naming each watch whose email channel will not
+be delivered.`,
 	RunE: runPoll,
 }
 
@@ -96,24 +104,26 @@ func buildPoller(ctx context.Context) (*watcher.Poller, *watcher.WatchFilter, er
 
 	store := watcher.NewStore(cfg, watchesTable, historyTable)
 
-	var notifier *watcher.Notifier
-	if topicArn := os.Getenv("LAGOTTO_SNS_TOPIC_ARN"); topicArn != "" {
-		notifier = watcher.NewNotifier(cfg, topicArn)
-	}
-
 	spawner, err := watcher.NewSpawner(ctx)
 	if err != nil && verbose {
 		fmt.Fprintf(os.Stderr, "Note: auto-spawn unavailable: %v\n", err)
 	}
 
-	// Resolve the caller ARN once — it's the lease owner and, for --mine, the
-	// owner filter.
+	// Resolve the caller ARN once — it's the lease owner, for --mine the
+	// owner filter, and its account locates the alerts topic.
 	callerARN := callerIdentityARN(ctx, cfg)
 
 	filter, err := resolvePollFilter(callerARN)
 	if err != nil {
 		return nil, nil, err
 	}
+
+	// Always a notifier (#241): webhook and sns channels need no alerts topic.
+	// Only email does, and when none resolves it is said here, not dropped
+	// silently.
+	topic := resolveAlertsTopic(ctx, os.Getenv, cfg.Region, accountFromARN(callerARN), deploy.New(cfg))
+	notifier := buildPollNotifier(cfg, topic)
+	warnUnresolvedTopic(ctx, pollStderr, topic, filter, store.ListActiveWatches)
 
 	// Lease owner: a stable-ish id for this poller process so its own re-claims
 	// succeed and other pollers are excluded. Empty disables leasing.
