@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -45,6 +46,9 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	// JSON output and the detail table below share one computation.
 	w.ComputeDurations()
 
+	// Email delivery state per channel (#240). Best effort.
+	annotateEmailStates(ctx, emailSubscriberFor(cfg, os.Getenv, accountFromARN(w.UserID)), []*watcher.Watch{w})
+
 	if getOutputFormat() == "json" {
 		enc := json.NewEncoder(cmd.OutOrStdout())
 		enc.SetIndent("", "  ")
@@ -67,6 +71,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		_, _ = fmt.Fprintf(out, "Max price: $%.4f/hr\n", w.MaxPrice)
 	}
 	_, _ = fmt.Fprintf(out, "Action:   %s\n", w.Action)
+	writeNotifyChannels(out, w)
 	if w.DesiredCount > 0 {
 		_, _ = fmt.Fprintf(out, "Fleet:    maintain %d worker(s)\n", w.DesiredCount)
 		if w.CompletionCondition != "" {
@@ -191,5 +196,21 @@ func writeHeartbeat(out io.Writer, w *watcher.Watch, now time.Time) {
 			}
 			_, _ = fmt.Fprintf(out, "  at %s (%s ago%s)\n", w.LastPollErrorAt.Format(time.RFC3339), formatAge(now.Sub(w.LastPollErrorAt)), recovered)
 		}
+	}
+}
+
+// writeNotifyChannels prints the watch's notification channels, with each
+// email channel's subscription state when it is known (#240).
+func writeNotifyChannels(out io.Writer, w *watcher.Watch) {
+	for i, ch := range w.NotifyChannels {
+		label := "Notify:   "
+		if i > 0 {
+			label = "          "
+		}
+		line := ch.Type + ":" + ch.Target
+		if ch.Type == "email" && ch.Subscription != "" {
+			line += "  " + ch.Subscription.Describe()
+		}
+		_, _ = fmt.Fprintf(out, "%s%s\n", label, line)
 	}
 }

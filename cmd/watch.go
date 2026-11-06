@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"github.com/spore-host/lagotto/pkg/awscfg"
+	"github.com/spore-host/lagotto/pkg/deploy"
 	"github.com/spore-host/lagotto/pkg/quotacheck"
 	"github.com/spore-host/lagotto/pkg/watcher"
 	"github.com/spore-host/truffle/pkg/quotas"
@@ -77,7 +78,7 @@ func init() {
 	watchCmd.Flags().Float64Var(&watchMaxPrice, "max-price", 0, "Maximum acceptable price per hour (0 = any)")
 	watchCmd.Flags().StringVar(&watchAction, "action", "notify", "Action on match: notify, spawn, hold")
 	watchCmd.Flags().StringVar(&watchTTL, "ttl", "24h", "How long to keep watching (e.g., 24h, 7d)")
-	watchCmd.Flags().StringSliceVar(&watchNotify, "notify", nil, "Notification channels (e.g., email:user@example.com, webhook:https://...)")
+	watchCmd.Flags().StringSliceVar(&watchNotify, "notify", nil, "Notification channels (e.g., email:user@example.com, webhook:https://..., sns:<topic-arn>). An email address is subscribed to the alerts topic and must confirm by clicking the link in the AWS Notification email before anything is delivered.")
 	watchCmd.Flags().StringVar(&watchSpawnConfig, "spawn-config", "", "lagotto spawn-config YAML (required for --action spawn; not spawn launch --config, see README for its keys — unknown keys are rejected): a local path, an s3://bucket/key URI, or '-' for stdin. Any user_data_file / iam_policy_file it references is read now and stored inline, so a hosted poller can launch it with no access to this machine.")
 	watchCmd.Flags().StringVar(&watchSageMakerConfig, "sagemaker-config", "", "YAML/JSON file with the SageMaker job definition (required for --service sagemaker)")
 	watchCmd.Flags().StringVar(&watchService, "service", "ec2", "Capacity service: ec2, or sagemaker (submits your SageMaker job for ml.* types)")
@@ -246,6 +247,12 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	// Subscribe each email address to the alerts topic (#240), before the watch
+	// is stored, so an address that cannot be subscribed refuses the watch
+	// instead of arming one whose emails reach no one.
+	if err := subscribeForNewWatch(ctx, os.Stderr, cfg, os.Getenv, aws.ToString(identity.Account), deploy.New(cfg), w); err != nil {
+		return err
+	}
 	if err := store.PutWatch(ctx, w); err != nil {
 		return fmt.Errorf("create watch: %w", err)
 	}
@@ -298,6 +305,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Quota:    %s\n", quotaSummaryRow(quotaReport, w))
 	}
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Expires:  %s\n", w.ExpiresAt.Format(time.RFC3339))
+	writeEmailStates(cmd.OutOrStdout(), "  Notify:   ", w)
 	return nil
 }
 
@@ -583,7 +591,14 @@ func parseNotifyChannels(raw []string) ([]watcher.NotifyChannel, error) {
 		}
 		ch := watcher.NotifyChannel{Type: parts[0], Target: parts[1]}
 		switch ch.Type {
-		case "email", "sns":
+		case "email":
+			// Stored normalized: the address is the subscription's filter value
+			// and the publish attribute (#240), so one spelling throughout.
+			if err := watcher.ValidateEmail(ch.Target); err != nil {
+				return nil, err
+			}
+			ch.Target = watcher.NormalizeEmail(ch.Target)
+		case "sns":
 		case "webhook":
 			if err := watcher.ValidateWebhookURL(ch.Target); err != nil {
 				return nil, fmt.Errorf("invalid webhook URL: %w", err)

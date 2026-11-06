@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -39,6 +40,13 @@ doctor also reports a poller Lambda older than this CLI, missing tables/roles/
 poller/topic/schedule, a schedule that is switched off while watches are active
 (the silent-death case: nothing is polling them), and a leftover CloudFormation
 stack.
+
+It reports email delivery for --notify email: channels: an address on an active
+watch whose subscription is still pending confirmation (so receives nothing yet) or
+missing, a subscription no active watch needs, and any email subscription on the
+alerts topic with no filter policy, which receives every user's email events.
+'lagotto notify-gc' removes unused subscriptions, and with --resubscribe
+subscribes missing ones.
 
 It checks that the shared EventBridge Scheduler invoke role's policy allows
 invoking THIS region's poller (lagotto#218: the role is IAM-global, and a deploy
@@ -95,6 +103,14 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		DynamoDB:        dynamodb.NewFromConfig(cfg),
 		Infra:           deploy.New(cfg),
 		Metrics:         cloudwatch.NewFromConfig(cfg),
+		EmailAudit: func(ctx context.Context) (watcher.EmailAudit, error) {
+			topicArn := emailTopicByName(os.Getenv, cfg.Region, *acct.Account)
+			watches, lErr := store.ListActiveWatches(ctx)
+			if lErr != nil {
+				return watcher.EmailAudit{TopicArn: topicArn}, lErr
+			}
+			return newEmailSubscriber(cfg, topicArn).Audit(ctx, watches)
+		},
 		ActiveWatches: func(ctx context.Context) (int, error) {
 			watches, lErr := store.ListActiveWatches(ctx)
 			if lErr != nil {

@@ -15,15 +15,16 @@ func regionalResources(region, account string) map[string][]string {
 		"dynamodb:Query", "dynamodb:Scan", "dynamodb:BatchGetItem", "dynamodb:BatchWriteItem",
 		"dynamodb:DescribeTable", "dynamodb:ConditionCheckItem"}
 	return map[string][]string{
-		a("dynamodb", "table/lagotto-watches"):                        ddb,
-		a("dynamodb", "table/lagotto-watches/index/by-user"):          ddb,
-		a("dynamodb", "table/lagotto-match-history"):                  ddb,
-		a("dynamodb", "table/lagotto-match-history/index/x"):          ddb,
-		a("dynamodb", "table/lagotto-scheduled-launches"):             ddb,
-		a("dynamodb", "table/lagotto-scheduled-launches/index/x"):     ddb,
-		a("sns", "lagotto-capacity-alerts"):                           {"sns:Publish"},
-		a("scheduler", "schedule/default/lagotto-capacity-poller"):    {"scheduler:UpdateSchedule", "scheduler:GetSchedule"},
-		a("scheduler", "schedule/default/lagotto-launch-sl-1234abcd"): {"scheduler:CreateSchedule", "scheduler:DeleteSchedule"},
+		a("dynamodb", "table/lagotto-watches"):                                   ddb,
+		a("dynamodb", "table/lagotto-watches/index/by-user"):                     ddb,
+		a("dynamodb", "table/lagotto-match-history"):                             ddb,
+		a("dynamodb", "table/lagotto-match-history/index/x"):                     ddb,
+		a("dynamodb", "table/lagotto-scheduled-launches"):                        ddb,
+		a("dynamodb", "table/lagotto-scheduled-launches/index/x"):                ddb,
+		a("sns", "lagotto-capacity-alerts"):                                      {"sns:Publish", "sns:ListSubscriptionsByTopic", "sns:GetSubscriptionAttributes", "sns:Unsubscribe"},
+		a("sns", "lagotto-capacity-alerts:0f1e2d3c-aaaa-bbbb-cccc-1234567890ab"): {"sns:GetSubscriptionAttributes", "sns:Unsubscribe"},
+		a("scheduler", "schedule/default/lagotto-capacity-poller"):               {"scheduler:UpdateSchedule", "scheduler:GetSchedule"},
+		a("scheduler", "schedule/default/lagotto-launch-sl-1234abcd"):            {"scheduler:CreateSchedule", "scheduler:DeleteSchedule"},
 	}
 }
 
@@ -85,6 +86,10 @@ func TestEnsureRuntimeRole_PolicyConvergesAcrossRegions(t *testing.T) {
 		{"dynamodb:PutItem", "arn:aws:dynamodb:us-east-1:123456789012:table/someone-elses-table"},
 		{"sns:Publish", "arn:aws:sns:us-east-1:123456789012:other-topic"},
 		{"sns:Publish", "arn:aws:sns:us-east-1:999999999999:lagotto-capacity-alerts"},
+		{"sns:Unsubscribe", "arn:aws:sns:us-east-1:123456789012:other-topic:0f1e2d3c"},
+		{"sns:Unsubscribe", "arn:aws:sns:us-east-1:999999999999:lagotto-capacity-alerts:0f1e2d3c"},
+		// Only the CLI subscribes an address (#240); the poller only cleans up.
+		{"sns:Subscribe", "arn:aws:sns:us-east-1:123456789012:lagotto-capacity-alerts"},
 		{"scheduler:UpdateSchedule", "arn:aws:scheduler:us-east-1:123456789012:schedule/default/other"},
 		{"scheduler:DeleteSchedule", "arn:aws:scheduler:us-east-1:123456789012:schedule/default/other"},
 		{"scheduler:CreateSchedule", "arn:aws:scheduler:us-east-1:999999999999:schedule/default/lagotto-launch-x"},
