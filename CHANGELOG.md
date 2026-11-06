@@ -82,6 +82,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The hosted poller can now finish what it starts: an `fsx_create` watch and
+  `lagotto launch --if-exists replace` work there** (#242). Its runtime policy
+  had no terminate, FSx or S3 grants. An `fsx_create` watch launched its
+  instance, was refused creating the S3 bucket, was refused terminating the
+  instance, and failed, leaving the instance running without its filesystem
+  until its TTL. `--if-exists replace` failed without launching. **Re-run
+  `lagotto setup` once** (in any region; the role is account-global) to apply
+  the new policy. It adds:
+  - `ec2:TerminateInstances` and `ec2:CancelSpotInstanceRequests`, only on
+    resources tagged `spawn:managed=true`, the tag spawn puts on every
+    instance it launches. The poller cannot end an instance spawn did not
+    launch.
+  - `ec2:DescribeAddresses`, which spawn's terminate uses to find an Elastic
+    IP to release.
+  - `fsx:CreateFileSystem` and `fsx:TagResource` only for filesystems created
+    with `spawn:managed=true`, `fsx:DeleteFileSystem` only on such
+    filesystems, the FSx service-linked role, and the VPC reads FSx makes on
+    the poller's behalf.
+  - `s3:CreateBucket`, and `s3:ListBucket` / `GetBucketTagging` /
+    `PutBucketTagging` on this account's buckets. spawn puts no naming rule
+    on the `fsx_s3_bucket` a watch names, so these are scoped to the account,
+    not to a bucket name.
+  - `iam:TagRole` and `iam:TagInstanceProfile` on the instance roles the
+    poller may already create. spawn creates them with tags, so without these
+    the first launch in an account, and every watch with `iam_policy`, was
+    refused at `CreateRole`. `lagotto doctor` reports a policy written before
+    this as missing these grants.
+
+  CI now checks the policy against the poller Lambda's own AWS calls,
+  discovered from the code, as the CLI's permissions page already is. A call
+  the policy does not grant fails the build unless it is listed, with the
+  reason, as unreachable or deliberately denied (Elastic IP allocation for
+  EFA, the no-public-IP preflight, the launch-config object, the account-name
+  lookup, and table deletion under `AUTO_DELETE_TABLES`).
+  `docs/reference/cli-iam-actions.md`: commands that create an FSx filesystem
+  gain `fsx:TagResource`.
+
 - **`lagotto poll` and `poll --daemon` now send notifications without
   `LAGOTTO_SNS_TOPIC_ARN`** (#241). The local poller built its notifier only
   when that undocumented variable was set. Without it, no channel fired, not

@@ -277,9 +277,15 @@ func EnsureRuntimeRole(ctx context.Context, client IAMAPI, region, accountID str
 // and attach the SSM managed policy (AttachRolePolicy), then reads/creates the
 // instance profile, then passes the role to EC2. Granting these one at a time just
 // moves the failure to the next call.
+//
+// iam:TagRole and iam:TagInstanceProfile (#242): spawn creates the role and the
+// profile WITH tags (spawn:managed=true, plus the launch's own tags on a
+// spawn-instance-<hash> role), and IAM authorizes tag-on-create as a separate
+// Tag* action. Without them the first CreateRole in an account (or every
+// per-watch iam_policy role) is AccessDenied.
 var InstanceRoleActions = []string{
-	"iam:GetRole", "iam:CreateRole", "iam:PutRolePolicy", "iam:AttachRolePolicy",
-	"iam:GetInstanceProfile", "iam:CreateInstanceProfile", "iam:AddRoleToInstanceProfile",
+	"iam:GetRole", "iam:CreateRole", "iam:TagRole", "iam:PutRolePolicy", "iam:AttachRolePolicy",
+	"iam:GetInstanceProfile", "iam:CreateInstanceProfile", "iam:TagInstanceProfile", "iam:AddRoleToInstanceProfile",
 }
 
 // InstanceRolePassAction is granted separately from [InstanceRoleActions] because
@@ -349,6 +355,19 @@ func RegionalARN(service, accountID, resource string) string {
 	return fmt.Sprintf("arn:aws:%s:%s:%s:%s", service, anyRegion, accountID, resource)
 }
 
+// ManagedTagKey is the tag spawn stamps on every instance it launches (spawn
+// pkg/aws buildTags, "spawn:managed"="true"), on the persistent Spot requests it
+// tags with the instance's tags, and on every FSx filesystem it creates
+// (buildFSxCreateInput). It is the only tag on ALL of the instances lagotto
+// launches: lagotto:watch-id is stamped by a watch's Spawn, not by a scheduled
+// launch (LaunchScheduled), so it cannot gate `--if-exists replace`. spawn's own
+// TTL reaper gates its TerminateInstances on the same tag (spawn
+// pkg/reaperiam.ManagedTagCondition).
+const ManagedTagKey = "spawn:managed"
+
+// managedTagValue is ManagedTagKey's value.
+const managedTagValue = "true"
+
 // statement is a single IAM policy statement (minimal shape we emit).
 type statement struct {
 	Effect    string      `json:"Effect"`
@@ -362,7 +381,13 @@ type statement struct {
 // deployment/cloudformation/lagotto-stack.yaml (the poller's Policies: block):
 // DynamoDB CRUD (3 tables), SNS publish, EC2/SSM read discovery, scheduler
 // manage + PassRole, the spawn launch set (RunInstances/tags/SG + spored* role
-// setup + PassRole to ec2), capacity reservations, and SageMaker submit + PassRole.
+// setup + PassRole to ec2), terminating what spawn launched (spawn:managed
+// tag-gated, #242), the fsx_create FSx filesystem and its S3 backing bucket
+// (#242), capacity reservations, and SageMaker submit + PassRole.
+//
+// TestPollerPolicyCoversItsCalls holds this policy to the poller Lambda's own
+// AWS calls, discovered from the code: a call the policy does not grant fails
+// CI unless it is listed, with a reason, as deliberately not granted.
 //
 // # No region (#219)
 //
@@ -394,6 +419,17 @@ func PolicyDocument(accountID string, instanceRoles []string) (string, error) {
 	passToService := func(svc string) interface{} {
 		return map[string]interface{}{"StringEquals": map[string]string{"iam:PassedToService": svc}}
 	}
+	// A condition key belongs to the ACTION's service: ec2:ResourceTag on an ec2:
+	// action; FSx has no fsx:ResourceTag, so its actions use the global aws:
+	// keys. An ec2: key on an fsx: or s3: action is a silent implicit deny that
+	// still passes PutRolePolicy (the spawn#665 shape).
+	// TestPolicyConditionKeysMatchActionService enforces it.
+	ec2Managed := map[string]interface{}{"StringEquals": map[string]string{"ec2:ResourceTag/" + ManagedTagKey: managedTagValue}}
+	fsxManagedRequest := map[string]interface{}{"StringEquals": map[string]string{"aws:RequestTag/" + ManagedTagKey: managedTagValue}}
+	fsxManagedResource := map[string]interface{}{"StringEquals": map[string]string{"aws:ResourceTag/" + ManagedTagKey: managedTagValue}}
+	viaFSx := map[string]interface{}{"ForAnyValue:StringEquals": map[string][]string{"aws:CalledVia": {"fsx.amazonaws.com"}}}
+	ownAccountBucket := map[string]interface{}{"StringEquals": map[string]string{"s3:ResourceAccount": accountID}}
+	fsxFileSystemARN := RegionalARN("fsx", accountID, "file-system/*")
 
 	statements := []statement{
 		// Tables are CLI-owned (#59) — the poller only reads/writes them.
@@ -419,6 +455,11 @@ func PolicyDocument(accountID string, instanceRoles []string) (string, error) {
 			"ec2:DescribeRegions", "ec2:DescribeImages", "ec2:DescribeVpcs", "ec2:DescribeSubnets",
 			"ec2:DescribeSecurityGroups", "ec2:DescribeKeyPairs", "ec2:DescribeInstances",
 			"ec2:DescribeCapacityReservations", "ssm:GetParameter", "ssm:GetParameters",
+			// spawn's Client.Terminate looks up the instance's Elastic IPs after
+			// terminating it (releaseInstanceElasticIPs, spawn#661). A denial only
+			// warns, but it is on every terminate below (#242/#243). No
+			// resource-level permissions, so Resource "*".
+			"ec2:DescribeAddresses",
 			// pricing:GetProducts backs spawn's --cost-limit enforcement: the launcher
 			// looks up the on-demand price before RunInstances, and for newer types
 			// (g7/g7e/p5) there's no static-fallback price, so without this the launch
@@ -455,6 +496,52 @@ func PolicyDocument(accountID string, instanceRoles []string) (string, error) {
 			Resource: []string{spawnRoleARN, spawnProfileARN, sporedRoleARN, sporedProfileARN}},
 		{Effect: "Allow", Action: []string{InstanceRolePassAction}, Resource: []string{spawnRoleARN, sporedRoleARN},
 			Condition: passToService("ec2.amazonaws.com")},
+		// Terminating what spawn launched (#242): Provision's compensating
+		// teardown after a failed fsx_create setup (spawn pkg/launcher
+		// provision.go, "TERMINATE IT MANUALLY" otherwise), and `lagotto launch
+		// --if-exists replace` (Spawner.LaunchScheduled). Both go through
+		// spotrequest.Terminate, which cancels the instance's Spot request first.
+		// Gated on spawn:managed=true, so the poller cannot end an instance spawn
+		// did not launch; an untagged one-time Spot request is refused, which is
+		// harmless (it closes with its instance; spawn only warns).
+		{Effect: "Allow", Action: []string{"ec2:TerminateInstances"},
+			Resource: arn("arn:aws:ec2:*:%s:instance/*", accountID), Condition: ec2Managed},
+		{Effect: "Allow", Action: []string{"ec2:CancelSpotInstanceRequests"},
+			Resource: arn("arn:aws:ec2:*:%s:spot-instances-request/*", accountID), Condition: ec2Managed},
+		// fsx_create (#43, #242): spawn's startFSxCreate creates the filesystem
+		// WITH tags (spawn:managed=true among them), which FSx authorizes as
+		// fsx:TagResource too. Both are gated on that request tag, so the poller
+		// can only create filesystems that carry spawn's reaper tag.
+		{Effect: "Allow", Action: []string{"fsx:CreateFileSystem", "fsx:TagResource"},
+			Resource: fsxFileSystemARN, Condition: fsxManagedRequest},
+		// The #210 backstop: Provision deletes the just-created filesystem when it
+		// cannot tag the instance with it. Only spawn-managed filesystems.
+		{Effect: "Allow", Action: []string{"fsx:DeleteFileSystem"},
+			Resource: fsxFileSystemARN, Condition: fsxManagedResource},
+		// FSx creates its service-linked role on the first filesystem in an
+		// account, as the caller (AmazonFSxFullAccess "CreateSLRForFSx").
+		{Effect: "Allow", Action: []string{"iam:CreateServiceLinkedRole"},
+			Resource:  arn("arn:aws:iam::%s:role/aws-service-role/fsx.amazonaws.com/*", accountID),
+			Condition: map[string]interface{}{"StringEquals": map[string]string{"iam:AWSServiceName": "fsx.amazonaws.com"}}},
+		// The VPC reads FSx makes with the caller's credentials while creating a
+		// filesystem (AmazonFSxFullAccess "DescribeEC2VpcResources"; the
+		// subnet/SG/VPC describes are already granted above). Only through FSx:
+		// the poller's own calls to these are not authorized, which the poller
+		// coverage gate accounts for.
+		{Effect: "Allow", Action: []string{"ec2:DescribeRouteTables", "ec2:GetSecurityGroupsForVpc"},
+			Resource: "*", Condition: viaFSx},
+		// The fsx_create S3 backing bucket (spawn createBucketIfNotExists, with
+		// AutoCreateBucket). spawn imposes NO naming pattern on it: fsx_s3_bucket
+		// is whatever the watch names, usually an existing data bucket. So the
+		// bucket reads/tagging are scoped to this account's buckets, not to a
+		// name. HeadBucket is authorized as s3:ListBucket; the Get/PutBucketTagging
+		// pair is the tag write after a create plus bucketsweep.ClearEmptySince
+		// for a spawn-results-*/staging name.
+		{Effect: "Allow", Action: []string{"s3:ListBucket", "s3:GetBucketTagging", "s3:PutBucketTagging"},
+			Resource: "arn:aws:s3:::*", Condition: ownAccountBucket},
+		// CreateBucket only ever creates in the caller's account; no condition
+		// key narrows it further without spawn passing tags on the create.
+		{Effect: "Allow", Action: []string{"s3:CreateBucket"}, Resource: "arn:aws:s3:::*"},
 		// hold: capacity reservations.
 		{Effect: "Allow", Action: []string{
 			"ec2:CreateCapacityReservation", "ec2:CancelCapacityReservation", "ec2:DescribeCapacityReservations",

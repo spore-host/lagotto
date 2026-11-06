@@ -143,7 +143,11 @@ leftover CloudFormation stack. It exits non-zero if any check fails.
 deploy** (#16). `deploy` creates the poller's execution role with only a trust
 relationship and CloudWatch Logs basic execution; `setup` writes the permissions
 policy (`lagotto-runtime-policy`) that lets the poller read capacity, spawn/hold,
-submit SageMaker jobs, and manage its schedule. lagotto codifies that policy in Go
+submit SageMaker jobs, and manage its schedule. Since #242 it also lets the poller
+terminate the instances spawn launched (gated on `spawn:managed=true`, for
+`--if-exists replace` and the teardown after a failed `fsx_create` setup) and
+create the `fsx_create` FSx filesystem and its S3 backing bucket. CI checks the
+policy against the poller Lambda's own AWS calls, discovered from the code. lagotto codifies that policy in Go
 (`pkg/runtimeiam`) as the single source of truth, the same way it owns its tables —
 so adding a permission is a code change, not a template edit.
 
