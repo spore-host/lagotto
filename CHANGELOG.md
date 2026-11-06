@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A heartbeat on every watch** (#239, phase 1), so a long-running hunt is
+  visibly alive and you can see why it hasn't landed:
+  - New fields, all optional: `attempts` (launch/hold/notify attempts made),
+    `last_attempt_at`, `last_error` (the failure class, AWS code and message,
+    e.g. `capacity: InsufficientInstanceCapacity: ...`, cut at 256 bytes),
+    `last_error_at`, and `last_poll_error` / `last_poll_error_at`, stamped when
+    the capacity search itself fails. A quota refusal (#238) counts as an
+    attempt, with the quota code as its `last_error`. A cycle whose search
+    fails makes no attempt and leaves `last_polled_at` alone.
+  - `lagotto list` has three new columns: `LAST POLL` (the age of the last
+    poll; an active watch is flagged `!` past 15 minutes), `TRIES` and
+    `LAST ERR` (the error class only). `lagotto list -o wide` adds the full
+    latest error, and `lagotto status` shows all of them with their times.
+    `-o json` carries every field.
+  - No extra DynamoDB writes: the fields ride on the write each poll cycle
+    already makes. The only new write is on a cycle whose search failed,
+    which used to write nothing and now writes `last_poll_error`.
+  - Old watch records read fine (the fields show as `0` / `-`), and a poller
+    from before this release ignores them. The hosted poller Lambda only
+    starts filling them in once it is redeployed with this release
+    (`lagotto deploy`).
+
 ### Changed
 
 - **Built against spawn v0.161.0 (from v0.160.0)**, in the root module and in
