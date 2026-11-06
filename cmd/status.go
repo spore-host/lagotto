@@ -87,9 +87,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	writeQuotaInfeasible(out, w, time.Now().UTC())
 	_, _ = fmt.Fprintf(out, "Created:  %s\n", w.CreatedAt.Format(time.RFC3339))
 	_, _ = fmt.Fprintf(out, "Expires:  %s\n", w.ExpiresAt.Format(time.RFC3339))
-	if !w.LastPolledAt.IsZero() {
-		_, _ = fmt.Fprintf(out, "Last polled: %s\n", w.LastPolledAt.Format(time.RFC3339))
-	}
+	writeHeartbeat(out, w, time.Now().UTC())
 	_, _ = fmt.Fprintf(out, "Matches:  %d\n", w.MatchCount)
 
 	// Derived timings (#139): how long this watch waited for capacity, or — if it
@@ -157,5 +155,41 @@ func writeQuotaInfeasible(out io.Writer, w *watcher.Watch, now time.Time) {
 	_, _ = fmt.Fprintf(out, "Quota:    %d candidate(s) skipped as quota-infeasible; the watch keeps trying the others\n", len(live))
 	for _, q := range live {
 		_, _ = fmt.Fprintf(out, "  %s (re-probe after %s)\n", q.Describe(), q.ReprobeAt().Format(time.RFC3339))
+	}
+}
+
+// writeHeartbeat prints the #239 heartbeat block of `lagotto status`: when the
+// watch was last polled, how many attempts it has made, and the full last error
+// and last search error. now is a parameter so the ages are testable.
+func writeHeartbeat(out io.Writer, w *watcher.Watch, now time.Time) {
+	if !w.LastPolledAt.IsZero() {
+		stale := ""
+		if w.Status == watcher.StatusActive && now.Sub(w.LastPolledAt) > stalePollAfter {
+			stale = "; stale: the poller may be disabled, or its capacity search failing"
+		}
+		_, _ = fmt.Fprintf(out, "Last polled: %s (%s ago%s)\n", w.LastPolledAt.Format(time.RFC3339), formatAge(now.Sub(w.LastPolledAt)), stale)
+	}
+	if w.Attempts > 0 || !w.LastAttemptAt.IsZero() {
+		_, _ = fmt.Fprintf(out, "Attempts: %d", w.Attempts)
+		if !w.LastAttemptAt.IsZero() {
+			_, _ = fmt.Fprintf(out, " (last %s, %s ago)", w.LastAttemptAt.Format(time.RFC3339), formatAge(now.Sub(w.LastAttemptAt)))
+		}
+		_, _ = fmt.Fprintln(out)
+	}
+	if w.LastError != "" {
+		_, _ = fmt.Fprintf(out, "Last error: %s\n", w.LastError)
+		if !w.LastErrorAt.IsZero() {
+			_, _ = fmt.Fprintf(out, "  at %s (%s ago)\n", w.LastErrorAt.Format(time.RFC3339), formatAge(now.Sub(w.LastErrorAt)))
+		}
+	}
+	if w.LastPollError != "" {
+		_, _ = fmt.Fprintf(out, "Last search error: %s\n", w.LastPollError)
+		if !w.LastPollErrorAt.IsZero() {
+			recovered := ""
+			if w.LastPolledAt.After(w.LastPollErrorAt) {
+				recovered = "; the search has succeeded since"
+			}
+			_, _ = fmt.Fprintf(out, "  at %s (%s ago%s)\n", w.LastPollErrorAt.Format(time.RFC3339), formatAge(now.Sub(w.LastPollErrorAt)), recovered)
+		}
 	}
 }

@@ -539,9 +539,14 @@ func (s *Store) recordPollError(ctx context.Context, watchID, msg string) error 
 		Key: map[string]types.AttributeValue{
 			"watch_id": &types.AttributeValueMemberS{Value: watchID},
 		},
-		// Only an existing watch: a search failure must never create a stub item.
-		ConditionExpression: aws.String("attribute_exists(watch_id)"),
-		UpdateExpression:    aws.String("SET last_poll_error = :err, last_poll_error_at = :now"),
+		// Only an existing watch: a search failure must never create a stub item
+		// (the watch may have been deleted since the sweep loaded it). status is on
+		// every watch record. The condition is on it rather than on the key because
+		// Substrate passes attribute_exists(<key>) for a missing item, and the test
+		// that pins this behaviour runs there.
+		ConditionExpression:      aws.String("attribute_exists(#st)"),
+		UpdateExpression:         aws.String("SET last_poll_error = :err, last_poll_error_at = :now"),
+		ExpressionAttributeNames: map[string]string{"#st": "status"},
 		ExpressionAttributeValues: map[string]types.AttributeValue{
 			":err": &types.AttributeValueMemberS{Value: msg},
 			":now": &types.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)},

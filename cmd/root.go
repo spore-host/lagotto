@@ -85,7 +85,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&sharedRegion, "region", "", "Default AWS region (overrides SPORE_REGION/AWS_REGION and the shared config)")
 	rootCmd.PersistentFlags().StringVar(&sharedAccount, "account", "", "Expected AWS account ID (optional guard)")
 
-	rootCmd.PersistentFlags().StringVarP(&outputFormat, "output", "o", "table", "Output format (table, json)")
+	rootCmd.PersistentFlags().StringVarP(&outputFormat, "output", "o", "table", "Output format (table, json; list also takes wide)")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose output")
 	rootCmd.PersistentFlags().StringVar(&watchesTable, "watches-table", "lagotto-watches", "DynamoDB table name for watches")
 	rootCmd.PersistentFlags().StringVar(&historyTable, "history-table", "lagotto-match-history", "DynamoDB table name for match history")

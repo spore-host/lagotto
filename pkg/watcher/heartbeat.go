@@ -74,8 +74,9 @@ func describeAttemptError(kind FailureKind, err error) string {
 			b.WriteString(": ")
 			b.WriteString(code)
 		}
-		if m := apiErr.ErrorMessage(); m != "" {
-			msg = m
+		msg = apiErr.ErrorMessage()
+		if msg == apiErr.ErrorCode() {
+			msg = "" // nothing the code didn't already say
 		}
 	}
 	if msg = oneLine(msg); msg != "" {
