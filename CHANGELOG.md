@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Built against spawn v0.161.0 (from v0.160.0)**, in the root module and in
+  `lambda/capacity-poller`. What reaches instances lagotto launches:
+  - **The acpid step no longer OOM-kills small instances** (spawn#1521). It
+    used to run `dnf install -y acpid || yum install -y acpid`; on AL2023 `yum`
+    is dnf, so on a t4g.nano the OOM killer took dnf, the same install ran
+    again as `yum`, and that second run took spored and systemd-resolved with
+    it. Now acpid that ships on the image is just enabled, an absent one is
+    installed with exactly one package manager and never retried under the
+    other name, and below 768 MiB of `MemTotal` no package manager runs at
+    all. This changes the bootstrap body: lagotto-launched instances fetch
+    the one spawn v0.161.0 published (sha256 `3563692d…f739`) and check it
+    against the hash compiled into this build.
+  - **New launches install spawn v0.161.0's spored**, which publishes an egress
+    proxy's first activity after a quiet period at once (spawn#1528). This
+    matters only for a launch that uses an egress proxy.
+  - Nothing else in spawn v0.161.0 reaches the packages lagotto imports: the
+    compute-profile change (spawn#1538) is in functions lagotto never calls,
+    and the rest is spawn's own CLI, examples and Lambdas. The
+    golang.org/x/net v0.62.0 bump in spawn v0.161.0 was already made here
+    (below). `docs/reference/cli-iam-actions.md` is unchanged.
 - **Built against spawn v0.160.0 (from v0.135.1), libs v0.51.4 (from v0.51.1)
   and truffle v0.63.0 (from v0.61.0)**, in the root module and in
   `lambda/capacity-poller`. Supersedes Dependabot's #236. What reaches

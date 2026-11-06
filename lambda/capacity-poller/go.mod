@@ -108,7 +108,7 @@ require (
 	github.com/sigstore/sigstore-go v1.2.2 // indirect
 	github.com/sigstore/timestamp-authority/v2 v2.1.2 // indirect
 	github.com/sirupsen/logrus v1.9.4 // indirect
-	github.com/spore-host/spawn v0.160.0 // indirect
+	github.com/spore-host/spawn v0.161.0 // indirect
 	github.com/theupdateframework/go-tuf/v2 v2.4.2 // indirect
 	github.com/transparency-dev/formats v0.1.1 // indirect
 	github.com/transparency-dev/merkle v0.0.2 // indirect
