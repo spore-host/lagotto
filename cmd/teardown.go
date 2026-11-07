@@ -28,15 +28,19 @@ var (
 var teardownCmd = &cobra.Command{
 	Use:   "teardown",
 	Short: "Delete lagotto's DynamoDB tables",
-	Long: `Delete the DynamoDB tables lagotto uses (lagotto-watches and
-lagotto-match-history by default).
+	Long: `Delete the DynamoDB tables lagotto uses: lagotto-watches,
+lagotto-match-history and lagotto-scheduled-launches (the last is created by
+'lagotto deploy' or the first 'lagotto launch').
 
 lagotto already tears these down automatically once there are no active watches
-and the tables have drained (watches and match history age out via DynamoDB TTL).
-Use this to remove them explicitly.
+or pending scheduled launches and the tables have drained (records age out via
+DynamoDB TTL). Use this to remove them explicitly.
 
 By default it refuses to delete tables that still hold records, so you don't lose
-match history; pass --force to delete regardless.
+match history or a pending scheduled launch; pass --force to delete regardless.
+The scheduled-launches table is deleted only if it carries lagotto's
+lagotto:managed=cli tag; an untagged table of that name is left in place and
+reported. A table that does not exist is skipped.
 
 --iam-roles also deletes the two IAM roles 'lagotto setup' and 'lagotto deploy'
 create (lagotto-capacity-poller-role and lagotto-capacity-poller-scheduler-invoke),
@@ -75,25 +79,29 @@ func runTeardown(cmd *cobra.Command, args []string) error {
 	}
 
 	if !teardownForce {
-		empty, err := store.TablesEmpty(ctx)
+		nonEmpty, err := store.NonEmptyTables(ctx)
 		if err != nil {
 			return fmt.Errorf("check tables: %w", err)
 		}
-		if !empty {
-			return fmt.Errorf("tables still contain records (watches and/or match history) — " +
-				"re-run with --force to delete anyway, or wait for them to age out via TTL")
+		if len(nonEmpty) > 0 {
+			return fmt.Errorf("table(s) still contain records: %s — "+
+				"re-run with --force to delete anyway, or wait for them to age out via TTL", strings.Join(nonEmpty, ", "))
 		}
 	}
 
-	deleted, err := store.DeleteTables(ctx)
+	res, err := store.DeleteTables(ctx)
+	for _, name := range res.Deleted {
+		_, _ = fmt.Fprintf(out, "Deleted table %s\n", name)
+	}
 	if err != nil {
 		return fmt.Errorf("delete tables: %w", err)
 	}
-	if len(deleted) == 0 {
-		_, _ = fmt.Fprintf(out, "No lagotto tables to delete (%s, %s already absent).\n", watchesTable, historyTable)
+	if len(res.Absent) > 0 {
+		_, _ = fmt.Fprintf(out, "Already absent: %s\n", strings.Join(res.Absent, ", "))
 	}
-	for _, name := range deleted {
-		_, _ = fmt.Fprintf(out, "Deleted table %s\n", name)
+	for _, name := range res.Unmanaged {
+		_, _ = fmt.Fprintf(out, "Left table %s in place: it lacks the lagotto:managed=cli tag, so lagotto did not create it. "+
+			"Delete it yourself if it is yours.\n", name)
 	}
 	if teardownIAMRoles {
 		if err := deleteCLIOwnedRoles(ctx, newRoleDeleter(cfg), out); err != nil {
@@ -107,8 +115,8 @@ func runTeardown(cmd *cobra.Command, args []string) error {
 // teardownTables is the slice of the store teardown uses; *watcher.Store
 // satisfies it.
 type teardownTables interface {
-	TablesEmpty(ctx context.Context) (bool, error)
-	DeleteTables(ctx context.Context) ([]string, error)
+	NonEmptyTables(ctx context.Context) ([]string, error)
+	DeleteTables(ctx context.Context) (watcher.TableTeardown, error)
 }
 
 // newTeardownStore builds the store teardown deletes from. A seam for tests.
