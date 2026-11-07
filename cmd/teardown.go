@@ -15,6 +15,7 @@ import (
 	lambdatypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
 	"github.com/spf13/cobra"
 	"github.com/spore-host/lagotto/pkg/awscfg"
+	"github.com/spore-host/lagotto/pkg/cliiam"
 	"github.com/spore-host/lagotto/pkg/deploy"
 	"github.com/spore-host/lagotto/pkg/runtimeiam"
 	"github.com/spore-host/lagotto/pkg/watcher"
@@ -59,7 +60,14 @@ with their policies. The roles are account-global and shared by the poller in ev
 region, so this first checks every region enabled in the account and refuses, before
 deleting anything, while a poller still exists in any of them (remove each with
 'lagotto deploy --teardown --region <region>') or when a region cannot be checked.
---force does not override that check.`,
+--force does not override that check.
+
+--iam-roles also deletes the customer-managed policy lagotto-cli-user that
+'lagotto setup' writes for the people who run lagotto (lagotto#232). IAM refuses
+to delete an attached policy, so teardown first DETACHES it from every user,
+group and role it is attached to (each is printed; they lose those permissions),
+then deletes its non-default versions, then the policy. A policy of that name
+without lagotto's lagotto:managed=cli tag is left in place and reported.`,
 	RunE: runTeardown,
 }
 
@@ -67,7 +75,8 @@ func init() {
 	rootCmd.AddCommand(teardownCmd)
 	teardownCmd.Flags().BoolVar(&teardownForce, "force", false, "Delete even if the tables still contain records")
 	teardownCmd.Flags().BoolVar(&teardownIAMRoles, "iam-roles", false,
-		"Also delete lagotto's two account-global IAM roles; refused while a poller exists in any region")
+		"Also delete lagotto's two account-global IAM roles and the lagotto-cli-user policy (detached from everyone first); "+
+			"refused while a poller exists in any region")
 }
 
 func runTeardown(cmd *cobra.Command, args []string) error {
@@ -83,9 +92,14 @@ func runTeardown(cmd *cobra.Command, args []string) error {
 
 	// The role check runs before anything is deleted, so a refusal leaves the
 	// account exactly as it was.
+	var acct string
 	if teardownIAMRoles {
 		if err := checkNoPollerAnywhere(ctx, cfg); err != nil {
 			return err
+		}
+		// The CLI-user policy's ARN is account-scoped (#232).
+		if acct, err = setupCallerAccount(ctx, cfg); err != nil {
+			return fmt.Errorf("not deleting anything: resolve the account ID (the %s policy's ARN needs it): %w", cliiam.PolicyName, err)
 		}
 	}
 
@@ -122,6 +136,9 @@ func runTeardown(cmd *cobra.Command, args []string) error {
 	}
 	if teardownIAMRoles {
 		if err := deleteCLIOwnedRoles(ctx, newRoleDeleter(cfg), out); err != nil {
+			return err
+		}
+		if err := deleteCLIUserPolicy(ctx, newPolicyDeleter(cfg), acct, out); err != nil {
 			return err
 		}
 	}
@@ -259,6 +276,33 @@ func deleteCLIOwnedRoles(ctx context.Context, client runtimeiam.RoleDeleteAPI, o
 	}
 	if len(deleted) == 0 {
 		_, _ = fmt.Fprintf(out, "No lagotto IAM roles to delete (%s already absent).\n", strings.Join(runtimeiam.CLIOwnedRoles, ", "))
+	}
+	return nil
+}
+
+// newPolicyDeleter builds the IAM client the CLI-user policy is deleted with.
+// A seam for tests.
+var newPolicyDeleter = func(cfg aws.Config) cliiam.DeleteAPI { return iam.NewFromConfig(cfg) }
+
+// deleteCLIUserPolicy is teardown's half of the lagotto-cli-user policy's
+// lifecycle (#232): it reports every principal the policy was detached from,
+// since each loses those permissions.
+func deleteCLIUserPolicy(ctx context.Context, client cliiam.DeleteAPI, accountID string, out io.Writer) error {
+	res, err := cliiam.DeletePolicy(ctx, client, accountID)
+	for _, p := range res.Detached {
+		_, _ = fmt.Fprintf(out, "Detached IAM policy %s from %s\n", cliiam.PolicyName, p)
+	}
+	if err != nil {
+		return fmt.Errorf("delete IAM policy %s: %w", cliiam.PolicyName, err)
+	}
+	switch {
+	case res.Deleted:
+		_, _ = fmt.Fprintf(out, "Deleted IAM policy %s\n", cliiam.PolicyName)
+	case res.Unmanaged:
+		_, _ = fmt.Fprintf(out, "Left IAM policy %s in place: it lacks the %s=%s tag, so lagotto did not create it.\n",
+			cliiam.PolicyName, cliiam.ManagedTagKey, cliiam.ManagedTagValue)
+	default:
+		_, _ = fmt.Fprintf(out, "No IAM policy %s to delete.\n", cliiam.PolicyName)
 	}
 	return nil
 }
