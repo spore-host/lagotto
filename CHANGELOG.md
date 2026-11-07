@@ -243,6 +243,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A fleet whose quota refuses its first worker now backs off** (#274). A
+  quota cap was recorded as the number of workers running when the quota
+  refused the next launch, and 0 meant "not capped". So a `--maintain` fleet
+  whose family quota couldn't fit even one worker was never treated as
+  capped: it retried the refused launch every poll cycle (about 576
+  RunInstances calls over a 48 h watch) instead of waiting for the #153
+  re-probe or the #158 backstop, was never notified, and `lagotto status`
+  showed no cap. A cap now also stores a `quota_capped` marker, so a cap at
+  0 workers backs off, notifies once and shows as "capped at 0/N". Records
+  written by an older poller have no marker and read exactly as before.
+
 - **`lagotto deploy --teardown` now deletes the artifact bucket** (#264).
   `lagotto deploy` creates `lagotto-lambda-<account>-<region>` for the poller
   zip, but no command deleted it, so every region ever deployed kept an S3

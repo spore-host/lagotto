@@ -541,7 +541,7 @@ func (p *Poller) pollFleetWatch(ctx context.Context, w *Watch, summary *PollSumm
 		// Reaching the goal means the ceiling isn't binding any more (a quota
 		// increase landed, or the count was mis-attributed), so drop the cap state
 		// (#153) — otherwise a later dip would be suppressed by a stale ceiling.
-		if w.QuotaCappedCount > 0 {
+		if w.IsQuotaCapped() {
 			p.clearQuotaCap(ctx, w)
 		}
 		_ = p.store.UpdateLastPolled(ctx, w.WatchID)
@@ -563,7 +563,11 @@ func (p *Poller) pollFleetWatch(ctx context.Context, w *Watch, summary *PollSumm
 	// When the quota can be read (#158), the reading decides how long to wait: a
 	// raised limit tops up now, no room anywhere waits for the slow backstop, and
 	// room (or an unreadable quota) keeps the #153 re-probe interval.
-	if w.QuotaCappedCount > 0 && running >= w.QuotaCappedCount {
+	//
+	// IsQuotaCapped, not `QuotaCappedCount > 0`: a quota that refused the very
+	// first worker caps the fleet at 0, and that is the cap that most needs the
+	// backoff (#274).
+	if w.IsQuotaCapped() && running >= w.QuotaCappedCount {
 		probe := p.probeQuotaCap(ctx, w)
 		wait := QuotaCapReprobeInterval
 		switch probe {
@@ -630,7 +634,7 @@ func (p *Poller) pollFleetWatch(ctx context.Context, w *Watch, summary *PollSumm
 		// launched-then-capped cycle correctly records the cap at the NEW higher
 		// level and re-notifies ("capped at 3/5", was "2/5").
 		p.recordQuotaCap(ctx, w, running+out.Launched, bestMatch, out.QuotaErr, summary)
-	case out.Launched > 0 && w.QuotaCappedCount > 0:
+	case out.Launched > 0 && w.IsQuotaCapped():
 		// A launch succeeded while capped → the ceiling moved (a granted increase,
 		// or other usage freed up). Clear the cap so we top up at full speed and a
 		// future cap notifies again (#153).
@@ -730,13 +734,16 @@ func (p *Poller) recordQuotaCap(ctx context.Context, w *Watch, running int, m *M
 
 	// isNew must be computed BEFORE the write-back: the persisted level is what
 	// makes "report once" possible across stateless poller invocations.
-	isNew := w.QuotaCappedCount != running
+	// A cap at 0 on an uncapped watch is new too (#274): the level alone can't
+	// tell "capped at 0" from "not capped".
+	isNew := !w.IsQuotaCapped() || w.QuotaCappedCount != running
 
 	if err := p.store.RecordQuotaCap(ctx, w.WatchID, running, reason, limit, region); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to record quota cap for %s: %v\n", w.WatchID, err)
 	}
 	// Mirror recordOutcome's discipline: keep the in-memory watch in step with the
 	// store so the rest of this cycle (and the caller) sees the new level.
+	w.QuotaCapped = true
 	w.QuotaCappedCount = running
 	w.QuotaCappedAt = time.Now().UTC()
 	w.QuotaCapReason = reason
@@ -941,6 +948,7 @@ func (p *Poller) clearQuotaCap(ctx context.Context, w *Watch) {
 	if p.verbose {
 		fmt.Fprintf(os.Stderr, "Watch %s: quota cap cleared (was %d/%d)\n", w.WatchID, w.QuotaCappedCount, w.DesiredCount)
 	}
+	w.QuotaCapped = false
 	w.QuotaCappedCount = 0
 	w.QuotaCappedAt = time.Time{}
 	w.QuotaCapReason = ""
