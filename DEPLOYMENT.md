@@ -220,8 +220,11 @@ succeeds.
 
 **Explicitly retained** (each is listed in the confirmation prompt):
 
-- **The DynamoDB tables** — they hold your watches and match history. Use
-  `lagotto teardown` to delete those (when empty, or with `--force`).
+- **The DynamoDB tables** — `lagotto-watches`, `lagotto-match-history` and
+  `lagotto-scheduled-launches` hold your watches, match history and pending
+  scheduled launches. Use `lagotto teardown` to delete all three (when empty, or
+  with `--force`). It deletes the scheduled-launches table only if it carries
+  the `lagotto:managed=cli` tag lagotto sets when it creates it.
 - **Both IAM roles** — `lagotto-capacity-poller-role` and
   `lagotto-capacity-poller-scheduler-invoke`. They are CLI-owned and IAM-global:
   shared by the poller in every region of the account, and the invoke role also by

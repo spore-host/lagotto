@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
@@ -122,17 +123,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		// (#146) and with the poller in every OTHER region of the account (#218 —
 		// teardown is per-region, so it never touches them), and the artifact
 		// bucket was never stack-owned so no previous teardown removed it either.
-		if !confirm(fmt.Sprintf(`Delete the lagotto poller in %s (account %s)?
-This deletes the schedule %s, the Lambda %s and the SNS topic %s.
-RETAINED: your DynamoDB tables (watches/history/scheduled — 'lagotto teardown' owns those),
-RETAINED: the IAM roles %s and %s (CLI-owned, IAM-global: shared by every region's poller and by per-launch scheduled launches),
-RETAINED: the artifact bucket %s,
-RETAINED: any per-launch 'lagotto-launch-sl-*' schedules.
-Continue?`,
-			region, acctID,
-			deploy.PollerScheduleName, deploy.PollerFunctionName, deploy.AlertsTopicName,
-			runtimeiam.RoleName, runtimeiam.SchedulerInvokeRoleName,
-			bucket)) {
+		if !confirm(deployTeardownPrompt(region, acctID, bucket)) {
 			_, _ = fmt.Fprintln(out, "Aborted.")
 			return nil
 		}
@@ -147,6 +138,7 @@ Continue?`,
 		if len(deleted) == 0 {
 			_, _ = fmt.Fprintln(out, "Nothing to delete — the poller, topic and schedule are already gone.")
 		}
+		_, _ = fmt.Fprintf(out, "DynamoDB tables %s are retained; 'lagotto teardown' deletes them.\n", strings.Join(cliTables(), ", "))
 		_, _ = fmt.Fprintf(out, "Artifact bucket %s is retained; delete it manually if you want.\n", bucket)
 		printLegacyStackNote(ctx, out, d, deploy.LegacyStackTeardownWarning(deployStackName))
 		return nil
@@ -255,4 +247,28 @@ func printLegacyStackNote(ctx context.Context, out io.Writer, d *deploy.Deployer
 		return
 	}
 	_, _ = fmt.Fprintf(out, "\n%s\n", note)
+}
+
+// cliTables names the three DynamoDB tables `lagotto deploy` creates and
+// `lagotto teardown` deletes, in the order watches, history, scheduled launches.
+func cliTables() []string {
+	return []string{watchesTable, historyTable, watcher.DefaultScheduledTable}
+}
+
+// deployTeardownPrompt is the `deploy --teardown` confirmation. It says exactly
+// what survives, naming each table so the user knows what 'lagotto teardown'
+// will remove (#250).
+func deployTeardownPrompt(region, acctID, bucket string) string {
+	return fmt.Sprintf(`Delete the lagotto poller in %s (account %s)?
+This deletes the schedule %s, the Lambda %s and the SNS topic %s.
+RETAINED: the DynamoDB tables %s ('lagotto teardown' deletes those),
+RETAINED: the IAM roles %s and %s (CLI-owned, IAM-global: shared by every region's poller and by per-launch scheduled launches),
+RETAINED: the artifact bucket %s,
+RETAINED: any per-launch 'lagotto-launch-sl-*' schedules.
+Continue?`,
+		region, acctID,
+		deploy.PollerScheduleName, deploy.PollerFunctionName, deploy.AlertsTopicName,
+		strings.Join(cliTables(), ", "),
+		runtimeiam.RoleName, runtimeiam.SchedulerInvokeRoleName,
+		bucket)
 }

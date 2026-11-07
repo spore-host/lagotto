@@ -21,6 +21,7 @@ import (
 
 	"github.com/spore-host/lagotto/pkg/awscfg"
 	"github.com/spore-host/lagotto/pkg/runtimeiam"
+	"github.com/spore-host/lagotto/pkg/watcher"
 )
 
 // ---- pollerRegions: the teardown --iam-roles region scan, with fake EC2/Lambda.
@@ -206,12 +207,28 @@ func TestApplySetupRoles_Errors(t *testing.T) {
 type fakeTables struct {
 	empty   bool
 	deleted bool
+	// nonEmpty, when set, is what NonEmptyTables reports (else derived from empty).
+	nonEmpty []string
+	// result, when set, is what DeleteTables returns.
+	result *watcher.TableTeardown
 }
 
-func (f *fakeTables) TablesEmpty(context.Context) (bool, error) { return f.empty, nil }
-func (f *fakeTables) DeleteTables(context.Context) ([]string, error) {
+func (f *fakeTables) NonEmptyTables(context.Context) ([]string, error) {
+	if f.nonEmpty != nil {
+		return f.nonEmpty, nil
+	}
+	if f.empty {
+		return nil, nil
+	}
+	return []string{"lagotto-watches"}, nil
+}
+
+func (f *fakeTables) DeleteTables(context.Context) (watcher.TableTeardown, error) {
 	f.deleted = true
-	return []string{"lagotto-watches", "lagotto-match-history"}, nil
+	if f.result != nil {
+		return *f.result, nil
+	}
+	return watcher.TableTeardown{Deleted: []string{"lagotto-watches", "lagotto-match-history", "lagotto-scheduled-launches"}}, nil
 }
 
 func stubTeardown(t *testing.T, tables *fakeTables, roles runtimeiam.RoleDeleteAPI, iamRoles, force bool) {
@@ -285,6 +302,57 @@ func TestRunTeardown_WithoutIAMRoles(t *testing.T) {
 	stubTeardown(t, tables, roles, false, true)
 	if _, err := runTeardownForTest(t); err != nil || !tables.deleted || !roles.exists[runtimeiam.RoleName] {
 		t.Errorf("--force deleted tables=%v, roles=%v, err=%v; want the tables only", tables.deleted, roles.exists, err)
+	}
+}
+
+// The teardown summary names the scheduled-launches table it deleted, lists
+// absent tables rather than erroring, and reports an untagged table it left
+// alone (#250).
+func TestRunTeardown_ReportsScheduledTable(t *testing.T) {
+	tables := &fakeTables{empty: true, result: &watcher.TableTeardown{
+		Deleted: []string{"lagotto-watches", "lagotto-scheduled-launches"},
+		Absent:  []string{"lagotto-match-history"},
+	}}
+	stubTeardown(t, tables, &cmdRoleDeleter{}, false, false)
+	out, err := runTeardownForTest(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Deleted table lagotto-scheduled-launches",
+		"Already absent: lagotto-match-history",
+		"Teardown complete.",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+
+	tables = &fakeTables{empty: true, result: &watcher.TableTeardown{
+		Deleted:   []string{"lagotto-watches", "lagotto-match-history"},
+		Unmanaged: []string{"lagotto-scheduled-launches"},
+	}}
+	stubTeardown(t, tables, &cmdRoleDeleter{}, false, false)
+	out, err = runTeardownForTest(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "Left table lagotto-scheduled-launches in place") {
+		t.Errorf("an untagged scheduled table is not reported:\n%s", out)
+	}
+}
+
+// A pending scheduled launch blocks teardown without --force, and the refusal
+// names the table holding it (#250).
+func TestRunTeardown_NonEmptyScheduledTableNeedsForce(t *testing.T) {
+	tables := &fakeTables{nonEmpty: []string{"lagotto-scheduled-launches"}}
+	stubTeardown(t, tables, &cmdRoleDeleter{}, false, false)
+	_, err := runTeardownForTest(t)
+	if err == nil || !strings.Contains(err.Error(), "lagotto-scheduled-launches") || !strings.Contains(err.Error(), "--force") {
+		t.Fatalf("err = %v, want a refusal naming the scheduled table and --force", err)
+	}
+	if tables.deleted {
+		t.Error("a refused teardown deleted tables")
 	}
 }
 

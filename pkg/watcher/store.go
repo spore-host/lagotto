@@ -75,14 +75,19 @@ type Store struct {
 	scheduledTable string
 }
 
+// DefaultScheduledTable is the scheduled-launches table every lagotto command
+// uses: `lagotto deploy` and the first `lagotto launch` create it, and
+// `lagotto teardown` deletes it.
+const DefaultScheduledTable = "lagotto-scheduled-launches"
+
 // NewStore creates a Store backed by DynamoDB. The scheduled-launches table name
-// defaults to "lagotto-scheduled-launches"; override with SetScheduledTable.
+// defaults to DefaultScheduledTable; override with SetScheduledTable.
 func NewStore(cfg aws.Config, watchesTable, historyTable string) *Store {
 	return &Store{
 		client:         dynamodb.NewFromConfig(cfg),
 		watchesTable:   watchesTable,
 		historyTable:   historyTable,
-		scheduledTable: "lagotto-scheduled-launches",
+		scheduledTable: DefaultScheduledTable,
 	}
 }
 
@@ -839,10 +844,26 @@ func (s *Store) enableTTL(ctx context.Context, name string) error {
 	return nil
 }
 
-// TablesEmpty reports whether both the watches and history tables contain zero
-// items. Used to decide when the account can be auto-torn-down (no litter).
+// TablesEmpty reports whether the watches, history and scheduled-launches
+// tables all contain zero items. Used to decide when the account can be
+// auto-torn-down (no litter).
 func (s *Store) TablesEmpty(ctx context.Context) (bool, error) {
-	for _, name := range []string{s.watchesTable, s.historyTable, s.scheduledTable} {
+	nonEmpty, err := s.nonEmptyTables(ctx, true)
+	return len(nonEmpty) == 0 && err == nil, err
+}
+
+// NonEmptyTables returns the names of lagotto's tables that still hold at least
+// one item, in the order watches, history, scheduled launches. A missing table
+// is trivially empty. `lagotto teardown` uses it to say which table blocks it.
+func (s *Store) NonEmptyTables(ctx context.Context) ([]string, error) {
+	return s.nonEmptyTables(ctx, false)
+}
+
+// nonEmptyTables scans each table for one item. With stopAtFirst it returns as
+// soon as any table has one.
+func (s *Store) nonEmptyTables(ctx context.Context, stopAtFirst bool) ([]string, error) {
+	var nonEmpty []string
+	for _, name := range s.tableNames() {
 		// Follow pages rather than trusting the first (#181): this answer
 		// decides whether the account is torn down, so "empty" must mean the
 		// whole table was read and nothing was found.
@@ -856,32 +877,79 @@ func (s *Store) TablesEmpty(ctx context.Context) (bool, error) {
 			if errors.As(err, &notFound) {
 				continue // a missing table is trivially empty
 			}
-			return false, fmt.Errorf("scan %q: %w", name, err)
+			return nonEmpty, fmt.Errorf("scan %q: %w", name, err)
 		}
 		if found {
-			return false, nil
+			nonEmpty = append(nonEmpty, name)
+			if stopAtFirst {
+				return nonEmpty, nil
+			}
 		}
 	}
-	return true, nil
+	return nonEmpty, nil
 }
 
-// DeleteTables removes both lagotto tables unconditionally. Idempotent:
-// already-absent tables are ignored. Returns the names actually deleted.
-// Used by the explicit `lagotto teardown` command (user opted in).
-func (s *Store) DeleteTables(ctx context.Context) ([]string, error) {
-	var deleted []string
-	for _, name := range []string{s.watchesTable, s.historyTable} {
+// tableNames lists every table lagotto creates: watches, history, scheduled
+// launches. Every reader of "all of lagotto's tables" goes through it, so a
+// table cannot again be created by one command and missed by its deleter (#250).
+func (s *Store) tableNames() []string {
+	return []string{s.watchesTable, s.historyTable, s.scheduledTable}
+}
+
+// TableTeardown is what DeleteTables did with each of lagotto's tables.
+type TableTeardown struct {
+	// Deleted holds the tables DeleteTable was called on.
+	Deleted []string
+	// Absent holds the tables that did not exist (nothing to do).
+	Absent []string
+	// Unmanaged holds tables that exist but were left in place because they
+	// lack the lagotto:managed=cli tag, so lagotto cannot show it owns them.
+	Unmanaged []string
+}
+
+// DeleteTables removes lagotto's tables. Used by the explicit `lagotto
+// teardown` command (user opted in). Idempotent: already-absent tables are
+// reported in Absent, not as errors.
+//
+// The watches and history tables are deleted unconditionally, as they always
+// have been: before #59 a CloudFormation stack created them without the managed
+// tag, and `lagotto teardown` is how those are removed.
+//
+// The scheduled-launches table is deleted only when it carries the
+// lagotto:managed=cli tag. Every lagotto that has created it tagged it (it was
+// introduced in #49 with the tag, and no stack ever created it), so the gate
+// costs nothing for lagotto's own table and leaves an identically named table
+// someone else made alone. A tag that cannot be read is an error naming the
+// table, not a silent skip (#250).
+func (s *Store) DeleteTables(ctx context.Context) (TableTeardown, error) {
+	var res TableTeardown
+	for _, name := range s.tableNames() {
+		if name == s.scheduledTable {
+			present, managed, err := s.tableOwnership(ctx, name)
+			if err != nil {
+				return res, err
+			}
+			if !present {
+				res.Absent = append(res.Absent, name)
+				continue
+			}
+			if !managed {
+				res.Unmanaged = append(res.Unmanaged, name)
+				continue
+			}
+		}
 		_, err := s.client.DeleteTable(ctx, &dynamodb.DeleteTableInput{TableName: aws.String(name)})
 		if err != nil {
 			var notFound *types.ResourceNotFoundException
 			if errors.As(err, &notFound) {
+				res.Absent = append(res.Absent, name)
 				continue
 			}
-			return deleted, fmt.Errorf("delete table %q: %w", name, err)
+			return res, fmt.Errorf("delete table %q: %w", name, err)
 		}
-		deleted = append(deleted, name)
+		res.Deleted = append(res.Deleted, name)
 	}
-	return deleted, nil
+	return res, nil
 }
 
 // DeleteManagedTables deletes only tables tagged as CLI-managed
@@ -890,7 +958,7 @@ func (s *Store) DeleteTables(ctx context.Context) ([]string, error) {
 // trips on missing control-plane IAM. Returns the names actually deleted.
 func (s *Store) DeleteManagedTables(ctx context.Context) ([]string, error) {
 	var deleted []string
-	for _, name := range []string{s.watchesTable, s.historyTable, s.scheduledTable} {
+	for _, name := range s.tableNames() {
 		managed, err := s.isManaged(ctx, name)
 		if err != nil {
 			return deleted, err
@@ -912,32 +980,45 @@ func (s *Store) DeleteManagedTables(ctx context.Context) ([]string, error) {
 }
 
 // isManaged reports whether the named table carries the lagotto:managed=cli tag.
-// A missing table returns false (nothing to delete).
+// A missing table returns false (nothing to delete). Tags that cannot be read
+// also return false: the poller's automatic teardown must never delete
+// something it cannot confirm it owns.
 func (s *Store) isManaged(ctx context.Context, name string) (bool, error) {
+	_, managed, err := s.tableOwnership(ctx, name)
+	if errors.Is(err, errTagsUnreadable) {
+		return false, nil
+	}
+	return managed, err
+}
+
+// errTagsUnreadable marks a tableOwnership failure to list a table's tags.
+var errTagsUnreadable = errors.New("could not read the table's tags")
+
+// tableOwnership reports whether the named table exists and whether it carries
+// the lagotto:managed=cli tag. A missing table is (false, false, nil). A
+// ListTagsOfResource failure wraps errTagsUnreadable.
+func (s *Store) tableOwnership(ctx context.Context, name string) (present, managed bool, err error) {
 	desc, err := s.client.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: aws.String(name)})
 	if err != nil {
 		var notFound *types.ResourceNotFoundException
 		if errors.As(err, &notFound) {
-			return false, nil
+			return false, false, nil
 		}
-		return false, fmt.Errorf("describe table %q: %w", name, err)
+		return false, false, fmt.Errorf("describe table %q: %w", name, err)
 	}
-	arn := desc.Table.TableArn
-	if arn == nil {
-		return false, nil
+	if desc.Table == nil || desc.Table.TableArn == nil {
+		return true, false, nil
 	}
-	tags, err := s.client.ListTagsOfResource(ctx, &dynamodb.ListTagsOfResourceInput{ResourceArn: arn})
+	tags, err := s.client.ListTagsOfResource(ctx, &dynamodb.ListTagsOfResourceInput{ResourceArn: desc.Table.TableArn})
 	if err != nil {
-		// If we can't read tags, be conservative and treat as unmanaged so we
-		// never delete something we shouldn't.
-		return false, nil
+		return true, false, fmt.Errorf("table %q: %w: %w", name, errTagsUnreadable, err)
 	}
 	for _, t := range tags.Tags {
 		if aws.ToString(t.Key) == aws.ToString(managedTag.Key) && aws.ToString(t.Value) == aws.ToString(managedTag.Value) {
-			return true, nil
+			return true, true, nil
 		}
 	}
-	return false, nil
+	return true, false, nil
 }
 
 // ensureTable creates one table if it does not already exist. Returns true if it

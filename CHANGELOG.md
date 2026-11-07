@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`lagotto teardown` now deletes the `lagotto-scheduled-launches` table**
+  (#250). `lagotto deploy` and the first `lagotto launch` create it, but
+  teardown deleted only the watches and match-history tables, so the scheduled
+  table was left behind, while `deploy --teardown` said `lagotto teardown`
+  owned it. Teardown deletes the scheduled table only when it carries the
+  `lagotto:managed=cli` tag, which every lagotto that created it has set; an
+  untagged table of that name is left in place and reported. A missing table
+  is listed as already absent, not an error. When tables still hold records,
+  the refusal without `--force` now names them, including a pending scheduled
+  launch. The `deploy --teardown` prompt and summary name all three tables.
+  `lagotto teardown` now also needs `dynamodb:DescribeTable` and
+  `dynamodb:ListTagsOfResource` (`docs/reference/cli-iam-actions.md`).
+
 ## [0.67.0] - 2026-11-06
 
 ### Added
