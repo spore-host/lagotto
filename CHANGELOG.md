@@ -183,6 +183,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     active watches' addresses that have no subscription). Only subscriptions
     carrying lagotto's filter policy are removed. A subscription still pending
     confirmation cannot be unsubscribed; AWS deletes it within 3 days.
+  - **Every SNS call on a topic runs in the region its ARN names**, not the
+    CLI's or the poller's: an alerts topic set with `LAGOTTO_SNS_TOPIC_ARN` in
+    another region, and an `sns:` channel's own topic in another region, used
+    to be refused by SNS with `InvalidParameter: TopicArn`.
   - **Re-run `lagotto setup` after upgrading**: the poller's runtime policy
     gains `sns:ListSubscriptionsByTopic`, `sns:GetSubscriptionAttributes` and
     `sns:Unsubscribe` on the alerts topic and its subscriptions (never

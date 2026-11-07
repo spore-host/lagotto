@@ -3,12 +3,15 @@ package watcher
 import (
 	"context"
 	"errors"
+	"net/http"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/spore-host/lagotto/pkg/testutil"
 )
 
@@ -585,5 +588,35 @@ func TestARNRegion(t *testing.T) {
 		if got := ARNRegion(arn); got != want {
 			t.Errorf("ARNRegion(%q) = %q, want %q", arn, got, want)
 		}
+	}
+}
+
+// hostCapture is an HTTP client that records each request and never dials.
+type hostCapture struct{ hosts, auth []string }
+
+func (h *hostCapture) Do(r *http.Request) (*http.Response, error) {
+	h.hosts = append(h.hosts, r.URL.Host)
+	h.auth = append(h.auth, r.Header.Get("Authorization"))
+	return nil, errors.New("captured")
+}
+
+// TestInARNRegion_RealSDKSendsToTheTopicRegion: with the real SNS client built
+// for us-east-2, a call carrying InARNRegion goes to us-west-2's endpoint and
+// is signed for us-west-2, so the per-call option is honoured by the SDK, not
+// only by the fake.
+func TestInARNRegion_RealSDKSendsToTheTopicRegion(t *testing.T) {
+	h := &hostCapture{}
+	c := sns.New(sns.Options{
+		Region:      "us-east-2",
+		Credentials: credentials.NewStaticCredentialsProvider("AKIDTEST", "secret", ""),
+		HTTPClient:  h,
+		Retryer:     aws.NopRetryer{},
+	})
+	_, _ = NewEmailSubscriptions(c, alertsARN).List(context.Background(), false)
+	if len(h.hosts) != 1 || h.hosts[0] != "sns.us-west-2.amazonaws.com" {
+		t.Errorf("request went to %v, want sns.us-west-2.amazonaws.com", h.hosts)
+	}
+	if len(h.auth) != 1 || !strings.Contains(h.auth[0], "/us-west-2/sns/") {
+		t.Errorf("signed as %v, want a us-west-2 SigV4 scope", h.auth)
 	}
 }
