@@ -49,18 +49,18 @@ func hbWatches() []watcher.Watch {
 func TestListTable_Heartbeat(t *testing.T) {
 	var out bytes.Buffer
 	writeWatchTable(&out, hbWatches(), hbNow, false)
-	want := `WATCH ID     STATUS     PROJECT         OWNER                PATTERN              REGIONS                   SPOT   ACTION     EXPIRES                   LAST POLL TRIES LAST ERR
-w-a660980c   active     -               user/alice           p5.48xlarge          [us-west-2 us-east-1]     false  spawn      2026-12-06T12:00:00Z      3m          812 capacity
-w-4a1e61d6   active     fieldwork       user/alice           g6e.*                [us-east-1]               false  notify     2026-11-07T12:00:00Z      2h!           0 search
-w-0ld00000   active     -               user/alice           c7g.large            [us-west-2]               false  notify     2026-11-06T13:00:00Z      never!        0 -
-w-done0000   matched    -               user/alice           g7.24xlarge          [eu-north-1 us-west-2]    false  spawn      2026-11-05T12:00:00Z      9d            2 quota
+	want := `WATCH ID     STATUS     PROJECT         OWNER                PATTERN              REGIONS                   SPOT   ACTION     EXPOSURE         EXPIRES                   LAST POLL TRIES LAST ERR
+w-a660980c   active     -               user/alice           p5.48xlarge          [us-west-2 us-east-1]     false  spawn      unknown          2026-12-06T12:00:00Z      3m          812 capacity
+w-4a1e61d6   active     fieldwork       user/alice           g6e.*                [us-east-1]               false  notify     none             2026-11-07T12:00:00Z      2h!           0 search
+w-0ld00000   active     -               user/alice           c7g.large            [us-west-2]               false  notify     none             2026-11-06T13:00:00Z      never!        0 -
+w-done0000   matched    -               user/alice           g7.24xlarge          [eu-north-1 us-west-2]    false  spawn      unknown          2026-11-05T12:00:00Z      9d            2 quota
 `
 	if got := out.String(); got != want {
 		t.Errorf("list table:\n--- got\n%s--- want\n%s", got, want)
 	}
-	// Width stays reasonable: the heartbeat adds 25 columns to the old 147-wide row, and EXPIRES is 25 wide for "until landed (ack in 12d)" (#239).
+	// Width stays reasonable: the heartbeat adds 25 columns to the old 147-wide row, EXPIRES is 25 wide for "until landed (ack in 12d)", and EXPOSURE adds 17 (#239).
 	for _, line := range strings.Split(strings.TrimRight(out.String(), "\n"), "\n") {
-		if n := len([]rune(line)); n > 177 {
+		if n := len([]rune(line)); n > 194 {
 			t.Errorf("row is %d wide: %q", n, line)
 		}
 	}

@@ -221,6 +221,10 @@ type Watch struct {
 	// when they don't apply.
 	WaitToAcquireSeconds *float64 `json:"wait_to_acquire_seconds,omitempty" dynamodbav:"-"`
 	TimeToGiveUpSeconds  *float64 `json:"time_to_give_up_seconds,omitempty" dynamodbav:"-"`
+	// Exposure is the DERIVED, display-only cost exposure (#239 phase 5; see
+	// exposure.go): what the watch can cost if it lands. Filled by list, status,
+	// watch and the reminder path; never persisted (dynamodbav "-").
+	Exposure *Exposure `json:"exposure,omitempty" dynamodbav:"-"`
 }
 
 // MatchResult records a capacity match event.

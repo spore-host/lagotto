@@ -14,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
+	truffleaws "github.com/spore-host/truffle/pkg/aws"
 )
 
 // Reminders for until-landed watches (#239 phase 4).
@@ -205,6 +206,11 @@ func (p *Poller) remindIfDue(ctx context.Context, w *Watch, now time.Time, summa
 	if p.verbose {
 		fmt.Fprintf(os.Stderr, "Watch %s: reminder %d/%d sent (pauses %s)\n", w.WatchID, r.Stage, r.Of, w.ExpiresAt.Format(time.RFC3339))
 	}
+	// Cost exposure (#239 phase 5), priced once for every channel. Derived,
+	// so nothing about it is written back.
+	pctx, cancel := context.WithTimeout(ctx, exposurePriceTimeout)
+	w.Exposure = ComputeExposure(pctx, w, p.exposurePricer())
+	cancel()
 	if err := notify(ctx, w, r, now); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to send reminder %d for watch %s: %v\n", r.Stage, w.WatchID, err)
 	}
@@ -291,6 +297,13 @@ func reminderBody(w *Watch, r ReminderStage, now time.Time) string {
 	if w.MaxPrice > 0 {
 		fmt.Fprintf(&b, "Max price: $%.4f/hr (the --max-price cap you set, not a price quote)\n", w.MaxPrice)
 	}
+	for i, line := range reminderExposure(w).Lines() {
+		label := "Exposure:  "
+		if i > 0 {
+			label = "           "
+		}
+		fmt.Fprintf(&b, "%s%s\n", label, line)
+	}
 	fmt.Fprintf(&b, "Created:   %s\n", w.CreatedAt.Format(time.RFC3339))
 	fmt.Fprintf(&b, "Deadline:  %s\n", w.ExpiresAt.Format(time.RFC3339))
 
@@ -356,8 +369,40 @@ func reminderPayload(w *Watch, r ReminderStage, now time.Time) map[string]interf
 	if w.MaxPrice > 0 {
 		p["max_price"] = w.MaxPrice
 	}
+	p["exposure"] = reminderExposure(w)
 	return p
 }
+
+// ReminderStaticPriceReason labels the static rates of a reminder rendered
+// with no live price source (remindIfDue sets one; this is the fallback).
+const ReminderStaticPriceReason = "this reminder was rendered without a live AWS Price List client"
+
+// reminderExposure is the watch's cost exposure for a reminder: the one
+// remindIfDue priced (live where the poller can), else the static list.
+func reminderExposure(w *Watch) *Exposure {
+	if w.Exposure == nil {
+		w.Exposure = StaticExposure(w, ReminderStaticPriceReason)
+	}
+	return w.Exposure
+}
+
+// exposurePricer is the poller's on-demand price source for reminders:
+// truffle's live client when the poller has one (its runtime policy already
+// allows pricing:GetProducts), else the static list.
+func (p *Poller) exposurePricer() OnDemandPricer {
+	if c, ok := p.truffle.(*truffleaws.Client); ok && c == nil {
+		return StaticPricer{Reason: "this poller has no live AWS Price List client"}
+	}
+	if lp, ok := p.truffle.(OnDemandPricer); ok {
+		return lp
+	}
+	return StaticPricer{Reason: "this poller has no live AWS Price List client"}
+}
+
+// exposurePriceTimeout bounds the live price lookups of one reminder; a slow
+// or throttled Price List degrades to truffle's labelled static fallback or
+// "unknown", never a stalled sweep.
+const exposurePriceTimeout = 15 * time.Second
 
 // roundSpan renders a duration to the minute ("13d23h", "4h5m", "0m"), for
 // reminder text.
