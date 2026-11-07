@@ -199,9 +199,11 @@ func statements(accountID string, configBuckets []string) []statement {
 		// that disabled itself when it ran out of watches; doctor reads it.
 		{Sid: "PollerSchedule", Action: []string{"scheduler:GetSchedule", "scheduler:UpdateSchedule"},
 			Resource: regional("scheduler", pollerScheduleName)},
-		// `lagotto launch` creates one schedule per scheduled launch. Only
-		// creates: the poller deletes a fired one, and teardown the rest.
-		{Sid: "LaunchSchedules", Action: []string{"scheduler:CreateSchedule"},
+		// `lagotto launch` creates one schedule per scheduled launch, and
+		// `lagotto cancel sl-…` deletes it and the poller's -r<n> boundary
+		// retries of it (#279), which share the prefix. Listing them is
+		// scheduler:ListSchedules, below (no resource-level permissions).
+		{Sid: "LaunchSchedules", Action: []string{"scheduler:CreateSchedule", "scheduler:DeleteSchedule"},
 			Resource: regional("scheduler", "schedule/default/"+launchSchedulePrefix+"*")},
 		// Creating or updating a schedule passes the role it assumes. Only
 		// lagotto's invoke role, and only to EventBridge Scheduler.
@@ -271,8 +273,9 @@ func statements(accountID string, configBuckets []string) []statement {
 			"ec2:DescribeCapacityReservations",
 			// The vCPU quota of --require-quota and the quota check (#157).
 			"servicequotas:GetServiceQuota",
-			// doctor: the per-launch schedules (#260), the artifact buckets
-			// (#264) and the Scheduler target-error metric (#218).
+			// doctor and cancel: the per-launch schedules (#260, #279); doctor:
+			// the artifact buckets (#264) and the Scheduler target-error metric
+			// (#218).
 			"scheduler:ListSchedules", "s3:ListAllMyBuckets", "cloudwatch:GetMetricStatistics",
 		}, Resource: "*"},
 	}

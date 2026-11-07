@@ -16,12 +16,17 @@ import (
 	"github.com/spore-host/lagotto/pkg/watcher"
 )
 
-var cancelYes bool
+var (
+	cancelYes    bool
+	cancelRegion string
+)
 
 var cancelCmd = &cobra.Command{
-	Use:   "cancel <watch-id>",
-	Short: "Cancel an active watch, or release a fired hold's capacity reservation",
-	Long: `Cancel an active watch. Any capacity reservation it recorded is released, and
+	Use:   "cancel <watch-id | scheduled-launch-id>",
+	Short: "Cancel an active watch or a scheduled launch, or release a fired hold's capacity reservation",
+	Long: `Cancel an active watch (w-…) or a scheduled launch (sl-…, from 'lagotto launch').
+
+A watch: any capacity reservation it recorded is released, and
 each email address it notifies is unsubscribed from the alerts topic unless another
 active watch still names it.
 
@@ -29,7 +34,15 @@ For a --action hold watch that already fired (status: matched), cancel releases
 the reservation it holds. The reservation is targeted and bills at the On-Demand
 rate until its 30-minute window ends, so release it as soon as you know you
 won't launch into it. The watch keeps its matched status. Releasing a
-reservation that already expired or was already released is not an error.`,
+reservation that already expired or was already released is not an error.
+
+A scheduled launch: the launch is marked cancelled, then its EventBridge
+schedule and any boundary-retry schedules (-r<n>) are deleted. A schedule that
+is already gone is not an error. A one-shot launch that already fired is
+refused: there is nothing left to cancel. A --cron launch can be cancelled at
+any time; it stops future fires. Cancelling an already-cancelled launch deletes
+any schedule left behind. The record is in the region 'launch' ran in; pass
+--region if that is not your default.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runCancel,
 }
@@ -37,6 +50,7 @@ reservation that already expired or was already released is not an error.`,
 func init() {
 	// --yes/-y matches the suite-wide confirmation convention (spawn#40).
 	cancelCmd.Flags().BoolVarP(&cancelYes, "yes", "y", false, "Skip the confirmation prompt")
+	cancelCmd.Flags().StringVar(&cancelRegion, "region", "", "AWS region of the watch or scheduled launch (default: from your AWS config)")
 	rootCmd.AddCommand(cancelCmd)
 }
 
@@ -44,9 +58,14 @@ func runCancel(cmd *cobra.Command, args []string) error {
 	watchID := args[0]
 	ctx := context.Background()
 
-	cfg, err := awscfg.Load(ctx, "")
+	cfg, err := awscfg.Load(ctx, cancelRegion)
 	if err != nil {
 		return fmt.Errorf("load AWS config: %w", err)
+	}
+
+	// A scheduled launch's id starts sl- (#279); a watch's starts w-.
+	if isScheduledLaunchID(watchID) {
+		return runCancelScheduledLaunch(ctx, cmd.OutOrStdout(), os.Stderr, cfg, watchID)
 	}
 
 	store := watcher.NewStore(cfg, watchesTable, historyTable)

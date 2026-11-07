@@ -282,7 +282,10 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 	if instanceName != "" {
 		_, _ = fmt.Fprintf(out, "  Name: %s (if it already exists at fire time: %s)\n", instanceName, ifExists)
 	}
-	_, _ = fmt.Fprintf(out, "  Cancel with: aws scheduler delete-schedule --name %s --region %s\n", scheduleName, region)
+	// The lagotto command, not a raw DeleteSchedule: it also cancels the record
+	// (which otherwise keeps the poller armed) and any boundary retries, and the
+	// lagotto-cli-user policy grants it (#279).
+	_, _ = fmt.Fprintf(out, "  Cancel with: %s\n", cancelLaunchCmd(scheduleID, region))
 	return nil
 }
 

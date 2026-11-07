@@ -446,3 +446,24 @@ func TestAppendCallerCheck(t *testing.T) {
 		t.Errorf("an unsimulable caller: %+v", c)
 	}
 }
+
+// TestCLIUserPolicyGrantsLaunchCancel (#279): `cancel sl-…` deletes and lists
+// per-launch schedules, the policy grants both, and the gate fails if the
+// DeleteSchedule grant is dropped.
+func TestCLIUserPolicyGrantsLaunchCancel(t *testing.T) {
+	granted := cliiam.GrantedActions("123456789012", nil)
+	has := map[string]bool{}
+	for _, a := range granted {
+		has[a] = true
+	}
+	for _, a := range []string{"scheduler:DeleteSchedule", "scheduler:ListSchedules"} {
+		if !has[a] {
+			t.Errorf("the %s policy does not grant %s, which `lagotto cancel sl-…` calls", cliiam.PolicyName, a)
+		}
+	}
+	inv := map[string]map[string]bool{"lagotto cancel": {"scheduler:DeleteSchedule": true, "scheduler:ListSchedules": true}}
+	p := cliUserPolicyProblems(inv, []string{"lagotto cancel"}, []string{"scheduler:ListSchedules"}, nil)
+	if len(p) != 1 || !strings.Contains(p[0], "lagotto cancel calls scheduler:DeleteSchedule") {
+		t.Errorf("dropping the DeleteSchedule grant: %v", p)
+	}
+}

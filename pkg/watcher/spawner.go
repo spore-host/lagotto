@@ -528,6 +528,10 @@ const (
 	// OutcomeFailed — a terminal failure (dead reservation, bad config, or retry
 	// budget exhausted). Do not retry.
 	OutcomeFailed
+	// OutcomeCancelled — the launch was cancelled (`lagotto cancel`, #279) and
+	// nothing was launched. A schedule that fires after the cancel (one the cancel
+	// raced with, or could not delete) lands here. Do not retry or re-record.
+	OutcomeCancelled
 )
 
 // RunScheduled fires a scheduled launch, applying the Capacity-Block start-time
@@ -541,8 +545,12 @@ const (
 // It returns the outcome, the instance id (on launch), and a human message. The
 // caller (the Lambda handler) owns re-arming the EventBridge retry for OutcomeRetry.
 // A launch with no ReservationID behaves exactly like LaunchScheduled wrapped as
-// launched/failed (no boundary retry) — preserving the plain #49 path.
+// launched/failed (no boundary retry) — preserving the plain #49 path. A
+// cancelled launch launches nothing (OutcomeCancelled).
 func (s *Spawner) RunScheduled(ctx context.Context, sl *ScheduledLaunch) (ScheduledOutcome, string, error) {
+	if sl.Status == ScheduledCancelled {
+		return OutcomeCancelled, "", nil
+	}
 	if sl.ReservationID != "" {
 		gate, state := s.checkReservation(ctx, sl.Region, sl.ReservationID)
 		switch gate {

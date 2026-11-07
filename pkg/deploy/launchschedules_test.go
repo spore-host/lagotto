@@ -99,3 +99,97 @@ func TestDeleteLaunchSchedules_Errors(t *testing.T) {
 		t.Errorf("Deleted = %v, want the one deleted before the failure", res.Deleted)
 	}
 }
+
+// IsScheduleOfLaunch matches a launch's own schedule and its -r<n> retries,
+// and nothing of another launch whose id merely shares a prefix.
+func TestIsScheduleOfLaunch(t *testing.T) {
+	for name, want := range map[string]bool{
+		"lagotto-launch-sl-aaaa":     true,
+		"lagotto-launch-sl-aaaa-r1":  true,
+		"lagotto-launch-sl-aaaa-r12": true,
+		"lagotto-launch-sl-aaaa9":    false,
+		"lagotto-launch-sl-aaaa-r":   false,
+		"lagotto-launch-sl-aaaa-rx":  false,
+		"lagotto-launch-sl-aaaa-r1x": false,
+		"lagotto-launch-sl-bbbb":     false,
+		"lagotto-capacity-poller":    false,
+		"":                           false,
+	} {
+		if got := IsScheduleOfLaunch(name, "sl-aaaa"); got != want {
+			t.Errorf("IsScheduleOfLaunch(%q, sl-aaaa) = %v, want %v", name, got, want)
+		}
+	}
+	if IsScheduleOfLaunch("lagotto-launch-w-1", "w-1") {
+		t.Error("a non-sl id must not produce a deletable schedule name")
+	}
+}
+
+// DeleteScheduledLaunchSchedules (`cancel sl-…`, #279) deletes the launch's
+// schedule and its boundary retries, lists by the launch's own prefix, treats a
+// schedule already gone as success, and leaves every other schedule alone.
+func TestDeleteScheduledLaunchSchedules(t *testing.T) {
+	gone := &schedulertypes.ResourceNotFoundException{Message: aws.String("not found")}
+	sc := &fakeScheduler{
+		// The fake ignores NamePrefix, as an emulator might.
+		listPages: [][]string{
+			{"lagotto-launch-sl-aaaa-r1", "lagotto-launch-sl-aaaa9", "lagotto-launch-sl-bbbb"},
+			{"lagotto-launch-sl-aaaa-r2", "lagotto-capacity-poller"},
+		},
+		// The one-shot already fired and removed itself; r1 likewise.
+		deleteErrs: map[string]error{"lagotto-launch-sl-aaaa": gone, "lagotto-launch-sl-aaaa-r1": gone},
+	}
+	d, _ := testDeployer(nil, nil, sc)
+	res, err := d.DeleteScheduledLaunchSchedules(context.Background(), "sl-aaaa", "lagotto-launch-sl-aaaa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"lagotto-launch-sl-aaaa-r2"}; !reflect.DeepEqual(res.Deleted, want) {
+		t.Errorf("Deleted = %v, want %v", res.Deleted, want)
+	}
+	if want := []string{"lagotto-launch-sl-aaaa", "lagotto-launch-sl-aaaa-r1"}; !reflect.DeepEqual(res.Absent, want) {
+		t.Errorf("Absent = %v, want %v", res.Absent, want)
+	}
+	if want := []string{"lagotto-launch-sl-aaaa-r2"}; !reflect.DeepEqual(sc.deleted, want) {
+		t.Errorf("deleted %v, want only %v", sc.deleted, want)
+	}
+	if sc.deleteCalls != 3 {
+		t.Errorf("DeleteSchedule called %d times, want 3", sc.deleteCalls)
+	}
+	in := sc.listInputs[0]
+	if aws.ToString(in.GroupName) != "default" || aws.ToString(in.NamePrefix) != "lagotto-launch-sl-aaaa" {
+		t.Errorf("listed group %q prefix %q", aws.ToString(in.GroupName), aws.ToString(in.NamePrefix))
+	}
+}
+
+// A recorded name that is not the launch's own is never deleted, and with no
+// recorded name the launch's own schedule is still tried.
+func TestDeleteScheduledLaunchSchedules_RecordedNameIsChecked(t *testing.T) {
+	sc := &fakeScheduler{}
+	d, _ := testDeployer(nil, nil, sc)
+	res, err := d.DeleteScheduledLaunchSchedules(context.Background(), "sl-aaaa", "lagotto-capacity-poller")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"lagotto-launch-sl-aaaa"}; !reflect.DeepEqual(res.Deleted, want) {
+		t.Errorf("Deleted = %v, want %v", res.Deleted, want)
+	}
+}
+
+// A listing error deletes nothing; a delete error other than not-found stops.
+func TestDeleteScheduledLaunchSchedules_Errors(t *testing.T) {
+	sc := &fakeScheduler{listErr: errors.New("AccessDeniedException")}
+	d, _ := testDeployer(nil, nil, sc)
+	if _, err := d.DeleteScheduledLaunchSchedules(context.Background(), "sl-aaaa", ""); err == nil {
+		t.Fatal("a list error was swallowed")
+	}
+	if sc.deleteCalls != 0 {
+		t.Errorf("deleted %d schedules after a failed listing", sc.deleteCalls)
+	}
+
+	sc = &fakeScheduler{deleteErrs: map[string]error{"lagotto-launch-sl-aaaa": errors.New("AccessDeniedException")}}
+	d, _ = testDeployer(nil, nil, sc)
+	if _, err := d.DeleteScheduledLaunchSchedules(context.Background(), "sl-aaaa", ""); err == nil ||
+		!strings.Contains(err.Error(), "lagotto-launch-sl-aaaa") {
+		t.Fatalf("delete error = %v, want it naming the schedule", err)
+	}
+}

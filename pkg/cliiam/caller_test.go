@@ -219,3 +219,22 @@ func TestSimPlanSkipsSimulatorBlindSpots(t *testing.T) {
 		t.Error("the AlertsTopic statement's simulable actions were dropped too")
 	}
 }
+
+// TestSimRequestsCoverLaunchCancel: doctor's caller check simulates the grant
+// `lagotto cancel sl-…` needs (#279), DeleteSchedule on a per-launch schedule,
+// so a principal missing it is reported rather than found out at cancel time.
+func TestSimRequestsCoverLaunchCancel(t *testing.T) {
+	want := "arn:aws:scheduler:eu-west-1:" + testAccount + ":schedule/default/" + launchSchedulePrefix + probeName
+	for _, r := range simRequests(testAccount, "eu-west-1") {
+		if _, ok := r.resources[want]; !ok {
+			continue
+		}
+		for _, a := range r.actions {
+			if a == "scheduler:DeleteSchedule" {
+				return
+			}
+		}
+		t.Fatalf("the per-launch schedule request simulates %v, not scheduler:DeleteSchedule", r.actions)
+	}
+	t.Fatalf("no simulated request on %s", want)
+}

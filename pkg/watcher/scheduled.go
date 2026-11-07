@@ -94,7 +94,20 @@ type ScheduledLaunch struct {
 	Attempts int `json:"attempts,omitempty" dynamodbav:"attempts,omitempty"`
 }
 
-// PutScheduledLaunch creates or updates a scheduled launch.
+// ErrScheduledLaunchCancelled is PutScheduledLaunch refusing to overwrite a
+// record `lagotto cancel` has cancelled (#279).
+var ErrScheduledLaunchCancelled = errors.New("scheduled launch was cancelled")
+
+// ErrScheduledLaunchChanged is CancelScheduledLaunch finding the record no
+// longer in the status the caller read: it fired, failed or was cancelled in
+// between.
+var ErrScheduledLaunchChanged = errors.New("scheduled launch changed status")
+
+// PutScheduledLaunch creates or updates a scheduled launch. It never
+// overwrites a cancelled record (ErrScheduledLaunchCancelled): the poller's
+// boundary retry (#62) rewrites the whole record, and without the condition a
+// retry that read the record just before `lagotto cancel` would put it back to
+// retrying and re-arm it (#279).
 func (s *Store) PutScheduledLaunch(ctx context.Context, sl *ScheduledLaunch) error {
 	sl.UpdatedAt = time.Now().UTC()
 	item, err := attributevalue.MarshalMap(sl)
@@ -102,10 +115,49 @@ func (s *Store) PutScheduledLaunch(ctx context.Context, sl *ScheduledLaunch) err
 		return fmt.Errorf("marshal scheduled launch: %w", err)
 	}
 	if _, err := s.client.PutItem(ctx, &dynamodb.PutItemInput{
-		TableName: &s.scheduledTable,
-		Item:      item,
+		TableName:                &s.scheduledTable,
+		Item:                     item,
+		ConditionExpression:      aws.String("attribute_not_exists(schedule_id) OR #s <> :c"),
+		ExpressionAttributeNames: map[string]string{"#s": "status"},
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":c": &types.AttributeValueMemberS{Value: string(ScheduledCancelled)},
+		},
 	}); err != nil {
+		var ccf *types.ConditionalCheckFailedException
+		if errors.As(err, &ccf) {
+			return fmt.Errorf("put scheduled launch %s: %w", sl.ScheduleID, ErrScheduledLaunchCancelled)
+		}
 		return fmt.Errorf("put scheduled launch: %w", err)
+	}
+	return nil
+}
+
+// CancelScheduledLaunch marks a scheduled launch cancelled (status and
+// updated_at, as the poller records a fired or failed one), only if its status
+// is still from, the one the caller read and decided on. Otherwise it returns
+// ErrScheduledLaunchChanged and changes nothing. The record keeps its TTL, so
+// it ages out like any other finished launch; a cancelled record no longer
+// counts as pending (HasPendingScheduledLaunches) and the poller does not fire
+// it.
+func (s *Store) CancelScheduledLaunch(ctx context.Context, id string, from ScheduledLaunchStatus) error {
+	_, err := s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName:                &s.scheduledTable,
+		Key:                      map[string]types.AttributeValue{"schedule_id": &types.AttributeValueMemberS{Value: id}},
+		UpdateExpression:         aws.String("SET #s = :c, updated_at = :u"),
+		ConditionExpression:      aws.String("#s = :from"),
+		ExpressionAttributeNames: map[string]string{"#s": "status"},
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":c":    &types.AttributeValueMemberS{Value: string(ScheduledCancelled)},
+			":u":    &types.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)},
+			":from": &types.AttributeValueMemberS{Value: string(from)},
+		},
+	})
+	if err != nil {
+		var ccf *types.ConditionalCheckFailedException
+		if errors.As(err, &ccf) {
+			return fmt.Errorf("cancel scheduled launch %s: %w", id, ErrScheduledLaunchChanged)
+		}
+		return fmt.Errorf("cancel scheduled launch %s: %w", id, err)
 	}
 	return nil
 }
