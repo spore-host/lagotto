@@ -262,11 +262,12 @@ Spot:     %v
 %s
 
 The watch stays ACTIVE and keeps its running workers: it maintains as many as the
-quota allows, retries at most once every %s while capped, and picks up a granted
-quota increase automatically.
+quota allows and picks up a granted quota increase automatically. While capped it
+retries at most once every %s; when it can read the quota, it retries as soon as
+the limit is raised and otherwise only once every %s.
 `,
 		w.WatchID, running, w.DesiredCount, w.InstanceTypePattern, w.Regions, w.Spot,
-		reason, QuotaCapReprobeInterval)
+		reason, QuotaCapReprobeInterval, QuotaCapBackstopInterval)
 }
 
 // quotaCapPayload is the machine-readable quota-cap event. The "event" key is new

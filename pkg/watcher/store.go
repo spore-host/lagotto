@@ -603,21 +603,33 @@ func (s *Store) recordPollError(ctx context.Context, watchID, msg string) error 
 // refreshes the anchor and the reason); the caller decides whether this cap is
 // NEW and therefore worth a notification.
 //
-// Deliberately a SET of all three attributes rather than an ADD: the value is a
+// limit and region are the family vCPU limit read in the region the cap was hit
+// (#158); limit 0 means it could not be read, and removes any limit a previous
+// cap recorded, so a stale figure is never compared against.
+//
+// Deliberately a SET of the attributes rather than an ADD: the value is a
 // level ("capped at M"), not a counter, so a cap at a different level overwrites
 // cleanly and re-notifies.
-func (s *Store) RecordQuotaCap(ctx context.Context, watchID string, running int, reason string) error {
+func (s *Store) RecordQuotaCap(ctx context.Context, watchID string, running int, reason string, limit int32, region string) error {
+	set := "SET last_polled_at = :now, quota_capped_count = :n, quota_capped_at = :now, quota_cap_reason = :reason, quota_cap_region = :region"
+	values := map[string]types.AttributeValue{
+		":now":    &types.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)},
+		":n":      &types.AttributeValueMemberN{Value: strconv.Itoa(running)},
+		":reason": &types.AttributeValueMemberS{Value: reason},
+		":region": &types.AttributeValueMemberS{Value: region},
+	}
+	expr := "REMOVE quota_cap_limit " + set
+	if limit > 0 {
+		expr = set + ", quota_cap_limit = :limit"
+		values[":limit"] = &types.AttributeValueMemberN{Value: strconv.Itoa(int(limit))}
+	}
 	_, err := s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: &s.watchesTable,
 		Key: map[string]types.AttributeValue{
 			"watch_id": &types.AttributeValueMemberS{Value: watchID},
 		},
-		UpdateExpression: aws.String("SET last_polled_at = :now, quota_capped_count = :n, quota_capped_at = :now, quota_cap_reason = :reason"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":now":    &types.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)},
-			":n":      &types.AttributeValueMemberN{Value: strconv.Itoa(running)},
-			":reason": &types.AttributeValueMemberS{Value: reason},
-		},
+		UpdateExpression:          aws.String(expr),
+		ExpressionAttributeValues: values,
 	})
 	if err != nil {
 		return fmt.Errorf("record quota cap: %w", err)
@@ -625,10 +637,10 @@ func (s *Store) RecordQuotaCap(ctx context.Context, watchID string, running int,
 	return nil
 }
 
-// ClearQuotaCap removes the quota-cap state from a watch (#153), so the next
-// cycle top-ups immediately and a later cap notifies again. Called when a launch
-// succeeds while capped or the fleet reaches its goal — which is what makes a
-// granted quota increase self-correcting with no user action.
+// ClearQuotaCap removes the quota-cap state from a watch (#153, #158), so the
+// next cycle top-ups immediately and a later cap notifies again. Called when a
+// launch succeeds while capped or the fleet reaches its goal — which is what
+// makes a granted quota increase self-correcting with no user action.
 //
 // The single-expression `REMOVE … SET …` form is already proven against both real
 // DynamoDB and Substrate by UpdateSageMakerJob.
@@ -638,7 +650,7 @@ func (s *Store) ClearQuotaCap(ctx context.Context, watchID string) error {
 		Key: map[string]types.AttributeValue{
 			"watch_id": &types.AttributeValueMemberS{Value: watchID},
 		},
-		UpdateExpression: aws.String("REMOVE quota_capped_count, quota_capped_at, quota_cap_reason SET last_polled_at = :now"),
+		UpdateExpression: aws.String("REMOVE quota_capped_count, quota_capped_at, quota_cap_reason, quota_cap_limit, quota_cap_region SET last_polled_at = :now"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{
 			":now": &types.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)},
 		},

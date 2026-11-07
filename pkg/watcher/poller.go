@@ -548,26 +548,44 @@ func (p *Poller) pollFleetWatch(ctx context.Context, w *Watch, summary *PollSumm
 		return
 	}
 
-	// 2b. Quota-cap backoff (#153). A fleet we KNOW is at its vCPU ceiling must not
-	// re-fail a launch every cycle for the rest of its TTL. Placed AFTER the
-	// completion-condition check (a capped fleet must still retire on --until) and
-	// AFTER the gap<=0 return (it must still clear its cap on reaching the goal),
-	// but BEFORE the lease claim and the capacity search, so a suppressed cycle
-	// costs zero AWS calls.
+	// 2b. Quota-cap backoff (#153, #158). A fleet we KNOW is at its vCPU ceiling
+	// must not re-fail a launch every cycle for the rest of its TTL. Placed AFTER
+	// the completion-condition check (a capped fleet must still retire on
+	// --until) and AFTER the gap<=0 return (it must still clear its cap on
+	// reaching the goal), but BEFORE the lease claim and the capacity search, so
+	// a suppressed cycle makes no launch and no capacity search.
 	//
 	// The `running >= w.QuotaCappedCount` conjunct is essential: the backoff
 	// applies only to attempts we already know will fail. A worker that died below
 	// the known ceiling is replaced on the very next cycle, not up to 30 minutes
 	// later.
-	if w.QuotaCappedCount > 0 && running >= w.QuotaCappedCount && time.Since(w.QuotaCappedAt) < QuotaCapReprobeInterval {
-		if p.verbose {
-			fmt.Fprintf(os.Stderr, "Watch %s: fleet capped at %d/%d by EC2 quota; next re-probe in %s\n",
-				w.WatchID, w.QuotaCappedCount, w.DesiredCount,
-				(QuotaCapReprobeInterval - time.Since(w.QuotaCappedAt)).Round(time.Second))
+	//
+	// When the quota can be read (#158), the reading decides how long to wait: a
+	// raised limit tops up now, no room anywhere waits for the slow backstop, and
+	// room (or an unreadable quota) keeps the #153 re-probe interval.
+	if w.QuotaCappedCount > 0 && running >= w.QuotaCappedCount {
+		probe := p.probeQuotaCap(ctx, w)
+		wait := QuotaCapReprobeInterval
+		switch probe {
+		case capProbeRaised:
+			wait = 0
+		case capProbeNoRoom:
+			wait = QuotaCapBackstopInterval
 		}
-		summary.QuotaCapped++
-		_ = p.store.UpdateLastPolled(ctx, w.WatchID)
-		return
+		if since := time.Since(w.QuotaCappedAt); since < wait {
+			if p.verbose {
+				fmt.Fprintf(os.Stderr, "Watch %s: fleet capped at %d/%d by EC2 quota (%s); next re-probe in %s\n",
+					w.WatchID, w.QuotaCappedCount, w.DesiredCount, probe, (wait - since).Round(time.Second))
+			}
+			summary.QuotaCapped++
+			_ = p.store.UpdateLastPolled(ctx, w.WatchID)
+			return
+		}
+		if probe == capProbeRaised {
+			// Logged unconditionally: it is why a capped fleet launched early.
+			fmt.Fprintf(os.Stderr, "Watch %s: EC2 quota in %s raised above %d vCPU since the cap; topping up now\n",
+				w.WatchID, w.QuotaCapRegion, w.QuotaCapLimit)
+		}
 	}
 
 	// 3. Find capacity, then fill the gap this cycle (launch up to `gap` workers).
@@ -701,13 +719,20 @@ func (p *Poller) recordQuotaCap(ctx context.Context, w *Watch, running int, m *M
 		}
 	}
 
-	reason := quotacheck.CapReason(region, instanceType, w.Spot, w.DesiredCount, running, p.quotaReport(ctx, w, region, m))
+	rep := p.quotaReport(ctx, w, region, m)
+	reason := quotacheck.CapReason(region, instanceType, w.Spot, w.DesiredCount, running, rep)
+	// The limit read at cap time is what a later cycle compares against (#158);
+	// 0 = it could not be read.
+	var limit int32
+	if rep != nil && rep.Known {
+		limit = rep.Limit
+	}
 
 	// isNew must be computed BEFORE the write-back: the persisted level is what
 	// makes "report once" possible across stateless poller invocations.
 	isNew := w.QuotaCappedCount != running
 
-	if err := p.store.RecordQuotaCap(ctx, w.WatchID, running, reason); err != nil {
+	if err := p.store.RecordQuotaCap(ctx, w.WatchID, running, reason, limit, region); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to record quota cap for %s: %v\n", w.WatchID, err)
 	}
 	// Mirror recordOutcome's discipline: keep the in-memory watch in step with the
@@ -715,6 +740,8 @@ func (p *Poller) recordQuotaCap(ctx context.Context, w *Watch, running int, m *M
 	w.QuotaCappedCount = running
 	w.QuotaCappedAt = time.Now().UTC()
 	w.QuotaCapReason = reason
+	w.QuotaCapLimit = limit
+	w.QuotaCapRegion = region
 
 	// Log unconditionally, not under p.verbose: for a hosted poller the
 	// CloudWatch log is a real audience, and this is the evidence that
@@ -817,6 +844,92 @@ func (p *Poller) quotaReport(ctx context.Context, w *Watch, region string, m *Ma
 	return &rep
 }
 
+// capProbe is what the current quota reading says about a capped fleet (#158).
+type capProbe int
+
+const (
+	// capProbeUnknown: the quota could not be read in every region of the
+	// watch (no reader, an error, an unreported family, too many regions).
+	// Falls back to the #153 time-based re-probe.
+	capProbeUnknown capProbe = iota
+	// capProbeRoom: some region shows room for another worker, so the cap may
+	// have lifted (other usage released capacity). Keeps the #153 interval,
+	// not an immediate attempt: if the reading disagrees with EC2, an
+	// immediate attempt would fail every cycle.
+	capProbeRoom
+	// capProbeNoRoom: every region was read, none has room for another worker,
+	// and the cap region's limit is no higher than at cap time. A launch would
+	// be refused, so only the slow QuotaCapBackstopInterval re-probe is made.
+	capProbeNoRoom
+	// capProbeRaised: the cap region's limit is higher than the one recorded at
+	// cap time — a granted increase. Tops up on this cycle.
+	capProbeRaised
+)
+
+func (c capProbe) String() string {
+	switch c {
+	case capProbeRoom:
+		return "the quota shows room"
+	case capProbeNoRoom:
+		return "quota unchanged and full"
+	case capProbeRaised:
+		return "quota raised"
+	default:
+		return "quota not readable"
+	}
+}
+
+// maxCapProbeRegions bounds how many regions a capped fleet's quota probe
+// reads per cycle (each GetQuotas is ~16 GetServiceQuota calls plus
+// DescribeInstances, cached by the reader for 5 minutes). A fleet over more
+// regions keeps the #153 time-based re-probe.
+const maxCapProbeRegions = 3
+
+// probeQuotaCap reads the current family quota in every region of a capped
+// fleet and compares it with what was recorded at cap time (#158). It uses
+// the same reader, and so the same servicequotas/DescribeInstances reads, as
+// the cap report, and it fails open: anything it can't read is
+// capProbeUnknown, which keeps today's behaviour. Unknown is never "full".
+func (p *Poller) probeQuotaCap(ctx context.Context, w *Watch) capProbe {
+	if p.quotas == nil || len(w.Regions) == 0 || len(w.Regions) > maxCapProbeRegions {
+		return capProbeUnknown
+	}
+	rungs := SplitInstanceTypePatterns(w.InstanceTypePattern)
+	if len(rungs) == 0 {
+		return capProbeUnknown
+	}
+	room := false
+	for _, region := range w.Regions {
+		lctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		// Desired 1: "is there room for one more of the smallest rung?" — the
+		// most optimistic reading, so a doubtful case probes rather than waits.
+		rep, err := quotacheck.Feasibility(lctx, p.quotas, quotacheck.Request{
+			Region: region, Rungs: rungs, Spot: w.Spot, Desired: 1,
+		})
+		cancel()
+		if err != nil || !rep.Known {
+			if p.verbose {
+				why := fmt.Sprintf("no %s-family figure", rep.Family)
+				if err != nil {
+					why = err.Error()
+				}
+				fmt.Fprintf(os.Stderr, "Watch %s: quota not readable in %s, keeping the time-based re-probe: %s\n", w.WatchID, region, why)
+			}
+			return capProbeUnknown
+		}
+		if region == w.QuotaCapRegion && w.QuotaCapLimit > 0 && rep.Limit > w.QuotaCapLimit {
+			return capProbeRaised
+		}
+		if rep.Feasible {
+			room = true
+		}
+	}
+	if room {
+		return capProbeRoom
+	}
+	return capProbeNoRoom
+}
+
 // clearQuotaCap drops a watch's quota-cap state (#153) after a successful launch
 // or on reaching the fleet goal, so a granted quota increase is picked up with no
 // user action and a later cap notifies again.
@@ -831,6 +944,8 @@ func (p *Poller) clearQuotaCap(ctx context.Context, w *Watch) {
 	w.QuotaCappedCount = 0
 	w.QuotaCappedAt = time.Time{}
 	w.QuotaCapReason = ""
+	w.QuotaCapLimit = 0
+	w.QuotaCapRegion = ""
 }
 
 // searchBestMatch runs a single-watch truffle capacity search and returns the

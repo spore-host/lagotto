@@ -60,6 +60,16 @@ const MaxConsecutiveFailures = 10
 // within half an hour with no user action.
 const QuotaCapReprobeInterval = 30 * time.Minute
 
+// QuotaCapBackstopInterval is how long a capped fleet waits between top-up
+// attempts when the poller CAN read the quota and it shows the ceiling has not
+// moved: the cap region's limit is no higher than at cap time and no region of
+// the watch has room for another worker (#158). Those attempts are doomed by
+// the reading, so the #153 30-minute re-probe is skipped; this slow backstop
+// remains only because the usage half of the reading is computed from
+// DescribeInstances and could disagree with what EC2 enforces. A raised limit
+// is acted on at the next poll, not after this interval.
+const QuotaCapBackstopInterval = 6 * time.Hour
+
 // Watch represents a user's request to monitor for instance capacity.
 type Watch struct {
 	WatchID string `json:"watch_id" dynamodbav:"watch_id"`
@@ -153,6 +163,14 @@ type Watch struct {
 	// QuotaCapReason is the human explanation (family, numbers when known, and the
 	// quota-increase hint) shown by `lagotto status`.
 	QuotaCapReason string `json:"quota_cap_reason,omitempty" dynamodbav:"quota_cap_reason,omitempty"`
+	// QuotaCapLimit and QuotaCapRegion record the family vCPU limit the poller
+	// read in the region the cap was hit, at cap time (#158). A later cycle that
+	// reads a higher limit there tops up at once instead of waiting out the
+	// backoff. 0 means the limit could not be read at cap time; a real limit of
+	// 0 can't occur here, since a cap needs at least one running worker
+	// (QuotaCappedCount > 0). omitempty, so older records read back as unknown.
+	QuotaCapLimit  int32  `json:"quota_cap_limit,omitempty" dynamodbav:"quota_cap_limit,omitempty"`
+	QuotaCapRegion string `json:"quota_cap_region,omitempty" dynamodbav:"quota_cap_region,omitempty"`
 	// QuotaInfeasible lists the single-shot candidates (instance type, region)
 	// that EC2 refused because of an account quota (#238). A live entry (younger
 	// than QuotaCapReprobeInterval) makes the poller skip that candidate and try
