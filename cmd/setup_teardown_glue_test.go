@@ -20,6 +20,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/spore-host/lagotto/pkg/awscfg"
+	"github.com/spore-host/lagotto/pkg/deploy"
 	"github.com/spore-host/lagotto/pkg/runtimeiam"
 	"github.com/spore-host/lagotto/pkg/watcher"
 )
@@ -211,6 +212,35 @@ type fakeTables struct {
 	nonEmpty []string
 	// result, when set, is what DeleteTables returns.
 	result *watcher.TableTeardown
+	// scheduleNames / namesErr are what ScheduledLaunchScheduleNames returns.
+	scheduleNames []string
+	namesErr      error
+	// log, when set, records the order of reads and deletions (#260).
+	log *[]string
+}
+
+func (f *fakeTables) ScheduledLaunchScheduleNames(context.Context) ([]string, error) {
+	if f.log != nil {
+		*f.log = append(*f.log, "read schedule names")
+	}
+	return f.scheduleNames, f.namesErr
+}
+
+// fakeLaunchSchedules stands in for the scheduler teardown deletes from.
+type fakeLaunchSchedules struct {
+	recorded []string
+	called   bool
+	result   deploy.LaunchScheduleTeardown
+	err      error
+	log      *[]string
+}
+
+func (f *fakeLaunchSchedules) DeleteLaunchSchedules(_ context.Context, recorded []string) (deploy.LaunchScheduleTeardown, error) {
+	f.called, f.recorded = true, recorded
+	if f.log != nil {
+		*f.log = append(*f.log, "delete schedules")
+	}
+	return f.result, f.err
 }
 
 func (f *fakeTables) NonEmptyTables(context.Context) ([]string, error) {
@@ -225,6 +255,9 @@ func (f *fakeTables) NonEmptyTables(context.Context) ([]string, error) {
 
 func (f *fakeTables) DeleteTables(context.Context) (watcher.TableTeardown, error) {
 	f.deleted = true
+	if f.log != nil {
+		*f.log = append(*f.log, "delete tables")
+	}
 	if f.result != nil {
 		return *f.result, nil
 	}
@@ -233,6 +266,7 @@ func (f *fakeTables) DeleteTables(context.Context) (watcher.TableTeardown, error
 
 func stubTeardown(t *testing.T, tables *fakeTables, roles runtimeiam.RoleDeleteAPI, iamRoles, force bool) {
 	t.Helper()
+	stubLaunchSchedules(t, &fakeLaunchSchedules{})
 	awscfg.SetLoaderForTest(t, func(context.Context, ...func(*awsconfig.LoadOptions) error) (aws.Config, error) {
 		return aws.Config{Region: "us-west-2"}, nil
 	})
@@ -243,6 +277,13 @@ func stubTeardown(t *testing.T, tables *fakeTables, roles runtimeiam.RoleDeleteA
 	t.Cleanup(func() {
 		newTeardownStore, newRoleDeleter, teardownIAMRoles, teardownForce = oldStore, oldDeleter, oldRoles, oldForce
 	})
+}
+
+func stubLaunchSchedules(t *testing.T, f *fakeLaunchSchedules) {
+	t.Helper()
+	old := newLaunchScheduleDeleter
+	newLaunchScheduleDeleter = func(aws.Config) launchScheduleDeleter { return f }
+	t.Cleanup(func() { newLaunchScheduleDeleter = old })
 }
 
 func runTeardownForTest(t *testing.T) (string, error) {
@@ -414,4 +455,85 @@ type refusingHTTP struct{}
 
 func (refusingHTTP) Do(*http.Request) (*http.Response, error) {
 	return nil, errors.New("refused by test")
+}
+
+// With --force, teardown deletes the per-launch schedules the records name
+// (and those found by prefix) BEFORE the tables, since the table is the only
+// record of them, and reports them alongside the tables (#260).
+func TestRunTeardown_DeletesLaunchSchedulesBeforeTables(t *testing.T) {
+	var order []string
+	tables := &fakeTables{nonEmpty: []string{"lagotto-scheduled-launches"}, log: &order,
+		scheduleNames: []string{"lagotto-launch-sl-aaaa", "lagotto-launch-sl-fired"}}
+	sched := &fakeLaunchSchedules{log: &order, result: deploy.LaunchScheduleTeardown{
+		Deleted: []string{"lagotto-launch-sl-aaaa", "lagotto-launch-sl-orph"},
+		Absent:  []string{"lagotto-launch-sl-fired"},
+	}}
+	stubTeardown(t, tables, &cmdRoleDeleter{}, false, true)
+	stubLaunchSchedules(t, sched)
+
+	out, err := runTeardownForTest(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"read schedule names", "delete schedules", "delete tables"}; !reflect.DeepEqual(order, want) {
+		t.Errorf("order = %v, want %v", order, want)
+	}
+	if !reflect.DeepEqual(sched.recorded, tables.scheduleNames) {
+		t.Errorf("deleter got %v, want the recorded names %v", sched.recorded, tables.scheduleNames)
+	}
+	for _, want := range []string{
+		"Deleted schedule lagotto-launch-sl-aaaa",
+		"Deleted schedule lagotto-launch-sl-orph",
+		"Schedules already absent: lagotto-launch-sl-fired",
+		"Deleted table lagotto-watches",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+}
+
+// Without --force, a non-empty table refuses before any schedule is touched.
+func TestRunTeardown_RefusalTouchesNoSchedule(t *testing.T) {
+	tables := &fakeTables{nonEmpty: []string{"lagotto-scheduled-launches"}}
+	sched := &fakeLaunchSchedules{}
+	stubTeardown(t, tables, &cmdRoleDeleter{}, false, false)
+	stubLaunchSchedules(t, sched)
+	if _, err := runTeardownForTest(t); err == nil {
+		t.Fatal("non-empty tables without --force did not refuse")
+	}
+	if sched.called || tables.deleted {
+		t.Errorf("a refused teardown deleted schedules=%v tables=%v", sched.called, tables.deleted)
+	}
+}
+
+// When the schedules cannot be read or deleted, no table is deleted, so the
+// record of the schedules survives for a retry.
+func TestRunTeardown_ScheduleFailureKeepsTables(t *testing.T) {
+	tables := &fakeTables{empty: true, namesErr: errors.New("AccessDeniedException: dynamodb:Scan")}
+	stubTeardown(t, tables, &cmdRoleDeleter{}, false, false)
+	if _, err := runTeardownForTest(t); err == nil || !strings.Contains(err.Error(), "no table was deleted") {
+		t.Errorf("err = %v, want the record-read failure", err)
+	}
+	if tables.deleted {
+		t.Error("tables deleted after the schedule names could not be read")
+	}
+
+	tables = &fakeTables{empty: true}
+	sched := &fakeLaunchSchedules{
+		result: deploy.LaunchScheduleTeardown{Deleted: []string{"lagotto-launch-sl-aaaa"}},
+		err:    errors.New("AccessDeniedException: scheduler:DeleteSchedule"),
+	}
+	stubTeardown(t, tables, &cmdRoleDeleter{}, false, false)
+	stubLaunchSchedules(t, sched)
+	out, err := runTeardownForTest(t)
+	if err == nil || !strings.Contains(err.Error(), "scheduler:ListSchedules and scheduler:DeleteSchedule") {
+		t.Errorf("err = %v, want it to name the scheduler permissions", err)
+	}
+	if tables.deleted {
+		t.Error("tables deleted after a schedule deletion failed")
+	}
+	if !strings.Contains(out, "Deleted schedule lagotto-launch-sl-aaaa") {
+		t.Errorf("a schedule deleted before the failure is not reported:\n%s", out)
+	}
 }

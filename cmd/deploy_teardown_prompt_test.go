@@ -16,3 +16,12 @@ func TestDeployTeardownPromptNamesEveryTable(t *testing.T) {
 		}
 	}
 }
+
+// deploy --teardown keeps the per-launch schedules with the scheduled-launches
+// table and names the command that deletes both (#260).
+func TestDeployTeardownPromptNamesTheScheduleDeleter(t *testing.T) {
+	p := deployTeardownPrompt("us-west-2", "123456789012", "bucket")
+	if !strings.Contains(p, "'lagotto-launch-sl-*' schedules") || !strings.Contains(p, "'lagotto teardown' deletes both") {
+		t.Errorf("prompt does not say what deletes the per-launch schedules:\n%s", p)
+	}
+}

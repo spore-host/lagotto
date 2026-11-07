@@ -133,6 +133,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		},
 	})
 	report := doctor.Evaluate(state)
+	appendLaunchScheduleCheck(ctx, report, cfg.Region, deploy.New(cfg), store.ScheduledLaunchScheduleNames)
 
 	if err := writeDoctorReport(cmd.OutOrStdout(), report, getOutputFormat()); err != nil {
 		return err

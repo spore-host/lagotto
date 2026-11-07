@@ -235,7 +235,13 @@ succeeds.
   poller exists in any of them or a region cannot be checked.
 - **The artifact bucket** (`lagotto-lambda-<account>-<region>`) — it is created
   outside the poller's lifecycle. Delete it manually if you want.
-- **Per-launch `lagotto-launch-sl-*` schedules.**
+- **Per-launch `lagotto-launch-sl-*` schedules.** Each one fires a scheduled
+  launch recorded in the retained `lagotto-scheduled-launches` table, so it is
+  kept with that table, and a redeployed poller fires it again. `lagotto
+  teardown` deletes them together with the tables (#260): every schedule a
+  record names and every `lagotto-launch-sl-*` schedule in the default group,
+  before it deletes the table that records them. `lagotto doctor` warns about a
+  per-launch schedule with no record.
 
 ## Alternate: deploy via CloudFormation (IaC / enterprise)
 

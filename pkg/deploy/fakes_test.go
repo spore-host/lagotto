@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/cloudformation"
 	cfntypes "github.com/aws/aws-sdk-go-v2/service/cloudformation/types"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
 	lambdatypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
 	"github.com/aws/aws-sdk-go-v2/service/scheduler"
+	schedulertypes "github.com/aws/aws-sdk-go-v2/service/scheduler/types"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 )
 
@@ -194,6 +196,35 @@ type fakeScheduler struct {
 	getCalls    int
 	deleteErr   error
 	log         *callLog
+
+	// Per-launch schedules (#260): listPages are the ListSchedules pages, in
+	// order; deleted records each DeleteSchedule name; deleteErrs fails one.
+	listPages  [][]string
+	listErr    error
+	listInputs []*scheduler.ListSchedulesInput
+	deleted    []string
+	deleteErrs map[string]error
+}
+
+func (f *fakeScheduler) ListSchedules(_ context.Context, in *scheduler.ListSchedulesInput, _ ...func(*scheduler.Options)) (*scheduler.ListSchedulesOutput, error) {
+	f.listInputs = append(f.listInputs, in)
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	page := 0
+	if in.NextToken != nil {
+		_, _ = fmt.Sscanf(*in.NextToken, "page-%d", &page)
+	}
+	out := &scheduler.ListSchedulesOutput{}
+	if page < len(f.listPages) {
+		for _, n := range f.listPages[page] {
+			out.Schedules = append(out.Schedules, schedulertypes.ScheduleSummary{Name: aws.String(n)})
+		}
+	}
+	if page+1 < len(f.listPages) {
+		out.NextToken = aws.String(fmt.Sprintf("page-%d", page+1))
+	}
+	return out, nil
 }
 
 func (f *fakeScheduler) GetSchedule(_ context.Context, _ *scheduler.GetScheduleInput, _ ...func(*scheduler.Options)) (*scheduler.GetScheduleOutput, error) {
@@ -217,12 +248,16 @@ func (f *fakeScheduler) UpdateSchedule(_ context.Context, in *scheduler.UpdateSc
 	return &scheduler.UpdateScheduleOutput{}, nil
 }
 
-func (f *fakeScheduler) DeleteSchedule(_ context.Context, _ *scheduler.DeleteScheduleInput, _ ...func(*scheduler.Options)) (*scheduler.DeleteScheduleOutput, error) {
+func (f *fakeScheduler) DeleteSchedule(_ context.Context, in *scheduler.DeleteScheduleInput, _ ...func(*scheduler.Options)) (*scheduler.DeleteScheduleOutput, error) {
 	f.deleteCalls++
 	f.log.add("DeleteSchedule")
 	if f.deleteErr != nil {
 		return nil, f.deleteErr
 	}
+	if err := f.deleteErrs[aws.ToString(in.Name)]; err != nil {
+		return nil, err
+	}
+	f.deleted = append(f.deleted, aws.ToString(in.Name))
 	return &scheduler.DeleteScheduleOutput{}, nil
 }
 

@@ -221,7 +221,7 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 	// Persist the scheduled launch, then arm the schedule. Store first so the
 	// Lambda can always resolve the id the schedule will send.
 	scheduleID := "sl-" + uuid.New().String()[:8]
-	scheduleName := "lagotto-launch-" + scheduleID
+	scheduleName := deploy.LaunchScheduleName(scheduleID)
 	store := watcher.NewStore(cfg, watchesTable, historyTable)
 	if _, err := store.EnsureScheduledTable(ctx); err != nil {
 		return fmt.Errorf("ensure scheduled-launches table: %w", err)
