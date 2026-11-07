@@ -151,6 +151,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **CI and release builds use Go 1.27.3** (from 1.26.10) and golangci-lint
+  2.15.0 (from 2.14.0; the older binary can't read Go 1.27 export data), per
+  the org-wide pin move (spore-host/spore-host#609). `go.mod` still says
+  `go 1.26.0`, so importers are not forced onto 1.27.
+
 - `lagotto watch` refuses a negative `--max-price` (0 still means any price).
   It used to store it, and the poller treated it as no limit. The check is
   shared with `lagotto update` (#257).
