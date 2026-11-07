@@ -37,6 +37,13 @@ Besides each watch's definition, the table shows its heartbeat:
   LAST ERR   the class of its latest error: capacity, quota, terminal,
              unknown, or search (the capacity search itself failed).
 
+EXPOSURE is what the watch can cost if it lands: "≤$X/hr" for spawn (a
+fleet's total), "30m@$X/hr" for a hold's reservation (billed even if unused),
+"none" for notify, "unknown" when lagotto has no price. "cap" means it is your
+--max-price, "*" a rate from the static price list (the note under the table
+says when it was collected and why), "?" that some types or regions have no
+price. The CLI never calls the live Price List.
+
 Use -o wide for the full latest error, or -o json for every field.
 "lagotto status <watch-id>" shows the full errors and when they happened.`,
 	RunE: runList,
@@ -99,6 +106,10 @@ func runList(cmd *cobra.Command, args []string) error {
 		ptrs[i] = &watches[i]
 	}
 	annotateEmailStates(ctx, emailSubscriberFor(cfg, os.Getenv, aws.ToString(identity.Account)), ptrs)
+	// Cost exposure per watch (#239 phase 5), for the EXPOSURE column and JSON.
+	for _, w := range ptrs {
+		cliExposure(w)
+	}
 
 	if getOutputFormat() == "json" {
 		enc := json.NewEncoder(cmd.OutOrStdout())
@@ -142,8 +153,8 @@ const stalePollAfter = 15 * time.Minute
 // writeWatchTable renders the `list` table. now is a parameter so the ages are
 // testable against a fixed clock. wide (`-o wide`) adds the full last error.
 func writeWatchTable(out io.Writer, watches []watcher.Watch, now time.Time, wide bool) {
-	const row = "%-12s %-10s %-15s %-20s %-20s %-25s %-6v %-10s %-25s %-9s %5s %-8s"
-	header := fmt.Sprintf(row, "WATCH ID", "STATUS", "PROJECT", "OWNER", "PATTERN", "REGIONS", "SPOT", "ACTION", "EXPIRES",
+	const row = "%-12s %-10s %-15s %-20s %-20s %-25s %-6v %-10s %-16s %-25s %-9s %5s %-8s"
+	header := fmt.Sprintf(row, "WATCH ID", "STATUS", "PROJECT", "OWNER", "PATTERN", "REGIONS", "SPOT", "ACTION", "EXPOSURE", "EXPIRES",
 		"LAST POLL", "TRIES", "LAST ERR")
 	if wide {
 		header += " LAST ERROR"
@@ -171,6 +182,7 @@ func writeWatchTable(out io.Writer, watches []watcher.Watch, now time.Time, wide
 			regions,
 			w.Spot,
 			actionCol,
+			exposureCol(w),
 			expiresCol(w, now),
 			lastPollCol(w, now),
 			strconv.Itoa(w.Attempts),
@@ -186,6 +198,51 @@ func writeWatchTable(out io.Writer, watches []watcher.Watch, now time.Time, wide
 		}
 		_, _ = fmt.Fprintln(out, strings.TrimRight(line, " "))
 	}
+	writeExposureNotes(out, watches)
+}
+
+// exposureCol is the EXPOSURE column (#239 phase 5): what the watch can cost
+// if it lands, per hour (a fleet's total), or a hold's reservation rate. See
+// watcher.Exposure.Column for the markers.
+func exposureCol(w *watcher.Watch) string {
+	if w.Exposure == nil {
+		cliExposure(w)
+	}
+	return truncate(w.Exposure.Column(), 16)
+}
+
+// writeExposureNotes explains the EXPOSURE markers under the table, once each:
+// every static rate's label (static, collected <date>: why) for "*", and "?"
+// for a maximum with unpriced combinations. The owner rule (truffle#184) is
+// that a static price never appears without that label.
+func writeExposureNotes(out io.Writer, watches []watcher.Watch) {
+	seen := map[string]bool{}
+	var notes []string
+	partial := false
+	for i := range watches {
+		e := watches[i].Exposure
+		if e == nil || e.Basis != watcher.BasisOnDemand {
+			continue
+		}
+		for _, n := range e.StaticNotes {
+			if !seen[n] {
+				seen[n] = true
+				notes = append(notes, n)
+			}
+		}
+		partial = partial || len(e.Unpriced) > 0
+	}
+	if len(notes) == 0 && !partial {
+		return
+	}
+	_, _ = fmt.Fprintln(out)
+	for _, n := range notes {
+		_, _ = fmt.Fprintf(out, "EXPOSURE * on-demand rate, %s\n", n)
+	}
+	if partial {
+		_, _ = fmt.Fprintln(out, "EXPOSURE ? some of the watch's types or regions have no price, so the real maximum may be higher")
+	}
+	_, _ = fmt.Fprintln(out, "EXPOSURE is the cost if the watch lands: \"lagotto status <watch-id>\" shows its price basis.")
 }
 
 // expiresCol is the EXPIRES column: the expiry time, or for an until-landed

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/spore-host/lagotto/pkg/watcher"
@@ -81,19 +82,31 @@ var stdinIsTerminal = func() bool {
 // capacity at any point in the next weeks. --yes skips the prompt; without a
 // terminal to ask on, --yes is required. Every other watch passes straight
 // through.
-func confirmUntilLanded(in io.Reader, errOut io.Writer, isTTY, yes bool, action watcher.ActionMode, pattern string, ul untilLandedFlags) error {
+//
+// The prompt (and the refusal) carry the watch's cost exposure (#239 phase 5):
+// "if this lands: up to $X/hr", with its price basis and source.
+func confirmUntilLanded(in io.Reader, errOut io.Writer, isTTY, yes bool, action watcher.ActionMode, pattern string, ul untilLandedFlags, exp *watcher.Exposure) error {
 	if !ul.enabled || yes || (action != watcher.ActionSpawn && action != watcher.ActionHold) {
 		return nil
 	}
 	what := "launch a billable " + pattern + " instance"
 	if action == watcher.ActionHold {
-		what = "create a billable capacity reservation for " + pattern + " (billed for 30 minutes whether used or not)"
+		what = fmt.Sprintf("create a billable capacity reservation for %s (billed for %d minutes whether used or not)",
+			pattern, int(watcher.HoldDuration/time.Minute))
 	}
 	if !isTTY {
-		return fmt.Errorf("--until-landed --action %s needs confirmation: it may %s at any time until it lands. "+
-			"Pass --yes to confirm when not running in a terminal; no watch was created", action, what)
+		msg := fmt.Sprintf("--until-landed --action %s needs confirmation: it may %s at any time until it lands", action, what)
+		if exp != nil {
+			msg += " (" + exp.Summary + ")"
+		}
+		return fmt.Errorf("%s. Pass --yes to confirm when not running in a terminal; no watch was created", msg)
 	}
 	_, _ = fmt.Fprintf(errOut, "This watch has no TTL: it may %s at any time until it lands.\n", what)
+	if exp != nil {
+		for _, line := range exp.Lines() {
+			_, _ = fmt.Fprintf(errOut, "  %s\n", line)
+		}
+	}
 	_, _ = fmt.Fprintf(errOut, "It pauses itself unless you run 'lagotto ack <id>' within %s (%d × the %s --remind interval).\n",
 		watcher.FormatSpan(ul.window()), ul.pauseAfter+1, watcher.FormatSpan(ul.remindEvery))
 	_, _ = fmt.Fprint(errOut, "Create it? [y/N] ")
@@ -161,5 +174,29 @@ func writeExpires(out io.Writer, w *watcher.Watch, now time.Time) {
 			w.WatchID, watcher.FormatSpan(w.AckWindow()), w.RemindPauseAfter+1, remind)
 	default:
 		_, _ = fmt.Fprintf(out, "Expires:  until landed (deadline was %s)\n", w.ExpiresAt.Format(time.RFC3339))
+	}
+}
+
+// cliExposure fills and returns w's cost exposure (#239 phase 5) as the CLI
+// prices it: the --max-price cap, else the static price list, labelled static
+// with why and when it was collected. The CLI makes no Price List call, so it
+// needs no pricing permission.
+func cliExposure(w *watcher.Watch) *watcher.Exposure {
+	if w.Exposure == nil {
+		w.Exposure = watcher.StaticExposure(w, watcher.CLIStaticPriceReason)
+	}
+	return w.Exposure
+}
+
+// writeExposure prints an exposure's summary after label and its details
+// indented beneath it. A nil exposure prints nothing.
+func writeExposure(out io.Writer, label string, e *watcher.Exposure) {
+	if e == nil {
+		return
+	}
+	pad := strings.Repeat(" ", len(label)+2)
+	_, _ = fmt.Fprintf(out, "%s%s\n", label, e.Summary)
+	for _, d := range e.Details {
+		_, _ = fmt.Fprintf(out, "%s%s\n", pad, d)
 	}
 }

@@ -66,10 +66,10 @@ func TestConfirmUntilLanded(t *testing.T) {
 	var errOut bytes.Buffer
 
 	// Passes straight through: --yes, notify, or not until-landed at all.
-	if err := confirmUntilLanded(strings.NewReader(""), &errOut, false, true, watcher.ActionSpawn, "p5.48xlarge", ul); err != nil {
+	if err := confirmUntilLanded(strings.NewReader(""), &errOut, false, true, watcher.ActionSpawn, "p5.48xlarge", ul, nil); err != nil {
 		t.Errorf("--yes: %v", err)
 	}
-	if err := confirmUntilLanded(strings.NewReader(""), &errOut, false, false, watcher.ActionSpawn, "p5.48xlarge", untilLandedFlags{}); err != nil {
+	if err := confirmUntilLanded(strings.NewReader(""), &errOut, false, false, watcher.ActionSpawn, "p5.48xlarge", untilLandedFlags{}, nil); err != nil {
 		t.Errorf("not until-landed: %v", err)
 	}
 	if errOut.Len() != 0 {
@@ -77,14 +77,14 @@ func TestConfirmUntilLanded(t *testing.T) {
 	}
 
 	// No terminal and no --yes: refused, naming --yes.
-	err := confirmUntilLanded(strings.NewReader("y\n"), &errOut, false, false, watcher.ActionHold, "p5.48xlarge", ul)
+	err := confirmUntilLanded(strings.NewReader("y\n"), &errOut, false, false, watcher.ActionHold, "p5.48xlarge", ul, nil)
 	if err == nil || !strings.Contains(err.Error(), "--yes") || !strings.Contains(err.Error(), "capacity reservation") {
 		t.Errorf("non-TTY = %v", err)
 	}
 
 	// A terminal: the prompt explains, and only an explicit yes proceeds.
 	errOut.Reset()
-	if err := confirmUntilLanded(strings.NewReader("y\n"), &errOut, true, false, watcher.ActionSpawn, "p5.48xlarge", ul); err != nil {
+	if err := confirmUntilLanded(strings.NewReader("y\n"), &errOut, true, false, watcher.ActionSpawn, "p5.48xlarge", ul, nil); err != nil {
 		t.Errorf("TTY yes: %v", err)
 	}
 	for _, want := range []string{"no TTL", "billable p5.48xlarge instance", "lagotto ack", "21d", "7d", "[y/N]"} {
@@ -92,7 +92,7 @@ func TestConfirmUntilLanded(t *testing.T) {
 			t.Errorf("prompt lacks %q:\n%s", want, errOut.String())
 		}
 	}
-	err = confirmUntilLanded(strings.NewReader("\n"), &errOut, true, false, watcher.ActionSpawn, "p5.48xlarge", ul)
+	err = confirmUntilLanded(strings.NewReader("\n"), &errOut, true, false, watcher.ActionSpawn, "p5.48xlarge", ul, nil)
 	if err == nil || !strings.Contains(err.Error(), "not confirmed") {
 		t.Errorf("TTY default answer = %v, want not confirmed", err)
 	}

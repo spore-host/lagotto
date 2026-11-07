@@ -176,7 +176,9 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		if err := watcher.ValidateUntilLanded(action, watchMaintain, channels, ul.remindEvery, watcher.DefaultRemindPauseAfter); err != nil {
 			return err
 		}
-		if err := confirmUntilLanded(os.Stdin, os.Stderr, stdinIsTerminal(), watchYes, action, pattern, ul); err != nil {
+		exp := cliExposure(&watcher.Watch{Service: service, Action: action, InstanceTypePattern: pattern,
+			Regions: watchRegions, Spot: watchSpot, MaxPrice: watchMaxPrice, DesiredCount: watchMaintain})
+		if err := confirmUntilLanded(os.Stdin, os.Stderr, stdinIsTerminal(), watchYes, action, pattern, ul, exp); err != nil {
 			return err
 		}
 	}
@@ -274,6 +276,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		return pollScheduleUpdateRefusal(armAction, "no watch was created", store.PutWatch(ctx, w), err)
 	}
 
+	cliExposure(w)
 	if getOutputFormat() == "json" {
 		enc := json.NewEncoder(cmd.OutOrStdout())
 		enc.SetIndent("", "  ")
@@ -306,6 +309,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Max price: $%.4f/hr\n", w.MaxPrice)
 	}
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Action:   %s\n", w.Action)
+	writeExposure(cmd.OutOrStdout(), "  Exposure: ", w.Exposure)
 	if action == watcher.ActionSpawn && w.Service == watcher.ServiceEC2 {
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Spawn config: %s\n", watchSpawnConfig)
 	}

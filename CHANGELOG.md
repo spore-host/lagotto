@@ -117,6 +117,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     only, and only `_test.go` files and `go test -exec` wrappers may import
     it. New `Install` and `Recorder.Take` support a `TestMain` that does its
     own setup.
+- **Cost exposure: what a watch can cost if it lands** (#239, phase 5).
+  - `lagotto watch` (and the `--until-landed` confirmation prompt) and
+    `lagotto status` show an `Exposure:` line. For spawn it is
+    "if this lands: up to $X/hr (≈$Y/day)", multiplied by N for a
+    `--maintain N` fleet. For hold it is "30 min reserved at up to $Y/hr
+    (≈$Z), billed even if unused". Notify watches show "launches and
+    reserves nothing", and SageMaker watches say the cost is unknown.
+  - `lagotto list` has a new `EXPOSURE` column, e.g. `≤$32.77/hr`,
+    `30m@$32.77/hr`, `≤$5.00/hr cap`, `none` or `unknown`. A `*` marks a rate
+    from the static price list, and a note under the table says when that
+    list was collected and why it was used. `-o json` on `list`, `status` and
+    `watch` carries an `exposure` object.
+  - Until-landed reminders include the same lines, and their webhook/sns JSON
+    has an `exposure` key.
+  - **Where the rate comes from.** The `--max-price` cap when you set one,
+    labelled as your cap and not a quote. Otherwise the on-demand rate:
+    - the CLI takes it from the static spore.host price list and says so,
+      with the date it was collected. The CLI does not call the live AWS
+      Price List, so it needs no new permission;
+    - the poller, for reminders, uses the live AWS Price List, which its
+      existing policy already allows. If the live API fails it falls back to
+      the static list, labelled the same way.
+
+    The static list has no GPU or accelerator family newer than p4d, so in
+    the CLI a watch for p5, g6e, g7e and similar types shows `unknown`. On-demand is the
+    ceiling for spot, so a spot watch's "up to" is still an upper bound.
+  - A wildcard pattern (e.g. `c7g.*`) or a watch on several types or regions
+    shows the highest rate, labelled with the range. A wildcard is expanded
+    against the static price list, so matching types the list lacks are not
+    counted, and the line says so.
+  - The poller's runtime policy is unchanged.
 
 ### Changed
 

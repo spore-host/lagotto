@@ -53,6 +53,9 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	// send reminders (#239). Best effort, to stderr, so -o json stays clean.
 	warnIfPollerPredatesReminders(ctx, cfg, os.Stderr, w)
 
+	// Cost exposure (#239 phase 5), in full: summary, basis and source.
+	cliExposure(w)
+
 	if getOutputFormat() == "json" {
 		enc := json.NewEncoder(cmd.OutOrStdout())
 		enc.SetIndent("", "  ")
@@ -76,6 +79,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		_, _ = fmt.Fprintf(out, "Max price: $%.4f/hr\n", w.MaxPrice)
 	}
 	_, _ = fmt.Fprintf(out, "Action:   %s\n", w.Action)
+	writeExposure(out, "Exposure: ", w.Exposure)
 	writeNotifyChannels(out, w)
 	if w.DesiredCount > 0 {
 		_, _ = fmt.Fprintf(out, "Fleet:    maintain %d worker(s)\n", w.DesiredCount)

@@ -116,6 +116,12 @@ func (h *Holder) forgetSubnets(region string) {
 	}
 }
 
+// HoldDuration is how long a hold's capacity reservation lasts: its EndDate is
+// creation + HoldDuration. The reservation is billed at the on-demand rate for
+// all of it whether or not an instance is launched into it, which is what the
+// hold exposure line (#239, exposure.go) states.
+const HoldDuration = 30 * time.Minute
+
 // Hold creates a targeted ODCR for the matched instance type, in the first
 // candidate AZ that has a default subnet (#209); m.AvailabilityZone is set to
 // that AZ. The reservation expires after 30 minutes — the user must launch
@@ -138,7 +144,7 @@ func (h *Holder) Hold(ctx context.Context, w *Watch, m *MatchResult) error {
 
 	client := h.createClient(m.Region)
 
-	endDate := time.Now().UTC().Add(30 * time.Minute)
+	endDate := time.Now().UTC().Add(HoldDuration)
 
 	result, err := client.CreateCapacityReservation(ctx, &ec2.CreateCapacityReservationInput{
 		InstanceType:          aws.String(m.InstanceType),
