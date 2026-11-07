@@ -479,6 +479,11 @@ func loadEC2SpawnConfigFile(ctx context.Context, read watcher.ConfigReader, sour
 	if err := cfg.ValidateAndDefaultTTL(); err != nil {
 		return nil, err
 	}
+	// fsx_create's backing bucket must be one the hosted poller is allowed to
+	// create and tag (#242): refuse it here, before the watch is stored.
+	if err := cfg.ValidateFSxBucket(); err != nil {
+		return nil, err
+	}
 	// Resolve any user_data_file / iam_policy_file references to inline content
 	// now, on the creating machine, so the stored watch is self-contained and a
 	// hosted poller with no access to this filesystem can launch it (#132, #140).

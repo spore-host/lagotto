@@ -37,7 +37,7 @@ func minimalWatch(t *testing.T) *Watch {
 		Region:       "us-east-1",
 		FSxCreate:    true,
 		FSxLifecycle: "ephemeral",
-		FSxS3Bucket:  "b",
+		FSxS3Bucket:  "lagotto-fsx-b",
 	}
 	raw, err := json.Marshal(cfg)
 	if err != nil {

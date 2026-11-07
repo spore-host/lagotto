@@ -66,6 +66,10 @@ var impliedRules = concatRules(
 	tagOnCreate("sts", "Tags", "sts:TagSession", "AssumeRole"),
 	tagOnCreate("s3", "Tagging", "s3:PutObjectTagging", "PutObject", "CopyObject", "CreateMultipartUpload"),
 	tagOnCreate("sagemaker", "Tags", "sagemaker:AddTags", "CreateTrainingJob"),
+	// FSx authorizes tags passed on a create as fsx:TagResource as well (Amazon
+	// FSx for Lustre user guide, "Grant permission to tag resources during
+	// creation"). spawn's buildFSxCreateInput always passes Tags (#242).
+	tagOnCreate("fsx", "Tags", "fsx:TagResource", "CreateFileSystem"),
 	[]impliedRule{
 		{Op: "s3:CreateBucket", Field: "CreateBucketConfiguration.Tags", Actions: []string{"s3:TagResource"}},
 		{Op: sdkRoot + "feature/s3/transfermanager.UploadObject", Field: "Tagging", Actions: []string{"s3:PutObjectTagging"}},

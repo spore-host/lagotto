@@ -88,6 +88,38 @@ func (s *SpawnConfigFile) ValidateAndDefaultTTL() error {
 	return nil
 }
 
+// FSxBucketPrefix is the name prefix every fsx_create backing bucket must
+// carry (#242). The hosted poller creates, lists and tags that bucket, and its
+// runtime policy grants those S3 actions only on arn:aws:s3:::lagotto-fsx-*, so
+// the poller can touch no bucket lagotto did not name for itself. spawn
+// (v0.161.0) has no naming convention for this bucket, and a spawn-* prefix
+// would cover buckets spawn's own CLI users create, so the prefix is lagotto's.
+const FSxBucketPrefix = "lagotto-fsx-"
+
+// ValidateFSxBucket refuses an fsx_create config whose fsx_s3_bucket is absent
+// or not under [FSxBucketPrefix] (#242). Called at watch/launch creation (a
+// clear error before anything is stored) and again by the poller before it
+// launches (for configs stored before the rule), where the error wraps
+// failure.ErrConfigRefused so the watch stops as terminal. A config without
+// fsx_create is unaffected: fsx_id mounts an existing filesystem and the
+// poller makes no S3 call for it.
+func (s *SpawnConfigFile) ValidateFSxBucket() error {
+	if !s.FSxCreate {
+		return nil
+	}
+	b := strings.TrimSpace(s.FSxS3Bucket)
+	if b == "" {
+		return fmt.Errorf("fsx_create needs fsx_s3_bucket: a bucket named %s<something> (it is created if absent)", FSxBucketPrefix)
+	}
+	if !strings.HasPrefix(b, FSxBucketPrefix) || len(b) == len(FSxBucketPrefix) {
+		return fmt.Errorf("fsx_s3_bucket %q is not allowed with fsx_create: the bucket must be named %s<something>, "+
+			"because the hosted poller may create, list and tag only buckets with that prefix (#242). "+
+			"Name a %s* bucket here (e.g. %s%s; it is created if absent) and point fsx_import_path / fsx_export_path "+
+			"at your data bucket, or create the filesystem yourself and mount it with fsx_id", b, FSxBucketPrefix, FSxBucketPrefix, FSxBucketPrefix, b)
+	}
+	return nil
+}
+
 // SpawnConfigFile is lagotto's view of the --spawn-config YAML. spawn's
 // LaunchConfig has no JSON/YAML struct tags, so snake_case keys a user naturally
 // writes (on_complete, pre_stop, idle_timeout, iam_policy) silently never map to
