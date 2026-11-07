@@ -9,9 +9,12 @@ import (
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/scheduler"
+	schedulertypes "github.com/aws/aws-sdk-go-v2/service/scheduler/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 
 	"github.com/spore-host/lagotto/pkg/deploy"
+	"github.com/spore-host/lagotto/pkg/testutil"
 	"github.com/spore-host/lagotto/pkg/watcher"
 )
 
@@ -190,5 +193,72 @@ func TestAuthorizeLaunchOwner(t *testing.T) {
 	if _, err := authorizeLaunchOwner(ctx, fixedIdentity(sl.UserID), "sl-aaaa", "us-east-1", nil); err == nil ||
 		!strings.Contains(err.Error(), "--region") {
 		t.Errorf("missing: %v, want not found naming --region", err)
+	}
+}
+
+// TestRunCancelScheduledLaunch_Substrate drives `cancel sl-…` end to end
+// against the emulator: the record is cancelled, the launch's schedule and its
+// retry are deleted, another launch's schedule is left alone, and an unknown
+// id (or a region with no table) reads as not found.
+func TestRunCancelScheduledLaunch_Substrate(t *testing.T) {
+	env := testutil.SubstrateServer(t)
+	ctx := context.Background()
+	cfg := env.AWSConfig
+	prev := cancelYes
+	cancelYes = true
+	t.Cleanup(func() { cancelYes = prev })
+
+	var out bytes.Buffer
+	if err := runCancelScheduledLaunch(ctx, &out, &out, cfg, "sl-nothere"); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("no table: %v, want not found", err)
+	}
+
+	store := watcher.NewStore(cfg, watchesTable, historyTable)
+	if _, err := store.EnsureScheduledTable(ctx); err != nil {
+		t.Fatal(err)
+	}
+	id, err := sts.NewFromConfig(cfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutScheduledLaunch(ctx, &watcher.ScheduledLaunch{ScheduleID: "sl-e2e1", UserID: aws.ToString(id.Arn),
+		Status: watcher.ScheduledRetrying, Region: cfg.Region, ScheduleName: "lagotto-launch-sl-e2e1"}); err != nil {
+		t.Fatal(err)
+	}
+	sc := scheduler.NewFromConfig(cfg)
+	for _, n := range []string{"lagotto-launch-sl-e2e1-r1", "lagotto-launch-sl-e2e2"} {
+		if _, err := sc.CreateSchedule(ctx, &scheduler.CreateScheduleInput{
+			Name: aws.String(n), ScheduleExpression: aws.String("at(2099-01-01T00:00:00)"),
+			FlexibleTimeWindow: &schedulertypes.FlexibleTimeWindow{Mode: schedulertypes.FlexibleTimeWindowModeOff},
+			Target: &schedulertypes.Target{Arn: aws.String("arn:aws:lambda:us-east-1:123456789012:function:lagotto-capacity-poller"),
+				RoleArn: aws.String("arn:aws:iam::123456789012:role/lagotto-capacity-poller-scheduler-invoke")},
+		}); err != nil {
+			t.Fatalf("CreateSchedule %s: %v", n, err)
+		}
+	}
+
+	out.Reset()
+	if err := runCancelScheduledLaunch(ctx, &out, &out, cfg, "sl-e2e1"); err != nil {
+		t.Fatalf("cancel: %v\n%s", err, out.String())
+	}
+	got, err := store.GetScheduledLaunch(ctx, "sl-e2e1")
+	if err != nil || got.Status != watcher.ScheduledCancelled {
+		t.Fatalf("record after cancel: %+v, %v", got, err)
+	}
+	if pending, _ := store.HasPendingScheduledLaunches(ctx); pending {
+		t.Error("the cancelled launch still counts as pending")
+	}
+	if !strings.Contains(out.String(), "Deleted schedule lagotto-launch-sl-e2e1-r1") {
+		t.Errorf("output:\n%s", out.String())
+	}
+	if _, err := sc.GetSchedule(ctx, &scheduler.GetScheduleInput{Name: aws.String("lagotto-launch-sl-e2e1-r1")}); err == nil {
+		t.Error("the retry schedule survived the cancel")
+	}
+	if _, err := sc.GetSchedule(ctx, &scheduler.GetScheduleInput{Name: aws.String("lagotto-launch-sl-e2e2")}); err != nil {
+		t.Errorf("another launch's schedule was touched: %v", err)
+	}
+
+	if err := runCancelScheduledLaunch(ctx, &out, &out, cfg, "sl-unknown"); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("unknown id: %v, want not found", err)
 	}
 }
