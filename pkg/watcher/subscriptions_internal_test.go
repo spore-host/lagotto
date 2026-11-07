@@ -508,3 +508,82 @@ func TestPollAll_ReconcileFailureDoesNotStopTheSweep(t *testing.T) {
 		t.Errorf("PollAll: err = %v, reconcile calls = %d, expired = %d", err, called, summary.Expired)
 	}
 }
+
+// TestCrossRegionTopic_EveryCallUsesTheARNRegion is the live-test bug on #248:
+// with LAGOTTO_SNS_TOPIC_ARN in us-west-2 and the CLI in us-east-2, every SNS
+// call ran in us-east-2 and SNS refused the topic ARN. Now every call on the
+// alerts topic runs in the topic's region, and an sns: channel's publish runs
+// in its own topic's region.
+func TestCrossRegionTopic_EveryCallUsesTheARNRegion(t *testing.T) {
+	ctx := context.Background()
+	f := testutil.NewFakeSNS(alertsARN) // us-west-2
+	f.ClientRegion = "us-east-2"        // the CLI / store region
+	es := NewEmailSubscriptions(f, alertsARN)
+
+	if _, err := es.Ensure(ctx, "alice@example.com"); err != nil {
+		t.Fatalf("Ensure across regions: %v", err)
+	}
+	f.Confirm("alice@example.com")
+	if _, err := es.Ensure(ctx, "bob@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	f.Confirm("bob@example.com")
+	if _, err := es.States(ctx); err != nil {
+		t.Fatalf("States: %v", err)
+	}
+	if _, err := es.Audit(ctx, nil); err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+	n := &Notifier{snsClient: f, subs: f, topicArn: alertsARN}
+	w := emailWatch("w-a", StatusActive, "alice@example.com")
+	if err := n.NotifyExpired(ctx, &w); err != nil {
+		t.Fatalf("email publish across regions: %v", err)
+	}
+	res, err := n.ReconcileEmailSubscriptions(ctx, []Watch{w})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if !reflect.DeepEqual(res.Removed, []string{"bob@example.com"}) {
+		t.Errorf("Removed = %v", res.Removed)
+	}
+	for _, c := range f.Calls {
+		if !strings.HasSuffix(c, " us-west-2") {
+			t.Errorf("%s: not in the topic's region us-west-2", c)
+		}
+	}
+
+	// An sns: channel's own topic in a third region.
+	own := "arn:aws:sns:eu-west-1:111122223333:my-topic"
+	f.Calls = nil
+	raw := emailWatch("w-raw", StatusActive)
+	raw.NotifyChannels = []NotifyChannel{{Type: "sns", Target: own}}
+	m := &MatchResult{InstanceType: "p5.48xlarge", Region: "us-east-2", MatchedAt: time.Now()}
+	sends := map[string]func() error{
+		"match":       func() error { return n.Notify(ctx, &raw, m) },
+		"quota cap":   func() error { return n.NotifyQuotaCap(ctx, &raw, 1, "capped") },
+		"expired":     func() error { return n.NotifyExpired(ctx, &raw) },
+		"unsupported": func() error { return n.NotifyUnsupported(ctx, &raw, "retired") },
+	}
+	for name, send := range sends {
+		f.Calls = nil
+		if err := send(); err != nil {
+			t.Errorf("%s: sns channel in eu-west-1: %v", name, err)
+		}
+		if !reflect.DeepEqual(f.Calls, []string{"Publish eu-west-1"}) {
+			t.Errorf("%s: calls = %v, want one Publish in eu-west-1", name, f.Calls)
+		}
+	}
+}
+
+func TestARNRegion(t *testing.T) {
+	for arn, want := range map[string]string{
+		alertsARN:             "us-west-2",
+		alertsARN + ":0f1e":   "us-west-2",
+		"PendingConfirmation": "",
+		"":                    "",
+	} {
+		if got := ARNRegion(arn); got != want {
+			t.Errorf("ARNRegion(%q) = %q, want %q", arn, got, want)
+		}
+	}
+}

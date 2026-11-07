@@ -111,7 +111,7 @@ func (n *Notifier) publishEmail(ctx context.Context, addr, subject, body string)
 		Subject:           aws.String(subject),
 		Message:           aws.String(body),
 		MessageAttributes: emailMessageAttributes(addr),
-	})
+	}, InARNRegion(n.topicArn))
 	return err
 }
 
@@ -207,7 +207,7 @@ func (n *Notifier) NotifyQuotaCap(ctx context.Context, w *Watch, running int, re
 				_, err = n.snsClient.Publish(ctx, &sns.PublishInput{
 					TopicArn: aws.String(ch.Target),
 					Message:  aws.String(string(data)),
-				})
+				}, InARNRegion(ch.Target))
 			}
 		default:
 			continue
@@ -356,7 +356,7 @@ func (n *Notifier) NotifyExpired(ctx context.Context, w *Watch) error {
 				_, err = n.snsClient.Publish(ctx, &sns.PublishInput{
 					TopicArn: aws.String(ch.Target),
 					Message:  aws.String(string(data)),
-				})
+				}, InARNRegion(ch.Target))
 			}
 		default:
 			continue
@@ -625,7 +625,7 @@ func (n *Notifier) sendSNS(ctx context.Context, topicArn string, w *Watch, m *Ma
 	_, err = n.snsClient.Publish(ctx, &sns.PublishInput{
 		TopicArn: aws.String(topicArn),
 		Message:  aws.String(string(data)),
-	})
+	}, InARNRegion(topicArn))
 	return err
 }
 
@@ -663,7 +663,7 @@ func (n *Notifier) NotifyUnsupported(ctx context.Context, w *Watch, reason strin
 			_, err = n.snsClient.Publish(ctx, &sns.PublishInput{
 				TopicArn: aws.String(ch.Target),
 				Message:  aws.String(string(payload)),
-			})
+			}, InARNRegion(ch.Target))
 		default:
 			continue
 		}

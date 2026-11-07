@@ -28,6 +28,12 @@ type FakeSNS struct {
 	// PageSize bounds ListSubscriptionsByTopic pages (default 2), so paging is
 	// exercised.
 	PageSize int
+	// ClientRegion, when set, is the region the caller's client was built
+	// for. Each call's effective region (after its per-call options) is
+	// recorded in Calls, and a call whose ARN names another region fails the
+	// way SNS does: "InvalidParameter: TopicArn".
+	ClientRegion string
+	Calls        []string
 	// UnsubscribeErr, when set, fails Unsubscribe for this endpoint.
 	UnsubscribeErr map[string]error
 
@@ -84,9 +90,12 @@ func (f *FakeSNS) Confirm(endpoint string) {
 }
 
 // Subscribe implements SNS Subscribe for the email protocol.
-func (f *FakeSNS) Subscribe(_ context.Context, in *sns.SubscribeInput, _ ...func(*sns.Options)) (*sns.SubscribeOutput, error) {
+func (f *FakeSNS) Subscribe(_ context.Context, in *sns.SubscribeInput, optFns ...func(*sns.Options)) (*sns.SubscribeOutput, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.checkRegion("Subscribe", aws.ToString(in.TopicArn), optFns); err != nil {
+		return nil, err
+	}
 	if err := f.notFound(aws.ToString(in.TopicArn)); err != nil {
 		return nil, err
 	}
@@ -104,9 +113,12 @@ func (f *FakeSNS) Subscribe(_ context.Context, in *sns.SubscribeInput, _ ...func
 }
 
 // Unsubscribe removes a confirmed subscription by ARN.
-func (f *FakeSNS) Unsubscribe(_ context.Context, in *sns.UnsubscribeInput, _ ...func(*sns.Options)) (*sns.UnsubscribeOutput, error) {
+func (f *FakeSNS) Unsubscribe(_ context.Context, in *sns.UnsubscribeInput, optFns ...func(*sns.Options)) (*sns.UnsubscribeOutput, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.checkRegion("Unsubscribe", aws.ToString(in.SubscriptionArn), optFns); err != nil {
+		return nil, err
+	}
 	arn := aws.ToString(in.SubscriptionArn)
 	if f.NoTopic {
 		return nil, f.notFound(arn)
@@ -125,9 +137,12 @@ func (f *FakeSNS) Unsubscribe(_ context.Context, in *sns.UnsubscribeInput, _ ...
 }
 
 // ListSubscriptionsByTopic pages through the topic's subscriptions.
-func (f *FakeSNS) ListSubscriptionsByTopic(_ context.Context, in *sns.ListSubscriptionsByTopicInput, _ ...func(*sns.Options)) (*sns.ListSubscriptionsByTopicOutput, error) {
+func (f *FakeSNS) ListSubscriptionsByTopic(_ context.Context, in *sns.ListSubscriptionsByTopicInput, optFns ...func(*sns.Options)) (*sns.ListSubscriptionsByTopicOutput, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.checkRegion("ListSubscriptionsByTopic", aws.ToString(in.TopicArn), optFns); err != nil {
+		return nil, err
+	}
 	if err := f.notFound(aws.ToString(in.TopicArn)); err != nil {
 		return nil, err
 	}
@@ -158,9 +173,12 @@ func (f *FakeSNS) ListSubscriptionsByTopic(_ context.Context, in *sns.ListSubscr
 }
 
 // GetSubscriptionAttributes reads a confirmed subscription's attributes.
-func (f *FakeSNS) GetSubscriptionAttributes(_ context.Context, in *sns.GetSubscriptionAttributesInput, _ ...func(*sns.Options)) (*sns.GetSubscriptionAttributesOutput, error) {
+func (f *FakeSNS) GetSubscriptionAttributes(_ context.Context, in *sns.GetSubscriptionAttributesInput, optFns ...func(*sns.Options)) (*sns.GetSubscriptionAttributesOutput, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.checkRegion("GetSubscriptionAttributes", aws.ToString(in.SubscriptionArn), optFns); err != nil {
+		return nil, err
+	}
 	for _, s := range f.Subs {
 		if s.Arn == aws.ToString(in.SubscriptionArn) {
 			attrs := map[string]string{}
@@ -174,9 +192,12 @@ func (f *FakeSNS) GetSubscriptionAttributes(_ context.Context, in *sns.GetSubscr
 }
 
 // Publish records a publish to the topic.
-func (f *FakeSNS) Publish(_ context.Context, in *sns.PublishInput, _ ...func(*sns.Options)) (*sns.PublishOutput, error) {
+func (f *FakeSNS) Publish(_ context.Context, in *sns.PublishInput, optFns ...func(*sns.Options)) (*sns.PublishOutput, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.checkRegion("Publish", aws.ToString(in.TopicArn), optFns); err != nil {
+		return nil, err
+	}
 	f.Published = append(f.Published, in)
 	return &sns.PublishOutput{MessageId: aws.String("m")}, nil
 }
@@ -227,4 +248,19 @@ func contains(list []string, v string) bool {
 		}
 	}
 	return false
+}
+
+// checkRegion records op's effective region and, with ClientRegion set,
+// refuses an ARN from another region.
+func (f *FakeSNS) checkRegion(op, arn string, optFns []func(*sns.Options)) error {
+	o := sns.Options{Region: f.ClientRegion}
+	for _, fn := range optFns {
+		fn(&o)
+	}
+	f.Calls = append(f.Calls, op+" "+o.Region)
+	parts := strings.SplitN(arn, ":", 6)
+	if f.ClientRegion != "" && len(parts) == 6 && parts[3] != o.Region {
+		return &snstypes.InvalidParameterException{Message: aws.String("Invalid parameter: TopicArn")}
+	}
+	return nil
 }

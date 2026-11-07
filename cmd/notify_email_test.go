@@ -398,3 +398,26 @@ func TestNotifyGC_JSONAndErrors(t *testing.T) {
 		t.Error("an SNS failure did not make notify-gc fail")
 	}
 }
+
+// TestSubscribeForNewWatch_CrossRegionOverride replays the #248 live test:
+// `LAGOTTO_SNS_TOPIC_ARN=<us-west-2 topic> lagotto --region us-east-2 watch
+// … --notify email:…`. The subscribe calls run in the topic's region.
+func TestSubscribeForNewWatch_CrossRegionOverride(t *testing.T) {
+	f := testutil.NewFakeSNS(testAlerts) // us-west-2
+	f.ClientRegion = "us-east-2"
+	withFakeSubscriber(t, f)
+	w := cmdEmailWatch("w-1", watcher.StatusActive, "alice@example.com")
+	err := subscribeForNewWatch(context.Background(), &bytes.Buffer{}, aws.Config{Region: "us-east-2"},
+		envOf(map[string]string{topicEnvVar: testAlerts}), "111122223333", &fakeProber{}, &w)
+	if err != nil {
+		t.Fatalf("cross-region override refused: %v", err)
+	}
+	if len(f.Subs) != 1 {
+		t.Errorf("subscriptions = %d, want 1", len(f.Subs))
+	}
+	for _, c := range f.Calls {
+		if !strings.HasSuffix(c, " us-west-2") {
+			t.Errorf("%s: not in the topic's region", c)
+		}
+	}
+}

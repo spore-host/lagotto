@@ -181,7 +181,7 @@ func (e *EmailSubscriptions) List(ctx context.Context, inspect bool) ([]EmailSub
 		page, err := e.api.ListSubscriptionsByTopic(ctx, &sns.ListSubscriptionsByTopicInput{
 			TopicArn:  aws.String(e.topicArn),
 			NextToken: token,
-		})
+		}, InARNRegion(e.topicArn))
 		if err != nil {
 			return nil, fmt.Errorf("list subscriptions of %s: %w", e.topicArn, err)
 		}
@@ -221,7 +221,7 @@ func (e *EmailSubscriptions) inspect(ctx context.Context, sub *EmailSubscription
 	}
 	attrs, err := e.api.GetSubscriptionAttributes(ctx, &sns.GetSubscriptionAttributesInput{
 		SubscriptionArn: aws.String(sub.SubscriptionArn),
-	})
+	}, InARNRegion(e.topicArn))
 	if err != nil {
 		return fmt.Errorf("read subscription %s: %w", sub.SubscriptionArn, err)
 	}
@@ -301,7 +301,7 @@ func (e *EmailSubscriptions) Ensure(ctx context.Context, addr string) (EnsureRes
 			"FilterPolicyScope": "MessageAttributes",
 		},
 		ReturnSubscriptionArn: true,
-	}); err != nil {
+	}, InARNRegion(e.topicArn)); err != nil {
 		return res, fmt.Errorf("subscribe %s to %s: %w", addr, e.topicArn, err)
 	}
 	res.State, res.Created = SubPending, true
@@ -383,7 +383,7 @@ func (e *EmailSubscriptions) Reconcile(ctx context.Context, active []Watch, only
 		if !s.Managed {
 			continue
 		}
-		if _, err := e.api.Unsubscribe(ctx, &sns.UnsubscribeInput{SubscriptionArn: aws.String(s.SubscriptionArn)}); err != nil {
+		if _, err := e.api.Unsubscribe(ctx, &sns.UnsubscribeInput{SubscriptionArn: aws.String(s.SubscriptionArn)}, InARNRegion(e.topicArn)); err != nil {
 			errs = append(errs, fmt.Errorf("unsubscribe %s (%s): %w", s.Address, s.SubscriptionArn, err))
 			continue
 		}
@@ -516,4 +516,28 @@ func (e *EmailSubscriptions) MissingEmailSubscriptions(ctx context.Context, acti
 		}
 	}
 	return out, nil
+}
+
+// InARNRegion makes one SNS call in the region named in arn (a topic or
+// subscription ARN), whatever region the client was built for. SNS rejects a
+// topic ARN from another region with "InvalidParameter: TopicArn", and the
+// alerts topic (LAGOTTO_SNS_TOPIC_ARN) or an sns: channel's own topic may sit
+// in a region other than the CLI's or the poller's. An ARN with no region
+// leaves the client's region alone.
+func InARNRegion(arn string) func(*sns.Options) {
+	region := ARNRegion(arn)
+	return func(o *sns.Options) {
+		if region != "" {
+			o.Region = region
+		}
+	}
+}
+
+// ARNRegion returns the region field of an ARN, or "".
+func ARNRegion(arn string) string {
+	parts := strings.SplitN(arn, ":", 6)
+	if len(parts) < 6 || parts[0] != "arn" {
+		return ""
+	}
+	return parts[3]
 }
