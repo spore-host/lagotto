@@ -271,7 +271,11 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) (*Result, error) {
 //   - The artifact bucket. ensureBucket creates it OUTSIDE the stack, so even the
 //     old DeleteStack never removed it; changing that silently would be a
 //     surprising data deletion.
-//   - Per-launch lagotto-launch-sl-* schedules, same as before the cutover.
+//   - Per-launch lagotto-launch-sl-* schedules. Each belongs to a scheduled
+//     launch recorded in the retained scheduled-launches table, and a
+//     redeployed poller fires them again; deleting them here would strand
+//     those records as "pending" forever. `lagotto teardown` deletes the
+//     schedules together with the table (DeleteLaunchSchedules, #260).
 func (d *Deployer) Teardown(ctx context.Context, region, accountID string) ([]string, error) {
 	if region == "" || accountID == "" {
 		return nil, fmt.Errorf("teardown: region and accountID are required (the topic ARN is derived from them)")

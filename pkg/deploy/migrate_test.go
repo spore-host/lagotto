@@ -125,6 +125,9 @@ func (w worldSched) UpdateSchedule(context.Context, *scheduler.UpdateScheduleInp
 func (w worldSched) DeleteSchedule(context.Context, *scheduler.DeleteScheduleInput, ...func(*scheduler.Options)) (*scheduler.DeleteScheduleOutput, error) {
 	return nil, errors.New("unexpected DeleteSchedule")
 }
+func (w worldSched) ListSchedules(context.Context, *scheduler.ListSchedulesInput, ...func(*scheduler.Options)) (*scheduler.ListSchedulesOutput, error) {
+	return nil, errors.New("unexpected ListSchedules")
+}
 
 type worldSNS struct{ *world }
 

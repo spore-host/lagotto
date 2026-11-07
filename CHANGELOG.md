@@ -91,6 +91,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   launch. The `deploy --teardown` prompt and summary name all three tables.
   `lagotto teardown` now also needs `dynamodb:DescribeTable` and
   `dynamodb:ListTagsOfResource` (`docs/reference/cli-iam-actions.md`).
+- **`lagotto teardown` now deletes the per-launch `lagotto-launch-sl-*`
+  EventBridge Scheduler schedules** (#260). `lagotto launch` creates one per
+  scheduled launch, and nothing deleted them: with `--force`, teardown deleted
+  the scheduled-launches table, the only record of them, and left them armed.
+  A one-shot fired once into a torn-down poller and removed itself; a cron
+  schedule kept firing indefinitely, and would launch again if the poller was
+  redeployed. Teardown now deletes, before any table, every schedule a
+  scheduled-launch record names and every `lagotto-launch-sl-*` schedule in the
+  default group (which also catches the poller's boundary-retry schedules and
+  any whose record is already gone). Each is reported as deleted or already
+  absent, alongside the tables. If the schedules cannot be listed or deleted,
+  teardown stops before deleting any table. Without `--force` a pending launch
+  still blocks teardown. `lagotto deploy --teardown` still retains them, since
+  they belong to the scheduled launches in the tables it retains; its prompt
+  now says `lagotto teardown` deletes both. `lagotto doctor` warns about a
+  per-launch schedule that no scheduled-launch record names. `lagotto
+  teardown` now also needs `scheduler:ListSchedules` and
+  `scheduler:DeleteSchedule`, and `lagotto doctor` needs
+  `scheduler:ListSchedules` and `dynamodb:Scan`
+  (`docs/reference/cli-iam-actions.md`). The poller's runtime policy is
+  unchanged. Re-running teardown while its table deletes are still in
+  progress now reports those tables as already absent instead of failing
+  with `ResourceInUseException`.
 
 - **The poller notices a default subnet you create** (#256). Its per-region
   default-subnet lookup was cached for the life of a warm Lambda container,

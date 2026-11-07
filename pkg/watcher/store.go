@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -975,7 +976,7 @@ func (s *Store) DeleteTables(ctx context.Context) (TableTeardown, error) {
 		_, err := s.client.DeleteTable(ctx, &dynamodb.DeleteTableInput{TableName: aws.String(name)})
 		if err != nil {
 			var notFound *types.ResourceNotFoundException
-			if errors.As(err, &notFound) {
+			if errors.As(err, &notFound) || tableBeingDeleted(err) {
 				res.Absent = append(res.Absent, name)
 				continue
 			}
@@ -1153,4 +1154,12 @@ func unmarshalMatches(items []map[string]types.AttributeValue) ([]MatchResult, e
 		matches = append(matches, m)
 	}
 	return matches, nil
+}
+
+// tableBeingDeleted reports whether DeleteTable failed because an earlier delete
+// of the same table is still in progress, so a re-run of teardown seconds after
+// the first reports the table as absent instead of failing (#260).
+func tableBeingDeleted(err error) bool {
+	var inUse *types.ResourceInUseException
+	return errors.As(err, &inUse) && strings.Contains(strings.ToLower(aws.ToString(inUse.Message)), "being deleted")
 }

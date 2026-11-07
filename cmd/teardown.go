@@ -27,7 +27,7 @@ var (
 
 var teardownCmd = &cobra.Command{
 	Use:   "teardown",
-	Short: "Delete lagotto's DynamoDB tables",
+	Short: "Delete lagotto's DynamoDB tables and per-launch schedules",
 	Long: `Delete the DynamoDB tables lagotto uses: lagotto-watches,
 lagotto-match-history and lagotto-scheduled-launches (the last is created by
 'lagotto deploy' or the first 'lagotto launch').
@@ -41,6 +41,17 @@ match history or a pending scheduled launch; pass --force to delete regardless.
 The scheduled-launches table is deleted only if it carries lagotto's
 lagotto:managed=cli tag; an untagged table of that name is left in place and
 reported. A table that does not exist is skipped.
+
+Before deleting the tables it deletes the per-launch EventBridge Scheduler
+schedules 'lagotto launch' creates (lagotto-launch-sl-*): every one a
+scheduled-launch record names, and every one in the default schedule group with
+that prefix, including the poller's retry schedules and any whose record is
+gone. The scheduled-launches table is the only record of those schedules, and a
+cron schedule never removes itself, so deleting the table first would leave it
+firing indefinitely. A schedule that no longer exists is reported, not an error.
+With --force this cancels any pending scheduled launch. If the schedules cannot
+be listed or deleted (scheduler:ListSchedules, scheduler:DeleteSchedule),
+teardown stops before deleting any table.
 
 --iam-roles also deletes the two IAM roles 'lagotto setup' and 'lagotto deploy'
 create (lagotto-capacity-poller-role and lagotto-capacity-poller-scheduler-invoke),
@@ -89,6 +100,12 @@ func runTeardown(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Schedules before tables (#260): the scheduled-launches table is the only
+	// record of which schedules exist, so it must outlive their deletion.
+	if err := deleteLaunchSchedules(ctx, store, newLaunchScheduleDeleter(cfg), out); err != nil {
+		return err
+	}
+
 	res, err := store.DeleteTables(ctx)
 	for _, name := range res.Deleted {
 		_, _ = fmt.Fprintf(out, "Deleted table %s\n", name)
@@ -117,6 +134,39 @@ func runTeardown(cmd *cobra.Command, args []string) error {
 type teardownTables interface {
 	NonEmptyTables(ctx context.Context) ([]string, error)
 	DeleteTables(ctx context.Context) (watcher.TableTeardown, error)
+	ScheduledLaunchScheduleNames(ctx context.Context) ([]string, error)
+}
+
+// launchScheduleDeleter deletes the per-launch schedules; *deploy.Deployer
+// satisfies it.
+type launchScheduleDeleter interface {
+	DeleteLaunchSchedules(ctx context.Context, recorded []string) (deploy.LaunchScheduleTeardown, error)
+}
+
+// newLaunchScheduleDeleter builds the scheduler teardown uses. A seam for tests.
+var newLaunchScheduleDeleter = func(cfg aws.Config) launchScheduleDeleter { return deploy.New(cfg) }
+
+// deleteLaunchSchedules deletes every per-launch schedule, those the
+// scheduled-launch records name and those found by prefix, and reports each.
+// Any failure is returned before a table is touched, so the records survive
+// for a retry.
+func deleteLaunchSchedules(ctx context.Context, store teardownTables, sched launchScheduleDeleter, out io.Writer) error {
+	recorded, err := store.ScheduledLaunchScheduleNames(ctx)
+	if err != nil {
+		return fmt.Errorf("read the scheduled launches' schedule names (no table was deleted): %w", err)
+	}
+	res, err := sched.DeleteLaunchSchedules(ctx, recorded)
+	for _, name := range res.Deleted {
+		_, _ = fmt.Fprintf(out, "Deleted schedule %s\n", name)
+	}
+	if err != nil {
+		return fmt.Errorf("delete per-launch %s* schedules (no table was deleted; "+
+			"teardown needs scheduler:ListSchedules and scheduler:DeleteSchedule): %w", deploy.LaunchSchedulePrefix, err)
+	}
+	if len(res.Absent) > 0 {
+		_, _ = fmt.Fprintf(out, "Schedules already absent: %s\n", strings.Join(res.Absent, ", "))
+	}
+	return nil
 }
 
 // newTeardownStore builds the store teardown deletes from. A seam for tests.

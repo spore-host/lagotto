@@ -187,6 +187,35 @@ func (s *Store) HasPendingScheduledLaunches(ctx context.Context) (bool, error) {
 	return found, nil
 }
 
+// ScheduledLaunchScheduleNames returns the ScheduleName of every
+// scheduled-launch record, whatever its status, reading every page. `lagotto
+// teardown` deletes those schedules before it deletes the table, which is the
+// only record of them (#260). A missing table returns none.
+func (s *Store) ScheduledLaunchScheduleNames(ctx context.Context) ([]string, error) {
+	p := dynamodb.NewScanPaginator(s.client, &dynamodb.ScanInput{
+		TableName:                aws.String(s.scheduledTable),
+		ProjectionExpression:     aws.String("#n"),
+		ExpressionAttributeNames: map[string]string{"#n": "schedule_name"},
+	})
+	var names []string
+	for p.HasMorePages() {
+		page, err := p.NextPage(ctx)
+		if err != nil {
+			var notFound *types.ResourceNotFoundException
+			if errors.As(err, &notFound) {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("scan %q for schedule names: %w", s.scheduledTable, err)
+		}
+		for _, item := range page.Items {
+			if v, ok := item["schedule_name"].(*types.AttributeValueMemberS); ok && v.Value != "" {
+				names = append(names, v.Value)
+			}
+		}
+	}
+	return names, nil
+}
+
 // scheduledTableSchema is the CreateTable input for the scheduled-launches table:
 // hash key schedule_id, a user_id GSI, TTL on ttl_timestamp.
 func scheduledTableSchema(name string) *dynamodb.CreateTableInput {
