@@ -25,6 +25,10 @@ job it submitted is in flight. An expired or failed watch is only updated with
 --reactivate, which also makes it active again; it must still be before its
 deadline (run 'lagotto extend' first if not).
 
+--require-quota applies 'watch --require-quota' to a fleet watch's updated
+search: the update is refused (exit status 3) only when the quota was read in
+every region and provably can't hold the fleet.
+
 --dry-run shows the change, after every check, without writing anything.
 
 ```
@@ -49,6 +53,7 @@ lagotto update <watch-id> [flags]
 | `--regions` | `-r` | stringSlice |  | Replace the regions (comma-separated; '' = all enabled regions) |
 | `--remove-notify` |  | stringSlice |  | Remove notification channels |
 | `--remove-region` |  | stringSlice |  | Remove regions from the watch's region list (comma-separated) |
+| `--require-quota` |  | bool |  | For a --maintain fleet watch: refuse the update (exit status 3) when the account's EC2 vCPU quota, read in every region of the updated watch, provably can't hold its workers, as 'watch --require-quota' does. An unreadable quota is unknown, not zero: the update then goes ahead, with a note. |
 | `--spawn-config` |  | string |  | Replace the spawn config (--action spawn watches): a local path, s3://bucket/key or '-' for stdin, read and stored as 'watch' does |
 | `--spot` |  | bool |  | Watch for Spot capacity |
 

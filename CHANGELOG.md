@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`--require-quota` on `lagotto watch` and `lagotto update`: refuse a fleet
+  that provably can't reach `--maintain N`** (#157). Opt-in: without it the
+  #153 quota warning is unchanged and the watch is still created.
+  - Refuses only when the EC2 vCPU quota was read in every `--regions` region
+    and, summed across those regions (a fleet counts its workers in all of
+    them), holds fewer than N workers. The refusal exits with status 3, so a
+    pipeline can tell "quota too low" from any other failure, and nothing is
+    stored.
+  - An unreadable quota is unknown, not zero: a failed or denied lookup, a
+    family the region doesn't report, a wildcard-only pattern with free vCPUs
+    (no worker size to count), or a watch with no `--regions` never refuses.
+    The watch is created and a note on stderr says which region could not be
+    checked and why.
+  - Unlike the warning, the gate checks every listed region, not just the
+    first three. `-o json` adds a `quota_gate` object with the verdict
+    (`feasible`, `infeasible`, `unknown`), the per-region figures and the
+    reason. It uses the Service Quotas reads the CLI already makes; no IAM
+    change.
+
 - **`lagotto update <watch-id>`: change an existing watch's search in place**
   (#257), instead of cancelling and re-creating it. The watch keeps its ID,
   attempt count, last error, match history and confirmed email subscriptions,

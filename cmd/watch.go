@@ -37,6 +37,7 @@ var (
 	watchUntilLanded     bool
 	watchRemind          string
 	watchYes             bool
+	watchRequireQuota    bool
 )
 
 var watchCmd = &cobra.Command{
@@ -54,6 +55,12 @@ With --until-landed (--action spawn or hold) there is no TTL: the watch hunts
 until the launch is running or the reservation is active. It is still bounded:
 it pauses itself unless you run 'lagotto ack <watch-id>' within 3 × --remind
 (21 days by default) of creation or the last ack, and 'lagotto ack' resumes it.
+
+A --maintain fleet whose goal exceeds the account's EC2 vCPU quota gets a
+warning, and is still created. With --require-quota it is refused instead (exit
+status 3), but only when the quota was read in every --regions region and
+provably can't hold the goal; an unreadable quota is unknown, not zero, so the
+watch is then created with a note saying it could not be checked.
 
 If the pattern matches no instance type your region(s) offer, the first poll
 prints a warning (a likely typo) but keeps watching in case the type appears.
@@ -93,6 +100,7 @@ func init() {
 	watchCmd.Flags().BoolVar(&watchUntilLanded, "until-landed", false, "Keep hunting with no TTL until the launch (--action spawn) or hold lands. The watch pauses itself unless you run 'lagotto ack <id>' within (2+1) × --remind (21d by default). Needs a --notify channel; not with --ttl, --maintain, --until, or --action notify.")
 	watchCmd.Flags().StringVar(&watchRemind, "remind", "7d", "With --until-landed: the reminder interval (1h to 30d). You are reminded after each of the first 2 intervals and warned 24h before the pause; the watch pauses 3 × this after creation or the last ack.")
 	watchCmd.Flags().BoolVarP(&watchYes, "yes", "y", false, "Skip the confirmation prompt that --until-landed --action spawn/hold shows (required when stdin is not a terminal)")
+	watchCmd.Flags().BoolVar(&watchRequireQuota, "require-quota", false, "With --maintain: refuse to create the watch (exit status 3) when the account's EC2 vCPU quota, read in every --regions region, provably can't hold --maintain N workers. A quota that can't be read is unknown, not zero: the watch is then created anyway, with a note.")
 	watchCmd.Flags().StringVar(&watchUntil, "until", "", "Fleet completion condition, re-checked each poll: 's3-empty: s3://b/manifest minus s3://b/done/', 'http-200: https://…', or 'shell: <cmd>' (shell = local daemon only). When true the fleet retires.")
 }
 
@@ -159,6 +167,9 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	// watch, which only makes sense for the spawn action (it launches workers).
 	if err := validateFleetFlags(action, watchMaintain, watchUntil); err != nil {
 		return err
+	}
+	if watchRequireQuota && watchMaintain <= 0 {
+		return errRequireQuotaNeedsFleet
 	}
 	if watchUntil != "" && watcher.IsShellCondition(watchUntil) {
 		fmt.Fprintln(os.Stderr, "note: shell completion conditions run only on the local 'poll --daemon' (the hosted poller has no shell sandbox).")
@@ -231,12 +242,14 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	if err := validateWatchSearch(w); err != nil {
 		return err
 	}
-	// Default-subnet coverage (#256), the fleet quota warning (#153) and the
-	// instance-role check (#170), before anything is created.
-	quotaReport, roleCheck, err := preflightWatch(ctx, cfg, os.Stderr, w)
+	// Default-subnet coverage (#256), the fleet quota warning (#153) and its
+	// opt-in --require-quota gate (#157), and the instance-role check (#170),
+	// before anything is created.
+	pre, err := preflightWatch(ctx, cfg, os.Stderr, w, watchRequireQuota)
 	if err != nil {
 		return err
 	}
+	quotaReport, roleCheck := pre.Quota, pre.Role
 
 	store := watcher.NewStore(cfg, watchesTable, historyTable)
 
@@ -280,15 +293,16 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	if getOutputFormat() == "json" {
 		enc := json.NewEncoder(cmd.OutOrStdout())
 		enc.SetIndent("", "  ")
-		if quotaReport != nil || roleCheck != nil {
+		if quotaReport != nil || roleCheck != nil || pre.Gate != nil {
 			// The quota report and the instance-role verdict ride alongside the watch
 			// (their own struct tags do the rest), so a scripted caller can see what
 			// was printed to stderr.
 			return enc.Encode(struct {
 				*watcher.Watch
 				QuotaWarning *quotacheck.Report `json:"quota_warning,omitempty"`
+				QuotaGate    *quotacheck.Gate   `json:"quota_gate,omitempty"`
 				InstanceRole *InstanceRoleCheck `json:"instance_role_check,omitempty"`
-			}{Watch: w, QuotaWarning: quotaReport, InstanceRole: roleCheck})
+			}{Watch: w, QuotaWarning: quotaReport, QuotaGate: pre.Gate, InstanceRole: roleCheck})
 		}
 		return enc.Encode(w)
 	}
@@ -318,6 +332,9 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	}
 	if quotaReport != nil && quotaReport.Known {
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Quota:    %s\n", quotaSummaryRow(quotaReport, w))
+	}
+	if pre.Gate != nil {
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Quota gate: %s (--require-quota)\n", pre.Gate.Verdict)
 	}
 	if w.UntilLanded {
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Expires:  until landed; pauses %s unless acknowledged (lagotto ack %s)\n",
