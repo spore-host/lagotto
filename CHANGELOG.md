@@ -119,6 +119,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`lagotto deploy --teardown` now deletes the artifact bucket** (#264).
+  `lagotto deploy` creates `lagotto-lambda-<account>-<region>` for the poller
+  zip, but no command deleted it, so every region ever deployed kept an S3
+  bucket. Teardown now empties it of every object version and delete marker,
+  page by page, and deletes it, after the poller. Only when lagotto manages
+  it: the name is the default, this account owns it (every S3 call carries
+  `ExpectedBucketOwner`) and it carries the `lagotto:managed=cli` tag. An
+  untagged bucket is retained and reported; a `--lambda-bucket` you supplied
+  is never tagged or deleted.
+  - `lagotto deploy` tags the bucket when it creates it, and adds the tag
+    (keeping any existing tags) to a default-named bucket this account
+    already owns, so a bucket from an older deploy becomes deletable after
+    the next `deploy`. A failed back-fill is reported in the deploy output and
+    does not fail the deploy.
+  - `lagotto doctor` adds an `artifact-buckets` check: it lists every
+    `lagotto-lambda-<account>-*` bucket and warns (never fails) about each in
+    a region with no poller, with the command that deletes it.
+  - New CLI permissions, in `docs/reference/cli-iam-actions.md`:
+    `lagotto deploy` needs `s3:GetBucketTagging`, `s3:PutBucketTagging`,
+    `s3:ListBucketVersions`, `s3:DeleteObject`, `s3:DeleteObjectVersion` and
+    `s3:DeleteBucket`; `lagotto doctor` needs `s3:ListAllMyBuckets` and
+    `s3:GetBucketTagging`. The inventory now counts `s3:DeleteObjectVersion`
+    for a `DeleteObjects` call that names versions. The poller's runtime
+    policy is unchanged.
+
 - **`lagotto teardown` now deletes the `lagotto-scheduled-launches` table**
   (#250). `lagotto deploy` and the first `lagotto launch` create it, but
   teardown deleted only the watches and match-history tables, so the scheduled

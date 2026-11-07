@@ -141,13 +141,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		// The artifact bucket goes last (#264), and only after the poller is gone:
 		// DeleteArtifactBucket deletes the DEFAULT bucket alone, and only when this
 		// account owns it and it carries lagotto's managed tag.
-		// A --lambda-bucket spelled exactly like the default still counts as
-		// user-supplied, so it is retained too.
-		var bt deploy.BucketTeardown
-		var berr error
-		if deployBucket != deploy.DefaultBucketName(acctID, region) {
-			bt, berr = d.DeleteArtifactBucket(ctx, region, acctID)
-		}
+		bt, berr := teardownArtifactBucket(ctx, d, region, acctID, deployBucket)
 		reportArtifactBucketTeardown(out, bt, deployBucket, region)
 		_, _ = fmt.Fprintf(out, "DynamoDB tables %s are retained; 'lagotto teardown' deletes them.\n", strings.Join(cliTables(), ", "))
 		if berr != nil {
@@ -266,6 +260,22 @@ func printLegacyStackNote(ctx context.Context, out io.Writer, d *deploy.Deployer
 // `lagotto teardown` deletes, in the order watches, history, scheduled launches.
 func cliTables() []string {
 	return []string{watchesTable, historyTable, watcher.DefaultScheduledTable}
+}
+
+// artifactBucketDeleter is the part of *deploy.Deployer deploy --teardown uses
+// for the artifact bucket.
+type artifactBucketDeleter interface {
+	DeleteArtifactBucket(ctx context.Context, region, accountID string) (deploy.BucketTeardown, error)
+}
+
+// teardownArtifactBucket deletes the default artifact bucket when lagotto
+// manages it (#264). A --lambda-bucket spelled exactly like the default still
+// counts as user-supplied, so then nothing is deleted.
+func teardownArtifactBucket(ctx context.Context, d artifactBucketDeleter, region, acctID, userBucket string) (deploy.BucketTeardown, error) {
+	if userBucket == deploy.DefaultBucketName(acctID, region) {
+		return deploy.BucketTeardown{}, nil
+	}
+	return d.DeleteArtifactBucket(ctx, region, acctID)
 }
 
 // reportArtifactBucketTeardown says what happened to the artifact bucket (#264),

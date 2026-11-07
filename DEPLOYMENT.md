@@ -24,7 +24,7 @@ There are two paths:
 | IAM role | `lagotto-capacity-poller-scheduler-invoke` (assumed by EventBridge Scheduler) | `pkg/runtimeiam`: created by `deploy` **only** |
 | DynamoDB tables | `lagotto-watches`, `lagotto-match-history` | the CLI: `deploy`, `setup` or `watch` |
 | DynamoDB table | `lagotto-scheduled-launches` | the CLI: `deploy` or the first `launch` |
-| S3 artifact bucket | `lagotto-lambda-<account>-<region>` | `lagotto deploy` |
+| S3 artifact bucket | `lagotto-lambda-<account>-<region>`, tagged `lagotto:managed=cli` | `lagotto deploy`; deleted by `lagotto deploy --teardown` (#264) |
 
 Every one of these has a **fixed name**, which is what makes the deploy idempotent
 and the ARNs derivable without reading any stack outputs.
@@ -218,6 +218,17 @@ so nothing can fire into a half-deleted poller. Deleting the topic deletes its
 email subscriptions with it. It is idempotent: running it twice
 succeeds.
 
+**The artifact bucket** `lagotto-lambda-<account>-<region>` is deleted last,
+after the poller, with every object version and delete marker in it (#264). Only
+when lagotto manages it: this account owns it (every call carries
+`ExpectedBucketOwner`) and it carries the `lagotto:managed=cli` tag. `lagotto
+deploy` writes the tag when it creates the bucket, and adds it to an existing
+default-named bucket this account owns, so a bucket from an older deploy becomes
+deletable after one more `deploy`. An untagged bucket is retained and reported. A
+bucket you supplied with `--lambda-bucket` is never tagged or deleted, even one
+spelled like the default. `lagotto doctor` warns about an artifact bucket in a
+region with no poller.
+
 **Explicitly retained** (each is listed in the confirmation prompt):
 
 - **The DynamoDB tables** — `lagotto-watches`, `lagotto-match-history` and
@@ -233,8 +244,6 @@ succeeds.
   runs a poller, delete them with `lagotto teardown --iam-roles` (#229). It checks
   every region enabled in the account first and refuses, deleting nothing, while a
   poller exists in any of them or a region cannot be checked.
-- **The artifact bucket** (`lagotto-lambda-<account>-<region>`) — it is created
-  outside the poller's lifecycle. Delete it manually if you want.
 - **Per-launch `lagotto-launch-sl-*` schedules.** Each one fires a scheduled
   launch recorded in the retained `lagotto-scheduled-launches` table, so it is
   kept with that table, and a redeployed poller fires it again. `lagotto
