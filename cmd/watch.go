@@ -244,7 +244,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 
 	// Default-subnet coverage (#256): refuse a spawn/hold watch that can never
 	// land, before anything is created.
-	if _, err := checkWatchSubnetCoverage(ctx, watcher.NewSubnetCoverageChecker(cfg), os.Stderr, w); err != nil {
+	if _, err := checkWatchSubnetCoverage(ctx, newSubnetCoverageChecker(cfg), os.Stderr, w); err != nil {
 		return err
 	}
 

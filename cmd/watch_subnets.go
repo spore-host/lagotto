@@ -16,6 +16,10 @@ import (
 // pass untouched. A lookup it can't make is a warning, never a refusal.
 //
 // Call it before the watch is stored, so a refused watch leaves nothing behind.
+// newSubnetCoverageChecker builds the checker runWatch uses; a test seam so the
+// fake-AWS watch tests needn't serve EC2 (#256).
+var newSubnetCoverageChecker = watcher.NewSubnetCoverageChecker
+
 func checkWatchSubnetCoverage(ctx context.Context, checker *watcher.SubnetCoverageChecker, out io.Writer, w *watcher.Watch) (*watcher.SubnetCoverage, error) {
 	cov := checker.Check(ctx, w)
 	if err := cov.Refusal(); err != nil {
