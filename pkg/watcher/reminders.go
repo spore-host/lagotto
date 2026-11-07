@@ -208,9 +208,7 @@ func (p *Poller) remindIfDue(ctx context.Context, w *Watch, now time.Time, summa
 	}
 	// Cost exposure (#239 phase 5), priced once for every channel. Derived,
 	// so nothing about it is written back.
-	pctx, cancel := context.WithTimeout(ctx, exposurePriceTimeout)
-	w.Exposure = ComputeExposure(pctx, w, p.exposurePricer())
-	cancel()
+	w.Exposure = p.pollerExposure(ctx, w)
 	if err := notify(ctx, w, r, now); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to send reminder %d for watch %s: %v\n", r.Stage, w.WatchID, err)
 	}
@@ -386,18 +384,25 @@ func reminderExposure(w *Watch) *Exposure {
 	return w.Exposure
 }
 
-// exposurePricer is the poller's on-demand price source for reminders:
-// truffle's live client when the poller has one (its runtime policy already
-// allows pricing:GetProducts), else the static list.
-func (p *Poller) exposurePricer() OnDemandPricer {
+// pollerExposure prices w's exposure for a reminder: through truffle's live
+// client when the poller has one (its runtime policy already allows
+// pricing:GetProducts; truffle falls back to the static list, labelled, when
+// the live API fails), else from the static list.
+func (p *Poller) pollerExposure(ctx context.Context, w *Watch) *Exposure {
 	if c, ok := p.truffle.(*truffleaws.Client); ok && c == nil {
-		return StaticPricer{Reason: "this poller has no live AWS Price List client"}
+		return StaticExposure(w, PollerNoLivePriceReason)
 	}
 	if lp, ok := p.truffle.(OnDemandPricer); ok {
-		return lp
+		pctx, cancel := context.WithTimeout(ctx, exposurePriceTimeout)
+		defer cancel()
+		return ComputeExposure(pctx, w, lp)
 	}
-	return StaticPricer{Reason: "this poller has no live AWS Price List client"}
+	return StaticExposure(w, PollerNoLivePriceReason)
 }
+
+// PollerNoLivePriceReason labels a reminder's static rates when the poller has
+// no live Price List client.
+const PollerNoLivePriceReason = "this poller has no live AWS Price List client"
 
 // exposurePriceTimeout bounds the live price lookups of one reminder; a slow
 // or throttled Price List degrades to truffle's labelled static fallback or
