@@ -42,6 +42,27 @@ func getWatchOwned(ctx context.Context, store *watcher.Store, stsClient stsIdent
 	if err != nil {
 		return nil, fmt.Errorf("get watch: %w", err)
 	}
+	return authorizeWatchOwner(ctx, stsClient, watchID, w)
+}
+
+// getWatchOwnedVersioned is getWatchOwned with a strongly consistent read that
+// also returns the record's raw updated_at, the version `update`'s conditional
+// write compares against (#257).
+func getWatchOwnedVersioned(ctx context.Context, store *watcher.Store, stsClient stsIdentityAPI, watchID string) (*watcher.Watch, string, error) {
+	w, version, err := store.GetWatchVersioned(ctx, watchID)
+	if err != nil {
+		return nil, "", err
+	}
+	w, err = authorizeWatchOwner(ctx, stsClient, watchID, w)
+	if err != nil {
+		return nil, "", err
+	}
+	return w, version, nil
+}
+
+// authorizeWatchOwner returns w if the caller owns it, else the same "not
+// found" error as a missing (nil) watch.
+func authorizeWatchOwner(ctx context.Context, stsClient stsIdentityAPI, watchID string, w *watcher.Watch) (*watcher.Watch, error) {
 	notFound := fmt.Errorf("watch %s not found", watchID)
 	if w == nil {
 		return nil, notFound

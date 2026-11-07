@@ -18,7 +18,6 @@ import (
 	"github.com/spore-host/lagotto/pkg/deploy"
 	"github.com/spore-host/lagotto/pkg/quotacheck"
 	"github.com/spore-host/lagotto/pkg/watcher"
-	"github.com/spore-host/truffle/pkg/quotas"
 	"gopkg.in/yaml.v3"
 )
 
@@ -138,14 +137,11 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	var launchConfigJSON []byte
 	if service == watcher.ServiceEC2 && action == watcher.ActionSpawn {
 		if watchSpawnConfig == "" {
-			return fmt.Errorf("--spawn-config is required when --action=spawn")
+			return errSpawnConfigRequired
 		}
-		read := watcher.NewConfigReader(func(ctx context.Context) (aws.Config, error) {
-			return awscfg.Load(ctx, "")
-		}, os.Stdin)
-		launchConfigJSON, err = loadEC2SpawnConfig(ctx, read, watchSpawnConfig)
+		launchConfigJSON, err = readSpawnConfigFlag(ctx, watchSpawnConfig)
 		if err != nil {
-			return fmt.Errorf("load spawn config: %w", err)
+			return err
 		}
 	}
 
@@ -242,9 +238,15 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		w.RemindPauseAfter = watcher.DefaultRemindPauseAfter
 	}
 
-	// Default-subnet coverage (#256): refuse a spawn/hold watch that can never
-	// land, before anything is created.
-	if _, err := checkWatchSubnetCoverage(ctx, newSubnetCoverageChecker(cfg), os.Stderr, w); err != nil {
+	// Everything `update` re-checks (#257) goes through these two, so an update
+	// cannot store a watch that this command would refuse.
+	if err := validateWatchSearch(w); err != nil {
+		return err
+	}
+	// Default-subnet coverage (#256), the fleet quota warning (#153) and the
+	// instance-role check (#170), before anything is created.
+	quotaReport, roleCheck, err := preflightWatch(ctx, cfg, os.Stderr, w)
+	if err != nil {
 		return err
 	}
 
@@ -257,25 +259,6 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	}
 	for _, name := range created {
 		fmt.Fprintf(os.Stderr, "Created DynamoDB table %s\n", name)
-	}
-
-	// Create-time feasibility check for a fleet watch (#153): tell the user NOW if
-	// their --maintain goal exceeds the account's vCPU quota, instead of leaving
-	// them to infer it from a fleet that never fills. Deliberately NON-FATAL and
-	// without a --force escape hatch: truffle's GetQuotas swallows per-quota errors
-	// (truffle#167), so "zero quota" isn't reliably distinguishable from "lookup
-	// failed / no permission / throttled" — a fatal gate would break watch creation
-	// for anyone lacking a read permission. (Opt-in strictness is #157.)
-	quotaReport := warnFleetQuotaFeasibility(ctx, quotas.NewClientFromConfig(cfg), os.Stderr, w, cfg.Region)
-
-	// Create-time authorization check for a named iam_role (#170). Unlike the quota
-	// check above this one CAN be fatal, because it refuses only on direct evidence
-	// from the deployed policy — see checkInstanceRoleAuthorized for the four
-	// outcomes. It runs before PutWatch so a watch that provably cannot launch is
-	// never persisted to wait for capacity it can't use.
-	roleCheck, err := checkInstanceRoleAuthorizedFromConfig(ctx, cfg, os.Stderr, w)
-	if err != nil {
-		return err
 	}
 
 	// Store the watch and make sure the hosted poller will poll it (#231): a

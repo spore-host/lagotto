@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/sts"
@@ -86,6 +87,9 @@ func runHistory(cmd *cobra.Command, args []string) error {
 	// Fill each row's derived wait-to-acquire from its watch's created_at (#139),
 	// where we know it and the delta is sane (non-negative).
 	for i := range matches {
+		if matches[i].ActionTaken == watcher.ActionUpdated {
+			continue // an audit row (#257): nothing was acquired
+		}
 		if c, ok := created[matches[i].WatchID]; ok && !c.IsZero() && !matches[i].MatchedAt.IsZero() {
 			if d := matches[i].MatchedAt.Sub(c); d >= 0 {
 				s := d.Seconds()
@@ -146,7 +150,12 @@ type gaveUpEntry struct {
 func historyEntries(matches []watcher.MatchResult, gaveUp []watcher.Watch) []any {
 	entries := make([]any, 0, len(matches)+len(gaveUp))
 	for _, m := range matches {
-		entries = append(entries, matchEntry{MatchResult: m, Event: "match"})
+		event := "match"
+		if m.ActionTaken == watcher.ActionUpdated {
+			// An audit row (#257), not a match: it acquired nothing.
+			event = "updated"
+		}
+		entries = append(entries, matchEntry{MatchResult: m, Event: event})
 	}
 	for i := range gaveUp {
 		w := &gaveUp[i]
@@ -185,8 +194,9 @@ func renderHistory(out io.Writer, matches []watcher.MatchResult, gaveUp []watche
 			"WATCH ID", "INSTANCE TYPE", "REGION", "AZ", "PRICE", "ACTION", "MATCHED AT", "WAIT")
 		for _, m := range matches {
 			wait := "-"
-			// A quota refusal acquired nothing, so it has no wait-to-acquire.
-			if m.WaitToAcquireSeconds != nil && m.ActionTaken != watcher.ActionQuotaInfeasible {
+			// A quota refusal or an update acquired nothing, so it has no
+			// wait-to-acquire.
+			if m.WaitToAcquireSeconds != nil && acquiredSomething(m) {
 				wait = watcher.FormatWait(time.Duration(*m.WaitToAcquireSeconds * float64(time.Second)))
 			}
 			_, _ = fmt.Fprintf(out, "%-12s %-18s %-15s %-15s $%-9.4f %-16s %-25s %s\n",
@@ -201,6 +211,9 @@ func renderHistory(out io.Writer, matches []watcher.MatchResult, gaveUp []watche
 			)
 			if m.QuotaDetail != "" {
 				_, _ = fmt.Fprintf(out, "  %s\n", m.QuotaDetail)
+			}
+			if len(m.ChangedFields) > 0 {
+				_, _ = fmt.Fprintf(out, "  changed: %s\n", strings.Join(m.ChangedFields, ", "))
 			}
 		}
 	}
@@ -239,4 +252,10 @@ func renderHistory(out io.Writer, matches []watcher.MatchResult, gaveUp []watche
 		)
 	}
 	return nil
+}
+
+// acquiredSomething reports whether a history row can have a wait-to-acquire:
+// not a quota refusal (#238) and not an update's audit row (#257).
+func acquiredSomething(m watcher.MatchResult) bool {
+	return m.ActionTaken != watcher.ActionQuotaInfeasible && m.ActionTaken != watcher.ActionUpdated
 }
