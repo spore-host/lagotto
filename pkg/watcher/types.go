@@ -173,9 +173,9 @@ type Watch struct {
 	// A pre-#239 poller ignores them, which is why a landing watch also carries
 	// a lease marker (LandingLeasePrefix) in LeaseOwner, which every poller since
 	// #47 already refuses to override. See landing.go.
-	PendingInstanceID    string    `json:"pending_instance_id,omitempty" dynamodbav:"pending_instance_id,omitempty"`
-	PendingReservationID string    `json:"pending_reservation_id,omitempty" dynamodbav:"pending_reservation_id,omitempty"`
-	PendingRegion        string    `json:"pending_region,omitempty" dynamodbav:"pending_region,omitempty"`
+	PendingInstanceID    string `json:"pending_instance_id,omitempty" dynamodbav:"pending_instance_id,omitempty"`
+	PendingReservationID string `json:"pending_reservation_id,omitempty" dynamodbav:"pending_reservation_id,omitempty"`
+	PendingRegion        string `json:"pending_region,omitempty" dynamodbav:"pending_region,omitempty"`
 	// PendingSince is a pointer because the DynamoDB encoder writes a zero
 	// time.Time even with omitempty; nil keeps it off every non-landing record.
 	PendingSince *time.Time `json:"pending_since,omitempty" dynamodbav:"pending_since,omitempty"`
