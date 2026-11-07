@@ -18,7 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     poller's own launch permissions, including writing and passing instance
     roles) or the administrator commands `setup`, `deploy` and `teardown`.
   - Resource-scoped to lagotto's three tables (and their indexes, query only),
-    the poller's schedule, the `lagotto-launch-sl-*` schedules (create only),
+    the poller's schedule, the `lagotto-launch-sl-*` schedules (create, and delete
+    for `cancel sl-…`, #279),
     the alerts topic (subscribe by email only), lagotto's two roles (read only),
     the poller function and doctor's stack and artifact buckets.
     `iam:PassRole` only on `lagotto-capacity-poller-scheduler-invoke`, only to
@@ -281,6 +282,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `EC2 suggests us-west-2a, us-west-2b, us-west-2d; ...`.
 
 ### Fixed
+
+- **`lagotto cancel sl-<id>` cancels a scheduled launch** (#279). There was no
+  lagotto way to cancel one: `cancel` only knew watches (`watch sl-… not
+  found`), and `launch` told you to run `aws scheduler delete-schedule`, which
+  the `lagotto-cli-user` policy (#232) does not grant and which left the
+  `lagotto-scheduled-launches` record pending, so the poller stayed armed
+  until the record's TTL.
+  - `cancel` dispatches on the `sl-` prefix; `cancel w-…` is unchanged. A new
+    `--region` flag reaches a launch made with `launch --region`.
+  - It marks the record `cancelled` (status and `updated_at`, as the poller
+    records a fired or failed launch; the TTL is kept), then deletes the
+    launch's schedule and every `-r<n>` boundary-retry schedule (#62), listed
+    by the launch's own prefix. A schedule already gone is not an error, and
+    each one is reported.
+  - A one-shot that already fired (launched or failed) is refused, and a
+    launched one names its instance and `spawn terminate`. A `--cron` launch
+    is cancellable at any time. A launch that fires while `cancel` runs is
+    not overwritten. Rerunning `cancel` on a cancelled launch deletes any
+    schedule a failed deletion left behind.
+  - A cancelled launch no longer counts as pending, so the poller can disable
+    itself. The poller does not fire a cancelled launch, and its boundary
+    retry no longer writes a cancelled record back to `retrying` and re-arms
+    it.
+  - `launch` prints `Cancel with: lagotto cancel sl-<id> --region <region>`.
+  - `lagotto-cli-user` gains `scheduler:DeleteSchedule` on
+    `schedule/default/lagotto-launch-sl-*` (the `LaunchSchedules`
+    statement), through the inventory gate; `doctor`'s caller check simulates
+    it. Rerun `lagotto setup` to update the policy.
 
 - **A fleet whose quota refuses its first worker now backs off** (#274). A
   quota cap was recorded as the number of workers running when the quota

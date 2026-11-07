@@ -46,7 +46,8 @@
       "Sid": "LaunchSchedules",
       "Effect": "Allow",
       "Action": [
-        "scheduler:CreateSchedule"
+        "scheduler:CreateSchedule",
+        "scheduler:DeleteSchedule"
       ],
       "Resource": "arn:aws:scheduler:*:123456789012:schedule/default/lagotto-launch-sl-*"
     },

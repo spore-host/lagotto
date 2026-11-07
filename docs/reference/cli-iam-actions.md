@@ -51,7 +51,7 @@ identity against the policy and lists what is missing.
 | Command | Beyond the tables |
 | --- | --- |
 | `lagotto ack` | `iam:PassRole`, `lambda:GetFunction`, `scheduler:GetSchedule`, `scheduler:UpdateSchedule`, `sns:GetSubscriptionAttributes`, `sns:ListSubscriptionsByTopic`, `sns:Subscribe` |
-| `lagotto cancel` | `ec2:CancelCapacityReservation`, `ec2:DescribeCapacityReservations`, `sns:GetSubscriptionAttributes`, `sns:ListSubscriptionsByTopic`, `sns:Unsubscribe` |
+| `lagotto cancel` | `ec2:CancelCapacityReservation`, `ec2:DescribeCapacityReservations`, `scheduler:DeleteSchedule`, `scheduler:ListSchedules`, `sns:GetSubscriptionAttributes`, `sns:ListSubscriptionsByTopic`, `sns:Unsubscribe` |
 | `lagotto doctor` | `cloudformation:DescribeStacks`, `cloudwatch:GetMetricStatistics`, `ec2:DescribeInstanceTypeOfferings`, `ec2:DescribeRegions`, `ec2:DescribeSubnets`, `iam:GetRole`, `iam:GetRolePolicy`, `iam:SimulatePrincipalPolicy`, `lambda:GetFunction`, `s3:GetBucketTagging`, `s3:ListAllMyBuckets`, `scheduler:GetSchedule`, `scheduler:ListSchedules`, `sns:GetSubscriptionAttributes`, `sns:GetTopicAttributes`, `sns:ListSubscriptionsByTopic` |
 | `lagotto extend` | `iam:PassRole`, `lambda:GetFunction`, `scheduler:GetSchedule`, `scheduler:UpdateSchedule`, `sns:GetSubscriptionAttributes`, `sns:ListSubscriptionsByTopic`, `sns:Subscribe` |
 | `lagotto history` | nothing |
@@ -75,7 +75,7 @@ Not everyday use:
 | Command | IAM actions |
 | --- | --- |
 | `lagotto ack` | `dynamodb:GetItem`, `dynamodb:UpdateItem`, `iam:PassRole`, `lambda:GetFunction`, `scheduler:GetSchedule`, `scheduler:UpdateSchedule`, `sns:GetSubscriptionAttributes`, `sns:ListSubscriptionsByTopic`, `sns:Subscribe` |
-| `lagotto cancel` | `dynamodb:GetItem`, `dynamodb:Query`, `dynamodb:UpdateItem`, `ec2:CancelCapacityReservation`, `ec2:DescribeCapacityReservations`, `sns:GetSubscriptionAttributes`, `sns:ListSubscriptionsByTopic`, `sns:Unsubscribe` |
+| `lagotto cancel` | `dynamodb:GetItem`, `dynamodb:Query`, `dynamodb:UpdateItem`, `ec2:CancelCapacityReservation`, `ec2:DescribeCapacityReservations`, `scheduler:DeleteSchedule`, `scheduler:ListSchedules`, `sns:GetSubscriptionAttributes`, `sns:ListSubscriptionsByTopic`, `sns:Unsubscribe` |
 | `lagotto deploy` | `cloudformation:CreateChangeSet`, `cloudformation:DeleteChangeSet`, `cloudformation:DeleteStack`, `cloudformation:DescribeChangeSet`, `cloudformation:DescribeStackDriftDetectionStatus`, `cloudformation:DescribeStackResourceDrifts`, `cloudformation:DescribeStacks`, `cloudformation:DetectStackDrift`, `cloudformation:ExecuteChangeSet`, `cloudformation:GetTemplate`, `cloudformation:ListStackResources`, `dynamodb:CreateTable`, `dynamodb:DescribeTable`, `dynamodb:DescribeTimeToLive`, `dynamodb:TagResource`, `dynamodb:UpdateTimeToLive`, `iam:AttachRolePolicy`, `iam:CreateRole`, `iam:GetRole`, `iam:GetRolePolicy`, `iam:ListAttachedRolePolicies`, `iam:ListRolePolicies`, `iam:PassRole`, `iam:PutRolePolicy`, `iam:TagRole`, `lambda:CreateFunction`, `lambda:DeleteFunction`, `lambda:GetFunction`, `lambda:TagResource`, `lambda:UpdateFunctionCode`, `lambda:UpdateFunctionConfiguration`, `s3:CreateBucket`, `s3:DeleteBucket`, `s3:DeleteObject`, `s3:DeleteObjectVersion`, `s3:GetBucketTagging`, `s3:ListBucket`, `s3:ListBucketVersions`, `s3:PutBucketTagging`, `s3:PutObject`, `s3:PutObjectTagging`, `s3:TagResource`, `scheduler:CreateSchedule`, `scheduler:DeleteSchedule`, `scheduler:GetSchedule`, `scheduler:UpdateSchedule`, `sns:CreateTopic`, `sns:DeleteTopic`, `sns:GetTopicAttributes`, `sns:SetTopicAttributes`, `sns:TagResource` |
 | `lagotto doctor` | `cloudformation:DescribeStacks`, `cloudwatch:GetMetricStatistics`, `dynamodb:DescribeTable`, `dynamodb:Query`, `dynamodb:Scan`, `ec2:DescribeInstanceTypeOfferings`, `ec2:DescribeRegions`, `ec2:DescribeSubnets`, `iam:GetRole`, `iam:GetRolePolicy`, `iam:SimulatePrincipalPolicy`, `lambda:GetFunction`, `s3:GetBucketTagging`, `s3:ListAllMyBuckets`, `scheduler:GetSchedule`, `scheduler:ListSchedules`, `sns:GetSubscriptionAttributes`, `sns:GetTopicAttributes`, `sns:ListSubscriptionsByTopic` |
 | `lagotto extend` | `dynamodb:GetItem`, `dynamodb:UpdateItem`, `iam:PassRole`, `lambda:GetFunction`, `scheduler:GetSchedule`, `scheduler:UpdateSchedule`, `sns:GetSubscriptionAttributes`, `sns:ListSubscriptionsByTopic`, `sns:Subscribe` |
@@ -204,9 +204,9 @@ Not everyday use:
 | `sagemaker:CreateTrainingJob` | `lagotto poll` |
 | `sagemaker:DescribeTrainingJob` | `lagotto poll` |
 | `scheduler:CreateSchedule` | `lagotto deploy`, `lagotto launch` |
-| `scheduler:DeleteSchedule` | `lagotto deploy`, `lagotto teardown` |
+| `scheduler:DeleteSchedule` | `lagotto cancel`, `lagotto deploy`, `lagotto teardown` |
 | `scheduler:GetSchedule` | `lagotto ack`, `lagotto deploy`, `lagotto doctor`, `lagotto extend`, `lagotto update`, `lagotto watch` |
-| `scheduler:ListSchedules` | `lagotto doctor`, `lagotto teardown` |
+| `scheduler:ListSchedules` | `lagotto cancel`, `lagotto doctor`, `lagotto teardown` |
 | `scheduler:UpdateSchedule` | `lagotto ack`, `lagotto deploy`, `lagotto extend`, `lagotto update`, `lagotto watch` |
 | `servicequotas:GetServiceQuota` | `lagotto poll`, `lagotto update`, `lagotto watch` |
 | `sns:CreateTopic` | `lagotto deploy` |

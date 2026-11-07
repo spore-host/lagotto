@@ -53,6 +53,7 @@ lagotto extend <watch-id> --ttl 48h
 lagotto ack <watch-id>             # an --until-landed watch: move its acknowledgement deadline
 lagotto update <watch-id> --add-region us-west-2 --add-type g6.xlarge   # widen the search in place; --dry-run shows the diff
 lagotto cancel <watch-id>          # also releases a fired hold's reservation; -y/--yes skips the prompt
+lagotto cancel <sl-id>             # cancel a scheduled launch (from 'lagotto launch') before it fires
 lagotto history
 ```
 
@@ -370,6 +371,12 @@ Scheduled launches are driven by EventBridge Scheduler against the hosted
 poller, so they require `lagotto deploy` first (the schedule targets the poller
 Lambda in your account). The launched instance always carries a TTL (#38), and a
 one-shot's schedule self-deletes after it fires.
+
+To cancel one before it fires, run `lagotto cancel sl-<id>` (the id `launch`
+prints; `--region` if it was launched outside your default region). It marks
+the launch cancelled and deletes its schedule and any boundary-retry schedules.
+A one-shot that has already fired is refused; a `--cron` launch can be
+cancelled at any time and stops firing (#279).
 
 **Overlap policy.** If an instance with the same `Name` tag already exists when a
 schedule fires, `--if-exists` decides what happens:

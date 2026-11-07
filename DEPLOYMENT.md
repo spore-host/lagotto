@@ -24,7 +24,7 @@ There are two paths:
 | IAM role | `lagotto-capacity-poller-scheduler-invoke` (assumed by EventBridge Scheduler) | `pkg/runtimeiam`: created by `deploy` **only** |
 | DynamoDB tables | `lagotto-watches`, `lagotto-match-history` | the CLI: `deploy`, `setup` or `watch`; deleted by `lagotto teardown` |
 | DynamoDB table | `lagotto-scheduled-launches`, tagged `lagotto:managed=cli` | the CLI: `deploy` or the first `launch`; deleted by `lagotto teardown` (#250) |
-| EventBridge schedules | `lagotto-launch-sl-<id>`, one per scheduled launch (and the poller's boundary-retry schedules) | `lagotto launch` and the poller; deleted by `lagotto teardown` (#260) |
+| EventBridge schedules | `lagotto-launch-sl-<id>`, one per scheduled launch (and the poller's boundary-retry schedules) | `lagotto launch` and the poller; deleted by `lagotto cancel sl-<id>` (#279) or `lagotto teardown` (#260) |
 | S3 artifact bucket | `lagotto-lambda-<account>-<region>`, tagged `lagotto:managed=cli` | `lagotto deploy`; deleted by `lagotto deploy --teardown` (#264) |
 
 Every one of these has a **fixed name**, which is what makes the deploy idempotent

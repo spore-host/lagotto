@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -157,6 +158,12 @@ func handleScheduledLaunch(ctx context.Context, id string) error {
 	case watcher.OutcomeRetry:
 		return rearmBoundaryRetry(ctx, sl)
 
+	case watcher.OutcomeCancelled:
+		// `lagotto cancel` marked it cancelled (#279); a schedule it raced with or
+		// could not delete still fired. Nothing to launch, nothing to record.
+		log.Printf("Scheduled launch %s was cancelled — not launching", id)
+		return nil
+
 	default: // OutcomeFailed
 		if uerr := store.UpdateScheduledLaunchStatus(ctx, id, watcher.ScheduledFailed, ""); uerr != nil {
 			log.Printf("warning: could not mark scheduled launch %s failed: %v", id, uerr)
@@ -200,6 +207,11 @@ func rearmBoundaryRetry(ctx context.Context, sl *watcher.ScheduledLaunch) error 
 	sl.Attempts++
 	sl.Status = watcher.ScheduledRetrying
 	if uerr := store.PutScheduledLaunch(ctx, sl); uerr != nil {
+		// Cancelled since this firing read the record (#279): do not re-arm it.
+		if errors.Is(uerr, watcher.ErrScheduledLaunchCancelled) {
+			log.Printf("Scheduled launch %s was cancelled — not re-arming its boundary retry", sl.ScheduleID)
+			return nil
+		}
 		log.Printf("warning: could not persist retry state for %s: %v", sl.ScheduleID, uerr)
 	}
 

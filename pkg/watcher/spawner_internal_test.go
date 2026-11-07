@@ -678,3 +678,30 @@ func TestLaunchScheduled_ReservationIDReachesLauncher(t *testing.T) {
 		}
 	})
 }
+
+// TestRunScheduled_CancelledLaunchesNothing: a schedule that fires after
+// `lagotto cancel` (one the cancel raced with, or could not delete) launches
+// nothing and does not even read the reservation (#279).
+func TestRunScheduled_CancelledLaunchesNothing(t *testing.T) {
+	raw, _ := json.Marshal(SpawnConfigFile{InstanceType: "t3.micro", Region: "us-east-1", TTL: "1h"})
+	launched, described := false, false
+	sp := newSpawnerWithProvision(func(context.Context, *spawnaws.Client, spawnaws.LaunchConfig, launcher.Options) (*spawnaws.LaunchResult, error) {
+		launched = true
+		return &spawnaws.LaunchResult{InstanceID: "i-x"}, nil
+	})
+	sp.describeReservation = func(context.Context, string, string) (*spawnaws.CapacityReservation, error) {
+		described = true
+		return &spawnaws.CapacityReservation{State: "active"}, nil
+	}
+	for _, resID := range []string{"", "cr-x"} {
+		sl := &ScheduledLaunch{ScheduleID: "sl-1", Region: "us-east-1", Status: ScheduledCancelled,
+			ReservationID: resID, LaunchConfigJSON: raw}
+		out, id, err := sp.RunScheduled(context.Background(), sl)
+		if out != OutcomeCancelled || id != "" || err != nil {
+			t.Errorf("reservation %q: RunScheduled = %d, %q, %v; want OutcomeCancelled, \"\", nil", resID, out, id, err)
+		}
+	}
+	if launched || described {
+		t.Errorf("a cancelled launch reached AWS: launched=%v described=%v", launched, described)
+	}
+}

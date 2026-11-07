@@ -177,7 +177,7 @@ func TestNoPrivilegeEscalation(t *testing.T) {
 	}
 	forbidden := []string{"iam:Create", "iam:Put", "iam:Attach", "iam:Delete", "iam:Detach", "iam:Update", "iam:Tag",
 		"iam:Add", "ec2:Run", "ec2:Terminate", "ec2:CreateCapacityReservation", "lambda:Update", "lambda:Create",
-		"lambda:Invoke", "dynamodb:Delete", "scheduler:Delete", "sns:Publish", "sns:Create", "sns:Delete", "sns:Set"}
+		"lambda:Invoke", "dynamodb:Delete", "sns:Publish", "sns:Create", "sns:Delete", "sns:Set"}
 	for _, g := range grants {
 		if strings.Contains(g.Action, "*") {
 			t.Errorf("wildcard action %s", g.Action)
@@ -192,6 +192,13 @@ func TestNoPrivilegeEscalation(t *testing.T) {
 				!strings.Contains(g.Condition, "iam:PassedToService") || !strings.Contains(g.Condition, "scheduler.amazonaws.com") {
 				t.Errorf("iam:PassRole must be on the scheduler invoke role, to Scheduler only: %s when %s", g.Resource, g.Condition)
 			}
+		}
+		// `cancel sl-…` deletes per-launch schedules (#279), and nothing else: never
+		// the poller's own schedule, a group, or another schedule in the account.
+		if strings.HasPrefix(g.Action, "scheduler:Delete") &&
+			(g.Action != "scheduler:DeleteSchedule" ||
+				g.Resource != "arn:aws:scheduler:*:"+testAccount+":schedule/default/"+launchSchedulePrefix+"*") {
+			t.Errorf("the CLI-user policy grants %s on %s; only DeleteSchedule on the per-launch schedules is allowed", g.Action, g.Resource)
 		}
 		if g.Action == "ec2:CancelCapacityReservation" && !strings.Contains(g.Condition, "ec2:ResourceTag/lagotto:managed") {
 			t.Errorf("ec2:CancelCapacityReservation is not gated on lagotto's tag: %q", g.Condition)
