@@ -13,13 +13,14 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spf13/cobra"
 	"github.com/spore-host/lagotto/pkg/awscfg"
+	"github.com/spore-host/lagotto/pkg/cliiam"
 	"github.com/spore-host/lagotto/pkg/runtimeiam"
 	"github.com/spore-host/lagotto/pkg/watcher"
 )
 
 var setupCmd = &cobra.Command{
 	Use:   "setup",
-	Short: "Create lagotto's DynamoDB tables and the hosted poller's IAM roles and policies",
+	Short: "Create lagotto's DynamoDB tables, the hosted poller's IAM roles, and the CLI-user policy",
 	Long: `Provision lagotto's backend: the DynamoDB tables it uses to store watches and
 match history (lagotto-watches and lagotto-match-history by default; override with
 --watches-table / --history-table), and both CLI-owned IAM roles: the poller's
@@ -35,13 +36,28 @@ to provision the backend ahead of time, or — importantly — after 'lagotto de
 to grant the poller its permissions. 'deploy' creates only a minimal execution
 role (so the runtime Lambda can never self-escalate); 'setup', run by you, attaches
 the spawn/hold/SageMaker/scheduler policy. Until then the poller can only notify.
-'lagotto teardown --iam-roles' deletes both roles once no region runs a poller.`,
+'lagotto teardown --iam-roles' deletes both roles once no region runs a poller.
+
+It also writes the customer-managed policy lagotto-cli-user (lagotto#232): the
+least-privilege permissions the everyday commands need with YOUR credentials
+(watch, update, ack, extend, cancel, list, status, history, launch, notify-gc,
+doctor), resource-scoped to lagotto's tables, schedules, topic, roles and poller.
+It is generated from the CLI's own AWS calls (docs/reference/cli-iam-actions.md).
+Attach it to the group, users or roles that run lagotto. A re-run that changes
+it writes a new default version (deleting the oldest when IAM's limit of five is
+reached); an unchanged one is left alone. 'poll', 'setup', 'deploy' and
+'teardown' are not covered: they need administrator permissions. s3:// spawn
+configs are readable only from the buckets you name with --config-bucket; those
+are carried forward on later runs. 'lagotto teardown --iam-roles' detaches and
+deletes the policy.`,
 	RunE: runSetup,
 }
 
 var (
-	setupInstanceRoles []string
-	setupRevokeRoles   []string
+	setupInstanceRoles       []string
+	setupRevokeRoles         []string
+	setupConfigBuckets       []string
+	setupRevokeConfigBuckets []string
 )
 
 func init() {
@@ -51,6 +67,11 @@ func init() {
 			"NOTE: this lets the poller write an inline policy to and attach a managed policy to that role, not merely pass it — spawn adds its spored/SSM baseline to every role it launches with.")
 	setupCmd.Flags().StringArrayVar(&setupRevokeRoles, "revoke-instance-role", nil,
 		"Remove a previously authorized instance role (repeatable). Takes precedence over --instance-role for the same name.")
+	setupCmd.Flags().StringArrayVar(&setupConfigBuckets, "config-bucket", nil,
+		"Let the "+cliiam.PolicyName+" policy read s3:// spawn configs from this bucket (repeatable; s3:GetObject on its objects). "+
+			"Kept on later runs until revoked.")
+	setupCmd.Flags().StringArrayVar(&setupRevokeConfigBuckets, "revoke-config-bucket", nil,
+		"Remove a bucket granted with --config-bucket (repeatable). Takes precedence over --config-bucket for the same name.")
 	rootCmd.AddCommand(setupCmd)
 }
 
@@ -81,6 +102,15 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	// tables. Both roles are get-or-created, so setup works standalone on a fresh
 	// account, before or without a `lagotto deploy`.
 	if err := ensureRuntimePolicy(ctx, cfg, out); err != nil {
+		return err
+	}
+
+	// 3. The CLI-user policy (#232): what the people who run lagotto need.
+	acct, err := setupCallerAccount(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("resolve account ID: %w", err)
+	}
+	if err := applyCLIUserPolicy(ctx, newSetupPolicyClient(cfg), acct, out); err != nil {
 		return err
 	}
 
@@ -115,6 +145,83 @@ var setupCallerAccount = func(ctx context.Context, cfg aws.Config) (string, erro
 }
 
 var newSetupIAMClient = func(cfg aws.Config) runtimeiam.IAMAPI { return iam.NewFromConfig(cfg) }
+
+// newSetupPolicyClient builds the IAM client the CLI-user policy is written
+// with. A seam for tests.
+var newSetupPolicyClient = func(cfg aws.Config) cliiam.PolicyAPI { return iam.NewFromConfig(cfg) }
+
+// applyCLIUserPolicy writes the lagotto-cli-user managed policy (#232),
+// carrying the config buckets the deployed version grants forward, and tells
+// the administrator how to attach it.
+func applyCLIUserPolicy(ctx context.Context, client cliiam.PolicyAPI, accountID string, out io.Writer) error {
+	buckets, err := resolveConfigBuckets(ctx, client, accountID, out)
+	if err != nil {
+		return err
+	}
+	doc, err := cliiam.PolicyDocument(accountID, buckets)
+	if err != nil {
+		return err
+	}
+	res, err := cliiam.EnsurePolicy(ctx, client, accountID, doc)
+	if res.DeletedVersion != "" {
+		_, _ = fmt.Fprintf(out, "Deleted the oldest version (%s) of IAM policy %s to stay within IAM's five versions.\n",
+			res.DeletedVersion, cliiam.PolicyName)
+	}
+	if err != nil {
+		return fmt.Errorf("write the CLI-user IAM policy: %w", err)
+	}
+	switch {
+	case res.Created:
+		_, _ = fmt.Fprintf(out, "Created IAM policy %s (%s).\n", cliiam.PolicyName, res.ARN)
+	case res.Updated:
+		_, _ = fmt.Fprintf(out, "Updated IAM policy %s with a new default version.\n", cliiam.PolicyName)
+	default:
+		_, _ = fmt.Fprintf(out, "IAM policy %s is up to date.\n", cliiam.PolicyName)
+	}
+	if len(buckets) > 0 {
+		_, _ = fmt.Fprintf(out, "  s3:// spawn configs readable from: %s\n", strings.Join(buckets, ", "))
+	}
+	_, _ = fmt.Fprintf(out, "  Attach it to whoever runs lagotto's everyday commands, for example:\n"+
+		"    aws iam attach-group-policy --group-name <group> --policy-arn %s\n", res.ARN)
+	return nil
+}
+
+// resolveConfigBuckets computes the s3:// config buckets to grant: those the
+// deployed policy grants, plus --config-bucket, minus --revoke-config-bucket.
+// Revoke wins for the same name. A deployed policy that cannot be read is an
+// error, never "no buckets": guessing would narrow the grant being written.
+func resolveConfigBuckets(ctx context.Context, client cliiam.PolicyAPI, accountID string, out io.Writer) ([]string, error) {
+	for _, name := range append(append([]string{}, setupConfigBuckets...), setupRevokeConfigBuckets...) {
+		if err := cliiam.ValidateConfigBucketName(name); err != nil {
+			return nil, err
+		}
+	}
+	var current []string
+	doc, found, err := cliiam.ReadPolicy(ctx, client, accountID)
+	if err != nil {
+		return nil, fmt.Errorf("read the deployed %s policy (needed to keep its config buckets): %w", cliiam.PolicyName, err)
+	}
+	if found {
+		if current, err = cliiam.ConfigBuckets(doc); err != nil {
+			return nil, fmt.Errorf("parse the deployed %s policy: %w", cliiam.PolicyName, err)
+		}
+	}
+	revoked := map[string]bool{}
+	for _, n := range setupRevokeConfigBuckets {
+		n = strings.TrimSpace(n)
+		revoked[n] = true
+		if !containsString(current, n) {
+			_, _ = fmt.Fprintf(out, "note: config bucket %q was not granted; nothing to revoke.\n", n)
+		}
+	}
+	var keep []string
+	for _, n := range append(current, setupConfigBuckets...) {
+		if n = strings.TrimSpace(n); !revoked[n] {
+			keep = append(keep, n)
+		}
+	}
+	return cliiam.NormalizeConfigBuckets(keep), nil
+}
 
 // applySetupRoles is the IAM half of setup, separated so it is tested against a
 // fake IAM: carry the authorized instance roles forward, ensure both roles and

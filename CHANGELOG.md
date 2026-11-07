@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`lagotto setup` writes a least-privilege policy for the people who run
+  lagotto, `lagotto-cli-user`** (#232), so an administrator no longer works out
+  and hand-grants what the everyday commands need. Attach it to a group, user
+  or role.
+  - Covers `watch`, `update`, `ack`, `extend`, `cancel`, `list`, `status`,
+    `history`, `launch`, `notify-gc` and `doctor`. Not `poll` (it needs the
+    poller's own launch permissions, including writing and passing instance
+    roles) or the administrator commands `setup`, `deploy` and `teardown`.
+  - Resource-scoped to lagotto's three tables (and their indexes, query only),
+    the poller's schedule, the `lagotto-launch-sl-*` schedules (create only),
+    the alerts topic (subscribe by email only), lagotto's two roles (read only),
+    the poller function and doctor's stack and artifact buckets.
+    `iam:PassRole` only on `lagotto-capacity-poller-scheduler-invoke`, only to
+    EventBridge Scheduler; `ec2:CancelCapacityReservation` only on
+    reservations tagged `lagotto:managed=true`. `*` only for actions IAM does
+    not scope (EC2 describes, Service Quotas, `scheduler:ListSchedules`,
+    `s3:ListAllMyBuckets`, `cloudwatch:GetMetricStatistics`).
+  - Generated from the CLI's own AWS calls: CI fails if an everyday command
+    calls an action the policy lacks, or the policy grants one nothing calls.
+  - s3:// spawn configs are readable only from buckets named with
+    `setup --config-bucket <bucket>`; they are kept on later runs, and
+    `--revoke-config-bucket` removes one.
+  - A changed policy is written as a new default version, deleting the oldest
+    non-default one when IAM's five-version limit is reached; an unchanged one
+    is left alone. A same-named policy without lagotto's `lagotto:managed=cli`
+    tag is never touched.
+  - `lagotto teardown --iam-roles` deletes it: it detaches the policy from
+    every user, group and role (and prints each), deletes its old versions,
+    then the policy.
+  - `lagotto doctor` has a new `caller-permissions` check: it simulates your
+    identity against the policy (`iam:SimulatePrincipalPolicy`; an assumed
+    role is simulated as its IAM role) and lists what is denied, with the
+    attach command. It warns, never fails, and reports "unknown" when the
+    simulation itself is not permitted.
+
 - **`--require-quota` on `lagotto watch` and `lagotto update`: refuse a fleet
   that provably can't reach `--maintain N`** (#157). Opt-in: without it the
   #153 quota warning is unchanged and the watch is still created.

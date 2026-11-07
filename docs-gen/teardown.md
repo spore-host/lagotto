@@ -33,6 +33,13 @@ deleting anything, while a poller still exists in any of them (remove each with
 'lagotto deploy --teardown --region &lt;region&gt;') or when a region cannot be checked.
 --force does not override that check.
 
+--iam-roles also deletes the customer-managed policy lagotto-cli-user that
+'lagotto setup' writes for the people who run lagotto (lagotto#232). IAM refuses
+to delete an attached policy, so teardown first DETACHES it from every user,
+group and role it is attached to (each is printed; they lose those permissions),
+then deletes its non-default versions, then the policy. A policy of that name
+without lagotto's lagotto:managed=cli tag is left in place and reported.
+
 ```
 lagotto teardown [flags]
 ```
@@ -42,5 +49,5 @@ lagotto teardown [flags]
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
 | `--force` |  | bool |  | Delete even if the tables still contain records |
-| `--iam-roles` |  | bool |  | Also delete lagotto's two account-global IAM roles; refused while a poller exists in any region |
+| `--iam-roles` |  | bool |  | Also delete lagotto's two account-global IAM roles and the lagotto-cli-user policy (detached from everyone first); refused while a poller exists in any region |
 
