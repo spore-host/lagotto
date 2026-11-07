@@ -52,6 +52,11 @@ match ANY of the listed rungs. lagotto attempts to launch the requested instance
 and retries until it succeeds or the watch TTL expires — the launch itself is the
 capacity test (neither EC2 nor SageMaker exposes a capacity API).
 
+With --until-landed (--action spawn or hold) there is no TTL: the watch hunts
+until the launch is running or the reservation is active. It is still bounded:
+it pauses itself unless you run 'lagotto ack <watch-id>' within 3 × --remind
+(21 days by default) of creation or the last ack, and 'lagotto ack' resumes it.
+
 If the pattern matches no instance type your region(s) offer, the first poll
 prints a warning (a likely typo) but keeps watching in case the type appears.
 

@@ -69,8 +69,9 @@ func parseUntilLandedFlags(untilLanded bool, remind string, ttlSet, remindSet, m
 	return untilLandedFlags{enabled: true, remindEvery: d, pauseAfter: watcher.DefaultRemindPauseAfter}, nil
 }
 
-// stdinIsTerminal reports whether stdin is an interactive terminal.
-func stdinIsTerminal() bool {
+// stdinIsTerminal reports whether stdin is an interactive terminal. A variable
+// so tests can pin it.
+var stdinIsTerminal = func() bool {
 	fi, err := os.Stdin.Stat()
 	return err == nil && fi.Mode()&os.ModeCharDevice != 0
 }

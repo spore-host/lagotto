@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`lagotto watch --until-landed`: keep hunting until the launch or hold
+  lands, with no TTL** (#239, phase 3). Instead of a TTL the watch has a
+  rolling acknowledgement deadline: it pauses itself unless you run the new
+  **`lagotto ack <watch-id>`** within 3 × `--remind` (default `--remind 7d`, so
+  21 days; `--remind` is 1h to 30d) of creation or the last ack. `ack` moves
+  the deadline a full window ahead from now. A paused watch shows as
+  `status: expired` with the new `expired_reason: unacknowledged`, gets a
+  "paused" notification instead of the usual expiry one, and `ack` (or
+  `extend`) resumes it.
+  - For `--action spawn` and `--action hold` only. `--action notify` is
+    refused for now: notify fires when a type is offered, which is not a sign
+    a launch would succeed, so the watch would end on its first poll.
+  - Requires a `--notify` channel, and asks for confirmation before creating
+    the watch (pass `--yes` when not running in a terminal). It cannot be
+    combined with `--ttl`, `--maintain` or `--until`. If its only channels
+    are email addresses that haven't confirmed their subscription yet, the
+    watch is created with a warning.
+  - `lagotto list` shows `EXPIRES` as `until landed (ack in 4d)`, or
+    `paused (unacked)`; `lagotto status` shows the deadline and the command
+    that moves it.
+  - Safe with older pollers: the deadline is stored as the watch's ordinary
+    expiry, so a poller that predates this release simply expires the watch
+    there. Its record is retained for the usual 90 days after that.
+
+### Changed
+
+- **`--ttl` must be greater than zero**, for both `lagotto watch` and
+  `lagotto extend` (#239). `--ttl 0` and negative values used to be accepted
+  and expired the watch on the next poll; use `lagotto cancel` to stop a
+  watch, or `--until-landed` for one with no TTL.
+- **`lagotto extend` on an `--until-landed` watch acts as `lagotto ack`**: it
+  moves the acknowledgement deadline and resumes a paused watch. Passing
+  `--ttl` to it is refused, since such a watch has no TTL.
+- The `EXPIRES` column of `lagotto list` is 5 characters wider, to fit the
+  until-landed form.
+
 ### Fixed
 
 - **`lagotto teardown` now deletes the `lagotto-scheduled-launches` table**
