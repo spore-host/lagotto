@@ -59,3 +59,36 @@ func TestDeleteManagedTables_UnreadableTagsDeletesNothing(t *testing.T) {
 		t.Errorf("DeleteManagedTables = %v, %v (calls %v); want nothing deleted, no error", deleted, err, f.deleted)
 	}
 }
+
+// deletingDynamo reports every table present and lagotto-managed, but each
+// DeleteTable fails the way DynamoDB does while an earlier delete is in flight.
+type deletingDynamo struct{ dynamoAPI }
+
+func (deletingDynamo) DescribeTable(_ context.Context, in *dynamodb.DescribeTableInput, _ ...func(*dynamodb.Options)) (*dynamodb.DescribeTableOutput, error) {
+	arn := "arn:aws:dynamodb:us-west-2:123456789012:table/" + aws.ToString(in.TableName)
+	return &dynamodb.DescribeTableOutput{Table: &types.TableDescription{TableArn: aws.String(arn)}}, nil
+}
+
+func (deletingDynamo) ListTagsOfResource(context.Context, *dynamodb.ListTagsOfResourceInput, ...func(*dynamodb.Options)) (*dynamodb.ListTagsOfResourceOutput, error) {
+	return &dynamodb.ListTagsOfResourceOutput{Tags: []types.Tag{{Key: aws.String("lagotto:managed"), Value: aws.String("cli")}}}, nil
+}
+
+func (deletingDynamo) DeleteTable(_ context.Context, in *dynamodb.DeleteTableInput, _ ...func(*dynamodb.Options)) (*dynamodb.DeleteTableOutput, error) {
+	return nil, &types.ResourceInUseException{Message: aws.String("Attempt to change a resource which is still in use: Table is being deleted: " + aws.ToString(in.TableName))}
+}
+
+// Re-running teardown while the first run's deletes are still in progress
+// reports the tables as absent instead of failing (seen live, #260).
+func TestDeleteTables_TableBeingDeletedIsAbsent(t *testing.T) {
+	s := &Store{client: deletingDynamo{}, watchesTable: "w", historyTable: "h", scheduledTable: "s"}
+	res, err := s.DeleteTables(context.Background())
+	if err != nil {
+		t.Fatalf("DeleteTables: %v", err)
+	}
+	if strings.Join(res.Absent, ",") != "w,h,s" || len(res.Deleted) != 0 {
+		t.Fatalf("got %+v, want all absent", res)
+	}
+	if tableBeingDeleted(&types.ResourceInUseException{Message: aws.String("Table is being created")}) {
+		t.Fatal("a table being created is not being deleted")
+	}
+}

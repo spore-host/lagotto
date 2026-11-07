@@ -111,7 +111,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `scheduler:DeleteSchedule`, and `lagotto doctor` needs
   `scheduler:ListSchedules` and `dynamodb:Scan`
   (`docs/reference/cli-iam-actions.md`). The poller's runtime policy is
-  unchanged.
+  unchanged. Re-running teardown while its table deletes are still in
+  progress now reports those tables as already absent instead of failing
+  with `ResourceInUseException`.
 
 - **The poller notices a default subnet you create** (#256). Its per-region
   default-subnet lookup was cached for the life of a warm Lambda container,
