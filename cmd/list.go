@@ -142,7 +142,7 @@ const stalePollAfter = 15 * time.Minute
 // writeWatchTable renders the `list` table. now is a parameter so the ages are
 // testable against a fixed clock. wide (`-o wide`) adds the full last error.
 func writeWatchTable(out io.Writer, watches []watcher.Watch, now time.Time, wide bool) {
-	const row = "%-12s %-10s %-15s %-20s %-20s %-25s %-6v %-10s %-20s %-9s %5s %-8s"
+	const row = "%-12s %-10s %-15s %-20s %-20s %-25s %-6v %-10s %-25s %-9s %5s %-8s"
 	header := fmt.Sprintf(row, "WATCH ID", "STATUS", "PROJECT", "OWNER", "PATTERN", "REGIONS", "SPOT", "ACTION", "EXPIRES",
 		"LAST POLL", "TRIES", "LAST ERR")
 	if wide {
@@ -171,7 +171,7 @@ func writeWatchTable(out io.Writer, watches []watcher.Watch, now time.Time, wide
 			regions,
 			w.Spot,
 			actionCol,
-			w.ExpiresAt.Format(time.RFC3339),
+			expiresCol(w, now),
 			lastPollCol(w, now),
 			strconv.Itoa(w.Attempts),
 			dashIfEmpty(truncate(watcher.ErrorClass(latest), 8)),
@@ -184,6 +184,15 @@ func writeWatchTable(out io.Writer, watches []watcher.Watch, now time.Time, wide
 		}
 		_, _ = fmt.Fprintln(out, strings.TrimRight(line, " "))
 	}
+}
+
+// expiresCol is the EXPIRES column: the expiry time, or for an until-landed
+// watch (#239) its acknowledgement state, e.g. "until landed (ack in 4d)".
+func expiresCol(w *watcher.Watch, now time.Time) string {
+	if s, ok := untilLandedExpiresCol(w, now); ok {
+		return s
+	}
+	return w.ExpiresAt.Format(time.RFC3339)
 }
 
 // statusCol is the STATUS column: the stored status, except that an active

@@ -372,6 +372,9 @@ func (n *Notifier) NotifyExpired(ctx context.Context, w *Watch) error {
 // "[lagotto] watch w-cf8e1a08 expired without acquiring g7e.*". Pure, so it's
 // testable without SNS (snsClient is a concrete *sns.Client).
 func expiredSubject(w *Watch) string {
+	if w.ExpiredReason == ExpiredReasonUnacknowledged {
+		return fmt.Sprintf("[lagotto] watch %s paused: not acknowledged (hunting %s)", w.WatchID, w.InstanceTypePattern)
+	}
 	return fmt.Sprintf("[lagotto] watch %s expired without acquiring %s", w.WatchID, w.InstanceTypePattern)
 }
 
@@ -381,6 +384,9 @@ func expiredBody(w *Watch) string {
 	waited := "unknown"
 	if d, ok := w.TimeToGiveUp(); ok {
 		waited = FormatWait(d)
+	}
+	if w.ExpiredReason == ExpiredReasonUnacknowledged {
+		return pausedBody(w, waited)
 	}
 	return fmt.Sprintf(`Your watch %s reached its TTL without ever finding capacity.
 
@@ -407,6 +413,35 @@ pattern, or dropping --max-price.
 		w.WatchID)
 }
 
+// pausedBody is the expiry body for an until-landed watch whose acknowledgement
+// deadline passed (#239). It is not a give-up: the watch is paused, and one
+// command resumes it.
+func pausedBody(w *Watch, waited string) string {
+	return fmt.Sprintf(`Your until-landed watch %s has paused: nobody acknowledged it before its
+deadline, so lagotto stopped hunting rather than keep trying to launch
+unattended.
+
+Pattern:  %s
+Regions:  %v
+Spot:     %v
+Action:   %s (never landed)
+Created:  %s
+Paused:   %s
+Hunted:   %s
+
+Nothing was launched. To resume the hunt (and move the deadline forward):
+
+  lagotto ack %s
+
+To stop for good, cancel it:
+
+  lagotto cancel %s
+`,
+		w.WatchID, w.InstanceTypePattern, w.Regions, w.Spot, w.Action,
+		w.CreatedAt.Format(time.RFC3339), w.UpdatedAt.Format(time.RFC3339), waited,
+		w.WatchID, w.WatchID)
+}
+
 // expiredPayload is the machine-readable expiry event. Like the quota-cap
 // payload, the "event" key is new to THIS payload only — the existing match
 // payload is left untouched, so no existing webhook consumer changes shape.
@@ -421,6 +456,14 @@ func expiredPayload(w *Watch) map[string]interface{} {
 	}
 	if d, ok := w.TimeToGiveUp(); ok {
 		p["time_to_give_up_seconds"] = d.Seconds()
+	}
+	// New keys only on an until-landed pause (#239), so a TTL expiry's payload
+	// keeps its shape.
+	if w.ExpiredReason != "" {
+		p["expired_reason"] = w.ExpiredReason
+	}
+	if w.UntilLanded {
+		p["until_landed"] = true
 	}
 	return p
 }

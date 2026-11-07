@@ -92,7 +92,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	}
 	writeQuotaInfeasible(out, w, time.Now().UTC())
 	_, _ = fmt.Fprintf(out, "Created:  %s\n", w.CreatedAt.Format(time.RFC3339))
-	_, _ = fmt.Fprintf(out, "Expires:  %s\n", w.ExpiresAt.Format(time.RFC3339))
+	writeExpires(out, w, time.Now().UTC())
 	writeHeartbeat(out, w, time.Now().UTC())
 	_, _ = fmt.Fprintf(out, "Matches:  %d\n", w.MatchCount)
 

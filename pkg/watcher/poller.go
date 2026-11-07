@@ -272,17 +272,25 @@ func (p *Poller) PollAll(ctx context.Context) (*PollSummary, error) {
 			}
 		}
 		if !w.ExpiresAt.IsZero() && now.After(w.ExpiresAt) {
-			if err := p.store.UpdateWatchStatus(ctx, w.WatchID, StatusExpired); err != nil {
+			// An until-landed watch has no TTL; passing ExpiresAt means nobody
+			// acknowledged it in time, so it pauses with that reason (#239).
+			reason := expiryReason(w)
+			if err := p.store.ExpireWatch(ctx, w.WatchID, reason); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to expire watch %s: %v\n", w.WatchID, err)
 			} else {
 				summary.Expired++
 				if p.verbose {
-					fmt.Fprintf(os.Stderr, "Watch %s expired (TTL %s elapsed)\n", w.WatchID, w.ExpiresAt.Format(time.RFC3339))
+					if reason != "" {
+						fmt.Fprintf(os.Stderr, "Watch %s paused (%s: deadline %s passed)\n", w.WatchID, reason, w.ExpiresAt.Format(time.RFC3339))
+					} else {
+						fmt.Fprintf(os.Stderr, "Watch %s expired (TTL %s elapsed)\n", w.WatchID, w.ExpiresAt.Format(time.RFC3339))
+					}
 				}
 				// Mirror the persisted transition onto the in-memory copy BEFORE
 				// notifying: TimeToGiveUp is derived from Status + UpdatedAt, and the
 				// loaded record still says active (#161).
 				w.Status = StatusExpired
+				w.ExpiredReason = reason
 				w.UpdatedAt = now
 				// "Your watch expired without acquiring" is the mirror of the match
 				// notification and the moment a human wants to hear from an unattended

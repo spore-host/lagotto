@@ -231,6 +231,9 @@ func (s *Store) ExtendWatch(ctx context.Context, watchID string, newExpiry time.
 		expr += ", #st = :active"
 		values[":active"] = &types.AttributeValueMemberS{Value: string(StatusActive)}
 		names["#st"] = "status"
+		// A resumed watch is no longer paused (#239): drop why it expired.
+		// REMOVE of an absent attribute is a no-op, so any watch can take it.
+		expr += " REMOVE expired_reason"
 	}
 
 	input := &dynamodb.UpdateItemInput{
@@ -280,6 +283,37 @@ func (s *Store) UpdateWatchStatus(ctx context.Context, watchID string, status Wa
 	})
 	if err != nil {
 		return fmt.Errorf("update watch status: %w", err)
+	}
+	return nil
+}
+
+// ExpireWatch marks a watch expired, recording why when reason is not empty
+// (#239: ExpiredReasonUnacknowledged for an until-landed watch whose
+// acknowledgement deadline passed). With no reason it is UpdateWatchStatus, so a
+// plain TTL expiry writes exactly what it always has.
+func (s *Store) ExpireWatch(ctx context.Context, watchID, reason string) error {
+	if reason == "" {
+		return s.UpdateWatchStatus(ctx, watchID, StatusExpired)
+	}
+	now := time.Now().UTC()
+	_, err := s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: &s.watchesTable,
+		Key: map[string]types.AttributeValue{
+			"watch_id": &types.AttributeValueMemberS{Value: watchID},
+		},
+		UpdateExpression: aws.String("SET #st = :status, updated_at = :now, ttl_timestamp = :ttl, expired_reason = :reason"),
+		ExpressionAttributeNames: map[string]string{
+			"#st": "status",
+		},
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":status": &types.AttributeValueMemberS{Value: string(StatusExpired)},
+			":now":    &types.AttributeValueMemberS{Value: now.Format(time.RFC3339)},
+			":ttl":    &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", RetentionTTL(now))},
+			":reason": &types.AttributeValueMemberS{Value: reason},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("expire watch: %w", err)
 	}
 	return nil
 }
