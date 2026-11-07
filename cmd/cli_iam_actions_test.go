@@ -165,6 +165,7 @@ func TestCLIActionInventoryIsCurrent(t *testing.T) {
 	}
 
 	readmeActionsAreInInventory(t, byCommand)
+	checkCLIUserPolicy(t, byCommand)
 
 	doc := renderCLIIAMInventory(every, byCommand)
 	path := filepath.Join("..", cliIAMDocPath)
@@ -193,9 +194,10 @@ func TestCLIActionInventoryIsCurrent(t *testing.T) {
 // lagotto's DynamoDB tables would still be missing.
 var nonEverydayCommands = map[string]string{
 	"lagotto deploy":   "administrator: creates the poller's Lambda, topic, schedule, tables and IAM roles",
-	"lagotto setup":    "administrator: creates the tables and both IAM roles, and writes their policies",
-	"lagotto teardown": "administrator: deletes lagotto's DynamoDB tables and, with --iam-roles, its IAM roles",
-	"lagotto poll":     "runs the poller locally, so it needs what the hosted poller's role has",
+	"lagotto setup":    "administrator: creates the tables and both IAM roles, writes their policies, and writes the lagotto-cli-user policy",
+	"lagotto teardown": "administrator: deletes lagotto's DynamoDB tables and, with --iam-roles, its IAM roles and the lagotto-cli-user policy",
+	"lagotto poll": "runs the poller locally, so it needs what the hosted poller's role has, including writing and passing " +
+		"instance roles; lagotto-cli-user deliberately does not cover it",
 }
 
 // readmeActionsAreInInventory: the README's hand-written permissions summary
@@ -289,6 +291,13 @@ func renderCLIIAMInventory(every map[string]bool, byCommand map[string]map[strin
 		"`dynamodb:*` on lagotto's own tables (`lagotto-watches`, `lagotto-match-history`,\n" +
 		"`lagotto-scheduled-launches`). These are the ones a user who was granted only the\n" +
 		"tables is missing. The administrator commands are listed after the table.\n\n" +
+		"`lagotto setup` writes all of these, resource-scoped, as the customer-managed\n" +
+		"policy `lagotto-cli-user` (lagotto#232): attach it to whoever runs these commands.\n" +
+		"It is built in `pkg/cliiam` and held to this page in both directions: CI fails\n" +
+		"when an everyday command calls an action the policy does not grant, or the\n" +
+		"policy grants one no everyday command calls. `s3:GetObject` is granted only on\n" +
+		"the buckets named with `setup --config-bucket`; `lagotto doctor` simulates your\n" +
+		"identity against the policy and lists what is missing.\n\n" +
 		"| Command | Beyond the tables |\n| --- | --- |\n")
 	everyday := make([]string, 0, len(byCommand))
 	for c := range byCommand {

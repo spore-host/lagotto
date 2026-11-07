@@ -468,10 +468,29 @@ lists the IAM actions each command can call. It is generated from the code
   `iam:PassRole` on `lagotto-capacity-poller-scheduler-invoke`), `launch` creates
   a schedule, and `cancel` of a fired hold releases its capacity reservation.
 
-lagotto does not yet provision a policy for CLI users (lagotto#232); until it
-does, an administrator has to grant these actions. Without the Scheduler
-permissions, a new watch can leave a self-disabled poller off without saying so
-(lagotto#231); `lagotto doctor` reports it.
+`lagotto setup` provisions those permissions for you (lagotto#232): it writes the
+customer-managed policy `lagotto-cli-user`, generated from the same inventory and
+resource-scoped to lagotto's tables, schedules, alerts topic, roles and poller.
+An administrator attaches it to whoever runs the everyday commands:
+
+```bash
+lagotto setup                                   # creates or updates lagotto-cli-user
+aws iam attach-group-policy --group-name <group> \
+  --policy-arn arn:aws:iam::<account>:policy/lagotto-cli-user
+```
+
+It covers `watch`, `update`, `ack`, `extend`, `cancel`, `list`, `status`,
+`history`, `launch`, `notify-gc` and `doctor`, not `poll` or the administrator
+commands. `iam:PassRole` is granted only on
+`lagotto-capacity-poller-scheduler-invoke` and only to EventBridge Scheduler;
+`ec2:CancelCapacityReservation` only on reservations tagged `lagotto:managed=true`.
+s3:// spawn configs are readable only from buckets named with
+`lagotto setup --config-bucket <bucket>` (kept on later runs;
+`--revoke-config-bucket` removes one). `lagotto doctor` simulates your identity
+against the policy (`iam:SimulatePrincipalPolicy`) and lists what you lack.
+`lagotto teardown --iam-roles` detaches the policy from everyone and deletes it.
+Without the Scheduler permissions, a new watch can leave a self-disabled poller
+off without saying so (lagotto#231); `lagotto doctor` reports it.
 
 ### Checking a deployment
 

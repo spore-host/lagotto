@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
@@ -63,6 +64,15 @@ It lists every lagotto-lambda-<account>-<region> artifact bucket in the account
 (lagotto#264) and warns about each one in a region with no poller, an orphan a
 'deploy --teardown' from before #264 left behind, with the command that deletes
 it. That needs s3:ListAllMyBuckets; without it the check is a warning.
+
+It checks YOUR credentials (lagotto#232): the IAM policy simulator
+(iam:SimulatePrincipalPolicy) is asked whether the identity running doctor may
+call every action, on every resource, of the lagotto-cli-user policy 'lagotto
+setup' writes, and it lists what is denied with the command that attaches the
+policy. An assumed role is simulated as its IAM role, not the STS session. When
+the simulation cannot be made (no iam:SimulatePrincipalPolicy, the root user)
+the result is reported as unknown. Every outcome is a warning at most: the
+simulator is a model (it ignores session policies), so a denial is a lead.
 
 Best effort, it also reports EventBridge Scheduler target errors in the last 24h
 (CloudWatch AWS/Scheduler TargetErrorCount for the poller's schedule group). That
@@ -140,6 +150,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	report := doctor.Evaluate(state)
 	appendLaunchScheduleCheck(ctx, report, cfg.Region, deploy.New(cfg), store.ScheduledLaunchScheduleNames)
 	appendArtifactBucketCheck(ctx, report, *acct.Account, deploy.New(cfg), regionalArtifactProbe{cfg})
+	appendCallerCheck(ctx, report, iam.NewFromConfig(cfg), aws.ToString(acct.Arn), *acct.Account, cfg.Region)
 
 	if err := writeDoctorReport(cmd.OutOrStdout(), report, getOutputFormat()); err != nil {
 		return err

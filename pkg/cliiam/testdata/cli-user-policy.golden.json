@@ -1,0 +1,189 @@
+{
+  "Statement": [
+    {
+      "Sid": "LagottoTables",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:CreateTable",
+        "dynamodb:DescribeTable",
+        "dynamodb:DescribeTimeToLive",
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:Query",
+        "dynamodb:Scan",
+        "dynamodb:TagResource",
+        "dynamodb:UpdateItem",
+        "dynamodb:UpdateTimeToLive"
+      ],
+      "Resource": [
+        "arn:aws:dynamodb:*:123456789012:table/lagotto-watches",
+        "arn:aws:dynamodb:*:123456789012:table/lagotto-match-history",
+        "arn:aws:dynamodb:*:123456789012:table/lagotto-scheduled-launches"
+      ]
+    },
+    {
+      "Sid": "LagottoTableIndexes",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:Query"
+      ],
+      "Resource": [
+        "arn:aws:dynamodb:*:123456789012:table/lagotto-watches/index/*",
+        "arn:aws:dynamodb:*:123456789012:table/lagotto-match-history/index/*",
+        "arn:aws:dynamodb:*:123456789012:table/lagotto-scheduled-launches/index/*"
+      ]
+    },
+    {
+      "Sid": "PollerSchedule",
+      "Effect": "Allow",
+      "Action": [
+        "scheduler:GetSchedule",
+        "scheduler:UpdateSchedule"
+      ],
+      "Resource": "arn:aws:scheduler:*:123456789012:schedule/default/lagotto-capacity-poller"
+    },
+    {
+      "Sid": "LaunchSchedules",
+      "Effect": "Allow",
+      "Action": [
+        "scheduler:CreateSchedule"
+      ],
+      "Resource": "arn:aws:scheduler:*:123456789012:schedule/default/lagotto-launch-sl-*"
+    },
+    {
+      "Sid": "PassSchedulerInvokeRole",
+      "Effect": "Allow",
+      "Action": [
+        "iam:PassRole"
+      ],
+      "Resource": "arn:aws:iam::123456789012:role/lagotto-capacity-poller-scheduler-invoke",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "scheduler.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "ReadLagottoRoles",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetRole",
+        "iam:GetRolePolicy"
+      ],
+      "Resource": [
+        "arn:aws:iam::123456789012:role/lagotto-capacity-poller-role",
+        "arn:aws:iam::123456789012:role/lagotto-capacity-poller-scheduler-invoke"
+      ]
+    },
+    {
+      "Sid": "ReadIdentityCenterRoles",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetRole"
+      ],
+      "Resource": "arn:aws:iam::123456789012:role/aws-reserved/sso.amazonaws.com/*"
+    },
+    {
+      "Sid": "SimulateCaller",
+      "Effect": "Allow",
+      "Action": [
+        "iam:SimulatePrincipalPolicy"
+      ],
+      "Resource": [
+        "arn:aws:iam::123456789012:user/*",
+        "arn:aws:iam::123456789012:role/*"
+      ]
+    },
+    {
+      "Sid": "ReadPoller",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:GetFunction"
+      ],
+      "Resource": "arn:aws:lambda:*:123456789012:function:lagotto-capacity-poller"
+    },
+    {
+      "Sid": "SubscribeEmail",
+      "Effect": "Allow",
+      "Action": [
+        "sns:Subscribe"
+      ],
+      "Resource": "arn:aws:sns:*:123456789012:lagotto-capacity-alerts",
+      "Condition": {
+        "StringEquals": {
+          "sns:Protocol": "email"
+        }
+      }
+    },
+    {
+      "Sid": "AlertsTopic",
+      "Effect": "Allow",
+      "Action": [
+        "sns:GetSubscriptionAttributes",
+        "sns:GetTopicAttributes",
+        "sns:ListSubscriptionsByTopic",
+        "sns:Unsubscribe"
+      ],
+      "Resource": [
+        "arn:aws:sns:*:123456789012:lagotto-capacity-alerts",
+        "arn:aws:sns:*:123456789012:lagotto-capacity-alerts:*"
+      ]
+    },
+    {
+      "Sid": "ReleaseHolds",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CancelCapacityReservation"
+      ],
+      "Resource": "arn:aws:ec2:*:123456789012:capacity-reservation/*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:ResourceTag/lagotto:managed": "true"
+        }
+      }
+    },
+    {
+      "Sid": "DoctorLegacyStack",
+      "Effect": "Allow",
+      "Action": [
+        "cloudformation:DescribeStacks"
+      ],
+      "Resource": "arn:aws:cloudformation:*:123456789012:stack/lagotto*/*"
+    },
+    {
+      "Sid": "DoctorArtifactBuckets",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetBucketTagging"
+      ],
+      "Resource": "arn:aws:s3:::lagotto-lambda-123456789012-*"
+    },
+    {
+      "Sid": "NoResourceLevelReads",
+      "Effect": "Allow",
+      "Action": [
+        "cloudwatch:GetMetricStatistics",
+        "ec2:DescribeCapacityReservations",
+        "ec2:DescribeInstanceTypeOfferings",
+        "ec2:DescribeInstances",
+        "ec2:DescribeRegions",
+        "ec2:DescribeSubnets",
+        "s3:ListAllMyBuckets",
+        "scheduler:ListSchedules",
+        "servicequotas:GetServiceQuota"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "SpawnConfigObjects",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::my-config-bucket/*"
+      ]
+    }
+  ],
+  "Version": "2012-10-17"
+}

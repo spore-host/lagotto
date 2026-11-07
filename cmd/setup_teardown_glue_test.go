@@ -277,6 +277,7 @@ func stubTeardown(t *testing.T, tables *fakeTables, roles runtimeiam.RoleDeleteA
 	t.Cleanup(func() {
 		newTeardownStore, newRoleDeleter, teardownIAMRoles, teardownForce = oldStore, oldDeleter, oldRoles, oldForce
 	})
+	stubPolicyDeleter(t, &fakePolicyDeleter{})
 }
 
 func stubLaunchSchedules(t *testing.T, f *fakeLaunchSchedules) {
