@@ -3,8 +3,8 @@ package cmd
 import (
 	"testing"
 
-	"github.com/spore-host/lagotto/internal/hermetic"
 	"github.com/spore-host/lagotto/pkg/awscfg"
+	"github.com/spore-host/lagotto/pkg/testutil/hermetic"
 )
 
 // TestMain makes this package's tests hermetic even under a plain `go test`

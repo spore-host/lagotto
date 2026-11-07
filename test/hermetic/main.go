@@ -1,5 +1,5 @@
 // Command hermetic is a `go test -exec` wrapper that runs each test binary in
-// the hermetic environment of internal/hermetic and FAILS the package if any
+// the hermetic environment of pkg/testutil/hermetic and FAILS the package if any
 // test reached the network (#214).
 //
 //	go build -o bin/hermetic-exec ./test/hermetic
@@ -19,7 +19,7 @@ import (
 	"os/exec"
 	"path/filepath"
 
-	"github.com/spore-host/lagotto/internal/hermetic"
+	"github.com/spore-host/lagotto/pkg/testutil/hermetic"
 )
 
 func main() {

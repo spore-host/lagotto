@@ -8,7 +8,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 
-	"github.com/spore-host/lagotto/internal/hermetic"
+	"github.com/spore-host/lagotto/pkg/testutil/hermetic"
 )
 
 func TestMain(m *testing.M) { hermetic.Main(m) }

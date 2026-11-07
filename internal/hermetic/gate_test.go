@@ -429,7 +429,7 @@ func hasHermeticTestMain(t *testing.T, dir string) bool {
 		}
 		local := ""
 		for _, imp := range file.Imports {
-			if ip, _ := strconv.Unquote(imp.Path.Value); ip == "github.com/spore-host/lagotto/internal/hermetic" {
+			if ip, _ := strconv.Unquote(imp.Path.Value); ip == "github.com/spore-host/lagotto/pkg/testutil/hermetic" {
 				local = "hermetic"
 				if imp.Name != nil {
 					local = imp.Name.Name
@@ -540,7 +540,7 @@ func TestNoTestCanReachARealAWSConfig(t *testing.T) {
 			if r := s.testsReach[bin]; r != "" {
 				why = "has a test that reaches a config loader (" + r + ")"
 			}
-			t.Errorf("the test binary for %s %s but has no `func TestMain(m *testing.M) { hermetic.Main(m) }`; add one (internal/hermetic, #214)", bin, why)
+			t.Errorf("the test binary for %s %s but has no `func TestMain(m *testing.M) { hermetic.Main(m) }`; add one (pkg/testutil/hermetic, #214)", bin, why)
 		}
 	}
 	if checked == 0 {

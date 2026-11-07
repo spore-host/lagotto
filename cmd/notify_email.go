@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spf13/cobra"
+	"github.com/spore-host/lagotto/pkg/arm"
 	"github.com/spore-host/lagotto/pkg/awscfg"
 	"github.com/spore-host/lagotto/pkg/deploy"
 	"github.com/spore-host/lagotto/pkg/watcher"
@@ -77,55 +78,21 @@ func subscribeForNewWatch(ctx context.Context, errOut io.Writer, cfg aws.Config,
 	return subscribeWatchEmails(ctx, errOut, topic, subs, w)
 }
 
-// subscribeWatchEmails subscribes each email address on w to the alerts topic,
-// reusing an address's existing subscription. It runs before the watch is
-// stored, so a refusal leaves no watch behind: an email channel that cannot be
-// subscribed would deliver nothing, which is the silent failure #240 is about.
-// It records each channel's state on w for the output.
+// subscribeWatchEmails is arm.SubscribeWatchEmails, run before the watch is
+// stored so a refusal leaves no watch behind (#240), printing its warnings to
+// errOut.
 func subscribeWatchEmails(ctx context.Context, errOut io.Writer, topic alertsTopic, subs emailSubscriber, w *watcher.Watch) error {
-	addrs := watcher.EmailAddresses(w)
-	if len(addrs) == 0 {
-		return nil
+	warnings, err := arm.SubscribeWatchEmails(ctx, topic, subs, w)
+	for _, line := range warnings {
+		_, _ = fmt.Fprintf(errOut, "Warning: %s\n", line)
 	}
-	if topic.ARN == "" || subs == nil {
-		return fmt.Errorf("email notifications need the alerts topic, and %s. Run `lagotto deploy` in this account and region "+
-			"(or set %s), or drop the email channel; no watch was created", topic.Why, topicEnvVar)
-	}
-	states := map[string]watcher.SubscriptionState{}
-	for _, a := range addrs {
-		res, err := subs.Ensure(ctx, a)
-		if err != nil {
-			return fmt.Errorf("subscribe %s to email notifications: %w; no watch was created", a, err)
-		}
-		states[a] = res.State
-		if res.Unfiltered {
-			_, _ = fmt.Fprintf(errOut, "Warning: %s already has a subscription on %s with NO filter policy: it receives every email "+
-				"event on the topic, other users' watches included. lagotto did not create it and leaves it alone; "+
-				"`lagotto doctor` names it.\n", a, subs.TopicArn())
-		}
-	}
-	setChannelStates(w, states, "")
-	return nil
+	return err
 }
 
-// setChannelStates records each email channel's state on w. fallback is used
-// for an address missing from states ("" means SubNone).
+// setChannelStates is arm.SetChannelStates: record each email channel's state
+// on w; fallback, when not "", is used for every one.
 func setChannelStates(w *watcher.Watch, states map[string]watcher.SubscriptionState, fallback watcher.SubscriptionState) {
-	for i := range w.NotifyChannels {
-		ch := &w.NotifyChannels[i]
-		if ch.Type != "email" {
-			continue
-		}
-		if fallback != "" {
-			ch.Subscription = fallback
-			continue
-		}
-		if s, ok := states[watcher.NormalizeEmail(ch.Target)]; ok {
-			ch.Subscription = s
-		} else {
-			ch.Subscription = watcher.SubNone
-		}
-	}
+	arm.SetChannelStates(w, states, fallback)
 }
 
 // annotateEmailStates fills in the subscription state of every email channel
@@ -169,32 +136,22 @@ func writeEmailStates(out io.Writer, indent string, w *watcher.Watch) {
 	}
 }
 
-// cleanupWatchEmails is cancel's half of the deleter: unsubscribe each of w's
-// addresses that no other active watch names. Best effort: cancelling the watch
-// already succeeded, and the poller's next sweep or `lagotto notify-gc` retries.
+// cleanupWatchEmails is cancel's half of the deleter: arm.CleanupWatchEmails,
+// unsubscribing each of w's addresses that no other active watch names, with
+// its result and any failure printed. Best effort: cancelling the watch already
+// succeeded, and the poller's next sweep or `lagotto notify-gc` retries.
 func cleanupWatchEmails(ctx context.Context, out, errOut io.Writer, subs emailSubscriber, listActive func(context.Context) ([]watcher.Watch, error), w *watcher.Watch) {
-	addrs := watcher.EmailAddresses(w)
-	if len(addrs) == 0 || subs == nil || subs.TopicArn() == "" {
-		return
-	}
-	active, err := listActive(ctx)
-	if err != nil {
+	res, err := arm.CleanupWatchEmails(ctx, subs, listActive, w)
+	addrs := strings.Join(watcher.EmailAddresses(w), ", ")
+	var listErr *arm.ListActiveError
+	if errors.As(err, &listErr) {
 		_, _ = fmt.Fprintf(errOut, "Note: could not check whether other watches still use %s (%v); the poller's next sweep or `lagotto notify-gc` will unsubscribe it if not\n",
-			strings.Join(addrs, ", "), err)
+			addrs, listErr.Err)
 		return
 	}
-	// status-index is a GSI, so eventually consistent: the just-cancelled watch
-	// may still be listed as active. It is not.
-	others := active[:0]
-	for _, a := range active {
-		if a.WatchID != w.WatchID {
-			others = append(others, a)
-		}
-	}
-	res, err := subs.Reconcile(ctx, others, addrs)
 	reportReconcile(out, res)
-	if err != nil && !watcher.IsTopicNotFound(err) {
-		_, _ = fmt.Fprintf(errOut, "Note: could not unsubscribe %s: %v (the poller's next sweep or `lagotto notify-gc` retries)\n", strings.Join(addrs, ", "), err)
+	if err != nil {
+		_, _ = fmt.Fprintf(errOut, "Note: could not unsubscribe %s: %v (the poller's next sweep or `lagotto notify-gc` retries)\n", addrs, err)
 	}
 }
 
