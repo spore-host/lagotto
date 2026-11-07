@@ -45,6 +45,7 @@ func TestUpdateWatchFields_SearchChangeResetsDerivedState(t *testing.T) {
 	w.Attempts = 9
 	w.LastError = "capacity: InsufficientInstanceCapacity: none"
 	w.MatchCount = 2
+	w.QuotaCapped = true
 	w.QuotaCappedCount = 3
 	w.QuotaCappedAt = time.Now().UTC()
 	w.QuotaCapReason = "capped"
@@ -69,7 +70,7 @@ func TestUpdateWatchFields_SearchChangeResetsDerivedState(t *testing.T) {
 	if strings.Join(after.Regions, ",") != "us-east-1,us-west-2" || after.MaxPrice != 0 || after.Project != "" {
 		t.Errorf("fields not written: regions=%v max=%v project=%q", after.Regions, after.MaxPrice, after.Project)
 	}
-	if after.ConsecutiveFailures != 0 || after.QuotaCappedCount != 0 || after.QuotaCapReason != "" || len(after.QuotaInfeasible) != 0 || !after.QuotaCappedAt.IsZero() {
+	if after.ConsecutiveFailures != 0 || after.QuotaCapped || after.QuotaCappedCount != 0 || after.QuotaCapReason != "" || len(after.QuotaInfeasible) != 0 || !after.QuotaCappedAt.IsZero() {
 		t.Errorf("derived search state not reset: %+v", after)
 	}
 	if after.Attempts != 9 || after.LastError == "" || after.MatchCount != 2 {

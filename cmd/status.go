@@ -86,17 +86,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		if w.CompletionCondition != "" {
 			_, _ = fmt.Fprintf(out, "Until:    %s\n", w.CompletionCondition)
 		}
-		// The quota ceiling (#153). This is the PRIMARY user-visible surface for it:
-		// most watches carry no --notify, so without this line a fleet stuck below
-		// --maintain by an account quota is only explained in the poller's logs.
-		if w.QuotaCappedCount > 0 {
-			_, _ = fmt.Fprintf(out, "Quota cap: fleet capped at %d/%d since %s\n",
-				w.QuotaCappedCount, w.DesiredCount, w.QuotaCappedAt.Format(time.RFC3339))
-			if w.QuotaCapReason != "" {
-				_, _ = fmt.Fprintf(out, "  %s\n", w.QuotaCapReason)
-			}
-			_, _ = fmt.Fprintf(out, "  The watch stays active and keeps its running workers; a granted quota increase is picked up automatically.\n")
-		}
+		writeQuotaCap(out, w)
 	}
 	writeQuotaInfeasible(out, w, time.Now().UTC())
 	_, _ = fmt.Fprintf(out, "Created:  %s\n", w.CreatedAt.Format(time.RFC3339))
@@ -120,6 +110,23 @@ func runStatus(cmd *cobra.Command, args []string) error {
 // writeLanding prints the #239 landing line of `lagotto status`: the launched
 // instance (or created reservation) the watch is waiting on, how long it has
 // been pending, and when the poller gives up on it.
+// writeQuotaCap prints a fleet watch's quota ceiling (#153). This is the
+// PRIMARY user-visible surface for it: most watches carry no --notify, so
+// without this line a fleet stuck below --maintain by an account quota is only
+// explained in the poller's logs. IsQuotaCapped, not QuotaCappedCount > 0: a
+// fleet whose quota refused the first worker is capped at 0 (#274).
+func writeQuotaCap(out io.Writer, w *watcher.Watch) {
+	if !w.IsQuotaCapped() {
+		return
+	}
+	_, _ = fmt.Fprintf(out, "Quota cap: fleet capped at %d/%d since %s\n",
+		w.QuotaCappedCount, w.DesiredCount, w.QuotaCappedAt.Format(time.RFC3339))
+	if w.QuotaCapReason != "" {
+		_, _ = fmt.Fprintf(out, "  %s\n", w.QuotaCapReason)
+	}
+	_, _ = fmt.Fprintf(out, "  The watch stays active and keeps its running workers; a granted quota increase is picked up automatically.\n")
+}
+
 func writeLanding(out io.Writer, w *watcher.Watch, now time.Time) {
 	if l := landingDesc(w, now); l != "" {
 		_, _ = fmt.Fprintf(out, "Landing:  %s in %s", strings.TrimPrefix(l, "landing "), dashIfEmpty(w.PendingRegion))

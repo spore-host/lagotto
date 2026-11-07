@@ -607,13 +607,17 @@ func (s *Store) recordPollError(ctx context.Context, watchID, msg string) error 
 // (#158); limit 0 means it could not be read, and removes any limit a previous
 // cap recorded, so a stale figure is never compared against.
 //
+// It also sets the quota_capped marker (#274), so a cap at running == 0 (the
+// quota refused the very first worker) reads back as capped.
+//
 // Deliberately a SET of the attributes rather than an ADD: the value is a
 // level ("capped at M"), not a counter, so a cap at a different level overwrites
 // cleanly and re-notifies.
 func (s *Store) RecordQuotaCap(ctx context.Context, watchID string, running int, reason string, limit int32, region string) error {
-	set := "SET last_polled_at = :now, quota_capped_count = :n, quota_capped_at = :now, quota_cap_reason = :reason, quota_cap_region = :region"
+	set := "SET last_polled_at = :now, quota_capped = :capped, quota_capped_count = :n, quota_capped_at = :now, quota_cap_reason = :reason, quota_cap_region = :region"
 	values := map[string]types.AttributeValue{
 		":now":    &types.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)},
+		":capped": &types.AttributeValueMemberBOOL{Value: true},
 		":n":      &types.AttributeValueMemberN{Value: strconv.Itoa(running)},
 		":reason": &types.AttributeValueMemberS{Value: reason},
 		":region": &types.AttributeValueMemberS{Value: region},
@@ -650,7 +654,7 @@ func (s *Store) ClearQuotaCap(ctx context.Context, watchID string) error {
 		Key: map[string]types.AttributeValue{
 			"watch_id": &types.AttributeValueMemberS{Value: watchID},
 		},
-		UpdateExpression: aws.String("REMOVE quota_capped_count, quota_capped_at, quota_cap_reason, quota_cap_limit, quota_cap_region SET last_polled_at = :now"),
+		UpdateExpression: aws.String("REMOVE quota_capped, quota_capped_count, quota_capped_at, quota_cap_reason, quota_cap_limit, quota_cap_region SET last_polled_at = :now"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{
 			":now": &types.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)},
 		},

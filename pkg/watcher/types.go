@@ -153,11 +153,20 @@ type Watch struct {
 	// the whole TTL — or, as before the fix, never.
 	//
 	// QuotaCappedCount is the ceiling M in "capped at M/N" — the number of workers
-	// that were running when the quota refused the next launch. 0 means not
-	// capped, so it doubles as the already-reported flag AND the suppression
-	// threshold (a cap at a different level overwrites and re-notifies). All three
-	// are omitempty, so pre-#153 watch records read back as zero — no migration.
+	// that were running when the quota refused the next launch. It is the
+	// suppression threshold, and with QuotaCapped the already-reported level (a
+	// cap at a different level overwrites and re-notifies). 0 is a real level: a
+	// quota that refuses the very first worker caps the fleet at 0 (#274), so
+	// whether the fleet is capped at all is QuotaCapped, read via IsQuotaCapped,
+	// never `QuotaCappedCount > 0`. All of these are omitempty, so pre-#153
+	// watch records read back as zero — no migration.
 	QuotaCappedCount int `json:"quota_capped_count,omitempty" dynamodbav:"quota_capped_count,omitempty"`
+	// QuotaCapped marks that the quota-cap state above is set (#274). Before it
+	// existed, QuotaCappedCount > 0 was the only marker, so a cap at 0 read as
+	// "not capped" and the fleet re-tried its doomed launch every cycle. Records
+	// written before #274 have no marker and keep exactly their old reading
+	// (capped iff QuotaCappedCount > 0); see IsQuotaCapped.
+	QuotaCapped bool `json:"quota_capped,omitempty" dynamodbav:"quota_capped,omitempty"`
 	// QuotaCappedAt anchors the QuotaCapReprobeInterval backoff.
 	QuotaCappedAt time.Time `json:"quota_capped_at,omitempty" dynamodbav:"quota_capped_at,omitempty"`
 	// QuotaCapReason is the human explanation (family, numbers when known, and the
@@ -166,9 +175,11 @@ type Watch struct {
 	// QuotaCapLimit and QuotaCapRegion record the family vCPU limit the poller
 	// read in the region the cap was hit, at cap time (#158). A later cycle that
 	// reads a higher limit there tops up at once instead of waiting out the
-	// backoff. 0 means the limit could not be read at cap time; a real limit of
-	// 0 can't occur here, since a cap needs at least one running worker
-	// (QuotaCappedCount > 0). omitempty, so older records read back as unknown.
+	// backoff. 0 means the limit could not be read at cap time. A real limit of
+	// 0 (a family the account has no quota for, capping the fleet at 0 workers)
+	// is also stored as 0, i.e. unknown: that only costs the "raised" shortcut,
+	// and a raised limit is still found by the room probe at the #153 re-probe
+	// interval. omitempty, so older records read back as unknown.
 	QuotaCapLimit  int32  `json:"quota_cap_limit,omitempty" dynamodbav:"quota_cap_limit,omitempty"`
 	QuotaCapRegion string `json:"quota_cap_region,omitempty" dynamodbav:"quota_cap_region,omitempty"`
 	// QuotaInfeasible lists the single-shot candidates (instance type, region)
@@ -243,6 +254,21 @@ type Watch struct {
 	// exposure.go): what the watch can cost if it lands. Filled by list, status,
 	// watch and the reminder path; never persisted (dynamodbav "-").
 	Exposure *Exposure `json:"exposure,omitempty" dynamodbav:"-"`
+}
+
+// IsQuotaCapped reports whether a fleet watch carries quota-cap state (#153,
+// #274). A watch is capped when the #274 marker is set together with the
+// QuotaCappedAt anchor it was written with, or, for a record written before
+// the marker existed, when QuotaCappedCount > 0, which is exactly how those
+// records always read. The anchor is required alongside the marker because a
+// pre-#274 poller or CLI clears the cap without knowing the marker: it
+// removes quota_capped_at but leaves quota_capped behind, and such a leftover
+// must not read as a cap at 0.
+func (w *Watch) IsQuotaCapped() bool {
+	if w.QuotaCappedCount > 0 {
+		return true
+	}
+	return w.QuotaCapped && !w.QuotaCappedAt.IsZero()
 }
 
 // MatchResult records a capacity match event.

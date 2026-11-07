@@ -67,6 +67,7 @@ func IsSearchField(field string) bool {
 var derivedSearchState = []string{
 	"consecutive_failures",
 	"quota_infeasible",
+	"quota_capped",
 	"quota_capped_count",
 	"quota_capped_at",
 	"quota_cap_reason",
@@ -234,6 +235,7 @@ func (s *Store) UpdateWatchFields(ctx context.Context, w *Watch, u WatchUpdate, 
 	if search {
 		w.ConsecutiveFailures = 0
 		w.QuotaInfeasible = nil
+		w.QuotaCapped = false
 		w.QuotaCappedCount = 0
 		w.QuotaCappedAt = time.Time{}
 		w.QuotaCapReason = ""

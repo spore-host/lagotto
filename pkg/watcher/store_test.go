@@ -529,6 +529,9 @@ func TestRecordAndClearQuotaCap(t *testing.T) {
 	if got.QuotaCappedCount != 2 {
 		t.Errorf("QuotaCappedCount = %d, want 2", got.QuotaCappedCount)
 	}
+	if !got.QuotaCapped {
+		t.Error("QuotaCapped marker not written (#274)")
+	}
 	if got.QuotaCapReason != reason {
 		t.Errorf("QuotaCapReason = %q, want %q", got.QuotaCapReason, reason)
 	}
@@ -562,7 +565,7 @@ func TestRecordAndClearQuotaCap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetWatch after clear: %v", err)
 	}
-	if got.QuotaCappedCount != 0 || got.QuotaCapReason != "" || !got.QuotaCappedAt.IsZero() ||
+	if got.QuotaCapped || got.QuotaCappedCount != 0 || got.QuotaCapReason != "" || !got.QuotaCappedAt.IsZero() ||
 		got.QuotaCapLimit != 0 || got.QuotaCapRegion != "" {
 		t.Errorf("cap state not cleared: count=%d at=%v reason=%q limit=%d region=%q",
 			got.QuotaCappedCount, got.QuotaCappedAt, got.QuotaCapReason, got.QuotaCapLimit, got.QuotaCapRegion)
