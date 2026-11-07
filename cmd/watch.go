@@ -96,7 +96,7 @@ func init() {
 	watchCmd.Flags().StringVar(&watchSageMakerConfig, "sagemaker-config", "", "YAML/JSON file with the SageMaker job definition (required for --service sagemaker)")
 	watchCmd.Flags().StringVar(&watchService, "service", "ec2", "Capacity service: ec2, or sagemaker (submits your SageMaker job for ml.* types)")
 	watchCmd.Flags().StringVar(&watchProject, "project", "", "Project label for scoping a local 'poll --daemon --project' in a shared account (default: $LAGOTTO_PROJECT)")
-	watchCmd.Flags().IntVar(&watchMaintain, "maintain", 0, "Goal-driven fleet: maintain this many workers (relaunching toward the goal, even from zero) until --until holds. Requires --action spawn. 0 = single-shot (default).")
+	watchCmd.Flags().IntVar(&watchMaintain, "maintain", 0, "Goal-driven fleet: maintain this many workers (relaunching toward the goal, even from zero) until --until holds. Requires --action spawn and --regions. 0 = single-shot (default).")
 	watchCmd.Flags().BoolVar(&watchUntilLanded, "until-landed", false, "Keep hunting with no TTL until the launch (--action spawn) or hold lands. The watch pauses itself unless you run 'lagotto ack <id>' within (2+1) × --remind (21d by default). Needs a --notify channel; not with --ttl, --maintain, --until, or --action notify.")
 	watchCmd.Flags().StringVar(&watchRemind, "remind", "7d", "With --until-landed: the reminder interval (1h to 30d). You are reminded after each of the first 2 intervals and warned 24h before the pause; the watch pauses 3 × this after creation or the last ack.")
 	watchCmd.Flags().BoolVarP(&watchYes, "yes", "y", false, "Skip the confirmation prompt that --until-landed --action spawn/hold shows (required when stdin is not a terminal)")
@@ -166,6 +166,11 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	// Goal-driven fleet validation (#70): --maintain/--until make this a fleet
 	// watch, which only makes sense for the spawn action (it launches workers).
 	if err := validateFleetFlags(action, watchMaintain, watchUntil); err != nil {
+		return err
+	}
+	// Also checked by validateWatchSearch below; here too so the refusal comes
+	// before any AWS call (#275).
+	if err := validateFleetRegions(watchMaintain, watchRegions); err != nil {
 		return err
 	}
 	if watchRequireQuota && watchMaintain <= 0 {

@@ -253,6 +253,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   showed no cap. A cap now also stores a `quota_capped` marker, so a cap at
   0 workers backs off, notifies once and shows as "capped at 0/N". Records
   written by an older poller have no marker and read exactly as before.
+- **`lagotto watch` and `lagotto update` refuse a `--maintain` fleet with no
+  `--regions`** (#275). A fleet counts its running workers in each region it
+  names, so a fleet with no regions could never be counted: it was stored as
+  active, logged a warning on every poll and never launched a worker. Both
+  commands now refuse it, before any AWS call for `watch`, with an error that
+  points at `--regions`. A fleet stored without regions by an older CLI now
+  reports the problem, and the `lagotto update <id> --regions …` that fixes
+  it, in its last search error (`lagotto status`) on every poll, and its LAST
+  POLL goes stale instead of looking healthy. `--require-quota` behaves as
+  before for single-shot watches; a fleet never reaches it without regions.
 
 - **`lagotto deploy --teardown` now deletes the artifact bucket** (#264).
   `lagotto deploy` creates `lagotto-lambda-<account>-<region>` for the poller

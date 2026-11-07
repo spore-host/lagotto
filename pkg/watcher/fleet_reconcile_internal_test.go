@@ -588,3 +588,44 @@ func TestCappedFleetStillCompletesOnUntil(t *testing.T) {
 		t.Errorf("launched %d, want 0", launches)
 	}
 }
+
+// TestPollFleetWatch_NoRegionsSurfacesInLastPollError: a fleet stored with no
+// regions (before #275 refused one) can't be counted. Each cycle must say why
+// in last_poll_error, pointing at --regions, rather than only logging, and
+// must leave last_polled_at alone so LAST POLL goes stale.
+func TestPollFleetWatch_NoRegionsSurfacesInLastPollError(t *testing.T) {
+	store := fleetStore(t)
+	ctx := context.Background()
+	w := quotaFleetWatch(t, "w-noregions")
+	w.Regions = nil
+	if err := store.PutWatch(ctx, w); err != nil {
+		t.Fatalf("PutWatch: %v", err)
+	}
+	p, calls := quotaPoller(t, store, w.WatchID, 0, func() (*spawnaws.LaunchResult, error) {
+		return &spawnaws.LaunchResult{InstanceID: "i-ok"}, nil
+	})
+	p.pollFleetWatch(ctx, w, &PollSummary{})
+
+	if *calls != 0 {
+		t.Errorf("RunInstances attempts = %d, want 0", *calls)
+	}
+	got, err := store.GetWatch(ctx, w.WatchID)
+	if err != nil {
+		t.Fatalf("GetWatch: %v", err)
+	}
+	if !strings.Contains(got.LastPollError, "--regions") || !strings.Contains(got.LastPollError, "lagotto update w-noregions --regions") {
+		t.Errorf("LastPollError = %q, want it to name --regions and the fix", got.LastPollError)
+	}
+	if len(got.LastPollError) >= MaxLastErrorBytes {
+		t.Errorf("LastPollError is %d bytes, truncated at %d: %q", len(got.LastPollError), MaxLastErrorBytes, got.LastPollError)
+	}
+	if got.LastPollErrorAt.IsZero() {
+		t.Error("LastPollErrorAt not stamped")
+	}
+	if !got.LastPolledAt.IsZero() {
+		t.Errorf("LastPolledAt = %v, want untouched so LAST POLL goes stale", got.LastPolledAt)
+	}
+	if got.Status != StatusActive {
+		t.Errorf("status = %q, want active", got.Status)
+	}
+}

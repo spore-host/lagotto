@@ -217,8 +217,10 @@ lagotto watch m8g.8xlarge --action spawn --spawn-config prep.yaml \
 ```
 
 Each poll: if `--until` holds, the fleet retires (`completed`); otherwise lagotto
-counts the running workers (by a `lagotto:watch=<id>` tag) and launches enough to
-reach `--maintain`. This makes idempotent, spot-friendly batch fire-and-forget:
+counts the running workers (by a `lagotto:watch=<id>` tag) in each `--regions`
+region and launches enough to reach `--maintain`. A fleet therefore needs
+`--regions`: `watch` and `update` refuse a `--maintain` watch without it. This
+makes idempotent, spot-friendly batch fire-and-forget:
 pull-model workers absorb independent reclaim, and the supervisor revives the
 fleet after a correlated total loss.
 

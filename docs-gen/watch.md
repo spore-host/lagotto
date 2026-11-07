@@ -15,7 +15,7 @@ lagotto watch <instance-type-pattern> [flags]
 |------|-------|------|---------|-------------|
 | `--action` |  | string | `notify` | Action on match: notify, spawn, hold |
 | `--azs` |  | stringSlice |  | Availability zones to pin/order within the region(s), comma-separated (e.g. us-west-2b,us-west-2c). Empty = all AZs. AZ breadth is free (same-region data locality), so all AZs are tried each poll. |
-| `--maintain` |  | int |  | Goal-driven fleet: maintain this many workers (relaunching toward the goal, even from zero) until --until holds. Requires --action spawn. 0 = single-shot (default). |
+| `--maintain` |  | int |  | Goal-driven fleet: maintain this many workers (relaunching toward the goal, even from zero) until --until holds. Requires --action spawn and --regions. 0 = single-shot (default). |
 | `--max-price` |  | float64 |  | Maximum acceptable price per hour (0 = any) |
 | `--notify` |  | stringSlice |  | Notification channels (e.g., email:user@example.com, webhook:https://..., sns:&lt;topic-arn&gt;). An email address is subscribed to the alerts topic and must confirm by clicking the link in the AWS Notification email before anything is delivered. |
 | `--project` |  | string |  | Project label for scoping a local 'poll --daemon --project' in a shared account (default: $LAGOTTO_PROJECT) |
