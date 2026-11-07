@@ -20,7 +20,7 @@ lagotto watch <instance-type-pattern> [flags]
 | `--notify` |  | stringSlice |  | Notification channels (e.g., email:user@example.com, webhook:https://..., sns:&lt;topic-arn&gt;). An email address is subscribed to the alerts topic and must confirm by clicking the link in the AWS Notification email before anything is delivered. |
 | `--project` |  | string |  | Project label for scoping a local 'poll --daemon --project' in a shared account (default: $LAGOTTO_PROJECT) |
 | `--regions` | `-r` | stringSlice |  | Regions to watch (comma-separated; empty = all enabled). Widening across regions can break data co-location (cross-region egress) — prefer --azs within your data's region first. |
-| `--remind` |  | string | `7d` | With --until-landed: the acknowledgement interval (1h to 30d). The watch pauses after 2 intervals pass without an ack, so the deadline is 3 × this from creation or the last ack. |
+| `--remind` |  | string | `7d` | With --until-landed: the reminder interval (1h to 30d). You are reminded after each of the first 2 intervals and warned 24h before the pause; the watch pauses 3 × this after creation or the last ack. |
 | `--sagemaker-config` |  | string |  | YAML/JSON file with the SageMaker job definition (required for --service sagemaker) |
 | `--service` |  | string | `ec2` | Capacity service: ec2, or sagemaker (submits your SageMaker job for ml.* types) |
 | `--spawn-config` |  | string |  | lagotto spawn-config YAML (required for --action spawn; not spawn launch --config, see README for its keys — unknown keys are rejected): a local path, an s3://bucket/key URI, or '-' for stdin. Any user_data_file / iam_policy_file it references is read now and stored inline, so a hosted poller can launch it with no access to this machine. |

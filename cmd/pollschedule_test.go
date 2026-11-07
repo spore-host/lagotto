@@ -39,6 +39,10 @@ type fakeAWS struct {
 	item string
 	// conditionFails makes every UpdateItem fail its condition (#257).
 	conditionFails bool
+	// pollerVersion is the deployed poller Lambda's Version tag (#239 phase
+	// 4); "" means no poller is deployed (GetFunction answers 404), and
+	// pollerUntagged means one is deployed with no Version tag.
+	pollerVersion string
 
 	mu        sync.Mutex
 	calls     []string
@@ -48,6 +52,10 @@ type fakeAWS struct {
 }
 
 const fakeCallerARN = "arn:aws:iam::123456789012:user/alice"
+
+// pollerUntagged is the fakeAWS.pollerVersion of a poller deployed with no
+// Version tag.
+const pollerUntagged = "untagged"
 
 func (f *fakeAWS) record(call string) {
 	f.mu.Lock()
@@ -176,6 +184,21 @@ func (f *fakeAWS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			f.t.Errorf("unexpected Scheduler %s", r.Method)
 			w.WriteHeader(http.StatusBadRequest)
 		}
+	case r.Method == http.MethodGet && r.URL.Path == "/2015-03-31/functions/lagotto-capacity-poller":
+		f.record("lambda:GetFunction")
+		if f.pollerVersion == "" {
+			schedError(w, "ResourceNotFoundException")
+			return
+		}
+		tags := map[string]string{}
+		if f.pollerVersion != pollerUntagged {
+			tags["Version"] = f.pollerVersion
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"Configuration": map[string]any{"FunctionName": "lagotto-capacity-poller"},
+			"Tags":          tags,
+		})
 	default:
 		f.t.Errorf("unexpected request %s %s target=%q body=%.200s", r.Method, r.URL, target, body)
 		w.WriteHeader(http.StatusBadRequest)

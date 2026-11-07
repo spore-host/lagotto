@@ -135,6 +135,9 @@ func TestNotify_NoTopic_EmailRefusedOthersDelivered(t *testing.T) {
 		"quota cap":   func() error { return n.NotifyQuotaCap(context.Background(), w, 1, "capped") },
 		"expired":     func() error { return n.NotifyExpired(context.Background(), w) },
 		"unsupported": func() error { return n.NotifyUnsupported(context.Background(), w, "retired") },
+		"reminder": func() error {
+			return n.NotifyReminder(context.Background(), w, ReminderStage{Stage: 1, Of: 3}, time.Now())
+		},
 	}
 	for name, send := range sends {
 		pub.msgs = nil

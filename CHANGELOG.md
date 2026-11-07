@@ -69,6 +69,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     expiry, so a poller that predates this release simply expires the watch
     there. Its record is retained for the usual 90 days after that.
 
+- **Until-landed reminders** (#239, phase 4). An `--until-landed` watch now
+  reminds you before it pauses, on its `--notify` channels (email, webhook
+  and sns; `"event": "reminder"` in the webhook/sns JSON). With the default
+  `--remind 7d` you hear from it on day 7 and day 14 after creation or your
+  last `lagotto ack`, and get a final warning 24 hours before the day-21
+  pause. With `--remind` of 24h or less, the last reminder is the final
+  warning.
+  - Each reminder says what the watch is hunting, how the hunt is going
+    (attempts, last error, last poll), when it pauses, and the `lagotto ack`
+    command that moves the deadline.
+  - Each reminder is sent at most once, even with several pollers (the
+    hosted poller and a `poll --daemon`) sweeping the same watch. A poller
+    that was down when reminders fell due sends only the latest one. A
+    reminder that fails to send is not retried; the watch still pauses safely
+    at its deadline.
+  - `lagotto ack` starts the reminder count again for the new deadline.
+  - Reminders are sent by the hosted poller, so **they start only after you
+    run `lagotto deploy`** with this release; until then the watch pauses at
+    its deadline without reminding you. `lagotto watch --until-landed`,
+    `lagotto ack` and `lagotto status` warn when the poller in your region is
+    older than the first release that sends reminders. That check reads the
+    poller Lambda's `Version` tag, as `lagotto doctor` does, so `watch`,
+    `ack`, `extend` and `status` now call `lambda:GetFunction`
+    (`docs/reference/cli-iam-actions.md`); without that permission the check
+    is skipped silently. The poller's own permissions are unchanged.
+  - `lagotto poll` and the poller log report how many reminders a cycle sent.
+
 ### Changed
 
 - `lagotto watch` refuses a negative `--max-price` (0 still means any price).

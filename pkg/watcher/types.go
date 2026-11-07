@@ -195,6 +195,14 @@ type Watch struct {
 	UntilLanded        bool  `json:"until_landed,omitempty" dynamodbav:"until_landed,omitempty"`
 	RemindEverySeconds int64 `json:"remind_every_seconds,omitempty" dynamodbav:"remind_every_seconds,omitempty"`
 	RemindPauseAfter   int   `json:"remind_pause_after,omitempty" dynamodbav:"remind_pause_after,omitempty"`
+	// ReminderWindow / RemindersSent are the "reminders sent" marker (#239
+	// phase 4; see reminders.go): the highest reminder stage sent, and the
+	// acknowledgement window it was sent in, keyed by that window's deadline
+	// (ExpiresAt as Unix seconds). An ack moves ExpiresAt, so the marker stops
+	// matching and the new window starts at zero with no extra write. Written
+	// only by Store.ClaimReminder's conditional UpdateItem.
+	ReminderWindow int64 `json:"reminder_window,omitempty" dynamodbav:"reminder_window,omitempty"`
+	RemindersSent  int   `json:"reminders_sent,omitempty" dynamodbav:"reminders_sent,omitempty"`
 	// ExpiredReason says why an expired watch stopped, when it was not a plain TTL
 	// expiry: ExpiredReasonUnacknowledged for an until-landed watch whose
 	// deadline passed (it is paused; `ack` resumes it). Cleared on resume.

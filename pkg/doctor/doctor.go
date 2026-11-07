@@ -1093,6 +1093,13 @@ func compareVersions(a, b string) (int, bool) {
 	return 0, true
 }
 
+// CompareVersions is compareVersions, exported so the CLI can hold the deployed
+// poller to a feature's minimum release by the same rules as the poller-version
+// check (#239: until-landed reminders, watcher.MinReminderPollerVersion).
+func CompareVersions(a, b string) (int, bool) {
+	return compareVersions(a, b)
+}
+
 func parseVersion(v string) ([3]int, bool) {
 	var out [3]int
 	v = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(v), "v"))

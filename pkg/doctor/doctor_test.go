@@ -800,6 +800,10 @@ func TestCompareVersions(t *testing.T) {
 		if ok && got != tc.want {
 			t.Errorf("compareVersions(%q, %q) = %d, want %d", tc.a, tc.b, got, tc.want)
 		}
+		// The exported form the CLI uses (#239) gives the same answer.
+		if eg, eok := CompareVersions(tc.a, tc.b); eg != got || eok != ok {
+			t.Errorf("CompareVersions(%q, %q) = %d, %v; compareVersions says %d, %v", tc.a, tc.b, eg, eok, got, ok)
+		}
 	}
 }
 

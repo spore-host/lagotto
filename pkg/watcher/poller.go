@@ -67,6 +67,12 @@ type Poller struct {
 	// notifyMatch overrides where a #239 landing's match (or final failure)
 	// notification goes — same test seam pattern.
 	notifyMatch func(ctx context.Context, w *Watch, m *MatchResult) error
+	// notifyReminder overrides where a #239 until-landed reminder goes — same
+	// test seam pattern.
+	notifyReminder func(ctx context.Context, w *Watch, r ReminderStage, now time.Time) error
+	// now is the sweep clock (nil = time.Now). A seam so tests can step through
+	// an acknowledgement window without waiting for it.
+	now func() time.Time
 	// quotas, when non-nil, enriches a quota-cap report with the account's actual
 	// vCPU limit/usage numbers (#153). OPTIONAL and nil-safe by design: the cap
 	// itself is detected from the RunInstances error, so a poller with no
@@ -204,6 +210,9 @@ type PollSummary struct {
 	// land (#239): started this cycle, or still pending. They stay ACTIVE and are
 	// checked, not relaunched, next cycle.
 	Landing int `json:"landing"`
+	// Reminded counts until-landed watches sent an acknowledgement reminder this
+	// cycle (#239). They stay active; a reminder is not a state transition.
+	Reminded int `json:"reminded"`
 }
 
 // Total returns the number of watches the sweep accounted for.
@@ -250,7 +259,7 @@ func (p *Poller) PollAll(ctx context.Context) (*PollSummary, error) {
 	// terminal failure). DynamoDB TTL deletion is lazy — up to ~48h late — so the
 	// poller enforces ExpiresAt itself: a past-TTL watch is expired now, not
 	// retried, so capacity-failing watches don't keep launching past their TTL.
-	now := time.Now().UTC()
+	now := p.clock()
 	groups := make(map[regionKey]*regionGroup)
 	for i := range watches {
 		w := &watches[i]
@@ -304,6 +313,12 @@ func (p *Poller) PollAll(ctx context.Context) (*PollSummary, error) {
 			}
 			continue
 		}
+		// An until-landed watch that is still hunting may be due a reminder of
+		// its deadline (#239). Claimed and sent here, before this cycle's attempt,
+		// so a slow or failing search never delays it.
+		if w.UntilLanded {
+			p.remindIfDue(ctx, w, now, summary)
+		}
 		summary.Watched++
 
 		// Goal-driven fleet (#70): maintain ~DesiredCount workers until the
@@ -347,6 +362,14 @@ func (p *Poller) PollAll(ctx context.Context) (*PollSummary, error) {
 	}
 
 	return summary, nil
+}
+
+// clock is the sweep's current time, in UTC.
+func (p *Poller) clock() time.Time {
+	if p.now != nil {
+		return p.now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 // reconcileEmailSubscriptions is the poller's half of the #240 deleter. The
