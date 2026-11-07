@@ -38,6 +38,11 @@ func EvalCallerPermissions(res cliiam.CallerResult, accountID string) Check {
 	default:
 		c.Status = StatusWarn
 		c.Summary = "unknown: " + res.Reason
+		return c
+	}
+	if len(res.NotSimulated) > 0 {
+		c.Detail = append(c.Detail, fmt.Sprintf("not simulated: %s (%s)",
+			strings.Join(res.NotSimulated, ", "), cliiam.SimulatorBlindSpot))
 	}
 	return c
 }

@@ -148,7 +148,20 @@ type statement struct {
 	sim       []string
 	// noSimulate excludes the statement from the caller check.
 	noSimulate bool
+	// simSkip are actions of this statement the caller check does not
+	// simulate, because the IAM policy simulator denies them for a principal
+	// that real IAM allows (see [SimulatorBlindSpot]). They are reported as
+	// not simulated, never as missing.
+	simSkip []string
 }
+
+// SimulatorBlindSpot says why the caller check skips an action: the IAM policy
+// simulator denies these for a principal holding exactly this policy, while the
+// same principal's real calls succeed (verified 2026-11-07, lagotto#232, with
+// an assumed role holding only lagotto-cli-user: a real tagged
+// CancelCapacityReservation, GetSubscriptionAttributes and Unsubscribe on an
+// alerts-topic subscription all succeeded; the simulator denied all three).
+const SimulatorBlindSpot = "the IAM policy simulator denies it for this policy although real IAM allows it (it does not apply ec2:ResourceTag conditions or SNS subscription ARNs), so doctor cannot check it"
 
 // stringEquals is a StringEquals condition block on one key.
 func stringEquals(key, value string) map[string]map[string]string {
@@ -230,13 +243,15 @@ func statements(accountID string, configBuckets []string) []statement {
 		// as in the poller's policy.
 		{Sid: "AlertsTopic", Action: []string{
 			"sns:GetSubscriptionAttributes", "sns:GetTopicAttributes", "sns:ListSubscriptionsByTopic", "sns:Unsubscribe",
-		}, Resource: []string{topicARN, topicARN + ":*"}, sim: []string{topicARN}},
+		}, Resource: []string{topicARN, topicARN + ":*"}, sim: []string{topicARN},
+			simSkip: []string{"sns:GetSubscriptionAttributes", "sns:Unsubscribe"}},
 
 		// `cancel` of a fired hold releases its capacity reservation (#203). Only
 		// reservations the poller created, which it always tags.
 		{Sid: "ReleaseHolds", Action: []string{"ec2:CancelCapacityReservation"},
 			Resource:  fmt.Sprintf("arn:aws:ec2:*:%s:capacity-reservation/*", accountID),
-			Condition: stringEquals("ec2:ResourceTag/"+holdTagKey, holdTagValue)},
+			Condition: stringEquals("ec2:ResourceTag/"+holdTagKey, holdTagValue),
+			simSkip:   []string{"ec2:CancelCapacityReservation"}},
 
 		// doctor's other reads.
 		{Sid: "DoctorLegacyStack", Action: []string{"cloudformation:DescribeStacks"},

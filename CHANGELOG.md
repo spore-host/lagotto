@@ -42,7 +42,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     identity against the policy (`iam:SimulatePrincipalPolicy`; an assumed
     role is simulated as its IAM role) and lists what is denied, with the
     attach command. It warns, never fails, and reports "unknown" when the
-    simulation itself is not permitted.
+    simulation itself is not permitted. Three granted actions are listed as
+    "not simulated" rather than checked, because the IAM policy simulator
+    denies them for this exact policy although real IAM allows them:
+    `ec2:CancelCapacityReservation` (its `ec2:ResourceTag` condition), and
+    `sns:GetSubscriptionAttributes` and `sns:Unsubscribe` (subscription ARNs).
 
 - **`--require-quota` on `lagotto watch` and `lagotto update`: refuse a fleet
   that provably can't reach `--maintain N`** (#157). Opt-in: without it the

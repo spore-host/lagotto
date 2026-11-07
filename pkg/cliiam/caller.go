@@ -47,6 +47,9 @@ type CallerResult struct {
 	Reason string `json:"reason,omitempty"`
 	// Checked is the number of action/resource pairs simulated.
 	Checked int `json:"checked"`
+	// NotSimulated are granted actions the check skips because the simulator
+	// cannot evaluate them for this policy ([SimulatorBlindSpot]), sorted.
+	NotSimulated []string `json:"not_simulated,omitempty"`
 }
 
 // errNotSimulable is a caller identity IAM cannot simulate.
@@ -109,9 +112,31 @@ func concreteARN(pattern, region string) string {
 // simRequests builds the caller check's requests from the policy's statements,
 // so what doctor checks is exactly what setup grants.
 func simRequests(accountID, region string) []simRequest {
+	reqs, _ := simPlan(accountID, region)
+	return reqs
+}
+
+// simPlan is [simRequests] plus the actions it deliberately leaves out
+// (statement simSkip), sorted.
+func simPlan(accountID, region string) ([]simRequest, []string) {
 	var out []simRequest
+	var skipped []string
 	for _, st := range statements(accountID, nil) {
 		if st.noSimulate {
+			continue
+		}
+		skip := map[string]bool{}
+		for _, a := range st.simSkip {
+			skip[a] = true
+			skipped = append(skipped, a)
+		}
+		actions := make([]string, 0, len(st.Action))
+		for _, a := range st.Action {
+			if !skip[a] {
+				actions = append(actions, a)
+			}
+		}
+		if len(actions) == 0 {
 			continue
 		}
 		patterns := st.sim
@@ -123,7 +148,7 @@ func simRequests(accountID, region string) []simRequest {
 				patterns = r
 			}
 		}
-		req := simRequest{actions: st.Action, resources: map[string]string{}}
+		req := simRequest{actions: actions, resources: map[string]string{}}
 		for _, p := range patterns {
 			if p != "*" {
 				req.resources[concreteARN(p, region)] = p
@@ -144,7 +169,8 @@ func simRequests(accountID, region string) []simRequest {
 		}
 		out = append(out, req)
 	}
-	return out
+	sort.Strings(skipped)
+	return out, skipped
 }
 
 func apiErrorCode(err error) string {
@@ -209,6 +235,7 @@ func CheckCaller(ctx context.Context, client SimulateAPI, callerARN, accountID, 
 		return res
 	}
 	res.Missing = missing
+	_, res.NotSimulated = simPlan(accountID, region)
 	if len(missing) == 0 {
 		res.Status = CallerAllowed
 	} else {

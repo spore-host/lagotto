@@ -58,9 +58,15 @@ func TestSimRequestsAreConcrete(t *testing.T) {
 	if actions["iam:SimulatePrincipalPolicy"] {
 		t.Error("the caller check simulates its own permission to simulate")
 	}
-	// Every other granted action is checked.
+	// Every other granted action is checked, except the simulator's blind
+	// spots, which are reported as not simulated.
+	_, blind := simPlan(testAccount, "eu-west-1")
+	skipped := map[string]bool{}
+	for _, a := range blind {
+		skipped[a] = true
+	}
 	for _, a := range GrantedActions(testAccount, nil) {
-		if !actions[a] && a != "iam:SimulatePrincipalPolicy" && a != "iam:GetRole" {
+		if !actions[a] && !skipped[a] && a != "iam:SimulatePrincipalPolicy" && a != "iam:GetRole" {
 			t.Errorf("%s is granted but not simulated", a)
 		}
 	}
@@ -166,5 +172,50 @@ func TestCheckCallerRootIsUnknown(t *testing.T) {
 	res := CheckCaller(context.Background(), f, "arn:aws:iam::123456789012:root", testAccount, "us-east-1")
 	if res.Status != CallerUnknown || len(f.simulated) != 0 || !strings.Contains(res.Reason, "root") {
 		t.Errorf("result = %+v", res)
+	}
+}
+
+// The simulator blind spots are skipped, reported, and each names an action
+// the policy actually grants (so a rename can't silently stop checking it).
+func TestSimPlanSkipsSimulatorBlindSpots(t *testing.T) {
+	reqs, skipped := simPlan(testAccount, "us-east-1")
+	want := []string{"ec2:CancelCapacityReservation", "sns:GetSubscriptionAttributes", "sns:Unsubscribe"}
+	if strings.Join(skipped, ",") != strings.Join(want, ",") {
+		t.Fatalf("skipped = %v, want %v", skipped, want)
+	}
+	for _, r := range reqs {
+		for _, a := range r.actions {
+			for _, s := range want {
+				if a == s {
+					t.Errorf("%s is still simulated", a)
+				}
+			}
+		}
+	}
+	granted := map[string]bool{}
+	for _, st := range statements(testAccount, nil) {
+		for _, a := range st.Action {
+			granted[a] = true
+		}
+		for _, a := range st.simSkip {
+			found := false
+			for _, b := range st.Action {
+				found = found || a == b
+			}
+			if !found {
+				t.Errorf("statement %s skips %s, which it does not grant", st.Sid, a)
+			}
+		}
+	}
+	// GetTopicAttributes / ListSubscriptionsByTopic in the same statement are
+	// still simulated.
+	sim := map[string]bool{}
+	for _, r := range reqs {
+		for _, a := range r.actions {
+			sim[a] = true
+		}
+	}
+	if !sim["sns:GetTopicAttributes"] || !sim["sns:ListSubscriptionsByTopic"] {
+		t.Error("the AlertsTopic statement's simulable actions were dropped too")
 	}
 }
