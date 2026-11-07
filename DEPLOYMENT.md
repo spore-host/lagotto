@@ -206,6 +206,43 @@ Three things to know:
   check FAILs in a region the policy doesn't cover, and WARNs where it covers
   that region only.
 
+## CLI-user permissions: `lagotto-cli-user`
+
+The poller's role covers the poller, not the people who run the CLI, whose
+commands use their own credentials. **`lagotto setup` also writes the
+customer-managed policy `lagotto-cli-user`** (#232): what the everyday commands
+(`watch`, `update`, `ack`, `extend`, `cancel`, `list`, `status`, `history`,
+`launch`, `notify-gc`, `doctor`) need, and nothing else. Attach it to whoever runs
+them:
+
+```bash
+lagotto setup
+aws iam attach-group-policy --group-name <group> \
+  --policy-arn arn:aws:iam::<account>:policy/lagotto-cli-user
+```
+
+- It is built in Go (`pkg/cliiam`) and CI holds it to the generated inventory
+  ([docs/reference/cli-iam-actions.md](docs/reference/cli-iam-actions.md)) in
+  both directions: an everyday command cannot gain an AWS call the policy does
+  not grant, and the policy cannot grant one no everyday command makes.
+- Resource-scoped, like the runtime policy, to lagotto's names in any region of
+  the account. `iam:PassRole` only on `lagotto-capacity-poller-scheduler-invoke`
+  and only to `scheduler.amazonaws.com`; `sns:Subscribe` only by email;
+  `ec2:CancelCapacityReservation` only on reservations tagged
+  `lagotto:managed=true`. `*` only for actions IAM does not scope.
+- **Not covered:** `poll`, which needs the poller's own launch permissions
+  (writing and passing instance roles), and `setup`, `deploy` and `teardown`.
+- `s3://` spawn configs: name their buckets with `lagotto setup --config-bucket
+  <bucket>` (repeatable). They are carried forward on later runs;
+  `--revoke-config-bucket` removes one.
+- A re-run writes a new default policy version only when the document changed,
+  deleting the oldest non-default version once IAM's limit of five is reached.
+- `lagotto doctor`'s `caller-permissions` check simulates your identity against
+  the policy and lists what you lack (a warning; "unknown" if you may not call
+  `iam:SimulatePrincipalPolicy`).
+- `lagotto teardown --iam-roles` deletes it, detaching it from every user, group
+  and role first.
+
 ## Default subnets
 
 The poller launches spawn and hold watches into each region's **default VPC**
@@ -298,8 +335,9 @@ To leave nothing behind in an account:
    per-launch `lagotto-launch-sl-*` schedules, then the three DynamoDB tables.
    It stops before deleting any table if it cannot list or delete the
    schedules.
-3. `lagotto teardown --iam-roles`: the two IAM roles and their policies. It
-   refuses while a poller exists in any enabled region.
+3. `lagotto teardown --iam-roles`: the two IAM roles and their policies, and the
+   `lagotto-cli-user` policy (detached from every user, group and role first).
+   It refuses while a poller exists in any enabled region.
 
 `lagotto doctor` warns about what a partial teardown leaves: an artifact bucket
 in a region with no poller (`artifact-buckets`) and a per-launch schedule that no
