@@ -14,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/spore-host/lagotto/pkg/testutil"
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/launcher"
 )
@@ -815,5 +816,131 @@ func TestLanding_PollWatchRoutes(t *testing.T) {
 	ms, err := h.poller.PollWatch(context.Background(), h.get(t, "w-pw"))
 	if err != nil || len(ms) != 1 || len(h.launches) != 1 {
 		t.Errorf("matches=%v err=%v launches=%v", ms, err, h.launches)
+	}
+}
+
+// Two pollers with no lease (poll --no-lease) load the same landing watch. The
+// first resolves it; the second, acting on its stale copy, must not record a
+// second resolution or launch again: every landing write is conditional on the
+// watch still landing the same resource.
+func TestLanding_StaleCopyCannotResolveTwice(t *testing.T) {
+	h := newLandHarness(t)
+	h.poller.leaseOwner = ""
+	h.put(t, landWatch(t, "w-race"))
+	h.cycle(t)
+	stale := h.get(t, "w-race")
+
+	h.describe = func(id string) (landingCheck, error) {
+		if id == "i-1" {
+			return landingCheck{State: "terminated", ReasonCode: "Server.InsufficientInstanceCapacity"}, nil
+		}
+		return landingCheck{State: "pending"}, nil
+	}
+	h.cycle(t) // resolves i-1, relaunches i-2
+	if len(h.launches) != 2 {
+		t.Fatalf("launches = %v", h.launches)
+	}
+
+	s := &PollSummary{}
+	if h.poller.pollLanding(context.Background(), stale, s) {
+		t.Error("the stale copy resumed hunting")
+	}
+	if n := len(h.history(t, "w-race")); n != 1 {
+		t.Errorf("history rows = %d, want 1 (no second resolution)", n)
+	}
+	// A refresh from a stale copy must not resurrect i-1 either.
+	h.describe = func(string) (landingCheck, error) { return landingCheck{State: "pending"}, nil }
+	stale2 := *stale
+	h.poller.pollLanding(context.Background(), &stale2, s)
+	if got := h.get(t, "w-race"); got.PendingInstanceID != "i-2" || got.LeaseOwner != LandingLeasePrefix+"i-2" {
+		t.Errorf("pending=%q lease=%q, want i-2 untouched", got.PendingInstanceID, got.LeaseOwner)
+	}
+}
+
+// failingDynamo fails UpdateItem calls whose expression contains match.
+type failingDynamo struct {
+	dynamoAPI
+	match string
+}
+
+func (f *failingDynamo) UpdateItem(ctx context.Context, in *dynamodb.UpdateItemInput, o ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
+	if strings.Contains(aws.ToString(in.UpdateExpression), f.match) {
+		return nil, errors.New("dynamodb unavailable")
+	}
+	return f.dynamoAPI.UpdateItem(ctx, in, o...)
+}
+
+// If the landing cannot be recorded, the match is recorded at once instead: a
+// premature match beats a second launch next cycle.
+func TestLanding_BeginWriteFailsFallsBackToMatch(t *testing.T) {
+	h := newLandHarness(t)
+	h.store.client = &failingDynamo{dynamoAPI: h.store.client, match: "pending_match = :pm"}
+	h.put(t, landWatch(t, "w-fallback"))
+	h.cycle(t)
+	got := h.get(t, "w-fallback")
+	if got.Status != StatusMatched || got.Landing() {
+		t.Errorf("status=%q landing=%v, want matched", got.Status, got.Landing())
+	}
+	h.cycle(t)
+	if len(h.launches) != 1 {
+		t.Errorf("launches = %v", h.launches)
+	}
+}
+
+// A failed clear leaves the watch landing (retried next cycle), and launches
+// nothing.
+func TestLanding_EndWriteFailsStaysLanding(t *testing.T) {
+	h := newLandHarness(t)
+	h.put(t, landWatch(t, "w-endfail"))
+	h.cycle(t)
+	h.store.client = &failingDynamo{dynamoAPI: h.store.client, match: "REMOVE pending_instance_id"}
+	h.describe = func(string) (landingCheck, error) { return landingCheck{State: "terminated"}, nil }
+	h.cycle(t)
+	if len(h.launches) != 1 {
+		t.Fatalf("launches = %v", h.launches)
+	}
+	if got := h.get(t, "w-endfail"); got.PendingInstanceID != "i-1" {
+		t.Errorf("pending = %q", got.PendingInstanceID)
+	}
+}
+
+// A poller with no describer or terminator wired cannot judge or give up on a
+// landing; it stays landing rather than launching.
+func TestLanding_NoSeamsStaysLanding(t *testing.T) {
+	p := &Poller{}
+	w := &Watch{PendingInstanceID: "i-1"}
+	if _, err := p.checkLanding(context.Background(), w); err == nil {
+		t.Error("checkLanding without a spawner succeeded")
+	}
+	if err := p.cancelPending(context.Background(), w); err == nil {
+		t.Error("cancelPending without a spawner succeeded")
+	}
+	w = &Watch{PendingReservationID: "cr-1"}
+	if _, err := p.checkLanding(context.Background(), w); err == nil {
+		t.Error("checkLanding without a holder succeeded")
+	}
+	if err := p.cancelPending(context.Background(), w); err == nil {
+		t.Error("cancelPending without a holder succeeded")
+	}
+	// A record without pending_match still yields a usable match.
+	since := time.Now().UTC()
+	m := landingMatch(&Watch{WatchID: "w", InstanceTypePattern: "m7g.medium", PendingInstanceID: "i-1", PendingRegion: "us-east-2", PendingSince: &since})
+	if m.InstanceID != "i-1" || m.Region != "us-east-2" || m.InstanceType != "m7g.medium" || !m.MatchedAt.Equal(since) {
+		t.Errorf("landingMatch = %+v", m)
+	}
+}
+
+// The production describers are one EC2 call each; run them against the
+// emulator so the wiring (region, client) is exercised.
+func TestLanding_ProductionDescribers(t *testing.T) {
+	env := testutil.SubstrateServer(t)
+	c, err := newInstanceDescriber(env.AWSConfig)(context.Background(), "us-east-1", "i-0000000000000dead")
+	if err == nil && !c.NotFound {
+		t.Errorf("describe of a missing instance = %+v", c)
+	}
+	h := NewHolder(env.AWSConfig)
+	c, err = h.describeReservation(context.Background(), "us-east-1", "cr-0000000000000dead")
+	if err == nil && !c.NotFound {
+		t.Errorf("describe of a missing reservation = %+v", c)
 	}
 }
