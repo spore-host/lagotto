@@ -31,7 +31,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.26.10'
+          go-version: '1.27.3'
 
       # Formatting gate (#99). Runs first because it's the cheapest check and the
       # fastest to act on. Nothing gated formatting before: CI had no formatting
@@ -202,19 +202,19 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.26.10'
+          go-version: '1.27.3'
 
       # Pinned version AND pinned hash, matching spawn's gitleaks install: a
       # version with no hash runs a replaced release asset unnoticed, and the hash
       # lives HERE rather than being read from the release's checksums.txt, because
       # a file fetched alongside the download can be replaced alongside it.
-      # Cross-checked against golangci-lint-2.14.0-checksums.txt when pinned.
+      # Cross-checked against golangci-lint-2.15.0-checksums.txt when pinned.
       # Keep VER in step with GOLANGCI_LINT_VERSION in the Makefile (a test checks).
       # Bumping the version can surface new findings; fix them in the same PR.
       - name: Install golangci-lint
         run: |
-          VER=2.14.0
-          SHA256=ab90aeb7b066f92a33415b638a50fe5344bbb75a0d32ad30cc248d88f81032ab
+          VER=2.15.0
+          SHA256=9b7fe6a6bf6334b98decf8d86b11415ea7889afdabdd1959fdce23af2a9ebcea
           T="golangci-lint-${VER}-linux-amd64.tar.gz"
           curl -sSLf -o "/tmp/$T" "https://github.com/golangci/golangci-lint/releases/download/v${VER}/$T"
           echo "$SHA256  /tmp/$T" | sha256sum -c -

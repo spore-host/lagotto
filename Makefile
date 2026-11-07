@@ -101,7 +101,7 @@ test: hermetic-exec
 # --max-same-issues=0: the default (3) hides every repeat of the same message, so
 # a run reporting 8 findings was really hiding 105 (#183). A gate that shows a
 # fraction of the problem invites fix-8-find-8-more round trips.
-GOLANGCI_LINT_VERSION=2.14.0
+GOLANGCI_LINT_VERSION=2.15.0
 lint:
 	@echo "Running linter..."
 	@which golangci-lint > /dev/null || (echo "golangci-lint not installed. Run: curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/v$(GOLANGCI_LINT_VERSION)/install.sh | sh -s -- -b $$(go env GOPATH)/bin v$(GOLANGCI_LINT_VERSION)" && exit 1)
