@@ -70,6 +70,8 @@ var derivedSearchState = []string{
 	"quota_capped_count",
 	"quota_capped_at",
 	"quota_cap_reason",
+	"quota_cap_limit",
+	"quota_cap_region",
 }
 
 // UpdateLeasePrefix marks the lease an update leaves on the watch. The poller
@@ -235,6 +237,8 @@ func (s *Store) UpdateWatchFields(ctx context.Context, w *Watch, u WatchUpdate, 
 		w.QuotaCappedCount = 0
 		w.QuotaCappedAt = time.Time{}
 		w.QuotaCapReason = ""
+		w.QuotaCapLimit = 0
+		w.QuotaCapRegion = ""
 	}
 	return nil
 }

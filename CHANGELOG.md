@@ -175,6 +175,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the org-wide pin move (spore-host/spore-host#609). `go.mod` still says
   `go 1.26.0`, so importers are not forced onto 1.27.
 
+- **A quota-capped fleet skips its doomed re-probes when it can read the
+  quota** (#158). At cap time the poller now records the family vCPU limit it
+  read in the cap region (new `quota_cap_limit` / `quota_cap_region` watch
+  attributes). On each later capped cycle it reads the quota in every region
+  of the watch:
+  - limit raised in the cap region: tops up on this poll, instead of up to
+    30 minutes later;
+  - every region read, none with room for another worker, limit not raised:
+    no launch attempt. Only a slow 6-hour backstop re-probe is made, because
+    the usage half of the reading is computed from `DescribeInstances` and
+    could disagree with EC2. That is about 8 doomed `RunInstances` over a 48h
+    watch, down from about 96;
+  - room in some region (other usage released capacity), or a quota that
+    can't be read (no permission, throttled, more than 3 regions): unchanged
+    #153 behaviour, one attempt per 30 minutes. Unknown is never treated as
+    full.
+  It uses the poller's existing `servicequotas:GetServiceQuota` and
+  `ec2:DescribeInstances` grants, so the runtime policy is unchanged. The
+  quota-cap notification now names both intervals.
+
 - `lagotto watch` refuses a negative `--max-price` (0 still means any price).
   It used to store it, and the poller treated it as no limit. The check is
   shared with `lagotto update` (#257).

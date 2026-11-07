@@ -499,8 +499,8 @@ func TestReleaseLease_OnlyOwnerClears(t *testing.T) {
 	}
 }
 
-// TestRecordAndClearQuotaCap round-trips the three persisted quota-cap fields
-// (#153) and confirms ClearQuotaCap removes all three while leaving the unrelated
+// TestRecordAndClearQuotaCap round-trips the persisted quota-cap fields
+// (#153, #158) and confirms ClearQuotaCap removes them all while leaving the unrelated
 // consecutive-failure counter alone.
 func TestRecordAndClearQuotaCap(t *testing.T) {
 	store := setupStore(t)
@@ -518,7 +518,7 @@ func TestRecordAndClearQuotaCap(t *testing.T) {
 
 	const reason = "fleet capped at 2/5 by the EC2 G-family On-Demand vCPU quota in us-east-1"
 	before := time.Now().UTC().Add(-time.Second)
-	if err := store.RecordQuotaCap(ctx, w.WatchID, 2, reason); err != nil {
+	if err := store.RecordQuotaCap(ctx, w.WatchID, 2, reason, 8, "us-east-1"); err != nil {
 		t.Fatalf("RecordQuotaCap: %v", err)
 	}
 
@@ -535,14 +535,24 @@ func TestRecordAndClearQuotaCap(t *testing.T) {
 	if got.QuotaCappedAt.Before(before) {
 		t.Errorf("QuotaCappedAt = %v, want >= %v", got.QuotaCappedAt, before)
 	}
+	if got.QuotaCapLimit != 8 || got.QuotaCapRegion != "us-east-1" {
+		t.Errorf("QuotaCapLimit/Region = %d/%q, want 8/us-east-1 (#158)", got.QuotaCapLimit, got.QuotaCapRegion)
+	}
 
-	// Re-recording at a different level overwrites (it's a level, not a counter).
-	if err := store.RecordQuotaCap(ctx, w.WatchID, 3, reason); err != nil {
+	// Re-recording at a different level overwrites (it's a level, not a counter),
+	// and an unread limit (0) removes the old one rather than leaving it stale.
+	if err := store.RecordQuotaCap(ctx, w.WatchID, 3, reason, 0, "us-west-2"); err != nil {
 		t.Fatalf("RecordQuotaCap (relevel): %v", err)
 	}
 	got, _ = store.GetWatch(ctx, w.WatchID)
 	if got.QuotaCappedCount != 3 {
 		t.Errorf("QuotaCappedCount after re-record = %d, want 3 (overwritten, not summed)", got.QuotaCappedCount)
+	}
+	if got.QuotaCapLimit != 0 || got.QuotaCapRegion != "us-west-2" {
+		t.Errorf("after an unread limit: QuotaCapLimit/Region = %d/%q, want 0/us-west-2", got.QuotaCapLimit, got.QuotaCapRegion)
+	}
+	if err := store.RecordQuotaCap(ctx, w.WatchID, 3, reason, 12, "us-west-2"); err != nil {
+		t.Fatalf("RecordQuotaCap (limit): %v", err)
 	}
 
 	if err := store.ClearQuotaCap(ctx, w.WatchID); err != nil {
@@ -552,9 +562,10 @@ func TestRecordAndClearQuotaCap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetWatch after clear: %v", err)
 	}
-	if got.QuotaCappedCount != 0 || got.QuotaCapReason != "" || !got.QuotaCappedAt.IsZero() {
-		t.Errorf("cap state not cleared: count=%d at=%v reason=%q",
-			got.QuotaCappedCount, got.QuotaCappedAt, got.QuotaCapReason)
+	if got.QuotaCappedCount != 0 || got.QuotaCapReason != "" || !got.QuotaCappedAt.IsZero() ||
+		got.QuotaCapLimit != 0 || got.QuotaCapRegion != "" {
+		t.Errorf("cap state not cleared: count=%d at=%v reason=%q limit=%d region=%q",
+			got.QuotaCappedCount, got.QuotaCappedAt, got.QuotaCapReason, got.QuotaCapLimit, got.QuotaCapRegion)
 	}
 	if got.ConsecutiveFailures != 1 {
 		t.Errorf("ConsecutiveFailures = %d, want 1 (untouched by the quota-cap clear)", got.ConsecutiveFailures)
