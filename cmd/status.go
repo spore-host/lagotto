@@ -49,6 +49,10 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	// Email delivery state per channel (#240). Best effort.
 	annotateEmailStates(ctx, emailSubscriberFor(cfg, os.Getenv, accountFromARN(w.UserID)), []*watcher.Watch{w})
 
+	// An active until-landed watch is only reminded by a poller new enough to
+	// send reminders (#239). Best effort, to stderr, so -o json stays clean.
+	warnIfPollerPredatesReminders(ctx, cfg, os.Stderr, w)
+
 	if getOutputFormat() == "json" {
 		enc := json.NewEncoder(cmd.OutOrStdout())
 		enc.SetIndent("", "  ")

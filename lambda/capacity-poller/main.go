@@ -240,8 +240,8 @@ func handlePoll(ctx context.Context) error {
 		return fmt.Errorf("poll: %w", err)
 	}
 
-	log.Printf("Poll complete: watched=%d launched=%d notified=%d retrying=%d failed=%d expired=%d quotaCapped=%d",
-		s.Watched, s.Launched, s.Notified, s.Retrying, s.Failed, s.Expired, s.QuotaCapped)
+	log.Printf("Poll complete: watched=%d launched=%d notified=%d retrying=%d failed=%d expired=%d quotaCapped=%d reminded=%d",
+		s.Watched, s.Launched, s.Notified, s.Retrying, s.Failed, s.Expired, s.QuotaCapped, s.Reminded)
 
 	// Check if any active watches remain. Retrying watches are still active, so
 	// the schedule stays armed until every watch has launched, failed, or

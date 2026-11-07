@@ -125,6 +125,14 @@ func extendOrAck(cmd *cobra.Command, watchID string, expiry func(w *watcher.Watc
 
 	writeExtended(cmd.OutOrStdout(), w, newExpiry)
 
+	// The acknowledged watch is reminded before its new deadline only by a
+	// poller new enough to send reminders (#239). Best effort.
+	if w.UntilLanded {
+		acked := *w
+		acked.Status, acked.ExpiresAt = watcher.StatusActive, newExpiry
+		warnIfPollerPredatesReminders(ctx, cfg, os.Stderr, &acked)
+	}
+
 	// A reactivated watch's addresses may have been unsubscribed when it
 	// expired (#240): subscribe them again. Best effort: the watch is extended
 	// either way, and this says so if its emails will not be delivered.

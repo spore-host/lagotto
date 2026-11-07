@@ -277,6 +277,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	warnUndeliverableUntilLanded(os.Stderr, w)
+	warnIfPollerPredatesReminders(ctx, cfg, os.Stderr, w)
 	if err := store.PutWatch(ctx, w); err != nil {
 		return fmt.Errorf("create watch: %w", err)
 	}
