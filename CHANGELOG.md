@@ -95,6 +95,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (`docs/reference/cli-iam-actions.md`); without that permission the check
     is skipped silently. The poller's own permissions are unchanged.
   - `lagotto poll` and the poller log report how many reminders a cycle sent.
+- **Exported Go API for programs that create watches** (#266), so they no
+  longer copy lagotto's unexported `cmd/` code (spore-host-mcp did, and missed
+  steps twice: spore-host-mcp#78, #81). The CLI now calls the same code; its
+  output, errors and call order are unchanged.
+  - New package `pkg/arm`, with the steps `lagotto watch` runs around storing
+    a watch: `PreflightPollSchedule`, `EnablePollScheduleIfOff` and
+    `PollScheduleUpdateRefusal` turn the hosted poller's schedule back on (#231).
+    `ResolveAlertsTopic` finds the alerts topic (#241). `SubscribeWatchEmails`,
+    `SetChannelStates` and `CleanupWatchEmails` subscribe and unsubscribe
+    email channels (#240). These functions return warnings and results rather
+    than printing them.
+  - `watcher.NewWatch(now, watcher.Lifetime{...})` builds a new watch, either
+    with a TTL or until-landed. It is now the only place that sets a new
+    watch's ID, `CreatedAt`, `UpdatedAt`, `ExpiresAt` and `TTLTimestamp`. It
+    always sets `TTLTimestamp` to `RetentionTTL(ExpiresAt)`, never to the
+    expiry itself (the bug in #41, #161 and spore-host-mcp#77).
+    `lagotto watch` uses it.
+  - The #214 hermetic test guard moved from `internal/hermetic` to
+    `pkg/testutil/hermetic`, so other modules can import it. It is for tests
+    only, and only `_test.go` files and `go test -exec` wrappers may import
+    it. New `Install` and `Recorder.Take` support a `TestMain` that does its
+    own setup.
 
 ### Changed
 
