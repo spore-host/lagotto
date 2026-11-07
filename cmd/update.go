@@ -643,7 +643,11 @@ func writeUpdate(out io.Writer, format string, r updateResult) error {
 		_, _ = fmt.Fprintf(out, "  %-22s %s -> %s\n", "status:", r.OldStatus, watcher.StatusActive)
 	}
 	if r.ResetState {
-		_, _ = fmt.Fprintln(out, "  The search changed, so the consecutive-failure count and the quota state were reset; attempts, last error and history are kept.")
+		verb := "were"
+		if r.DryRun {
+			verb = "would be"
+		}
+		_, _ = fmt.Fprintf(out, "  The search changed, so the consecutive-failure count and the quota state %s reset; attempts, last error and history are kept.\n", verb)
 	}
 	if r.DryRun {
 		_, _ = fmt.Fprintln(out, "Nothing was written.")

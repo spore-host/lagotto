@@ -294,7 +294,7 @@ func TestWriteUpdate(t *testing.T) {
 		"regions:", "us-east-1 -> (all enabled)",
 		"max_price:", "any -> $1.2500/hr",
 		"notify_channels:", "email:a@example.com -> (none)",
-		"were reset", "Nothing was written.",
+		"would be reset", "Nothing was written.",
 	} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("output lacks %q:\n%s", want, out.String())
