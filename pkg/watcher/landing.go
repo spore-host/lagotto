@@ -30,6 +30,7 @@ import (
 //	active (hunting) --launch/create--> active + pending_* (landing)
 //	landing --running / active-------------------------> matched (notify, history)
 //	landing --terminated / shutting-down / failed-------> active (hunting; last_error)
+//	landing --stopping / stopped------------------------> terminate -> active
 //	landing --still pending after PendingLandingTimeout-> terminate/cancel -> active
 //	landing --watch deadline passed---------------------> terminate/cancel -> expired
 //
@@ -142,16 +143,24 @@ const (
 	phaseWaiting landingPhase = iota
 	phaseLanded
 	phaseGone
+	// phaseStopped: the instance exists but is stopping/stopped. Within a
+	// landing window that is spawn's fail-closed bootstrap falling back to a
+	// shutdown when it could not terminate itself (spawn sets no
+	// InstanceInitiatedShutdownBehavior, so a shutdown stops it): spored is not
+	// running, nothing enforces its TTL, and its volumes bill. It is not a
+	// landing; it is given up on (terminated) like a stuck pending one.
+	phaseStopped
 )
 
-// instancePhase maps an EC2 instance state. stopping/stopped count as landed:
-// an instance only gets there after running.
+// instancePhase maps an EC2 instance state.
 func instancePhase(state string) landingPhase {
 	switch state {
-	case "running", "stopping", "stopped":
+	case "running":
 		return phaseLanded
 	case "shutting-down", "terminated":
 		return phaseGone
+	case "stopping", "stopped":
+		return phaseStopped
 	default: // "pending"
 		return phaseWaiting
 	}
@@ -318,7 +327,7 @@ func (p *Poller) pollLanding(ctx context.Context, w *Watch, summary *PollSummary
 		return p.failLanding(ctx, w, chk, ActionLandingFailed, now, summary)
 	}
 
-	if !expired && age < PendingLandingTimeout {
+	if phase == phaseWaiting && !expired && age < PendingLandingTimeout {
 		if p.verbose {
 			fmt.Fprintf(os.Stderr, "Watch %s: %s still %s after %s\n", w.WatchID, id, dashIfBlank(chk.State), age.Round(time.Second))
 		}
@@ -328,12 +337,30 @@ func (p *Poller) pollLanding(ctx context.Context, w *Watch, summary *PollSummary
 
 	// Stuck, or the watch ran out of time first: give up on this resource.
 	why := fmt.Sprintf("still %s after %s", dashIfBlank(chk.State), age.Round(time.Second))
-	if expired {
+	switch {
+	case phase == phaseStopped:
+		why = fmt.Sprintf("%s before it was seen running", chk.State)
+		if r := strings.Join(nonEmpty(chk.ReasonCode, chk.ReasonMessage), ": "); r != "" {
+			why += " (" + r + ")"
+		}
+	case expired:
 		why = fmt.Sprintf("the watch expired while it was still %s", dashIfBlank(chk.State))
 	}
 	verb := "terminated"
 	if reservation {
 		verb = "cancelled"
+	}
+	if phase == phaseStopped {
+		// A stopped instance never starts again on its own, so it cannot become a
+		// second running instance: hunt again even if the terminate fails, and say
+		// so (its volumes bill until it is terminated).
+		note := "lagotto terminated it"
+		if err := p.cancelPending(ctx, w); err != nil {
+			note = "lagotto could not terminate it (" + oneLine(err.Error()) + "); terminate it with spawn terminate " + id
+		}
+		fmt.Fprintf(os.Stderr, "Watch %s: %s %s; %s\n", w.WatchID, id, why, note)
+		chk.ReasonMessage = strings.Join(nonEmpty(chk.ReasonMessage, note), "; ")
+		return p.failLanding(ctx, w, chk, ActionLandingFailed, now, summary)
 	}
 	if err := p.cancelPending(ctx, w); err != nil {
 		msg := landingAttemptError(fmt.Sprintf("%s %s; giving up on it failed", id, why), err)

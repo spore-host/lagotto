@@ -51,6 +51,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
       retried without a cap, like a refused launch; any other reason counts
       toward the 10-consecutive-failures stop, so a launch that dies the same
       way every time does not repeat until the watch expires.
+    - `stopping` / `stopped` is not a landing either: it is what spawn's
+      fail-closed bootstrap leaves when it cannot terminate itself (spawn sets
+      no shutdown behaviour, so its shutdown stops the instance). The poller
+      terminates it and resumes; if the terminate fails it still resumes,
+      since a stopped instance cannot start again on its own, and `last_error`
+      names the instance to terminate.
     - **Still `pending` after 10 minutes:** the poller terminates it through
       spawn's terminate path, which cancels a Spot request and releases a
       spawn-allocated Elastic IP, then resumes and records `landing_timed_out`.

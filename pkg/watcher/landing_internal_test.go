@@ -780,7 +780,7 @@ func TestDescribeReservationState(t *testing.T) {
 
 func TestLandingPhasesAndKinds(t *testing.T) {
 	for state, want := range map[string]landingPhase{
-		"pending": phaseWaiting, "running": phaseLanded, "stopped": phaseLanded,
+		"pending": phaseWaiting, "running": phaseLanded, "stopped": phaseStopped, "stopping": phaseStopped,
 		"shutting-down": phaseGone, "terminated": phaseGone,
 	} {
 		if got := instancePhase(state); got != want {
@@ -943,4 +943,53 @@ func TestLanding_ProductionDescribers(t *testing.T) {
 	if err == nil && !c.NotFound {
 		t.Errorf("describe of a missing reservation = %+v", c)
 	}
+}
+
+// A stopped instance in the landing window is spawn's fail-closed bootstrap
+// falling back to a shutdown (no InstanceInitiatedShutdownBehavior, so it
+// stops): not a landing. It is terminated and the hunt resumes; if the
+// terminate fails the hunt still resumes, since a stopped instance cannot
+// become a second running one.
+func TestLanding_StoppedIsNotALanding(t *testing.T) {
+	stopped := func(id string) (landingCheck, error) {
+		if id == "i-1" {
+			return landingCheck{State: "stopped", ReasonCode: "Client.InstanceInitiatedShutdown",
+				ReasonMessage: "Client.InstanceInitiatedShutdown: Instance initiated shutdown"}, nil
+		}
+		return landingCheck{State: "pending"}, nil
+	}
+	t.Run("terminated", func(t *testing.T) {
+		h := newLandHarness(t)
+		h.put(t, landWatch(t, "w-stop"))
+		h.cycle(t)
+		h.describe = stopped
+		h.cycle(t)
+		if len(h.terminated) != 1 || len(h.launches) != 2 {
+			t.Fatalf("terminated=%v launches=%v", h.terminated, h.launches)
+		}
+		got := h.get(t, "w-stop")
+		if got.Status != StatusActive || got.PendingInstanceID != "i-2" || got.ConsecutiveFailures != 1 ||
+			!strings.HasPrefix(got.LastError, "unknown: Client.InstanceInitiatedShutdown: instance i-1 stopped before it landed") ||
+			!strings.Contains(got.LastError, "lagotto terminated it") {
+			t.Errorf("status=%q pending=%q streak=%d last_error=%q", got.Status, got.PendingInstanceID, got.ConsecutiveFailures, got.LastError)
+		}
+		if hist := h.history(t, "w-stop"); len(hist) != 1 || hist[0].InstanceState != "stopped" || hist[0].ActionTaken != ActionLandingFailed {
+			t.Errorf("history = %+v", hist)
+		}
+	})
+	t.Run("terminate fails", func(t *testing.T) {
+		h := newLandHarness(t)
+		h.put(t, landWatch(t, "w-stop-deny"))
+		h.cycle(t)
+		h.describe = stopped
+		h.termErr = &capErr{"UnauthorizedOperation"}
+		h.cycle(t)
+		if len(h.launches) != 2 {
+			t.Fatalf("launches = %v, want the hunt resumed", h.launches)
+		}
+		if got := h.get(t, "w-stop-deny"); !strings.Contains(got.LastError, "could not terminate it") ||
+			!strings.Contains(got.LastError, "spawn terminate i-1") {
+			t.Errorf("last_error = %q", got.LastError)
+		}
+	})
 }
