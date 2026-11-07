@@ -561,8 +561,10 @@ func PolicyDocument(accountID string, instanceRoles []string) (string, error) {
 			Condition: passToService("ec2.amazonaws.com")},
 		// Terminating what spawn launched (#242): Provision's compensating
 		// teardown after a failed fsx_create setup (spawn pkg/launcher
-		// provision.go, "TERMINATE IT MANUALLY" otherwise), and `lagotto launch
-		// --if-exists replace` (Spawner.LaunchScheduled). Both go through
+		// provision.go, "TERMINATE IT MANUALLY" otherwise), `lagotto launch
+		// --if-exists replace` (Spawner.LaunchScheduled), and a watch's launch
+		// still pending after PendingLandingTimeout (#239, Poller.cancelPending).
+		// All go through
 		// spotrequest.Terminate, which cancels the instance's Spot request first.
 		// Gated on spawn:managed=true, so the poller cannot end an instance spawn
 		// did not launch; an untagged one-time Spot request is refused, which is

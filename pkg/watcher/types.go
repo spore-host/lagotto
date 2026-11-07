@@ -160,6 +160,28 @@ type Watch struct {
 	// ignores it (and keeps its old terminal-on-quota behaviour). When the watch
 	// does fail this way, QuotaCapReason holds the message listing them all.
 	QuotaInfeasible []QuotaInfeasibility `json:"quota_infeasible,omitempty" dynamodbav:"quota_infeasible,omitempty"`
+	// Two-phase landing (#239 phase 2). A spawn watch whose RunInstances
+	// returned, or a hold watch whose reservation was created, is not yet
+	// matched: the instance is usually still "pending" and can still be
+	// terminated for lack of capacity, and the reservation can still fail. Until
+	// a later cycle sees it "running" (or the reservation "active"), the watch
+	// stays ACTIVE with these set, and the poller checks the resource each cycle
+	// instead of launching again. Exactly one of PendingInstanceID and
+	// PendingReservationID is set while landing; neither on any other watch.
+	//
+	// All omitempty: a pre-#239 record has none, and is polled exactly as before.
+	// A pre-#239 poller ignores them, which is why a landing watch also carries
+	// a lease marker (LandingLeasePrefix) in LeaseOwner, which every poller since
+	// #47 already refuses to override. See landing.go.
+	PendingInstanceID    string `json:"pending_instance_id,omitempty" dynamodbav:"pending_instance_id,omitempty"`
+	PendingReservationID string `json:"pending_reservation_id,omitempty" dynamodbav:"pending_reservation_id,omitempty"`
+	PendingRegion        string `json:"pending_region,omitempty" dynamodbav:"pending_region,omitempty"`
+	// PendingSince is a pointer because the DynamoDB encoder writes a zero
+	// time.Time even with omitempty; nil keeps it off every non-landing record.
+	PendingSince *time.Time `json:"pending_since,omitempty" dynamodbav:"pending_since,omitempty"`
+	// PendingMatch is the match the pending launch/hold came from, so the history
+	// row written when it lands (or fails to) describes the real candidate.
+	PendingMatch *MatchResult `json:"pending_match,omitempty" dynamodbav:"pending_match,omitempty"`
 	// LeaseOwner / LeaseExpiresAt guard the double-poller race (#47): before a
 	// poller acts on a match it claims a short lease, so two daemons (or a daemon
 	// + the hosted Lambda) can't both fire the same watch. A lease past its expiry
@@ -199,6 +221,15 @@ type MatchResult struct {
 	ActionTaken   string    `json:"action_taken" dynamodbav:"action_taken"`
 	InstanceID    string    `json:"instance_id,omitempty" dynamodbav:"instance_id,omitempty"`
 	ReservationID string    `json:"reservation_id,omitempty" dynamodbav:"reservation_id,omitempty"`
+	// Landing (#239 phase 2). LandedAt is when the poller saw the instance
+	// "running" (or the reservation "active"); MatchedAt stays the launch time,
+	// the history sort key. InstanceState / ReservationState is the state the
+	// poller saw at that point, and LandingReason says why a landing failed
+	// (EC2's state reason, e.g. "Server.InsufficientInstanceCapacity: ...").
+	LandedAt         time.Time `json:"landed_at,omitzero" dynamodbav:"landed_at,omitempty"`
+	InstanceState    string    `json:"instance_state,omitempty" dynamodbav:"instance_state,omitempty"`
+	ReservationState string    `json:"reservation_state,omitempty" dynamodbav:"reservation_state,omitempty"`
+	LandingReason    string    `json:"landing_reason,omitempty" dynamodbav:"landing_reason,omitempty"`
 	// QuotaDetail explains a quota_infeasible row (#238): the error code, the
 	// vCPUs the type needs, and the quota numbers when known. Empty otherwise.
 	QuotaDetail  string `json:"quota_detail,omitempty" dynamodbav:"quota_detail,omitempty"`

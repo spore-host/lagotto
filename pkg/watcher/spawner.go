@@ -31,6 +31,12 @@ type Spawner struct {
 	// describeReservation backs the #62 Capacity-Block start-time gate (verify the
 	// reservation is launchable before firing). Indirected for testing.
 	describeReservation func(ctx context.Context, region, reservationID string) (*spawnaws.CapacityReservation, error)
+	// describeInstance backs the #239 landing check: after RunInstances returns,
+	// later cycles read the instance's state (pending/running/terminated) and
+	// state reason. Nil = no landing check: the launch is recorded as matched at
+	// once, as before #239 (the unit-test spawners that predate it). Set in
+	// NewSpawner; needs only ec2:DescribeInstances, already granted.
+	describeInstance func(ctx context.Context, region, instanceID string) (landingCheck, error)
 	// sleep backs Snipe's inter-round backoff (#73), indirected so tests drive the
 	// retry loop without real waits. Nil = the default context-aware sleep.
 	sleep func(ctx context.Context, d time.Duration) error
@@ -61,6 +67,7 @@ func NewSpawner(ctx context.Context) (*Spawner, error) {
 		listInstances:       client.ListInstances,
 		terminateInstance:   client.Terminate,
 		describeReservation: client.DescribeCapacityReservation,
+		describeInstance:    newInstanceDescriber(client.Config()),
 		s3:                  s3.NewFromConfig(client.Config()),
 		launchableAZs:       newDefaultSubnetAZLookup(client.Config()),
 	}, nil
@@ -292,13 +299,16 @@ func (s *Spawner) Spawn(ctx context.Context, w *Watch, m *MatchResult) error {
 		attempts = []string{m.AvailabilityZone} // may be "" → let EC2 choose the AZ
 	}
 
-	instanceID, az, err := s.launchAcrossAZs(ctx, cfg, attempts, customUserData)
+	res, err := s.launchAcrossAZs(ctx, cfg, attempts, customUserData)
 	if err != nil {
 		m.ActionTaken = "spawn_failed"
 		return err
 	}
-	m.InstanceID = instanceID
-	m.AvailabilityZone = az
+	m.InstanceID = res.InstanceID
+	// The AZ EC2 actually placed the instance in (#239), not the one attempted:
+	// an unpinned attempt ("") used to record an empty AZ.
+	m.AvailabilityZone = res.AZ
+	m.InstanceState = res.State
 	m.ActionTaken = "spawned"
 	return nil
 }
@@ -381,12 +391,22 @@ func (s *Spawner) countRunningFleet(ctx context.Context, w *Watch) (int, error) 
 	return len(seen), nil
 }
 
+// launched is what a successful launchAcrossAZs placed: the instance, the AZ EC2
+// put it in, and the state RunInstances reported (normally "pending").
+type launched struct {
+	InstanceID string
+	AZ         string
+	State      string
+}
+
 // launchAcrossAZs provisions an instance from a resolved LaunchConfig, trying
 // each candidate AZ in preference order and falling through to the next on a
 // capacity failure (AZ breadth within a region is free — #34). A terminal failure
 // (bad AMI/IAM/quota) stops immediately; retrying other AZs can't help. Returns
-// the launched instance id and the AZ it landed in. Shared by the watch-match
-// path (Spawn) and the scheduled-launch path (LaunchScheduled, #49).
+// the launched instance id and the AZ it landed in: the placement RunInstances
+// reported, falling back to the attempted AZ only when it reported none (#239).
+// Shared by the watch-match path (Spawn) and the scheduled-launch path
+// (LaunchScheduled, #49).
 //
 // customUserData (#129) is the config's resolved user_data/user_data_file
 // payload, if any; it's passed through as launcher.Options.CustomUserData so
@@ -394,7 +414,7 @@ func (s *Spawner) countRunningFleet(ctx context.Context, w *Watch) (int, error) 
 // idle/on-complete enforcement) and appends the user's script after it —
 // setting cfg.UserData directly here would skip Provision's bootstrap-building
 // step entirely (it only builds one when config.UserData is empty).
-func (s *Spawner) launchAcrossAZs(ctx context.Context, cfg spawnaws.LaunchConfig, attempts []string, customUserData string) (instanceID, az string, err error) {
+func (s *Spawner) launchAcrossAZs(ctx context.Context, cfg spawnaws.LaunchConfig, attempts []string, customUserData string) (launched, error) {
 	// Drop AZs the account can't place a default-VPC instance in (no default
 	// subnet, e.g. us-west-2d), so we don't waste an attempt or surface a
 	// confusing InvalidInput mid-sweep (#150). Fails open when undeterminable.
@@ -414,14 +434,18 @@ func (s *Spawner) launchAcrossAZs(ctx context.Context, cfg spawnaws.LaunchConfig
 			CustomUserData: customUserData,
 		})
 		if perr == nil {
-			return result.InstanceID, a, nil
+			az := result.AvailabilityZone
+			if az == "" {
+				az = a
+			}
+			return launched{InstanceID: result.InstanceID, AZ: az, State: result.State}, nil
 		}
 		lastErr = perr
 		if ClassifyFailure(perr) == FailureTerminal {
 			break
 		}
 	}
-	return "", "", fmt.Errorf("launch instance (tried %d AZ(s): %v): %w", len(attempts), attempts, lastErr)
+	return launched{}, fmt.Errorf("launch instance (tried %d AZ(s): %v): %w", len(attempts), attempts, lastErr)
 }
 
 // LaunchScheduled fires a one-shot/cron scheduled launch (#49): it deserializes
@@ -506,8 +530,8 @@ func (s *Spawner) LaunchScheduled(ctx context.Context, sl *ScheduledLaunch) (str
 	if az != "" {
 		attempts = []string{az}
 	}
-	instanceID, _, err := s.launchAcrossAZs(ctx, cfg, attempts, customUserData)
-	return instanceID, err
+	res, err := s.launchAcrossAZs(ctx, cfg, attempts, customUserData)
+	return res.InstanceID, err
 }
 
 // ScheduledOutcome is the result of a single firing of RunScheduled (#62).

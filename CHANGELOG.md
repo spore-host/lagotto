@@ -31,6 +31,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     starts filling them in once it is redeployed with this release
     (`lagotto deploy`).
 
+- **A spawn or hold watch now matches only once its launch lands** (#239,
+  phase 2). RunInstances returning used to end the hunt, although the instance
+  was still `pending` and EC2 could still terminate it
+  (`Server.InsufficientInstanceCapacity`), or a fail-closed bootstrap shut it
+  down; a hold matched as soon as the reservation was created, whatever its state.
+  - **Launch.** The watch stays `active` and records `pending_instance_id`,
+    `pending_region`, `pending_since` and `pending_match`
+    (`pending_reservation_id` for a hold). It launches nothing more while they
+    are set.
+  - **Each cycle** the poller describes the instance (DescribeInstances) or the
+    reservation (DescribeCapacityReservations):
+    - `running` (`active` for a hold) is the match: the notification goes out,
+      the watch becomes `matched`, and history records the instance's real AZ,
+      `landed_at` and `instance_state` (`reservation_state`).
+    - `terminated` / `shutting-down` (`failed` for a hold) clears the pending
+      fields and resumes the hunt in the same cycle. `last_error` gets the state
+      reason, and history gets a `landing_failed` row. A capacity reason is
+      retried without a cap, like a refused launch; any other reason counts
+      toward the 10-consecutive-failures stop, so a launch that dies the same
+      way every time does not repeat until the watch expires.
+    - `stopping` / `stopped` is not a landing either: it is what spawn's
+      fail-closed bootstrap leaves when it cannot terminate itself (spawn sets
+      no shutdown behaviour, so its shutdown stops the instance). The poller
+      terminates it and resumes; if the terminate fails it still resumes,
+      since a stopped instance cannot start again on its own, and `last_error`
+      names the instance to terminate.
+    - **Still `pending` after 10 minutes:** the poller terminates it through
+      spawn's terminate path, which cancels a Spot request and releases a
+      spawn-allocated Elastic IP, then resumes and records `landing_timed_out`.
+      A hold's reservation is cancelled. If the terminate fails, the watch stays
+      landing and retries; it never launches a second instance in the meantime.
+    - If the watch's deadline passes while it is landing, a running instance
+      still counts as the match; otherwise the instance is terminated and the
+      watch expires.
+  - `lagotto list` shows such a watch as `landing`, with
+    `landing i-… (pending 3m)` at the end of the row. `lagotto status` adds a
+    `Landing:` line with the time it is given up on. The `poll` summary line
+    gains `N landing`, and its JSON a `landing` count.
+  - `lagotto cancel` on a landing hold releases the pending reservation. On a
+    landing spawn it says the instance was not terminated, and how to.
+  - Fleet (`--maintain`) watches and scheduled launches are unchanged.
+  - **Upgrading.** Old watches have no pending fields and behave as before.
+    A poller from before this release ignores the pending fields, so it could
+    launch again. To stop it, a landing watch also holds its lease as
+    `landing:<id>`, which every poller since v0.47.0 refuses to override. That
+    excludes only pollers older than v0.47.0, or run with `poll --no-lease`.
+  - **IAM.** No new grants for the hosted poller: DescribeInstances,
+    DescribeCapacityReservations, the tag-gated TerminateInstances and
+    CancelCapacityReservation are already in its runtime policy (#242). In
+    `docs/reference/cli-iam-actions.md`, `lagotto poll` adds
+    `ec2:DescribeCapacityReservations` and `ec2:CancelCapacityReservation`
+    for local pollers running hold watches.
+
 - **`lagotto teardown --iam-roles` deletes lagotto's two IAM roles** (#229),
   `lagotto-capacity-poller-role` and `lagotto-capacity-poller-scheduler-invoke`,
   with their inline and attached policies. Nothing deleted them before;
@@ -43,6 +96,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   actions, `ec2:DescribeRegions` and `lambda:GetFunction`.
 
 ### Changed
+
+- **The recorded AZ is the one EC2 placed the instance in** (#239). It used to be
+  the AZ lagotto attempted, which was empty for an unpinned attempt. This applies
+  to watch, fleet and `snipe` launches.
 
 - **Built against spawn v0.161.0 (from v0.160.0)**, in the root module and in
   `lambda/capacity-poller`. What reaches instances lagotto launches:

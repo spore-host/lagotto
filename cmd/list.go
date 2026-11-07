@@ -164,7 +164,7 @@ func writeWatchTable(out io.Writer, watches []watcher.Watch, now time.Time, wide
 		latest, latestAt := w.LatestError()
 		line := fmt.Sprintf(row,
 			w.WatchID,
-			w.Status,
+			statusCol(w),
 			dashIfEmpty(truncate(w.Project, 15)),
 			truncate(shortOwner(w.UserID), 20),
 			truncate(w.InstanceTypePattern, 20),
@@ -179,8 +179,33 @@ func writeWatchTable(out io.Writer, watches []watcher.Watch, now time.Time, wide
 		if wide && latest != "" {
 			line += fmt.Sprintf(" %s (%s ago)", latest, formatAge(now.Sub(latestAt)))
 		}
+		if l := landingDesc(w, now); l != "" {
+			line += "  " + l
+		}
 		_, _ = fmt.Fprintln(out, strings.TrimRight(line, " "))
 	}
+}
+
+// statusCol is the STATUS column: the stored status, except that an active
+// watch whose launch or hold is waiting to land (#239) reads "landing". The
+// stored status (and JSON) stays "active".
+func statusCol(w *watcher.Watch) string {
+	if w.Status == watcher.StatusActive && w.Landing() {
+		return "landing"
+	}
+	return string(w.Status)
+}
+
+// landingDesc describes a landing watch's pending resource, e.g.
+// "landing i-0abc (pending 3m)", or "" for a watch that is not landing.
+func landingDesc(w *watcher.Watch, now time.Time) string {
+	if w.Status != watcher.StatusActive || !w.Landing() {
+		return ""
+	}
+	if w.PendingSince == nil {
+		return "landing " + w.PendingResourceID()
+	}
+	return fmt.Sprintf("landing %s (pending %s)", w.PendingResourceID(), formatAge(now.Sub(*w.PendingSince)))
 }
 
 // lastPollCol renders LAST POLL as an age ("4m", "2h", "3d"), or "never". An

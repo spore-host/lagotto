@@ -82,12 +82,30 @@ type reservationReleaser interface {
 	Release(ctx context.Context, region, reservationID string) (watcher.ReleaseOutcome, error)
 }
 
-// heldReservation returns the reservation a watch's last match holds, or "".
+// heldReservation returns the reservation a watch holds, or "": the one still
+// waiting to land (#239), else the one its last match holds.
 func heldReservation(w *watcher.Watch) string {
+	if w.PendingReservationID != "" {
+		return w.PendingReservationID
+	}
 	if w.LastMatch == nil {
 		return ""
 	}
 	return w.LastMatch.ReservationID
+}
+
+// heldReservationWhere is the region and AZ of heldReservation's reservation.
+func heldReservationWhere(w *watcher.Watch) (region, az string) {
+	if w.PendingReservationID != "" {
+		if w.PendingMatch != nil {
+			az = w.PendingMatch.AvailabilityZone
+		}
+		return w.PendingRegion, az
+	}
+	if w.LastMatch == nil {
+		return "", ""
+	}
+	return w.LastMatch.Region, w.LastMatch.AvailabilityZone
 }
 
 // cancelWatch is runCancel after the AWS wiring: it decides what cancelling w
@@ -114,17 +132,25 @@ func cancelWatch(ctx context.Context, out, errOut io.Writer, w *watcher.Watch, r
 		// waiting out its 30-minute auto-expiry (#41). Best-effort: a failure
 		// here must not block cancelling the watch.
 		if resID != "" {
-			outcome, rerr := rel.Release(ctx, w.LastMatch.Region, resID)
+			region, az := heldReservationWhere(w)
+			outcome, rerr := rel.Release(ctx, region, resID)
 			if rerr != nil {
 				_, _ = fmt.Fprintf(errOut, "Note: could not release capacity reservation %s: %v\n", resID, rerr)
 			} else {
-				reportRelease(out, resID, w.LastMatch.AvailabilityZone, outcome)
+				reportRelease(out, resID, az, outcome)
 			}
 		}
 		if err := setStatus(ctx, w.WatchID, watcher.StatusCancelled); err != nil {
 			return fmt.Errorf("cancel watch: %w", err)
 		}
 		_, _ = fmt.Fprintf(out, "Cancelled watch %s\n", w.WatchID)
+		// A launch still landing (#239) is the user's instance now: cancel does not
+		// terminate it, and no poller checks it any more. Say so, and how.
+		if w.PendingInstanceID != "" {
+			_, _ = fmt.Fprintf(errOut, "Note: instance %s (%s) was launched for this watch and had not been confirmed running. "+
+				"It was not terminated; its TTL still applies. To terminate it now: spawn terminate %s\n",
+				w.PendingInstanceID, w.PendingRegion, w.PendingInstanceID)
+		}
 		return nil
 
 	case w.Status == watcher.StatusMatched && resID != "":

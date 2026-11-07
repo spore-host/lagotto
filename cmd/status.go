@@ -58,6 +58,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	out := cmd.OutOrStdout()
 	_, _ = fmt.Fprintf(out, "Watch:    %s\n", w.WatchID)
 	_, _ = fmt.Fprintf(out, "Status:   %s\n", w.Status)
+	writeLanding(out, w, time.Now().UTC())
 	if w.Project != "" {
 		_, _ = fmt.Fprintf(out, "Project:  %s\n", w.Project)
 	}
@@ -106,6 +107,25 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 	writeLastMatch(out, w)
 	return nil
+}
+
+// writeLanding prints the #239 landing line of `lagotto status`: the launched
+// instance (or created reservation) the watch is waiting on, how long it has
+// been pending, and when the poller gives up on it.
+func writeLanding(out io.Writer, w *watcher.Watch, now time.Time) {
+	if l := landingDesc(w, now); l != "" {
+		_, _ = fmt.Fprintf(out, "Landing:  %s in %s", strings.TrimPrefix(l, "landing "), dashIfEmpty(w.PendingRegion))
+		if w.PendingSince != nil {
+			_, _ = fmt.Fprintf(out, "; given up at %s if still pending",
+				w.PendingSince.Add(watcher.PendingLandingTimeout).Format(time.RFC3339))
+		}
+		_, _ = fmt.Fprintln(out)
+		if w.PendingReservationID != "" {
+			_, _ = fmt.Fprintf(out, "  The watch reserves nothing more until this resolves: active is a match; failed resumes the hunt.\n")
+		} else {
+			_, _ = fmt.Fprintf(out, "  The watch launches nothing more until this resolves: running is a match; terminated resumes the hunt.\n")
+		}
+	}
 }
 
 // writeLastMatch prints the "Last match" block of the status table.

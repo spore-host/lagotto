@@ -64,6 +64,9 @@ type Poller struct {
 	// reconcileEmail overrides the #240 email-subscription cleanup run at the
 	// start of each sweep — same test seam pattern.
 	reconcileEmail func(ctx context.Context, active []Watch) (ReconcileResult, error)
+	// notifyMatch overrides where a #239 landing's match (or final failure)
+	// notification goes — same test seam pattern.
+	notifyMatch func(ctx context.Context, w *Watch, m *MatchResult) error
 	// quotas, when non-nil, enriches a quota-cap report with the account's actual
 	// vCPU limit/usage numbers (#153). OPTIONAL and nil-safe by design: the cap
 	// itself is detected from the RunInstances error, so a poller with no
@@ -197,6 +200,10 @@ type PollSummary struct {
 	// (#153). These watches stay ACTIVE and keep their running workers, so they're
 	// counted separately from Retrying (capacity dry) and Failed (terminal).
 	QuotaCapped int `json:"quota_capped"`
+	// Landing counts spawn/hold watches whose launch or reservation is waiting to
+	// land (#239): started this cycle, or still pending. They stay ACTIVE and are
+	// checked, not relaunched, next cycle.
+	Landing int `json:"landing"`
 }
 
 // Total returns the number of watches the sweep accounted for.
@@ -253,6 +260,16 @@ func (p *Poller) PollAll(ctx context.Context) (*PollSummary, error) {
 		// sees every watch.
 		if !p.filter.matches(w) {
 			continue
+		}
+		// A watch whose launch or hold is waiting to land (#239) is checked, never
+		// relaunched. It comes before the expiry check so a launch that landed
+		// before the deadline still counts. Only a landing that failed (the watch is
+		// hunting again) goes on, to expire or to a new attempt this cycle.
+		if w.Landing() {
+			if !p.pollLanding(ctx, w, summary) {
+				summary.Watched++
+				continue
+			}
 		}
 		if !w.ExpiresAt.IsZero() && now.After(w.ExpiresAt) {
 			if err := p.store.UpdateWatchStatus(ctx, w.WatchID, StatusExpired); err != nil {
@@ -347,6 +364,9 @@ func (p *Poller) reconcileEmailSubscriptions(ctx context.Context, active []Watch
 // match events (launched or notified). Useful for testing.
 func (p *Poller) PollWatch(ctx context.Context, w *Watch) ([]MatchResult, error) {
 	summary := &PollSummary{}
+	if w.Landing() && !p.pollLanding(ctx, w, summary) {
+		return summary.Matches, nil
+	}
 	if normalizeService(w.Service) == ServiceSageMaker {
 		p.pollSageMakerWatch(ctx, w, summary)
 		return summary.Matches, nil
@@ -709,6 +729,18 @@ func (p *Poller) unsupportedNotifier() func(ctx context.Context, w *Watch, reaso
 	return nil
 }
 
+// matchNotifier resolves where a landing's match notification goes (#239): the
+// test seam if set, else the wired Notifier, else nowhere.
+func (p *Poller) matchNotifier() func(ctx context.Context, w *Watch, m *MatchResult) error {
+	if p.notifyMatch != nil {
+		return p.notifyMatch
+	}
+	if p.notifier != nil {
+		return p.notifier.Notify
+	}
+	return nil
+}
+
 // expiredNotifier resolves where a TTL-expiry notification goes: the test seam if
 // set, else the wired Notifier, else nowhere (a notify-less watch still gets the
 // persisted status=expired tombstone, `lagotto status` and `lagotto history`).
@@ -881,6 +913,12 @@ func (p *Poller) recordOutcome(ctx context.Context, w *Watch, m *MatchResult, fa
 			fmt.Fprintf(os.Stderr, "Watch %s: %d consecutive unclassified failures; stopping watch\n", w.WatchID, n)
 		}
 		failure = FailureTerminal
+	}
+
+	// A launch or hold that has not landed yet is not a match (#239): record it
+	// as landing (one write, heartbeat included) and check it next cycle.
+	if failure == FailureNone && p.startLanding(ctx, w, m, now, summary) {
+		return
 	}
 
 	// Success clears the streak so it persists via RecordMatch's PutWatch.

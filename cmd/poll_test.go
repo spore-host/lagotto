@@ -19,7 +19,7 @@ func TestPrintPollSummary_Table(t *testing.T) {
 	cmd.SetOut(&buf)
 
 	summary := &watcher.PollSummary{
-		Watched: 2, Launched: 1, Notified: 1,
+		Watched: 3, Launched: 1, Notified: 1, Landing: 1,
 		Matches: []watcher.MatchResult{
 			{InstanceType: "g5.12xlarge", IsSpot: false, Region: "us-west-2",
 				AvailabilityZone: "us-west-2a", Price: 5.672, WatchID: "w-abc123", ActionTaken: "spawned"},
@@ -29,7 +29,7 @@ func TestPrintPollSummary_Table(t *testing.T) {
 	out := buf.String()
 
 	for _, want := range []string{
-		"2 watched", "1 launched", "1 notified",
+		"3 watched", "1 launched", "1 landing", "1 notified",
 		"g5.12xlarge", "us-west-2", "w-abc123", "spawned", "on-demand",
 	} {
 		if !strings.Contains(out, want) {
