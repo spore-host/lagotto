@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/spore-host/lagotto/pkg/watcher"
 )
 
 var updateRuntimePolicyGolden = flag.Bool("update-runtime-policy", false, "rewrite "+runtimePolicyGolden)
@@ -68,7 +70,6 @@ func TestPolicyHasNoPolicyVariables(t *testing.T) {
 var policyConditionKeys = map[string]bool{
 	"iam:PassedToService": true,
 	"iam:AWSServiceName":  true,
-	"s3:ResourceAccount":  true,
 	"aws:CalledVia":       true,
 }
 
@@ -162,9 +163,39 @@ func TestDestructiveGrantsAreTagGated(t *testing.T) {
 			t.Errorf("the runtime policy does not grant %s (#242)", action)
 		}
 	}
+}
+
+// TestS3GrantsAreScopedToTheFSxPrefix (#242): every S3 grant is on
+// arn:aws:s3:::lagotto-fsx-* and nothing wider, and the prefix the policy
+// grants is the one `lagotto watch` and the poller enforce. Widening a grant
+// back to arn:aws:s3:::* (or to an account condition) fails here.
+func TestS3GrantsAreScopedToTheFSxPrefix(t *testing.T) {
+	if FSxBucketPrefix != watcher.FSxBucketPrefix {
+		t.Fatalf("runtimeiam.FSxBucketPrefix %q != watcher.FSxBucketPrefix %q: the poller would be granted one prefix "+
+			"and lagotto would enforce another", FSxBucketPrefix, watcher.FSxBucketPrefix)
+	}
+	doc, err := PolicyDocument("123456789012", []string{"my-instance-role"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grants, err := ParsePolicy(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "arn:aws:s3:::" + FSxBucketPrefix + "*"
+	seen := map[string]bool{}
 	for _, g := range grants {
-		if strings.HasPrefix(g.Action, "s3:") && g.Action != "s3:CreateBucket" && !strings.Contains(g.Condition, "s3:ResourceAccount") {
-			t.Errorf("%s on %s is not limited to this account's buckets: %q", g.Action, g.Resource, g.Condition)
+		if !strings.HasPrefix(g.Action, "s3:") {
+			continue
+		}
+		seen[g.Action] = true
+		if g.Resource != want {
+			t.Errorf("%s is granted on %q; S3 grants must be on %q only", g.Action, g.Resource, want)
+		}
+	}
+	for _, a := range []string{"s3:CreateBucket", "s3:ListBucket", "s3:GetBucketTagging", "s3:PutBucketTagging"} {
+		if !seen[a] {
+			t.Errorf("the fsx_create bucket action %s is not granted", a)
 		}
 	}
 }

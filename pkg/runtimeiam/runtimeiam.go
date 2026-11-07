@@ -365,6 +365,13 @@ func RegionalARN(service, accountID, resource string) string {
 // pkg/reaperiam.ManagedTagCondition).
 const ManagedTagKey = "spawn:managed"
 
+// FSxBucketPrefix is the only bucket-name prefix the poller's S3 grants cover:
+// the fsx_create backing bucket (#242). It must equal
+// watcher.FSxBucketPrefix, which refuses any other name before launch. The two
+// packages cannot share it by reference without an import cycle in the tests;
+// TestS3GrantsAreScopedToTheFSxPrefix asserts they agree.
+const FSxBucketPrefix = "lagotto-fsx-"
+
 // managedTagValue is ManagedTagKey's value.
 const managedTagValue = "true"
 
@@ -382,8 +389,8 @@ type statement struct {
 // DynamoDB CRUD (3 tables), SNS publish, EC2/SSM read discovery, scheduler
 // manage + PassRole, the spawn launch set (RunInstances/tags/SG + spored* role
 // setup + PassRole to ec2), terminating what spawn launched (spawn:managed
-// tag-gated, #242), the fsx_create FSx filesystem and its S3 backing bucket
-// (#242), capacity reservations, and SageMaker submit + PassRole.
+// tag-gated, #242), the fsx_create FSx filesystem and its lagotto-fsx-* S3
+// backing bucket (#242), capacity reservations, and SageMaker submit + PassRole.
 //
 // TestPollerPolicyCoversItsCalls holds this policy to the poller Lambda's own
 // AWS calls, discovered from the code: a call the policy does not grant fails
@@ -428,7 +435,6 @@ func PolicyDocument(accountID string, instanceRoles []string) (string, error) {
 	fsxManagedRequest := map[string]interface{}{"StringEquals": map[string]string{"aws:RequestTag/" + ManagedTagKey: managedTagValue}}
 	fsxManagedResource := map[string]interface{}{"StringEquals": map[string]string{"aws:ResourceTag/" + ManagedTagKey: managedTagValue}}
 	viaFSx := map[string]interface{}{"ForAnyValue:StringEquals": map[string][]string{"aws:CalledVia": {"fsx.amazonaws.com"}}}
-	ownAccountBucket := map[string]interface{}{"StringEquals": map[string]string{"s3:ResourceAccount": accountID}}
 	fsxFileSystemARN := RegionalARN("fsx", accountID, "file-system/*")
 
 	statements := []statement{
@@ -531,17 +537,16 @@ func PolicyDocument(accountID string, instanceRoles []string) (string, error) {
 		{Effect: "Allow", Action: []string{"ec2:DescribeRouteTables", "ec2:GetSecurityGroupsForVpc"},
 			Resource: "*", Condition: viaFSx},
 		// The fsx_create S3 backing bucket (spawn createBucketIfNotExists, with
-		// AutoCreateBucket). spawn imposes NO naming pattern on it: fsx_s3_bucket
-		// is whatever the watch names, usually an existing data bucket. So the
-		// bucket reads/tagging are scoped to this account's buckets, not to a
-		// name. HeadBucket is authorized as s3:ListBucket; the Get/PutBucketTagging
-		// pair is the tag write after a create plus bucketsweep.ClearEmptySince
-		// for a spawn-results-*/staging name.
-		{Effect: "Allow", Action: []string{"s3:ListBucket", "s3:GetBucketTagging", "s3:PutBucketTagging"},
-			Resource: "arn:aws:s3:::*", Condition: ownAccountBucket},
-		// CreateBucket only ever creates in the caller's account; no condition
-		// key narrows it further without spawn passing tags on the create.
-		{Effect: "Allow", Action: []string{"s3:CreateBucket"}, Resource: "arn:aws:s3:::*"},
+		// AutoCreateBucket): HeadBucket (authorized as s3:ListBucket), CreateBucket,
+		// then PutBucketTagging; bucketsweep.ClearEmptySince adds the
+		// Get/PutBucketTagging pair for a swept name. Only on buckets named
+		// FSxBucketPrefix*: spawn imposes no naming rule on fsx_s3_bucket, so
+		// lagotto does (#242). `lagotto watch`/`launch` refuse an fsx_create
+		// config outside the prefix, and the poller refuses a stored one before
+		// launching (watcher.SpawnConfigFile.ValidateFSxBucket).
+		{Effect: "Allow", Action: []string{
+			"s3:CreateBucket", "s3:ListBucket", "s3:GetBucketTagging", "s3:PutBucketTagging",
+		}, Resource: "arn:aws:s3:::" + FSxBucketPrefix + "*"},
 		// hold: capacity reservations.
 		{Effect: "Allow", Action: []string{
 			"ec2:CreateCapacityReservation", "ec2:CancelCapacityReservation", "ec2:DescribeCapacityReservations",

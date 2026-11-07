@@ -63,7 +63,8 @@ var pollerNotGranted = map[string]string{
 	// staging bucket only when the launch fixes a spored setting that no longer
 	// rides in tags (notify/Slack, webhooks, active ports/processes, app mode,
 	// idle CPU %, metrics/tracing). lagotto sets none, so the body is nil and
-	// nothing is uploaded (#243). The FSx bucket's own S3 actions are granted.
+	// nothing is uploaded (#243). That object goes to spawn's staging bucket, not
+	// the fsx_create bucket, whose S3 actions are granted on lagotto-fsx-* only.
 	"s3:GetLifecycleConfiguration":  "launch-config object only (spawn#1359); lagotto sets no launch-fixed spored setting (#243)",
 	"s3:PutLifecycleConfiguration":  "launch-config object only (spawn#1359); lagotto sets no launch-fixed spored setting (#243)",
 	"s3:PutEncryptionConfiguration": "launch-config object only (spawn#1359); lagotto sets no launch-fixed spored setting (#243)",

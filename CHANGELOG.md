@@ -100,15 +100,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     with `spawn:managed=true`, `fsx:DeleteFileSystem` only on such
     filesystems, the FSx service-linked role, and the VPC reads FSx makes on
     the poller's behalf.
-  - `s3:CreateBucket`, and `s3:ListBucket` / `GetBucketTagging` /
-    `PutBucketTagging` on this account's buckets. spawn puts no naming rule
-    on the `fsx_s3_bucket` a watch names, so these are scoped to the account,
-    not to a bucket name.
+  - `s3:CreateBucket`, `s3:ListBucket`, `s3:GetBucketTagging` and
+    `s3:PutBucketTagging`, only on buckets named `lagotto-fsx-*`.
   - `iam:TagRole` and `iam:TagInstanceProfile` on the instance roles the
     poller may already create. spawn creates them with tags, so without these
     the first launch in an account, and every watch with `iam_policy`, was
     refused at `CreateRole`. `lagotto doctor` reports a policy written before
     this as missing these grants.
+
+  **Changed, for `fsx_create`: the backing bucket must be named
+  `lagotto-fsx-<something>`.** spawn puts no naming rule on `fsx_s3_bucket`, so
+  lagotto does, and the poller can then touch no bucket lagotto didn't name for
+  itself. `lagotto watch` and `lagotto launch` refuse any other name with the
+  reason. The poller refuses a watch or scheduled launch stored before this
+  release the same way, before launching anything, and the watch fails as
+  terminal with that reason. Your data bucket can still be anything: point
+  `fsx_import_path` / `fsx_export_path` at it. A watch without `fsx_create`
+  (including `fsx_id`) is unaffected.
 
   CI now checks the policy against the poller Lambda's own AWS calls,
   discovered from the code, as the CLI's permissions page already is. A call

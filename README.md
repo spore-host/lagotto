@@ -88,6 +88,11 @@ typo is rejected rather than silently ignored. The accepted keys:
 - Other: `cost_limit`, `key_name`, `session_timeout`, `tags`
 <!-- spawn-config-keys:end -->
 
+With `fsx_create`, `fsx_s3_bucket` must be named `lagotto-fsx-<something>` (it is
+created if absent): the hosted poller may create, list and tag only buckets with
+that prefix, and `watch`/`launch` refuse any other name (#242). Your data can live
+elsewhere: point `fsx_import_path` / `fsx_export_path` at it.
+
 ## Goal-driven fleets
 
 By default a watch fires its action **once** and retires. A **fleet watch**

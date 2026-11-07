@@ -206,23 +206,12 @@
     {
       "Effect": "Allow",
       "Action": [
+        "s3:CreateBucket",
         "s3:ListBucket",
         "s3:GetBucketTagging",
         "s3:PutBucketTagging"
       ],
-      "Resource": "arn:aws:s3:::*",
-      "Condition": {
-        "StringEquals": {
-          "s3:ResourceAccount": "123456789012"
-        }
-      }
-    },
-    {
-      "Effect": "Allow",
-      "Action": [
-        "s3:CreateBucket"
-      ],
-      "Resource": "arn:aws:s3:::*"
+      "Resource": "arn:aws:s3:::lagotto-fsx-*"
     },
     {
       "Effect": "Allow",

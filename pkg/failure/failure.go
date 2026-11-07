@@ -99,6 +99,11 @@ var terminalErrorCodes = map[string]bool{
 	"ValidationException":   true,
 }
 
+// ErrConfigRefused marks a launch lagotto refuses on its own, before any AWS
+// call, because the stored config breaks a rule it enforces (e.g. an fsx_create
+// bucket outside lagotto's prefix, #242). ClassifyFailure treats it as terminal.
+var ErrConfigRefused = errors.New("launch config refused")
+
 // Label returns a short human label for log lines.
 func Label(k FailureKind) string {
 	switch k {
@@ -126,6 +131,12 @@ func Label(k FailureKind) string {
 func ClassifyFailure(err error) FailureKind {
 	if err == nil {
 		return FailureNone
+	}
+
+	// A stored config this lagotto refuses to launch (ErrConfigRefused): it will
+	// be refused the same way on every retry, so the watch stops.
+	if errors.Is(err, ErrConfigRefused) {
+		return FailureTerminal
 	}
 
 	// A post-launch failure (spawn#220): RunInstances already SUCCEEDED, and spawn's

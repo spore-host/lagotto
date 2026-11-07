@@ -12,6 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/spore-host/lagotto/pkg/failure"
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/launcher"
 )
@@ -204,6 +205,14 @@ func (s *Spawner) Spawn(ctx context.Context, w *Watch, m *MatchResult) error {
 	var file SpawnConfigFile
 	if err := json.Unmarshal(w.LaunchConfigJSON, &file); err != nil {
 		return fmt.Errorf("unmarshal spawn config: %w", err)
+	}
+
+	// Defence in depth for configs stored before the fsx_create bucket rule
+	// (#242): refuse before RunInstances, so nothing is launched and no S3 call
+	// is made. Terminal: it is refused the same way on every poll.
+	if err := file.ValidateFSxBucket(); err != nil {
+		m.ActionTaken = "spawn_failed"
+		return fmt.Errorf("%w: %v", failure.ErrConfigRefused, err)
 	}
 
 	cfg := file.ToLaunchConfig()
@@ -429,6 +438,9 @@ func (s *Spawner) LaunchScheduled(ctx context.Context, sl *ScheduledLaunch) (str
 	var file SpawnConfigFile
 	if err := json.Unmarshal(sl.LaunchConfigJSON, &file); err != nil {
 		return "", fmt.Errorf("unmarshal spawn config: %w", err)
+	}
+	if err := file.ValidateFSxBucket(); err != nil { // #242, as in Spawn
+		return "", fmt.Errorf("%w: %v", failure.ErrConfigRefused, err)
 	}
 	cfg := file.ToLaunchConfig()
 	var ttlWarning string
