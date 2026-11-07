@@ -24,6 +24,16 @@ import (
 // config.
 var errSpawnConfigRequired = errors.New("--spawn-config is required when --action=spawn")
 
+// errFleetNeedsRegions refuses a --maintain fleet with no --regions (#275). A
+// fleet counts its running workers in each region it names, and with none it
+// can't count them, so the poller could never top it up. Resolving "every
+// enabled region" at poll time instead would mean a DescribeInstances in every
+// enabled region on every cycle, for every fleet, and workers scattered across
+// regions away from their data; the --require-quota gate (#157) already treats
+// a fleet with no regions as unknown for the same reason.
+var errFleetNeedsRegions = errors.New("--maintain needs --regions: a fleet counts its running workers in each region it names, " +
+	"so it can't be maintained across every enabled region; name the region(s) to launch in with --regions")
+
 // readSpawnConfigFlag reads a --spawn-config source (a local path, s3:// URI or
 // "-" for stdin) and returns the self-contained JSON a watch stores
 // (loadEC2SpawnConfig).
@@ -38,9 +48,18 @@ func readSpawnConfigFlag(ctx context.Context, source string) ([]byte, error) {
 	return b, nil
 }
 
+// validateFleetRegions refuses a fleet (maintain > 0) with no regions (#275).
+// Blank entries don't count: `--regions " "` names no region.
+func validateFleetRegions(maintain int, regions []string) error {
+	if maintain > 0 && len(cleanList(regions)) == 0 {
+		return errFleetNeedsRegions
+	}
+	return nil
+}
+
 // validateWatchSearch checks the stored shape of w, with no AWS call: its
 // pattern fits its service, an EC2 spawn watch has a spawn config, a fleet's
-// --maintain/--until are consistent, and an until-landed watch can still tell
+// --maintain/--until are consistent and it names its --regions, and an until-landed watch can still tell
 // its owner anything (#239: it needs a notify channel). Notify channels are
 // validated where they are parsed (parseNotifyChannels).
 func validateWatchSearch(w *watcher.Watch) error {
@@ -57,6 +76,9 @@ func validateWatchSearch(w *watcher.Watch) error {
 		return fmt.Errorf("--max-price must be >= 0 (0 = any)")
 	}
 	if err := validateFleetFlags(w.Action, w.DesiredCount, w.CompletionCondition); err != nil {
+		return err
+	}
+	if err := validateFleetRegions(w.DesiredCount, w.Regions); err != nil {
 		return err
 	}
 	if w.UntilLanded {

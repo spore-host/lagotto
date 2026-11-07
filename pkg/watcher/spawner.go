@@ -3,6 +3,7 @@ package watcher
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -324,6 +325,10 @@ const (
 	ProjectTagKey = "lagotto:project"
 )
 
+// ErrFleetNoRegions is why a fleet watch with no regions is never topped up
+// (#275): its workers are counted per region, so with none it can't be counted.
+var ErrFleetNoRegions = errors.New("a --maintain fleet needs --regions (it counts its workers per region) and this watch names none, so it is never topped up")
+
 // countRunningFleet returns how many of a fleet watch's workers are currently
 // running (pending or running state), counted by the FleetTagKey=WatchID tag
 // across the watch's regions. This is the authoritative live count — it reflects
@@ -331,7 +336,7 @@ const (
 func (s *Spawner) countRunningFleet(ctx context.Context, w *Watch) (int, error) {
 	regions := w.Regions
 	if len(regions) == 0 {
-		return 0, fmt.Errorf("watch %s has no regions", w.WatchID)
+		return 0, fmt.Errorf("watch %s: %w", w.WatchID, ErrFleetNoRegions)
 	}
 	seen := map[string]struct{}{}
 	for _, region := range regions {

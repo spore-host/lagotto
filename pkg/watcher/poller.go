@@ -527,6 +527,18 @@ func (p *Poller) pollFleetWatch(ctx context.Context, w *Watch, summary *PollSumm
 	}
 
 	// 2. Count the live fleet and compute the gap to DesiredCount.
+	//
+	// A fleet with no regions can't be counted (countRunningFleet needs the
+	// regions its workers run in), so it could never be topped up. `watch` and
+	// `update` refuse one since #275; one stored before that is reported in
+	// last_poll_error, with the fix, on every cycle. Like a failed search, the
+	// cycle leaves last_polled_at alone, so LAST POLL goes stale too.
+	if len(w.Regions) == 0 {
+		err := fmt.Errorf("%w; fix: lagotto update %s --regions <region,...>", ErrFleetNoRegions, w.WatchID)
+		fmt.Fprintf(os.Stderr, "Warning: watch %s: %v\n", w.WatchID, err)
+		p.recordPollError(ctx, []*Watch{w}, err)
+		return
+	}
 	running, err := p.spawner.countRunningFleet(ctx, w)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: watch %s fleet count failed: %v (will retry)\n", w.WatchID, err)
