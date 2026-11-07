@@ -106,15 +106,6 @@ func (s *Spawner) splitAttempts(ctx context.Context, region string, attempts []s
 	return kept, noSubnet, false
 }
 
-// keepLaunchableAZs returns the attempts whose AZ is in usable (the AZs with a
-// default subnet), in order; "" (let-EC2-choose) is always kept. It can return
-// an empty list: the spawn sweep then fails open (filterLaunchableAZs), while a
-// hold refuses to reserve (Holder.chooseHoldAZ, #209).
-func keepLaunchableAZs(usable map[string]bool, attempts []string) []string {
-	kept, _ := splitLaunchableAZs(usable, attempts)
-	return kept
-}
-
 // reservationGate is the outcome of checking a Capacity Block reservation's
 // state before a start-time launch (#62).
 type reservationGate int
