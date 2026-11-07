@@ -232,8 +232,8 @@ func printPollSummary(cmd *cobra.Command, summary *watcher.PollSummary) {
 	}
 
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(),
-		"Poll cycle: %d watched, %d launched, %d notified, %d retrying, %d failed, %d expired, %d quota-capped\n",
-		summary.Watched, summary.Launched, summary.Notified, summary.Retrying, summary.Failed, summary.Expired,
+		"Poll cycle: %d watched, %d launched, %d landing, %d notified, %d retrying, %d failed, %d expired, %d quota-capped\n",
+		summary.Watched, summary.Launched, summary.Landing, summary.Notified, summary.Retrying, summary.Failed, summary.Expired,
 		summary.QuotaCapped)
 
 	for _, m := range summary.Matches {

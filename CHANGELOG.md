@@ -61,7 +61,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
       watch expires.
   - `lagotto list` shows such a watch as `landing`, with
     `landing i-… (pending 3m)` at the end of the row. `lagotto status` adds a
-    `Landing:` line with the time it is given up on.
+    `Landing:` line with the time it is given up on. The `poll` summary line
+    gains `N landing`, and its JSON a `landing` count.
   - `lagotto cancel` on a landing hold releases the pending reservation. On a
     landing spawn it says the instance was not terminated, and how to.
   - Fleet (`--maintain`) watches and scheduled launches are unchanged.
