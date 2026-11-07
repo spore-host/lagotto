@@ -3,6 +3,7 @@ package hermetic
 import (
 	"bytes"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 )
@@ -79,5 +80,58 @@ func TestRecorderRefusesAndReports(t *testing.T) {
 func TestDescribeConnect(t *testing.T) {
 	if got := describe(&http.Request{Method: http.MethodConnect, Host: "example.com:443"}); got != "HTTPS CONNECT example.com:443" {
 		t.Errorf("describe = %q", got)
+	}
+}
+
+// TestInstallAndTake is the half a consumer's own TestMain uses (#266):
+// Install strips the ambient credentials from this process and sets the fakes,
+// a variable set after it survives, and Take hands back (and forgets) a request
+// the test made on purpose, so Report has nothing left to fail on.
+func TestInstallAndTake(t *testing.T) {
+	saved := os.Environ()
+	t.Cleanup(func() {
+		os.Clearenv()
+		for _, kv := range saved {
+			k, v, _ := strings.Cut(kv, "=")
+			_ = os.Setenv(k, v)
+		}
+	})
+	_ = os.Setenv("AWS_PROFILE", "real")
+	_ = os.Setenv("SPORE_PROFILE", "real")
+
+	rec, err := Install()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close()
+	for _, k := range []string{"AWS_PROFILE", "SPORE_PROFILE"} {
+		if v, ok := os.LookupEnv(k); ok {
+			t.Errorf("%s = %q survived Install", k, v)
+		}
+	}
+	if got := os.Getenv("AWS_ACCESS_KEY_ID"); got != FakeAccessKeyID {
+		t.Errorf("AWS_ACCESS_KEY_ID = %q, want %q", got, FakeAccessKeyID)
+	}
+	if got := os.Getenv("AWS_ENDPOINT_URL"); got != rec.URL {
+		t.Errorf("AWS_ENDPOINT_URL = %q, want the recorder %q", got, rec.URL)
+	}
+	if os.Getenv(EnvMarker) != "1" {
+		t.Errorf("%s not set", EnvMarker)
+	}
+
+	resp, err := http.Post(rec.URL+"/", "application/x-www-form-urlencoded", strings.NewReader("Action=GetCallerIdentity"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if got := rec.Take(); len(got) != 1 || !strings.Contains(got[0], "action=GetCallerIdentity") {
+		t.Fatalf("Take = %v, want the one GetCallerIdentity request", got)
+	}
+	if got := rec.Take(); len(got) != 0 {
+		t.Errorf("second Take = %v, want nothing", got)
+	}
+	var out bytes.Buffer
+	if rec.Report(&out, "probe.test") {
+		t.Errorf("Report after Take reported: %q", out.String())
 	}
 }

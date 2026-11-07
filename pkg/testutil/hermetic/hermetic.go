@@ -32,6 +32,37 @@
 // that can reach an AWS config loader, so that even a plain `go test` is
 // hermetic. internal/hermetic's gate test discovers those packages and fails
 // if one lacks the TestMain.
+//
+// # Test-only
+//
+// This package is importable (it lived in internal/hermetic until #266) so that
+// other modules built on lagotto, spore-host-mcp first, can share the #214 guard
+// instead of copying it. It is still TEST-ONLY: it imports "testing", rewrites
+// the process environment, and refuses every network request. Import it only
+// from _test.go files (a TestMain) or from a `go test -exec` wrapper's main
+// package; never from code that ships. Nothing in lagotto's non-test build
+// imports it except test/hermetic, the wrapper.
+//
+// A consumer's TestMain that needs no setup of its own:
+//
+//	func TestMain(m *testing.M) { hermetic.Main(m) }
+//
+// One that does (a region, a fake, a self-test of the guard):
+//
+//	func TestMain(m *testing.M) {
+//		rec, err := hermetic.Install()
+//		if err != nil {
+//			fmt.Fprintln(os.Stderr, err)
+//			os.Exit(2)
+//		}
+//		_ = os.Setenv("AWS_REGION", "us-west-2") // after Install, which strips AWS_*
+//		code := m.Run()
+//		if rec.Report(os.Stderr, "this test binary") {
+//			code = 1
+//		}
+//		rec.Close()
+//		os.Exit(code)
+//	}
 package hermetic
 
 import (
@@ -172,6 +203,18 @@ func (r *Recorder) Requests() []string {
 	return out
 }
 
+// Take returns what the recorder has seen, sorted, and forgets it. A test that
+// reaches the recorder ON PURPOSE (a self-test of the guard) takes its own
+// request so that Report, at the end of the run, does not fail the binary on it.
+func (r *Recorder) Take() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := r.seen
+	r.seen = nil
+	sort.Strings(out)
+	return out
+}
+
 // Report writes the failure for a run that reached the recorder and reports
 // whether there was anything to report.
 func (r *Recorder) Report(w io.Writer, who string) bool {
@@ -199,12 +242,29 @@ func Main(m *testing.M) {
 
 // Run is Main without the os.Exit, for a TestMain that has its own setup.
 func Run(m *testing.M) int {
-	rec, err := Start()
+	rec, err := Install()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "hermetic: %v\n", err)
 		return 2
 	}
 	defer rec.Close()
+	code := m.Run()
+	if rec.Report(os.Stderr, "this test binary") {
+		return 1
+	}
+	return code
+}
+
+// Install starts a recorder and installs the hermetic environment in this
+// process: every variable Env drops is unset and the hermetic settings are set.
+// It is Run's setup, for a TestMain that has more of its own; the caller runs
+// the tests, calls Report, and closes the recorder. A variable the caller sets
+// AFTER Install (AWS_REGION, say) survives; one set before it does not.
+func Install() (*Recorder, error) {
+	rec, err := Start()
+	if err != nil {
+		return nil, err
+	}
 	for _, kv := range os.Environ() {
 		if k, _, _ := strings.Cut(kv, "="); dropped(k) {
 			_ = os.Unsetenv(k)
@@ -214,9 +274,5 @@ func Run(m *testing.M) int {
 		k, v, _ := strings.Cut(kv, "=")
 		_ = os.Setenv(k, v)
 	}
-	code := m.Run()
-	if rec.Report(os.Stderr, "this test binary") {
-		return 1
-	}
-	return code
+	return rec, nil
 }

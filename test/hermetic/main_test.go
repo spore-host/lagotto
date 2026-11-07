@@ -15,7 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
-	"github.com/spore-host/lagotto/internal/hermetic"
+	"github.com/spore-host/lagotto/pkg/testutil/hermetic"
 )
 
 // helperEnv selects what this test binary does when the wrapper under test runs

@@ -3,7 +3,7 @@ package cmd
 import (
 	"testing"
 
-	"github.com/spore-host/lagotto/internal/hermetic"
+	"github.com/spore-host/lagotto/pkg/testutil/hermetic"
 	"github.com/spore-host/lagotto/pkg/awscfg"
 )
 
