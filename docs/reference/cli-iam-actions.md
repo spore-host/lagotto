@@ -42,6 +42,7 @@ tables is missing. The administrator commands are listed after the table.
 
 | Command | Beyond the tables |
 | --- | --- |
+| `lagotto ack` | `iam:PassRole`, `scheduler:GetSchedule`, `scheduler:UpdateSchedule`, `sns:GetSubscriptionAttributes`, `sns:ListSubscriptionsByTopic`, `sns:Subscribe` |
 | `lagotto cancel` | `ec2:CancelCapacityReservation`, `ec2:DescribeCapacityReservations`, `sns:GetSubscriptionAttributes`, `sns:ListSubscriptionsByTopic`, `sns:Unsubscribe` |
 | `lagotto doctor` | `cloudformation:DescribeStacks`, `cloudwatch:GetMetricStatistics`, `iam:GetRole`, `iam:GetRolePolicy`, `lambda:GetFunction`, `scheduler:GetSchedule`, `sns:GetSubscriptionAttributes`, `sns:GetTopicAttributes`, `sns:ListSubscriptionsByTopic` |
 | `lagotto extend` | `iam:PassRole`, `scheduler:GetSchedule`, `scheduler:UpdateSchedule`, `sns:GetSubscriptionAttributes`, `sns:ListSubscriptionsByTopic`, `sns:Subscribe` |
@@ -64,6 +65,7 @@ Not everyday use:
 
 | Command | IAM actions |
 | --- | --- |
+| `lagotto ack` | `dynamodb:GetItem`, `dynamodb:UpdateItem`, `iam:PassRole`, `scheduler:GetSchedule`, `scheduler:UpdateSchedule`, `sns:GetSubscriptionAttributes`, `sns:ListSubscriptionsByTopic`, `sns:Subscribe` |
 | `lagotto cancel` | `dynamodb:GetItem`, `dynamodb:Query`, `dynamodb:UpdateItem`, `ec2:CancelCapacityReservation`, `ec2:DescribeCapacityReservations`, `sns:GetSubscriptionAttributes`, `sns:ListSubscriptionsByTopic`, `sns:Unsubscribe` |
 | `lagotto deploy` | `cloudformation:CreateChangeSet`, `cloudformation:DeleteChangeSet`, `cloudformation:DeleteStack`, `cloudformation:DescribeChangeSet`, `cloudformation:DescribeStackDriftDetectionStatus`, `cloudformation:DescribeStackResourceDrifts`, `cloudformation:DescribeStacks`, `cloudformation:DetectStackDrift`, `cloudformation:ExecuteChangeSet`, `cloudformation:GetTemplate`, `cloudformation:ListStackResources`, `dynamodb:CreateTable`, `dynamodb:DescribeTable`, `dynamodb:DescribeTimeToLive`, `dynamodb:TagResource`, `dynamodb:UpdateTimeToLive`, `iam:AttachRolePolicy`, `iam:CreateRole`, `iam:GetRole`, `iam:GetRolePolicy`, `iam:ListAttachedRolePolicies`, `iam:ListRolePolicies`, `iam:PassRole`, `iam:PutRolePolicy`, `iam:TagRole`, `lambda:CreateFunction`, `lambda:DeleteFunction`, `lambda:GetFunction`, `lambda:TagResource`, `lambda:UpdateFunctionCode`, `lambda:UpdateFunctionConfiguration`, `s3:CreateBucket`, `s3:ListBucket`, `s3:PutObject`, `s3:PutObjectTagging`, `s3:TagResource`, `scheduler:CreateSchedule`, `scheduler:DeleteSchedule`, `scheduler:GetSchedule`, `scheduler:UpdateSchedule`, `sns:CreateTopic`, `sns:DeleteTopic`, `sns:GetTopicAttributes`, `sns:SetTopicAttributes`, `sns:TagResource` |
 | `lagotto doctor` | `cloudformation:DescribeStacks`, `cloudwatch:GetMetricStatistics`, `dynamodb:DescribeTable`, `dynamodb:Query`, `iam:GetRole`, `iam:GetRolePolicy`, `lambda:GetFunction`, `scheduler:GetSchedule`, `sns:GetSubscriptionAttributes`, `sns:GetTopicAttributes`, `sns:ListSubscriptionsByTopic` |
@@ -100,13 +102,13 @@ Not everyday use:
 | `dynamodb:DeleteTable` | `lagotto teardown` |
 | `dynamodb:DescribeTable` | `lagotto deploy`, `lagotto doctor`, `lagotto launch`, `lagotto setup`, `lagotto teardown`, `lagotto watch` |
 | `dynamodb:DescribeTimeToLive` | `lagotto deploy`, `lagotto launch`, `lagotto setup`, `lagotto watch` |
-| `dynamodb:GetItem` | `lagotto cancel`, `lagotto extend`, `lagotto history`, `lagotto status` |
+| `dynamodb:GetItem` | `lagotto ack`, `lagotto cancel`, `lagotto extend`, `lagotto history`, `lagotto status` |
 | `dynamodb:ListTagsOfResource` | `lagotto teardown` |
 | `dynamodb:PutItem` | `lagotto launch`, `lagotto poll`, `lagotto watch` |
 | `dynamodb:Query` | `lagotto cancel`, `lagotto doctor`, `lagotto history`, `lagotto list`, `lagotto notify-gc`, `lagotto poll` |
 | `dynamodb:Scan` | `lagotto teardown` |
 | `dynamodb:TagResource` | `lagotto deploy`, `lagotto launch`, `lagotto setup`, `lagotto watch` |
-| `dynamodb:UpdateItem` | `lagotto cancel`, `lagotto extend`, `lagotto launch`, `lagotto poll` |
+| `dynamodb:UpdateItem` | `lagotto ack`, `lagotto cancel`, `lagotto extend`, `lagotto launch`, `lagotto poll` |
 | `dynamodb:UpdateTimeToLive` | `lagotto deploy`, `lagotto launch`, `lagotto setup`, `lagotto watch` |
 | `ec2:AllocateAddress` | `lagotto poll` |
 | `ec2:AssociateAddress` | `lagotto poll` |
@@ -147,7 +149,7 @@ Not everyday use:
 | `iam:GetRolePolicy` | `lagotto deploy`, `lagotto doctor`, `lagotto setup`, `lagotto watch` |
 | `iam:ListAttachedRolePolicies` | `lagotto deploy`, `lagotto teardown` |
 | `iam:ListRolePolicies` | `lagotto deploy`, `lagotto teardown` |
-| `iam:PassRole` | `lagotto deploy`, `lagotto extend`, `lagotto launch`, `lagotto notify-gc`, `lagotto poll`, `lagotto watch` |
+| `iam:PassRole` | `lagotto ack`, `lagotto deploy`, `lagotto extend`, `lagotto launch`, `lagotto notify-gc`, `lagotto poll`, `lagotto watch` |
 | `iam:PutRolePolicy` | `lagotto deploy`, `lagotto poll`, `lagotto setup` |
 | `iam:TagInstanceProfile` | `lagotto poll` |
 | `iam:TagRole` | `lagotto deploy`, `lagotto poll`, `lagotto setup` |
@@ -176,17 +178,17 @@ Not everyday use:
 | `sagemaker:DescribeTrainingJob` | `lagotto poll` |
 | `scheduler:CreateSchedule` | `lagotto deploy`, `lagotto launch` |
 | `scheduler:DeleteSchedule` | `lagotto deploy` |
-| `scheduler:GetSchedule` | `lagotto deploy`, `lagotto doctor`, `lagotto extend`, `lagotto watch` |
-| `scheduler:UpdateSchedule` | `lagotto deploy`, `lagotto extend`, `lagotto watch` |
+| `scheduler:GetSchedule` | `lagotto ack`, `lagotto deploy`, `lagotto doctor`, `lagotto extend`, `lagotto watch` |
+| `scheduler:UpdateSchedule` | `lagotto ack`, `lagotto deploy`, `lagotto extend`, `lagotto watch` |
 | `servicequotas:GetServiceQuota` | `lagotto poll`, `lagotto watch` |
 | `sns:CreateTopic` | `lagotto deploy` |
 | `sns:DeleteTopic` | `lagotto deploy` |
-| `sns:GetSubscriptionAttributes` | `lagotto cancel`, `lagotto doctor`, `lagotto extend`, `lagotto list`, `lagotto notify-gc`, `lagotto poll`, `lagotto status`, `lagotto watch` |
+| `sns:GetSubscriptionAttributes` | `lagotto ack`, `lagotto cancel`, `lagotto doctor`, `lagotto extend`, `lagotto list`, `lagotto notify-gc`, `lagotto poll`, `lagotto status`, `lagotto watch` |
 | `sns:GetTopicAttributes` | `lagotto deploy`, `lagotto doctor`, `lagotto notify-gc`, `lagotto poll`, `lagotto watch` |
-| `sns:ListSubscriptionsByTopic` | `lagotto cancel`, `lagotto doctor`, `lagotto extend`, `lagotto list`, `lagotto notify-gc`, `lagotto poll`, `lagotto status`, `lagotto watch` |
+| `sns:ListSubscriptionsByTopic` | `lagotto ack`, `lagotto cancel`, `lagotto doctor`, `lagotto extend`, `lagotto list`, `lagotto notify-gc`, `lagotto poll`, `lagotto status`, `lagotto watch` |
 | `sns:Publish` | `lagotto poll` |
 | `sns:SetTopicAttributes` | `lagotto deploy` |
-| `sns:Subscribe` | `lagotto extend`, `lagotto notify-gc`, `lagotto watch` |
+| `sns:Subscribe` | `lagotto ack`, `lagotto extend`, `lagotto notify-gc`, `lagotto watch` |
 | `sns:TagResource` | `lagotto deploy` |
 | `sns:Unsubscribe` | `lagotto cancel`, `lagotto notify-gc`, `lagotto poll` |
 | `ssm:GetParameter` | `lagotto poll` |

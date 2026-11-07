@@ -36,6 +36,9 @@ var (
 	watchProject         string
 	watchMaintain        int
 	watchUntil           string
+	watchUntilLanded     bool
+	watchRemind          string
+	watchYes             bool
 )
 
 var watchCmd = &cobra.Command{
@@ -48,6 +51,11 @@ The pattern supports wildcards ("p5.*" matches all p5 sizes), exact types
 match ANY of the listed rungs. lagotto attempts to launch the requested instance
 and retries until it succeeds or the watch TTL expires — the launch itself is the
 capacity test (neither EC2 nor SageMaker exposes a capacity API).
+
+With --until-landed (--action spawn or hold) there is no TTL: the watch hunts
+until the launch is running or the reservation is active. It is still bounded:
+it pauses itself unless you run 'lagotto ack <watch-id>' within 3 × --remind
+(21 days by default) of creation or the last ack, and 'lagotto ack' resumes it.
 
 If the pattern matches no instance type your region(s) offer, the first poll
 prints a warning (a likely typo) but keeps watching in case the type appears.
@@ -84,6 +92,9 @@ func init() {
 	watchCmd.Flags().StringVar(&watchService, "service", "ec2", "Capacity service: ec2, or sagemaker (submits your SageMaker job for ml.* types)")
 	watchCmd.Flags().StringVar(&watchProject, "project", "", "Project label for scoping a local 'poll --daemon --project' in a shared account (default: $LAGOTTO_PROJECT)")
 	watchCmd.Flags().IntVar(&watchMaintain, "maintain", 0, "Goal-driven fleet: maintain this many workers (relaunching toward the goal, even from zero) until --until holds. Requires --action spawn. 0 = single-shot (default).")
+	watchCmd.Flags().BoolVar(&watchUntilLanded, "until-landed", false, "Keep hunting with no TTL until the launch (--action spawn) or hold lands. The watch pauses itself unless you run 'lagotto ack <id>' within (2+1) × --remind (21d by default). Needs a --notify channel; not with --ttl, --maintain, --until, or --action notify.")
+	watchCmd.Flags().StringVar(&watchRemind, "remind", "7d", "With --until-landed: the acknowledgement interval (1h to 30d). The watch pauses after 2 intervals pass without an ack, so the deadline is 3 × this from creation or the last ack.")
+	watchCmd.Flags().BoolVarP(&watchYes, "yes", "y", false, "Skip the confirmation prompt that --until-landed --action spawn/hold shows (required when stdin is not a terminal)")
 	watchCmd.Flags().StringVar(&watchUntil, "until", "", "Fleet completion condition, re-checked each poll: 's3-empty: s3://b/manifest minus s3://b/done/', 'http-200: https://…', or 'shell: <cmd>' (shell = local daemon only). When true the fleet retires.")
 }
 
@@ -92,12 +103,14 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 
 	// Parse TTL
-	ttl, err := time.ParseDuration(watchTTL)
+	ttl, err := parseTTLFlag(watchTTL)
 	if err != nil {
-		ttl, err = parseDuration(watchTTL)
-		if err != nil {
-			return fmt.Errorf("invalid TTL %q: %w", watchTTL, err)
-		}
+		return err
+	}
+	ul, err := parseUntilLandedFlags(watchUntilLanded, watchRemind, cmd.Flags().Changed("ttl"),
+		cmd.Flags().Changed("remind"), cmd.Flags().Changed("maintain"), cmd.Flags().Changed("until"))
+	if err != nil {
+		return err
 	}
 
 	// Validate service and that the pattern fits it (ml.* iff sagemaker).
@@ -162,6 +175,17 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Until-landed (#239): no TTL, a rolling acknowledgement deadline instead.
+	// Validated and confirmed before any AWS call, so a refusal costs nothing.
+	if ul.enabled {
+		if err := watcher.ValidateUntilLanded(action, watchMaintain, channels, ul.remindEvery, watcher.DefaultRemindPauseAfter); err != nil {
+			return err
+		}
+		if err := confirmUntilLanded(os.Stdin, os.Stderr, stdinIsTerminal(), watchYes, action, pattern, ul); err != nil {
+			return err
+		}
+	}
+
 	// Get caller identity for user_id
 	cfg, err := awscfg.Load(ctx, "")
 	if err != nil {
@@ -175,6 +199,11 @@ func runWatch(cmd *cobra.Command, args []string) error {
 
 	now := time.Now().UTC()
 	expiresAt := now.Add(ttl)
+	if ul.enabled {
+		// The acknowledgement deadline, stored as the expiry so a poller that
+		// predates #239 still stops the watch there (see until_landed.go).
+		expiresAt = now.Add(ul.window())
+	}
 
 	project := watchProject
 	if project == "" {
@@ -206,6 +235,11 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		// poller marked it expired — the tombstone was written and then immediately
 		// vanished. The watch still stops at ExpiresAt; the record outlives it.
 		TTLTimestamp: watcher.RetentionTTL(expiresAt),
+	}
+	if ul.enabled {
+		w.UntilLanded = true
+		w.RemindEverySeconds = int64(ul.remindEvery / time.Second)
+		w.RemindPauseAfter = watcher.DefaultRemindPauseAfter
 	}
 
 	store := watcher.NewStore(cfg, watchesTable, historyTable)
@@ -253,6 +287,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	if err := subscribeForNewWatch(ctx, os.Stderr, cfg, os.Getenv, aws.ToString(identity.Account), deploy.New(cfg), w); err != nil {
 		return err
 	}
+	warnUndeliverableUntilLanded(os.Stderr, w)
 	if err := store.PutWatch(ctx, w); err != nil {
 		return fmt.Errorf("create watch: %w", err)
 	}
@@ -304,7 +339,12 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	if quotaReport != nil && quotaReport.Known {
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Quota:    %s\n", quotaSummaryRow(quotaReport, w))
 	}
-	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Expires:  %s\n", w.ExpiresAt.Format(time.RFC3339))
+	if w.UntilLanded {
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Expires:  until landed; pauses %s unless acknowledged (lagotto ack %s)\n",
+			w.ExpiresAt.Format(time.RFC3339), w.WatchID)
+	} else {
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Expires:  %s\n", w.ExpiresAt.Format(time.RFC3339))
+	}
 	writeEmailStates(cmd.OutOrStdout(), "  Notify:   ", w)
 	return nil
 }

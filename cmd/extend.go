@@ -21,8 +21,13 @@ var extendTTL string
 var extendCmd = &cobra.Command{
 	Use:   "extend <watch-id>",
 	Short: "Extend a watch's TTL",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runExtend,
+	Long: `Extend a watch's TTL to --ttl from now. An expired watch is reactivated.
+
+For an --until-landed watch, which has no TTL, extend is the same as
+'lagotto ack': it moves the acknowledgement deadline a full window ahead and
+resumes the watch if it paused. --ttl does not apply to it.`,
+	Args: cobra.ExactArgs(1),
+	RunE: runExtend,
 }
 
 func init() {
@@ -31,18 +36,35 @@ func init() {
 }
 
 func runExtend(cmd *cobra.Command, args []string) error {
-	watchID := args[0]
-	ctx := context.Background()
-
-	ttl, err := time.ParseDuration(extendTTL)
+	ttlSet := cmd.Flags().Changed("ttl")
+	ttl, err := parseTTLFlag(extendTTL)
 	if err != nil {
-		ttl, err = parseDuration(extendTTL)
-		if err != nil {
-			return fmt.Errorf("%s", i18n.T("lagotto.error.invalid_ttl", map[string]interface{}{
-				"TTL": extendTTL, "Error": err,
-			}))
-		}
+		return err
 	}
+	return extendOrAck(cmd, args[0], func(w *watcher.Watch, now time.Time) (time.Time, error) {
+		return extendExpiry(w, now, ttl, ttlSet)
+	})
+}
+
+// extendExpiry is the new expiry `extend` sets: now + ttl, or for an
+// until-landed watch (#239) its next acknowledgement deadline. An explicit
+// --ttl on an until-landed watch is refused rather than silently ignored.
+func extendExpiry(w *watcher.Watch, now time.Time, ttl time.Duration, ttlSet bool) (time.Time, error) {
+	if !w.UntilLanded {
+		return now.Add(ttl), nil
+	}
+	if ttlSet {
+		return time.Time{}, fmt.Errorf("watch %s is --until-landed and has no TTL: 'lagotto extend %s' (or 'lagotto ack %s') "+
+			"moves its acknowledgement deadline %s ahead; drop --ttl", w.WatchID, w.WatchID, w.WatchID, watcher.FormatSpan(w.AckWindow()))
+	}
+	return ackExpiry(w, now)
+}
+
+// extendOrAck is the shared body of `extend` and `ack`: resolve the caller's
+// watch, compute its new expiry, store it (reactivating an expired watch), and
+// re-arm the poller and email subscriptions a reactivated watch needs.
+func extendOrAck(cmd *cobra.Command, watchID string, expiry func(w *watcher.Watch, now time.Time) (time.Time, error)) error {
+	ctx := context.Background()
 
 	cfg, err := awscfg.Load(ctx, "")
 	if err != nil {
@@ -65,7 +87,10 @@ func runExtend(cmd *cobra.Command, args []string) error {
 		}))
 	}
 
-	newExpiry := time.Now().UTC().Add(ttl)
+	newExpiry, err := expiry(w, time.Now().UTC())
+	if err != nil {
+		return err
+	}
 	reactivate := w.Status == watcher.StatusExpired
 
 	// A reactivated watch is only polled if the poller's schedule, which the
@@ -81,24 +106,24 @@ func runExtend(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// ExtendWatch moves ttl_timestamp with the expiry, so an acknowledged
+	// until-landed watch's record keeps a finite, later retention horizon (#239).
 	if err := store.ExtendWatch(ctx, watchID, newExpiry, reactivate); err != nil {
 		return fmt.Errorf("extend watch: %w", err)
 	}
 
 	if reactivate {
 		if err := enablePollScheduleIfOff(ctx, sched, os.Stderr, pollSched); err != nil {
-			return pollScheduleUpdateRefusal(armAction, "the watch is still expired",
-				store.UpdateWatchStatus(ctx, watchID, watcher.StatusExpired), err)
+			// Put it back as it was: paused if it was paused.
+			restore := store.ExpireWatch(ctx, watchID, w.ExpiredReason)
+			return pollScheduleUpdateRefusal(armAction, "the watch is still expired", restore, err)
 		}
 		_, _ = fmt.Fprintln(cmd.OutOrStdout(), i18n.T("lagotto.extend.reactivated", map[string]interface{}{
 			"WatchID": watchID,
 		}))
 	}
 
-	_, _ = fmt.Fprintln(cmd.OutOrStdout(), i18n.T("lagotto.extend.extended", map[string]interface{}{
-		"WatchID":   watchID,
-		"ExpiresAt": newExpiry.Format(time.RFC3339),
-	}))
+	writeExtended(cmd.OutOrStdout(), w, newExpiry)
 
 	// A reactivated watch's addresses may have been unsubscribed when it
 	// expired (#240): subscribe them again. Best effort: the watch is extended
@@ -107,6 +132,19 @@ func runExtend(cmd *cobra.Command, args []string) error {
 		resubscribeOnReactivate(ctx, cmd.OutOrStdout(), os.Stderr, emailSubscriberFor(cfg, os.Getenv, accountFromARN(w.UserID)), w)
 	}
 	return nil
+}
+
+// writeExtended prints the outcome of an extend or ack.
+func writeExtended(out io.Writer, w *watcher.Watch, newExpiry time.Time) {
+	if w.UntilLanded {
+		_, _ = fmt.Fprintf(out, "Acknowledged watch %s: it keeps hunting until it lands, and pauses at %s unless acknowledged again\n",
+			w.WatchID, newExpiry.Format(time.RFC3339))
+		return
+	}
+	_, _ = fmt.Fprintln(out, i18n.T("lagotto.extend.extended", map[string]interface{}{
+		"WatchID":   w.WatchID,
+		"ExpiresAt": newExpiry.Format(time.RFC3339),
+	}))
 }
 
 // resubscribeOnReactivate subscribes a reactivated watch's email addresses,

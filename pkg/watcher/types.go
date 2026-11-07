@@ -182,6 +182,22 @@ type Watch struct {
 	// PendingMatch is the match the pending launch/hold came from, so the history
 	// row written when it lands (or fails to) describes the real candidate.
 	PendingMatch *MatchResult `json:"pending_match,omitempty" dynamodbav:"pending_match,omitempty"`
+	// Until-landed (#239 phase 3; see until_landed.go). UntilLanded watches have
+	// no TTL: ExpiresAt is their rolling acknowledgement deadline instead, set to
+	// (RemindPauseAfter+1) × RemindEverySeconds from creation or the last `ack`.
+	// The reminder interval and count are stored, not poller constants, so every
+	// poller version computes the same reminders for the same watch.
+	//
+	// All omitempty: a pre-#239 record has none and behaves exactly as before,
+	// and a pre-#239 poller ignores them and simply expires the watch at
+	// ExpiresAt, which is the fail-safe outcome.
+	UntilLanded        bool  `json:"until_landed,omitempty" dynamodbav:"until_landed,omitempty"`
+	RemindEverySeconds int64 `json:"remind_every_seconds,omitempty" dynamodbav:"remind_every_seconds,omitempty"`
+	RemindPauseAfter   int   `json:"remind_pause_after,omitempty" dynamodbav:"remind_pause_after,omitempty"`
+	// ExpiredReason says why an expired watch stopped, when it was not a plain TTL
+	// expiry: ExpiredReasonUnacknowledged for an until-landed watch whose
+	// deadline passed (it is paused; `ack` resumes it). Cleared on resume.
+	ExpiredReason string `json:"expired_reason,omitempty" dynamodbav:"expired_reason,omitempty"`
 	// LeaseOwner / LeaseExpiresAt guard the double-poller race (#47): before a
 	// poller acts on a match it claims a short lease, so two daemons (or a daemon
 	// + the hosted Lambda) can't both fire the same watch. A lease past its expiry
