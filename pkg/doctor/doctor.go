@@ -84,6 +84,7 @@ const (
 	CheckSchedulerErrs = "scheduler-errors"
 	CheckLegacyStack   = "legacy-stack"
 	CheckEmailSubs     = "email-subscriptions"
+	CheckSubnetCover   = "subnet-coverage"
 )
 
 // Check is one diagnostic line.
@@ -212,6 +213,10 @@ type Options struct {
 	// EmailAudit, when set, reads the alerts topic's email subscriptions
 	// against the active watches' addresses (#240). Read-only.
 	EmailAudit func(ctx context.Context) (watcher.EmailAudit, error)
+	// SubnetCoverage, when set, checks every active spawn/hold watch's
+	// default-subnet coverage (#256), returning one result per watch it
+	// applies to. Read-only.
+	SubnetCoverage func(ctx context.Context) ([]*watcher.SubnetCoverage, error)
 }
 
 // State is the raw, read-only observation Evaluate turns into a Report. Each
@@ -265,6 +270,12 @@ type State struct {
 	Email        watcher.EmailAudit
 	EmailErr     error
 	EmailChecked bool
+
+	// Subnets is the default-subnet coverage of each active spawn/hold watch
+	// (#256); SubnetsChecked is false when no check was supplied.
+	Subnets        []*watcher.SubnetCoverage
+	SubnetsErr     error
+	SubnetsChecked bool
 
 	LegacyStack       bool
 	LegacyStackStatus string
@@ -354,6 +365,12 @@ func Gather(ctx context.Context, o Options) State {
 		st.Email, st.EmailErr = o.EmailAudit(ctx)
 	}
 
+	// 5c. Can each spawn/hold watch land in the AZs it hunts (#256)?
+	if o.SubnetCoverage != nil {
+		st.SubnetsChecked = true
+		st.Subnets, st.SubnetsErr = o.SubnetCoverage(ctx)
+	}
+
 	// 6. Best effort: is Scheduler failing to invoke its targets?
 	if o.Metrics != nil {
 		now := time.Now
@@ -406,6 +423,9 @@ func Evaluate(st State) *Report {
 		r.Checks = append(r.Checks, c)
 	}
 	if c, ok := evalEmailSubscriptions(st); ok {
+		r.Checks = append(r.Checks, c)
+	}
+	if c, ok := evalSubnetCoverage(st); ok {
 		r.Checks = append(r.Checks, c)
 	}
 	if c, ok := evalLegacyStack(st); ok {
@@ -482,6 +502,72 @@ func evalEmailSubscriptions(st State) (Check, bool) {
 	}
 	c.Status = StatusWarn
 	c.Summary = fmt.Sprintf("email subscriptions: %s (%d confirmed)", strings.Join(problems, ", "), len(e.Confirmed))
+	return c, true
+}
+
+// evalSubnetCoverage reports active spawn/hold watches that hunt AZs they can
+// never land in (#256): an AZ offers the watch's type but has no default
+// subnet, so the poller skips it, and EC2 may be telling it that AZ is the one
+// with capacity. WARN, as the issue asks and as doctor is a CI gate; a watch
+// with no launchable AZ at all is called out in the summary.
+//
+// ok is false when there is nothing to say: no check supplied, or no active
+// spawn/hold watch.
+func evalSubnetCoverage(st State) (Check, bool) {
+	if !st.SubnetsChecked {
+		return Check{}, false
+	}
+	c := Check{Name: CheckSubnetCover}
+	if st.SubnetsErr != nil {
+		c.Status = StatusWarn
+		c.Summary = fmt.Sprintf("could not list active watches to check their default-subnet coverage: %v", st.SubnetsErr)
+		return c, true
+	}
+	if len(st.Subnets) == 0 {
+		return Check{}, false
+	}
+	affected, blocked := 0, 0
+	seenFix := map[string]bool{}
+	for _, cov := range st.Subnets {
+		if cov == nil {
+			continue
+		}
+		label := fmt.Sprintf("%s (%s %s)", cov.WatchID, cov.Action, cov.Pattern)
+		warnings := cov.Warnings()
+		if len(warnings) == 0 {
+			continue
+		}
+		if cov.HasUnreachable() {
+			affected++
+		}
+		if cov.Refusal() != nil {
+			blocked++
+			c.Detail = append(c.Detail, label+": can never launch: no AZ that offers its type has a default subnet")
+		}
+		for _, wline := range warnings {
+			c.Detail = append(c.Detail, label+": "+wline)
+		}
+		for _, f := range cov.FixCommands() {
+			if !seenFix[f] {
+				seenFix[f] = true
+				c.Fix = append(c.Fix, f)
+			}
+		}
+	}
+	if len(c.Detail) == 0 {
+		c.Status = StatusPass
+		c.Summary = fmt.Sprintf("%d spawn/hold watch(es): every AZ offering their types has a default subnet", len(st.Subnets))
+		return c, true
+	}
+	c.Status = StatusWarn
+	switch {
+	case blocked > 0:
+		c.Summary = fmt.Sprintf("%d of %d spawn/hold watch(es) hunt AZs with no default subnet, %d of them with no AZ they can launch in", affected, len(st.Subnets), blocked)
+	case affected > 0:
+		c.Summary = fmt.Sprintf("%d of %d spawn/hold watch(es) hunt AZs with no default subnet (the poller skips them)", affected, len(st.Subnets))
+	default:
+		c.Summary = "default-subnet coverage could not be fully checked"
+	}
 	return c, true
 }
 

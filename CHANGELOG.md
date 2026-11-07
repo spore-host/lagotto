@@ -44,6 +44,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--ttl` to it is refused, since such a watch has no TTL.
 - The `EXPIRES` column of `lagotto list` is 5 characters wider, to fit the
   until-landed form.
+- **`lagotto watch` checks default-subnet coverage for spawn and hold
+  watches** (#256). The poller launches into the default VPC with no explicit
+  subnet, so it can only land in an AZ that has a default subnet; since #150
+  it skipped the others without saying so. For each region the watch names,
+  `watch` now compares the AZs that offer the type
+  (`DescribeInstanceTypeOfferings`, narrowed by `--azs`) with the AZs that
+  have a default subnet:
+  - none in common: the watch is refused, naming the AZs and the
+    `aws ec2 create-default-subnet --region ... --availability-zone ...`
+    command. (A watch with no `--regions` is refused only if no enabled
+    region can serve it.)
+  - some offered AZs lack one: a warning per AZ, e.g. "us-west-2d offers
+    p5.4xlarge but has no default subnet; this watch can't land there".
+  - a lookup that fails (e.g. missing permission) is a warning, never a
+    refusal. Notify and SageMaker watches are not checked.
+  - `lagotto watch` therefore calls `ec2:DescribeInstanceTypeOfferings`,
+    `ec2:DescribeSubnets` and `ec2:DescribeRegions` with your credentials
+    (see `docs/reference/cli-iam-actions.md`). The poller's policy is
+    unchanged.
+- **`lagotto doctor` has a `subnet-coverage` check** (#256): a warning per
+  active spawn/hold watch whose regions have AZs that offer its type but have
+  no default subnet, with the commands that fix them. It needs the same three
+  EC2 read actions.
+
+- **A failed attempt that skipped AZs with no default subnet says so** (#256).
+  Its `last_error` now starts `no-subnet: <azs>; ` ahead of the usual
+  `<class>: <code>: <message>`, so `lagotto list` shows `no-subnet` instead of
+  a plain `capacity` miss. The retry decision is unchanged.
+- **EC2's capacity hint survives the 256-byte `last_error` cut** (#256). The
+  AZs an `InsufficientInstanceCapacity` message says do have capacity come
+  last in the message and were cut off; they are now moved ahead of it, as
+  `EC2 suggests us-west-2a, us-west-2b, us-west-2d; ...`.
 
 ### Fixed
 
@@ -59,6 +91,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   launch. The `deploy --teardown` prompt and summary name all three tables.
   `lagotto teardown` now also needs `dynamodb:DescribeTable` and
   `dynamodb:ListTagsOfResource` (`docs/reference/cli-iam-actions.md`).
+
+- **The poller notices a default subnet you create** (#256). Its per-region
+  default-subnet lookup was cached for the life of a warm Lambda container,
+  so after `aws ec2 create-default-subnet` it kept skipping the new AZ until a
+  cold start. The lookup now expires after 15 minutes, and is re-read on the
+  next cycle after any failed attempt that skipped an AZ. Takes effect on the
+  hosted poller once redeployed with this release (`lagotto deploy`).
 
 ## [0.67.0] - 2026-11-06
 

@@ -39,6 +39,10 @@ type Holder struct {
 	// them, so the reservation can be launched into without creating a subnet
 	// first (#209). Nil, or an empty result (lookup failed), skips the check.
 	launchableAZs func(ctx context.Context, region string) map[string]bool
+	// forgetLaunchableAZs drops the region's cached launchable set after a
+	// failed hold that skipped AZs with no default subnet, so the next cycle
+	// re-reads it (#256). Nil = nothing cached (test holders).
+	forgetLaunchableAZs func(region string)
 	// describeReservation backs the #239 landing check: a created reservation
 	// counts as held only once DescribeCapacityReservations shows it "active".
 	// Nil = no landing check, so a hold is matched at once, as before #239 (the
@@ -49,7 +53,8 @@ type Holder struct {
 
 // NewHolder creates a Holder.
 func NewHolder(cfg aws.Config) *Holder {
-	h := &Holder{cfg: cfg, launchableAZs: newDefaultSubnetAZLookup(cfg)}
+	subnets := newDefaultSubnetAZLookup(cfg)
+	h := &Holder{cfg: cfg, launchableAZs: subnets.lookup, forgetLaunchableAZs: subnets.forget}
 	h.releaseClient = func(region string) holderReleaseAPI {
 		c := h.cfg.Copy()
 		c.Region = region
@@ -75,27 +80,40 @@ func NewHolder(cfg aws.Config) *Holder {
 // If the subnet lookup is unavailable or returns nothing (an API error, or an
 // account with no default VPC), the first candidate is used, as before: the
 // check must not block holds it cannot evaluate. If the lookup succeeds and no
-// candidate has a default subnet, it returns an error and nothing is reserved.
-func (h *Holder) chooseHoldAZ(ctx context.Context, m *MatchResult) (string, error) {
+// candidate has a default subnet, it returns an error (a *NoSubnetError, #256)
+// and nothing is reserved.
+//
+// noSubnet lists the candidates skipped for want of a default subnet, so a
+// failed reservation can say they were (#256).
+func (h *Holder) chooseHoldAZ(ctx context.Context, m *MatchResult) (az string, noSubnet []string, err error) {
 	candidates := m.CandidateAZs
 	if len(candidates) == 0 {
 		candidates = []string{m.AvailabilityZone}
 	}
 	if h.launchableAZs == nil {
-		return candidates[0], nil
+		return candidates[0], nil, nil
 	}
 	usable := h.launchableAZs(ctx, m.Region)
 	if len(usable) == 0 {
-		return candidates[0], nil
+		return candidates[0], nil, nil
 	}
-	for _, az := range keepLaunchableAZs(usable, candidates) {
+	kept, noSubnet := splitLaunchableAZs(usable, candidates)
+	for _, az := range kept {
 		if az != "" {
-			return az, nil
+			return az, noSubnet, nil
 		}
 	}
-	return "", fmt.Errorf("not reserving %s in %s: none of the offered AZs %v has a default subnet, "+
+	h.forgetSubnets(m.Region)
+	return "", noSubnet, withNoSubnet(fmt.Errorf("not reserving %s in %s: none of the offered AZs %v has a default subnet, "+
 		"so the reservation could not be launched into without creating a subnet first "+
-		"(an opted-in Local Zone has no default subnet)", m.InstanceType, m.Region, candidates)
+		"(an opted-in Local Zone has no default subnet)", m.InstanceType, m.Region, candidates), noSubnet, true)
+}
+
+// forgetSubnets drops the region's cached default-subnet set, if any.
+func (h *Holder) forgetSubnets(region string) {
+	if h.forgetLaunchableAZs != nil {
+		h.forgetLaunchableAZs(region)
+	}
 }
 
 // Hold creates a targeted ODCR for the matched instance type, in the first
@@ -106,7 +124,7 @@ func (h *Holder) Hold(ctx context.Context, w *Watch, m *MatchResult) error {
 	if m.AvailabilityZone == "" && len(m.CandidateAZs) == 0 {
 		return fmt.Errorf("cannot create capacity reservation without availability zone")
 	}
-	az, err := h.chooseHoldAZ(ctx, m)
+	az, noSubnet, err := h.chooseHoldAZ(ctx, m)
 	if err != nil {
 		m.ActionTaken = "hold_failed"
 		return err
@@ -142,7 +160,10 @@ func (h *Holder) Hold(ctx context.Context, w *Watch, m *MatchResult) error {
 	})
 	if err != nil {
 		m.ActionTaken = "hold_failed"
-		return fmt.Errorf("create capacity reservation: %w", err)
+		if len(noSubnet) > 0 {
+			h.forgetSubnets(m.Region)
+		}
+		return withNoSubnet(fmt.Errorf("create capacity reservation: %w", err), noSubnet, false)
 	}
 
 	m.ReservationID = *result.CapacityReservation.CapacityReservationId

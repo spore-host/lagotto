@@ -5,12 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"sync"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/ec2"
-	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/spore-host/lagotto/pkg/failure"
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
@@ -47,8 +43,14 @@ type Spawner struct {
 	// subnet (so a default-VPC RunInstances can place there). Used to drop AZs the
 	// account can't launch in (e.g. us-west-2d with no default subnet) from the AZ
 	// sweep, avoiding a wasted attempt + confusing InvalidInput (#150). Nil in test
-	// spawners → filtering is skipped (fail open). Set (memoized) in NewSpawner.
+	// spawners → filtering is skipped (fail open). Set in NewSpawner, cached
+	// for DefaultSubnetCacheTTL (#256).
 	launchableAZs func(ctx context.Context, region string) map[string]bool
+	// forgetLaunchableAZs drops the region's cached launchable set, so the
+	// next cycle re-reads it. Called after a failed sweep that skipped AZs
+	// with no default subnet: the user may be creating one (#256). Nil = no
+	// cache to drop (test spawners).
+	forgetLaunchableAZs func(region string)
 }
 
 // S3Client returns the S3 lister for s3-empty completion conditions (#70), or
@@ -61,6 +63,7 @@ func NewSpawner(ctx context.Context) (*Spawner, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create spawn client: %w", err)
 	}
+	subnets := newDefaultSubnetAZLookup(client.Config())
 	return &Spawner{
 		client:              client,
 		provision:           launcher.Provision,
@@ -69,44 +72,9 @@ func NewSpawner(ctx context.Context) (*Spawner, error) {
 		describeReservation: client.DescribeCapacityReservation,
 		describeInstance:    newInstanceDescriber(client.Config()),
 		s3:                  s3.NewFromConfig(client.Config()),
-		launchableAZs:       newDefaultSubnetAZLookup(client.Config()),
+		launchableAZs:       subnets.lookup,
+		forgetLaunchableAZs: subnets.forget,
 	}, nil
-}
-
-// newDefaultSubnetAZLookup returns a memoized lookup of the AZ names in a region
-// that have a default subnet (default-for-az=true) — the AZs a default-VPC
-// RunInstances (no explicit subnet, as the poller launches) can actually place
-// in. Best-effort: an API error or empty result returns nil, and the caller
-// fails open (tries all AZs) rather than blocking a launch (#150). Requires only
-// ec2:DescribeSubnets, already in the poller runtime policy.
-func newDefaultSubnetAZLookup(cfg aws.Config) func(ctx context.Context, region string) map[string]bool {
-	var mu sync.Mutex
-	cache := map[string]map[string]bool{}
-	return func(ctx context.Context, region string) map[string]bool {
-		if region == "" {
-			return nil
-		}
-		mu.Lock()
-		defer mu.Unlock()
-		if set, ok := cache[region]; ok {
-			return set
-		}
-		cl := ec2.NewFromConfig(cfg, func(o *ec2.Options) { o.Region = region })
-		out, err := cl.DescribeSubnets(ctx, &ec2.DescribeSubnetsInput{
-			Filters: []ec2types.Filter{{Name: aws.String("default-for-az"), Values: []string{"true"}}},
-		})
-		if err != nil {
-			return nil // fail open (don't cache — retry next launch)
-		}
-		set := make(map[string]bool, len(out.Subnets))
-		for _, sn := range out.Subnets {
-			if sn.AvailabilityZone != nil {
-				set[*sn.AvailabilityZone] = true
-			}
-		}
-		cache[region] = set
-		return set
-	}
 }
 
 // filterLaunchableAZs drops AZs with no default subnet from the sweep so the
@@ -115,18 +83,27 @@ func newDefaultSubnetAZLookup(cfg aws.Config) func(ctx context.Context, region s
 // can't be determined, or filtering would empty the list, the attempts are
 // returned unchanged. "" (let-EC2-choose) is always kept.
 func (s *Spawner) filterLaunchableAZs(ctx context.Context, region string, attempts []string) []string {
+	kept, _, _ := s.splitAttempts(ctx, region, attempts)
+	return kept
+}
+
+// splitAttempts is filterLaunchableAZs that also reports the AZs it found
+// with no default subnet (#256), so a failed sweep can say they were skipped.
+// When filtering would empty the list it fails open: every attempt is kept,
+// all of them are reported as lacking a subnet, and all is true.
+func (s *Spawner) splitAttempts(ctx context.Context, region string, attempts []string) (kept, noSubnet []string, all bool) {
 	if s.launchableAZs == nil {
-		return attempts
+		return attempts, nil, false
 	}
 	usable := s.launchableAZs(ctx, region)
 	if len(usable) == 0 {
-		return attempts
+		return attempts, nil, false
 	}
-	filtered := keepLaunchableAZs(usable, attempts)
-	if len(filtered) == 0 {
-		return attempts
+	kept, noSubnet = splitLaunchableAZs(usable, attempts)
+	if len(kept) == 0 {
+		return attempts, noSubnet, true
 	}
-	return filtered
+	return kept, noSubnet, false
 }
 
 // keepLaunchableAZs returns the attempts whose AZ is in usable (the AZs with a
@@ -134,13 +111,8 @@ func (s *Spawner) filterLaunchableAZs(ctx context.Context, region string, attemp
 // an empty list: the spawn sweep then fails open (filterLaunchableAZs), while a
 // hold refuses to reserve (Holder.chooseHoldAZ, #209).
 func keepLaunchableAZs(usable map[string]bool, attempts []string) []string {
-	filtered := make([]string, 0, len(attempts))
-	for _, a := range attempts {
-		if a == "" || usable[a] {
-			filtered = append(filtered, a)
-		}
-	}
-	return filtered
+	kept, _ := splitLaunchableAZs(usable, attempts)
+	return kept
 }
 
 // reservationGate is the outcome of checking a Capacity Block reservation's
@@ -418,7 +390,7 @@ func (s *Spawner) launchAcrossAZs(ctx context.Context, cfg spawnaws.LaunchConfig
 	// Drop AZs the account can't place a default-VPC instance in (no default
 	// subnet, e.g. us-west-2d), so we don't waste an attempt or surface a
 	// confusing InvalidInput mid-sweep (#150). Fails open when undeterminable.
-	attempts = s.filterLaunchableAZs(ctx, cfg.Region, attempts)
+	attempts, noSubnet, allNoSubnet := s.splitAttempts(ctx, cfg.Region, attempts)
 	if len(attempts) == 0 {
 		attempts = []string{""} // let EC2 choose the AZ
 	}
@@ -445,7 +417,19 @@ func (s *Spawner) launchAcrossAZs(ctx context.Context, cfg spawnaws.LaunchConfig
 			break
 		}
 	}
-	return launched{}, fmt.Errorf("launch instance (tried %d AZ(s): %v): %w", len(attempts), attempts, lastErr)
+	err := fmt.Errorf("launch instance (tried %d AZ(s): %v): %w", len(attempts), attempts, lastErr)
+	if len(noSubnet) > 0 {
+		// Say which AZs were skipped for want of a default subnet (#256): EC2's
+		// own message often names one of them as the AZ with capacity. And
+		// re-read the subnets next cycle, in case the user is adding one.
+		if s.forgetLaunchableAZs != nil {
+			s.forgetLaunchableAZs(cfg.Region)
+		}
+		// allNoSubnet: filtering would have emptied the sweep, so it failed
+		// open and every attempt went to an AZ with no default subnet.
+		err = withNoSubnet(err, noSubnet, allNoSubnet)
+	}
+	return launched{}, err
 }
 
 // LaunchScheduled fires a one-shot/cron scheduled launch (#49): it deserializes

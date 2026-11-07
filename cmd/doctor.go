@@ -48,6 +48,12 @@ alerts topic with no filter policy, which receives every user's email events.
 'lagotto notify-gc' removes unused subscriptions, and with --resubscribe
 subscribes missing ones.
 
+For each active spawn or hold watch it checks default-subnet coverage
+(lagotto#256): the poller launches into the default VPC with no explicit subnet,
+so an AZ that offers the watch's type but has no default subnet is skipped, and
+the watch can never land there. Each such AZ is a warning, with the
+'aws ec2 create-default-subnet' command that fixes it.
+
 It checks that the shared EventBridge Scheduler invoke role's policy allows
 invoking THIS region's poller (lagotto#218: the role is IAM-global, and a deploy
 by lagotto older than v0.65.1 scoped it to the deploying region alone, so every
@@ -111,6 +117,13 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 			}
 			return newEmailSubscriber(cfg, topicArn).Audit(ctx, watches)
 		},
+		SubnetCoverage: func(ctx context.Context) ([]*watcher.SubnetCoverage, error) {
+			watches, lErr := store.ListActiveWatches(ctx)
+			if lErr != nil {
+				return nil, lErr
+			}
+			return activeSubnetCoverage(ctx, watcher.NewSubnetCoverageChecker(cfg), watches), nil
+		},
 		ActiveWatches: func(ctx context.Context) (int, error) {
 			watches, lErr := store.ListActiveWatches(ctx)
 			if lErr != nil {
@@ -125,6 +138,18 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	return doctorExitError(report)
+}
+
+// activeSubnetCoverage checks each spawn/hold watch's default-subnet coverage
+// (#256), skipping the watches the check does not apply to.
+func activeSubnetCoverage(ctx context.Context, checker *watcher.SubnetCoverageChecker, watches []watcher.Watch) []*watcher.SubnetCoverage {
+	var out []*watcher.SubnetCoverage
+	for i := range watches {
+		if cov := checker.Check(ctx, &watches[i]); cov.Checked {
+			out = append(out, cov)
+		}
+	}
+	return out
 }
 
 // doctorExitError turns a report into the command's exit status: an error (hence a

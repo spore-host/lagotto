@@ -242,6 +242,12 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		w.RemindPauseAfter = watcher.DefaultRemindPauseAfter
 	}
 
+	// Default-subnet coverage (#256): refuse a spawn/hold watch that can never
+	// land, before anything is created.
+	if _, err := checkWatchSubnetCoverage(ctx, watcher.NewSubnetCoverageChecker(cfg), os.Stderr, w); err != nil {
+		return err
+	}
+
 	store := watcher.NewStore(cfg, watchesTable, historyTable)
 
 	// Auto-create the backing tables on first use so the tool is zero-setup (#12).
