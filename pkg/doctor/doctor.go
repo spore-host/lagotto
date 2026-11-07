@@ -625,7 +625,7 @@ func evalRoles(st State) Check {
 		c.Status = StatusFail
 		c.Summary = "CLI-owned IAM role(s) missing: " + strings.Join(missing, ", ")
 		c.Detail = []string{"both roles are created by the CLI, not by the stack; the Scheduler invoke role is also what per-launch scheduled launches use"}
-		c.Fix = []string{"lagotto deploy --version <release>"}
+		c.Fix = []string{"lagotto setup   # creates both roles in any one region; they are account-global (#229)"}
 	case len(unreadable) > 0:
 		c.Status = StatusWarn
 		c.Summary = "could not check IAM role(s): " + strings.Join(unreadable, "; ")

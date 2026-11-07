@@ -224,8 +224,10 @@ succeeds.
   `lagotto-capacity-poller-scheduler-invoke`. They are CLI-owned and IAM-global:
   shared by the poller in every region of the account, and the invoke role also by
   per-launch scheduled launches. Teardown is per-region, so it cannot know that no
-  other region still needs them, and it never touches them (#218). Delete them by
-  hand once no region runs a poller.
+  other region still needs them, and it never touches them (#218). Once no region
+  runs a poller, delete them with `lagotto teardown --iam-roles` (#229). It checks
+  every region enabled in the account first and refuses, deleting nothing, while a
+  poller exists in any of them or a region cannot be checked.
 - **The artifact bucket** (`lagotto-lambda-<account>-<region>`) — it is created
   outside the poller's lifecycle. Delete it manually if you want.
 - **Per-launch `lagotto-launch-sl-*` schedules.**
@@ -241,44 +243,30 @@ CI-driven `aws cloudformation deploy`.
 
 The template declares the same three resources and **references** the IAM roles and
 DynamoDB tables by name without creating them, so the CLI still has to prepare
-those first. `lagotto deploy` creates all of them, but it also deploys the poller
-itself, which is what the stack is for. `lagotto setup` creates only some of them:
+those first. `lagotto setup` creates all of them except the scheduled-launches
+table, without deploying a poller:
 
 | Referenced by the stack | `lagotto setup` | `lagotto deploy` |
 |---|---|---|
 | `lagotto-watches`, `lagotto-match-history` tables | creates | creates |
 | `lagotto-capacity-poller-role` + its `lagotto-runtime-policy` | creates the role and writes the policy | creates the role; does **not** write the policy |
-| `lagotto-capacity-poller-scheduler-invoke` role + its `InvokeLambda` policy | **does not create** | creates |
+| `lagotto-capacity-poller-scheduler-invoke` role + its `InvokeLambda` policy | creates (since #229) | creates |
 | `lagotto-scheduled-launches` table | does not create | creates |
 
 The scheduled-launches table can wait: the poller treats a missing table as "no
-launches pending", and the first `lagotto launch` creates it. **The invoke role
-cannot wait.** The stack's `PollerSchedule` assumes it to invoke the poller, and the
-Lambda's `SCHEDULER_INVOKE_ROLE_ARN` names it. Without it the schedule cannot invoke
-the poller, so no watch is ever polled. lagotto#229 tracks making `setup` create it.
-Until then, the only lagotto command that creates it is `deploy`:
-
-- The role is IAM-global, and `lagotto deploy --teardown` never deletes it. **If
-  `lagotto deploy` has ever run in any region of this account, the role already
-  exists.** `lagotto doctor`'s `iam-roles` check confirms it.
-- Otherwise, run one `lagotto deploy` and then tear its poller down before creating
-  the stack (step 1b below). Teardown deletes only the schedule, function and topic
-  it just created, and keeps both roles and the tables. Pass `--lambda-bucket` with
-  the bucket you stage the zip in (step 2), so `deploy` does not create its own
-  `lagotto-lambda-<account>-<region>` artifact bucket. It uploads the Lambda zip there.
+launches pending", and the first `lagotto launch` creates it. The invoke role
+cannot: the stack's `PollerSchedule` assumes it to invoke the poller, and the
+Lambda's `SCHEDULER_INVOKE_ROLE_ARN` names it. `setup` creates it (lagotto#229;
+before that only `deploy` did), and prints each role it created. Both roles are
+IAM-global, so one `setup` in any region serves every region; `lagotto doctor`'s
+`iam-roles` check confirms they exist.
 
 ```bash
 # Set VERSION to the lagotto release you want, e.g. the one `lagotto version` prints.
 VERSION=X.Y.Z
 
-# 1. Tables, the poller's execution role and its runtime permissions policy.
+# 1. Tables, both CLI-owned IAM roles, and their policies.
 lagotto setup --region us-east-1
-
-# 1b. Only if `lagotto deploy` has never run in this account: create the
-#     Scheduler invoke role (and the scheduled-launches table), then remove the
-#     poller it deployed, so the stack can own those three resources.
-lagotto deploy --version $VERSION --lambda-bucket my-artifact-bucket --region us-east-1
-lagotto deploy --teardown --region us-east-1
 
 # 2. Get the published Lambda zip and stage it in a bucket you control.
 gh release download v$VERSION --repo spore-host/lagotto \

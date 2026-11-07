@@ -19,11 +19,15 @@ import (
 
 var setupCmd = &cobra.Command{
 	Use:   "setup",
-	Short: "Create lagotto's DynamoDB tables and grant the hosted poller its runtime IAM policy",
+	Short: "Create lagotto's DynamoDB tables and the hosted poller's IAM roles and policies",
 	Long: `Provision lagotto's backend: the DynamoDB tables it uses to store watches and
 match history (lagotto-watches and lagotto-match-history by default; override with
---watches-table / --history-table), and — if the hosted poller has been deployed
-('lagotto deploy') — the runtime IAM policy that lets the poller spawn/hold/submit.
+--watches-table / --history-table), and both CLI-owned IAM roles: the poller's
+execution role (lagotto-capacity-poller-role) with the runtime IAM policy that lets
+the poller spawn/hold/submit, and the role EventBridge Scheduler assumes to invoke
+the poller (lagotto-capacity-poller-scheduler-invoke). The roles are account-global,
+so one run in any region serves every region. Roles that already exist are reused;
+both policies are rewritten on every run. Setup prints each role it created.
 
 The table creation is idempotent (existing tables are left untouched) and normally
 automatic: 'lagotto watch' creates the tables on first use. Run 'setup' explicitly
@@ -31,8 +35,7 @@ to provision the backend ahead of time, or — importantly — after 'lagotto de
 to grant the poller its permissions. 'deploy' creates only a minimal execution
 role (so the runtime Lambda can never self-escalate); 'setup', run by you, attaches
 the spawn/hold/SageMaker/scheduler policy. Until then the poller can only notify.
-If the poller role doesn't exist yet, setup creates the tables and prints a
-next-step note instead of failing.`,
+'lagotto teardown --iam-roles' deletes both roles once no region runs a poller.`,
 	RunE: runSetup,
 }
 
@@ -73,12 +76,10 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		_, _ = fmt.Fprintf(out, "Created table %s\n", name)
 	}
 
-	// 2. Runtime IAM policy (#16): lagotto owns the hosted poller's permissions in
-	// Go, the same way it owns its tables. The CFN/SAM stack (`lagotto deploy`)
-	// creates a minimal execution role; setup attaches the permissions policy to
-	// it. Skipped gracefully when the role doesn't exist yet (deploy hasn't run) —
-	// the poller only NOTIFIES until the policy is applied, so this is a clear
-	// next-step message, not a hard failure.
+	// 2. The CLI-owned IAM roles and their policies (#16, #145, #229): lagotto
+	// owns the hosted poller's permissions in Go, the same way it owns its
+	// tables. Both roles are get-or-created, so setup works standalone on a fresh
+	// account, before or without a `lagotto deploy`.
 	if err := ensureRuntimePolicy(ctx, cfg, out); err != nil {
 		return err
 	}
@@ -87,12 +88,11 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// ensureRuntimePolicy resolves the account ID and writes the poller runtime
-// policy onto its execution role. A missing role (NoSuchEntity) is reported as a
-// "run lagotto deploy first" note rather than an error, since setup is also used
-// pre-deploy to provision only the tables.
+// ensureRuntimePolicy resolves the account ID, get-or-creates both CLI-owned
+// roles, and writes the runtime policy onto the poller's execution role and the
+// invoke policy onto the Scheduler invoke role. It prints each role it created.
 func ensureRuntimePolicy(ctx context.Context, cfg aws.Config, out io.Writer) error {
-	acct, err := sts.NewFromConfig(cfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	acct, err := setupCallerAccount(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("resolve account ID: %w", err)
 	}
@@ -101,8 +101,25 @@ func ensureRuntimePolicy(ctx context.Context, cfg aws.Config, out io.Writer) err
 		return fmt.Errorf("no region resolved; set --region, SPORE_REGION, or AWS_REGION")
 	}
 
-	iamClient := iam.NewFromConfig(cfg)
+	return applySetupRoles(ctx, newSetupIAMClient(cfg), region, acct, out)
+}
 
+// setupCallerAccount and newSetupIAMClient are setup's AWS clients, seams so
+// ensureRuntimePolicy is tested without AWS.
+var setupCallerAccount = func(ctx context.Context, cfg aws.Config) (string, error) {
+	out, err := sts.NewFromConfig(cfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	if err != nil {
+		return "", err
+	}
+	return aws.ToString(out.Account), nil
+}
+
+var newSetupIAMClient = func(cfg aws.Config) runtimeiam.IAMAPI { return iam.NewFromConfig(cfg) }
+
+// applySetupRoles is the IAM half of setup, separated so it is tested against a
+// fake IAM: carry the authorized instance roles forward, ensure both roles and
+// their policies, and report what was created and applied.
+func applySetupRoles(ctx context.Context, iamClient runtimeiam.IAMAPI, region, accountID string, out io.Writer) error {
 	// Authorized instance roles (#170) are carried forward from the DEPLOYED policy
 	// before being re-applied. The policy is written with a wholesale
 	// PutRolePolicy, so without this a plain `lagotto setup` would silently revoke
@@ -114,12 +131,19 @@ func ensureRuntimePolicy(ctx context.Context, cfg aws.Config, out io.Writer) err
 		return err
 	}
 
-	// EnsureRuntimeRole now creates the CLI-owned role if absent (#145), so setup
-	// works standalone on a fresh account without a prior `lagotto deploy`.
-	if err = runtimeiam.EnsureRuntimeRole(ctx, iamClient, region, aws.ToString(acct.Account), roles); err != nil {
-		return fmt.Errorf("ensure runtime IAM role/policy: %w", err)
+	// Both CLI-owned roles (#229), not only the poller's: the Scheduler invoke role
+	// is what the poller schedule (and a CloudFormation stack's PollerSchedule)
+	// assumes, so without it nothing ever invokes the poller. Before #229 only
+	// `lagotto deploy` created it.
+	created, err := runtimeiam.EnsureSetupRoles(ctx, iamClient, region, accountID, roles)
+	for _, name := range created {
+		_, _ = fmt.Fprintf(out, "Created IAM role %s\n", name)
+	}
+	if err != nil {
+		return fmt.Errorf("ensure poller IAM roles/policies: %w", err)
 	}
 	_, _ = fmt.Fprintf(out, "Applied runtime IAM policy %q to role %q.\n", runtimeiam.PolicyName, runtimeiam.RoleName)
+	_, _ = fmt.Fprintf(out, "Applied invoke policy %q to role %q.\n", runtimeiam.SchedulerInvokePolicyName, runtimeiam.SchedulerInvokeRoleName)
 	if len(roles) > 0 {
 		_, _ = fmt.Fprintf(out, "Authorized instance role(s) for hosted spawns: %s\n", strings.Join(roles, ", "))
 		_, _ = fmt.Fprintln(out, "  The poller may now read these roles, write their inline policy, attach managed policies to")

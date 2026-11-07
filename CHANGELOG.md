@@ -31,6 +31,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     starts filling them in once it is redeployed with this release
     (`lagotto deploy`).
 
+- **`lagotto teardown --iam-roles` deletes lagotto's two IAM roles** (#229),
+  `lagotto-capacity-poller-role` and `lagotto-capacity-poller-scheduler-invoke`,
+  with their inline and attached policies. Nothing deleted them before;
+  DEPLOYMENT.md said to delete them by hand. The roles are shared by the poller
+  in every region, so it first looks for the poller in every region enabled in
+  the account and refuses, before deleting anything, while one exists (naming
+  the `lagotto deploy --teardown --region` command for each) or when a region
+  cannot be checked. `--force` does not override that check.
+  `docs/reference/cli-iam-actions.md`: `lagotto teardown` gains the IAM delete
+  actions, `ec2:DescribeRegions` and `lambda:GetFunction`.
+
 ### Changed
 
 - **Built against spawn v0.161.0 (from v0.160.0)**, in the root module and in
@@ -126,6 +137,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lookup, and table deletion under `AUTO_DELETE_TABLES`).
   `docs/reference/cli-iam-actions.md`: commands that create an FSx filesystem
   gain `fsx:TagResource`.
+- **`lagotto setup` now creates the Scheduler invoke role too** (#229). It
+  created only the poller's execution role, so in an account set up for the
+  CloudFormation path no lagotto command short of `lagotto deploy` created
+  `lagotto-capacity-poller-scheduler-invoke`, the role the stack's schedule
+  assumes to invoke the poller. Without it no watch was ever polled, and the
+  documented workaround was to deploy a poller and tear it down again. Now
+  `setup` get-or-creates both roles, writes both policies, and prints
+  `Created IAM role <name>` for each role it created. It is idempotent, and
+  because both roles are account-global one run in any region serves every
+  region. DEPLOYMENT.md's CloudFormation step 1 is just `lagotto setup` again,
+  and `lagotto doctor`'s `iam-roles` check now prescribes `lagotto setup`
+  rather than a deploy.
 
 - **`lagotto poll` and `poll --daemon` now send notifications without
   `LAGOTTO_SNS_TOPIC_ARN`** (#241). The local poller built its notifier only
