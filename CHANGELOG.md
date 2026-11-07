@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`lagotto update <watch-id>`: change an existing watch's search in place**
+  (#257), instead of cancelling and re-creating it. The watch keeps its ID,
+  attempt count, last error, match history and confirmed email subscriptions,
+  and keeps hunting.
+  - Changes the instance-type pattern (`--instance-type`, or `--add-type`),
+    the regions (`--regions`, `--add-region`, `--remove-region`), `--azs`,
+    `--spot` / `--no-spot`, `--max-price`, the notify channels (`--notify`,
+    `--add-notify`, `--remove-notify`), `--spawn-config` and `--project`. The
+    action, service, owner, ID and deadline cannot be changed.
+  - The updated watch goes through the same checks as `lagotto watch`,
+    including default-subnet coverage (#256), the fleet quota warning and the
+    instance-role check, so an update cannot make a watch `watch` would
+    refuse.
+  - Prints a before/after diff of the changed fields; `--dry-run` runs every
+    check and shows the diff without writing anything. `-o json` gives the
+    same as a document.
+  - When the search changes, the consecutive-failure count and the quota state
+    (quota-refused candidates, quota cap) are reset; attempts, last error,
+    match count and history are kept.
+  - Only added email addresses are subscribed (and must confirm); a removed
+    one is unsubscribed unless another active watch names it.
+  - Refused while a poller is acting on the watch, while a launch or hold it
+    made is still landing, and while a SageMaker job it submitted is in
+    flight; queuing the change until landing resolves is not implemented. An
+    expired or failed watch needs `--reactivate`, and must still be before
+    its deadline (`lagotto extend` first if not).
+  - The write is a single conditional update on the `updated_at` read, so it
+    never overwrites anything the poller wrote meanwhile, and it holds the
+    watch for one lease length (2 minutes) so a poller that read the old
+    search just before cannot act on it.
+  - Each update adds an `updated` row to `lagotto history`, listing the
+    changed fields (`"event": "updated"` in `-o json`). It is not a match and
+    has no wait-to-acquire.
+  - Needs the same IAM as `lagotto watch`, plus `dynamodb:UpdateItem` and
+    `sns:Unsubscribe`; see `docs/reference/cli-iam-actions.md`.
+
 - **`lagotto watch --until-landed`: keep hunting until the launch or hold
   lands, with no TTL** (#239, phase 3). Instead of a TTL the watch has a
   rolling acknowledgement deadline: it pauses itself unless you run the new
@@ -34,6 +70,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     there. Its record is retained for the usual 90 days after that.
 
 ### Changed
+
+- `lagotto watch` refuses a negative `--max-price` (0 still means any price).
+  It used to store it, and the poller treated it as no limit. The check is
+  shared with `lagotto update` (#257).
 
 - **`--ttl` must be greater than zero**, for both `lagotto watch` and
   `lagotto extend` (#239). `--ttl 0` and negative values used to be accepted

@@ -249,8 +249,11 @@ type MatchResult struct {
 	LandingReason    string    `json:"landing_reason,omitempty" dynamodbav:"landing_reason,omitempty"`
 	// QuotaDetail explains a quota_infeasible row (#238): the error code, the
 	// vCPUs the type needs, and the quota numbers when known. Empty otherwise.
-	QuotaDetail  string `json:"quota_detail,omitempty" dynamodbav:"quota_detail,omitempty"`
-	TTLTimestamp int64  `json:"ttl_timestamp" dynamodbav:"ttl_timestamp"`
+	QuotaDetail string `json:"quota_detail,omitempty" dynamodbav:"quota_detail,omitempty"`
+	// ChangedFields lists the watch attributes an `updated` row (#257,
+	// ActionUpdated) changed. Empty on every other row.
+	ChangedFields []string `json:"changed_fields,omitempty" dynamodbav:"changed_fields,omitempty"`
+	TTLTimestamp  int64    `json:"ttl_timestamp" dynamodbav:"ttl_timestamp"`
 	// WaitToAcquireSeconds is the DERIVED time from the parent watch's creation to
 	// this match, in seconds (#139). Display-only, filled by the history command
 	// from the watch's created_at; never persisted (dynamodbav "-").
