@@ -22,8 +22,9 @@ There are two paths:
 | EventBridge schedule | `lagotto-capacity-poller` at `rate(5 minutes)`, starts **DISABLED** | `lagotto deploy` |
 | IAM role | `lagotto-capacity-poller-role` (execution role; its permissions policy is written by `setup`) | `pkg/runtimeiam`: created by `deploy` or `setup` |
 | IAM role | `lagotto-capacity-poller-scheduler-invoke` (assumed by EventBridge Scheduler) | `pkg/runtimeiam`: created by `deploy` **only** |
-| DynamoDB tables | `lagotto-watches`, `lagotto-match-history` | the CLI: `deploy`, `setup` or `watch` |
-| DynamoDB table | `lagotto-scheduled-launches` | the CLI: `deploy` or the first `launch` |
+| DynamoDB tables | `lagotto-watches`, `lagotto-match-history` | the CLI: `deploy`, `setup` or `watch`; deleted by `lagotto teardown` |
+| DynamoDB table | `lagotto-scheduled-launches`, tagged `lagotto:managed=cli` | the CLI: `deploy` or the first `launch`; deleted by `lagotto teardown` (#250) |
+| EventBridge schedules | `lagotto-launch-sl-<id>`, one per scheduled launch (and the poller's boundary-retry schedules) | `lagotto launch` and the poller; deleted by `lagotto teardown` (#260) |
 | S3 artifact bucket | `lagotto-lambda-<account>-<region>`, tagged `lagotto:managed=cli` | `lagotto deploy`; deleted by `lagotto deploy --teardown` (#264) |
 
 Every one of these has a **fixed name**, which is what makes the deploy idempotent
@@ -117,6 +118,23 @@ That uploads the new zip and issues a single `UpdateFunctionCode`; the topic and
 schedule are left untouched. (There is no longer any need to run
 `aws lambda update-function-code` by hand.)
 
+**Some features start only once the poller is redeployed.** The poller does
+the work, so a new CLI alone is not enough. From v0.68.0:
+
+- **Until-landed reminders** (`lagotto watch --until-landed`) are sent by the
+  poller. Until it runs v0.68.0, such a watch still pauses at its
+  acknowledgement deadline, but without reminding you first.
+  `lagotto watch --until-landed`, `lagotto ack` and `lagotto status` warn when
+  the poller in your region is older than that. They read the poller Lambda's
+  `Version` tag, as `lagotto doctor` does, so `watch`, `ack`, `extend` and
+  `status` call `lambda:GetFunction`; without that permission the check is
+  skipped silently.
+- **The poller notices a new default subnet within 15 minutes** (#256); before,
+  it kept skipping the AZ until a cold start.
+
+None of these needs a `lagotto setup`: the poller's runtime policy is unchanged
+in v0.68.0 (reminders' live Price List lookups use a grant it already has).
+
 **A deploy never changes the schedule's on/off state.** The schedule's state is
 owned out of band — `lagotto watch` enables it, the poller disables itself when no
 active watches or pending scheduled launches remain — so a re-deploy of a *running*
@@ -188,6 +206,23 @@ Three things to know:
   check FAILs in a region the policy doesn't cover, and WARNs where it covers
   that region only.
 
+## Default subnets
+
+The poller launches spawn and hold watches into each region's **default VPC**
+without naming a subnet, so it can only land them in AZs that have a default
+subnet. `lagotto watch` and `lagotto update` refuse a watch none of whose
+offered AZs has one, and warn per AZ that lacks one (#256); `lagotto doctor`'s
+`subnet-coverage` check reports the same for active watches. To fix one:
+
+```bash
+aws ec2 create-default-subnet --region us-west-2 --availability-zone us-west-2d
+```
+
+The checks run with your credentials and call `ec2:DescribeInstanceTypeOfferings`,
+`ec2:DescribeSubnets` and `ec2:DescribeRegions`
+([docs/reference/cli-iam-actions.md](docs/reference/cli-iam-actions.md)). A
+failed lookup is a warning, never a refusal.
+
 ## Scheduled launches (`lagotto launch`, #49)
 
 `lagotto launch --at/--after/--cron` (see the README) reuses the deployed poller:
@@ -251,6 +286,25 @@ region with no poller.
   record names and every `lagotto-launch-sl-*` schedule in the default group,
   before it deletes the table that records them. `lagotto doctor` warns about a
   per-launch schedule with no record.
+
+### Removing everything
+
+To leave nothing behind in an account:
+
+1. `lagotto deploy --teardown --region <region>` in every region that runs a
+   poller: the schedule, the Lambda, the topic (with its email subscriptions)
+   and the lagotto-managed artifact bucket.
+2. `lagotto teardown` (add `--force` if the tables still hold records): the
+   per-launch `lagotto-launch-sl-*` schedules, then the three DynamoDB tables.
+   It stops before deleting any table if it cannot list or delete the
+   schedules.
+3. `lagotto teardown --iam-roles`: the two IAM roles and their policies. It
+   refuses while a poller exists in any enabled region.
+
+`lagotto doctor` warns about what a partial teardown leaves: an artifact bucket
+in a region with no poller (`artifact-buckets`) and a per-launch schedule that no
+scheduled-launch record names. The new permissions these commands need are in
+[docs/reference/cli-iam-actions.md](docs/reference/cli-iam-actions.md).
 
 ## Alternate: deploy via CloudFormation (IaC / enterprise)
 

@@ -42,10 +42,15 @@ lagotto watch "g5.xlarge" --action spawn --spawn-config my-job.yaml
 # ANY of the listed types (first one with capacity wins)
 lagotto watch "g6.8xlarge,g6.4xlarge,g6.2xlarge,g6.xlarge" --action spawn --spawn-config my-job.yaml
 
+# Keep hunting with no TTL until the launch actually lands (pauses unless acked)
+lagotto watch "p5.48xlarge" --action spawn --spawn-config my-job.yaml \
+  --until-landed --notify email:you@example.com
+
 # Manage watches
 lagotto list
 lagotto status <watch-id>
 lagotto extend <watch-id> --ttl 48h
+lagotto ack <watch-id>             # an --until-landed watch: move its acknowledgement deadline
 lagotto update <watch-id> --add-region us-west-2 --add-type g6.xlarge   # widen the search in place; --dry-run shows the diff
 lagotto cancel <watch-id>          # also releases a fired hold's reservation; -y/--yes skips the prompt
 lagotto history
@@ -93,6 +98,108 @@ With `fsx_create`, `fsx_s3_bucket` must be named `lagotto-fsx-<something>` (it i
 created if absent): the hosted poller may create, list and tag only buckets with
 that prefix, and `watch`/`launch` refuse any other name (#242). Your data can live
 elsewhere: point `fsx_import_path` / `fsx_export_path` at it.
+
+## How long a watch lives
+
+A watch hunts until it acts, fails, is cancelled, or reaches its deadline. There
+are two kinds of deadline.
+
+**A TTL** (`--ttl`, default `24h`). The watch expires when it runs out.
+`lagotto extend <watch-id> --ttl 48h` moves it. `--ttl` must be greater than
+zero; to stop a watch, use `lagotto cancel`.
+
+**Until it lands** (`--until-landed`, for `--action spawn` and `--action hold`).
+The watch has no TTL and keeps hunting until the launch or hold has actually
+landed: the instance is `running`, or the reservation `active`. So that it can't
+run forever unnoticed, it has a rolling **acknowledgement deadline** instead, a
+dead-man's switch:
+
+```bash
+lagotto watch "p5.48xlarge" --action spawn --spawn-config my-job.yaml \
+  --regions us-east-1,us-west-2 --until-landed --notify email:you@example.com
+lagotto ack <watch-id>        # moves the deadline a full window ahead from now
+```
+
+- The deadline is 3 × `--remind` after creation or the last `lagotto ack`.
+  `--remind` defaults to `7d` (so 21 days) and can be `1h` to `30d`.
+- **Reminders.** The hosted poller reminds you on the watch's `--notify`
+  channels after each of the first two intervals (day 7 and day 14 by default)
+  and sends a final warning 24 hours before the pause. Each reminder says what
+  the watch is hunting, how the hunt is going (attempts, last error, last poll),
+  when it pauses, the `lagotto ack` command, and what the watch can cost if it
+  lands. Webhook and sns channels get it as JSON with `"event": "reminder"`.
+  Each reminder is sent at most once, even with several pollers.
+- **Pausing.** Without an ack by the deadline the watch pauses: `status` becomes
+  `expired` with `expired_reason: unacknowledged`, and you get a "paused"
+  notification instead of the usual expiry one. `lagotto ack` (or
+  `lagotto extend`, which acts as `ack` on such a watch) resumes it. Only `ack`
+  and `extend` count as an acknowledgement; `list` and `status` do not.
+- **Requirements.** It needs a `--notify` channel, and asks for confirmation
+  before creating the watch, showing what the watch can cost; pass `--yes` when
+  not running in a terminal. It can't be combined with `--ttl`, `--maintain` or
+  `--until`. `--action notify` is refused: notify fires when a type is
+  *offered*, which doesn't mean a launch would succeed, so the watch would end
+  on its first poll.
+- **Reminders need an upgraded poller.** They are sent by the hosted poller, so
+  they start only after you run `lagotto deploy` with lagotto v0.68.0 or later.
+  Until then the watch still pauses safely at its deadline, without reminding
+  you. `watch --until-landed`, `ack` and `status` warn when the poller in your
+  region is too old (they read its `Version` tag with `lambda:GetFunction`, and
+  skip the check silently without that permission).
+
+`lagotto list` shows an until-landed watch's `EXPIRES` as
+`until landed (ack in 4d)` or `paused (unacked)`; `lagotto status` shows the
+deadline and the command that moves it.
+
+### Changing a watch in place
+
+`lagotto update <watch-id>` changes what a watch hunts for (instance types,
+regions, AZs, Spot, `--max-price`), its `--notify` channels, its spawn config or
+its project, without cancelling it. The watch keeps its ID, attempts, last error,
+match history and confirmed email subscriptions.
+
+```bash
+lagotto update <watch-id> --add-region us-west-2 --add-type g6.xlarge --dry-run
+```
+
+- The updated watch goes through every check `lagotto watch` makes, including
+  default-subnet coverage, so an update can't produce a watch `watch` would
+  refuse. `--dry-run` runs the checks and prints the before/after diff without
+  writing anything.
+- The action, service, owner, ID and deadline can't be changed: use
+  `lagotto extend` or `lagotto ack` for the deadline.
+- It is refused while a poller is acting on the watch, while a launch or hold
+  it made is still landing, and while a SageMaker job it submitted is in flight.
+  An expired or failed watch needs `--reactivate`, and must still be before its
+  deadline.
+- Each update adds an `updated` row to `lagotto history` listing the changed
+  fields. It is not a match.
+
+### What a watch can cost
+
+`lagotto watch`, `lagotto status` and the until-landed confirmation show an
+`Exposure:` line, and `lagotto list` an `EXPOSURE` column:
+
+| Action | Exposure |
+|--------|----------|
+| `spawn` | "if this lands: up to $X/hr (≈$Y/day)", × N for a `--maintain N` fleet |
+| `hold` | "30 min reserved at up to $Y/hr (≈$Z), billed even if unused" |
+| `notify` | launches and reserves nothing |
+| SageMaker | unknown |
+
+- The rate is your `--max-price` cap when you set one, labelled as your cap and
+  not a quote. Otherwise it is the on-demand rate, which is the ceiling for
+  spot too.
+- The CLI takes the on-demand rate from the static spore.host price list, marks
+  it with `*` and says when the list was collected; it makes no Price List call
+  and needs no extra permission. The static list has no GPU or accelerator
+  family newer than p4d, so a p5, g6e or g7e watch shows `unknown`. Reminders
+  use the live AWS Price List, falling back to the static list, labelled the
+  same way.
+- A wildcard pattern, or a watch on several types or regions, shows the highest
+  rate, labelled with the range.
+- `-o json` on `watch`, `list` and `status`, and the reminder's webhook/sns JSON,
+  carry an `exposure` object.
 
 ## Goal-driven fleets
 
@@ -283,7 +390,10 @@ The dedup key is the instance `Name` tag (`--name`, or the spawn config's `name`
 
 The three actions differ in what they *do* when a match appears:
 
-- **`notify`** signals only — it never launches or reserves anything.
+- **`notify`** signals only — it never launches or reserves anything. It fires
+  when the type is *offered* in a region or AZ, which is not a sign that a
+  launch would succeed: for a scarce type that is offered everywhere (p5, say)
+  it can fire on the first poll. Use `spawn` or `hold` to wait for real capacity.
 - **`spawn`** launches an instance via `RunInstances`. Because the launch is the
   actual capacity test, `--action spawn` is the way to check whether a type will
   really launch right now.
@@ -308,6 +418,29 @@ The three actions differ in what they *do* when a match appears:
   error. Your AWS credentials need `ec2:CancelCapacityReservation` for that;
   without it, cancel says so and the reservation still expires at the end of its
   window.
+
+### Default subnets: where a spawn or hold watch can land
+
+The poller launches into each region's **default VPC** without naming a subnet,
+so a spawn or hold watch can only land in an AZ that has a default subnet; it
+skips the others. `lagotto watch` (and `lagotto update`) therefore compares, for
+each region the watch names, the AZs that offer the type (narrowed by `--azs`)
+with the AZs that have a default subnet:
+
+- **None in common:** the watch is refused, naming the AZs and the
+  `aws ec2 create-default-subnet --region ... --availability-zone ...` command
+  that fixes it. A watch with no `--regions` is refused only if no enabled
+  region can serve it.
+- **Some offered AZs lack one:** a warning per AZ, e.g. "us-west-2d offers
+  p5.4xlarge but has no default subnet; this watch can't land there".
+- **The lookup fails** (e.g. a missing permission): a warning, never a refusal.
+  Notify and SageMaker watches are not checked.
+
+`lagotto doctor`'s `subnet-coverage` check reports the same for every active
+spawn and hold watch. A failed attempt that skipped AZs says so: its
+`last_error` starts `no-subnet: <azs>; `, and `lagotto list` shows `no-subnet`
+rather than a plain capacity miss. After you create a default subnet, the hosted
+poller notices it within 15 minutes (once it runs lagotto v0.68.0 or later).
 
 ## Deployment
 
@@ -356,11 +489,38 @@ It is strictly read-only (there is no `--fix`) and exits non-zero only when a
 check FAILS, so it can gate CI. `-o json` gives the machine-readable form,
 including the exact missing or extra IAM grants.
 
+### Removing it
+
+`lagotto deploy --teardown` removes one region's poller (schedule, Lambda,
+topic) and its lagotto-managed artifact bucket. `lagotto teardown` removes the
+three DynamoDB tables and the per-launch `lagotto-launch-sl-*` schedules, and
+`lagotto teardown --iam-roles` the two account-wide IAM roles once no region
+runs a poller. [DEPLOYMENT.md](DEPLOYMENT.md#teardown) has what each one deletes
+and what it leaves.
+
 ## Go Library
 
 ```go
 import "github.com/spore-host/lagotto/pkg/watcher"
 ```
+
+A program that creates watches itself (as spore-host-mcp does) should not copy
+`cmd/` code:
+
+- **`watcher.NewWatch(now, watcher.Lifetime{...})`** builds a new watch with a
+  TTL or until-landed. It sets the ID, `CreatedAt`, `UpdatedAt`, `ExpiresAt`
+  and `TTLTimestamp`, always with `TTLTimestamp` = `RetentionTTL(ExpiresAt)`
+  and never the expiry itself. Fill in what to watch, then store it.
+- **`github.com/spore-host/lagotto/pkg/arm`** has the steps `lagotto watch` runs
+  around storing a watch: `PreflightPollSchedule`, `EnablePollScheduleIfOff`
+  and `PollScheduleUpdateRefusal` turn the hosted poller's schedule back on;
+  `ResolveAlertsTopic` finds the alerts topic; `SubscribeWatchEmails`,
+  `SetChannelStates` and `CleanupWatchEmails` subscribe and unsubscribe email
+  channels. They return warnings and results instead of printing them. The
+  package documentation gives the order to call them in.
+- **`github.com/spore-host/lagotto/pkg/testutil/hermetic`** is the guard that
+  keeps a test from reaching real AWS. Import it only from `_test.go` files and
+  `go test -exec` wrappers.
 
 ## License
 
