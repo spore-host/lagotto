@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -47,8 +48,18 @@ func Execute() {
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		os.Exit(exitStatus(err))
 	}
+}
+
+// exitStatus is the process exit status for a command error: the error's own
+// ExitCode when it has one (the --require-quota refusal, #157), else 1.
+func exitStatus(err error) int {
+	var ec interface{ ExitCode() int }
+	if errors.As(err, &ec) {
+		return ec.ExitCode()
+	}
+	return 1
 }
 
 func init() {

@@ -50,6 +50,7 @@ type updateOpts struct {
 	projectSet      bool
 	reactivate      bool
 	dryRun          bool
+	requireQuota    bool
 }
 
 var updateFlags updateOpts
@@ -82,6 +83,10 @@ job it submitted is in flight. An expired or failed watch is only updated with
 --reactivate, which also makes it active again; it must still be before its
 deadline (run 'lagotto extend' first if not).
 
+--require-quota applies 'watch --require-quota' to a fleet watch's updated
+search: the update is refused (exit status 3) only when the quota was read in
+every region and provably can't hold the fleet.
+
 --dry-run shows the change, after every check, without writing anything.`,
 	Args:         cobra.ExactArgs(1),
 	SilenceUsage: true,
@@ -108,6 +113,7 @@ func init() {
 	f.StringVar(&o.project, "project", "", "Replace the project label ('' = none)")
 	f.BoolVar(&o.reactivate, "reactivate", false, "Allow updating an expired or failed watch, and make it active again")
 	f.BoolVar(&o.dryRun, "dry-run", false, "Show the change without writing anything")
+	f.BoolVar(&o.requireQuota, "require-quota", false, "For a --maintain fleet watch: refuse the update (exit status 3) when the account's EC2 vCPU quota, read in every region of the updated watch, provably can't hold its workers, as 'watch --require-quota' does. An unreadable quota is unknown, not zero: the update then goes ahead, with a note.")
 }
 
 func runUpdate(cmd *cobra.Command, args []string) error {
@@ -138,6 +144,9 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 	if err := checkUpdatable(w, o.reactivate, now); err != nil {
 		return err
 	}
+	if o.requireQuota && w.DesiredCount <= 0 {
+		return errRequireQuotaNeedsFleet
+	}
 
 	nw, changes, err := applyUpdate(w, o, func(src string) ([]byte, error) { return readSpawnConfigFlag(ctx, src) })
 	if err != nil {
@@ -149,12 +158,12 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// The same checks `watch` makes (#256, #153, #170), on the watch as it
-	// will be stored.
+	// The same checks `watch` makes (#256, #153 and its --require-quota gate
+	// #157, #170), on the watch as it will be stored.
 	if err := validateWatchSearch(nw); err != nil {
 		return err
 	}
-	quotaReport, roleCheck, err := preflightWatch(ctx, cfg, os.Stderr, nw)
+	pre, err := preflightWatch(ctx, cfg, os.Stderr, nw, o.requireQuota)
 	if err != nil {
 		return err
 	}
@@ -168,8 +177,9 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		Changes:     changes,
 		ResetState:  searchChanged(changes),
 		Watch:       nw,
-		Quota:       quotaReport,
-		Role:        roleCheck,
+		Quota:       pre.Quota,
+		Gate:        pre.Gate,
+		Role:        pre.Role,
 	}
 	if o.dryRun {
 		return writeUpdate(out, getOutputFormat(), res)
@@ -621,6 +631,7 @@ type updateResult struct {
 	ResetState  bool                `json:"reset_derived_state"`
 	Watch       *watcher.Watch      `json:"watch"`
 	Quota       *quotacheck.Report  `json:"quota_warning,omitempty"`
+	Gate        *quotacheck.Gate    `json:"quota_gate,omitempty"`
 	Role        *InstanceRoleCheck  `json:"instance_role_check,omitempty"`
 }
 
@@ -648,6 +659,9 @@ func writeUpdate(out io.Writer, format string, r updateResult) error {
 			verb = "would be"
 		}
 		_, _ = fmt.Fprintf(out, "  The search changed, so the consecutive-failure count and the quota state %s reset; attempts, last error and history are kept.\n", verb)
+	}
+	if r.Gate != nil {
+		_, _ = fmt.Fprintf(out, "  Quota gate: %s (--require-quota)\n", r.Gate.Verdict)
 	}
 	if r.DryRun {
 		_, _ = fmt.Fprintln(out, "Nothing was written.")
