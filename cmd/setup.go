@@ -92,7 +92,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 // roles, and writes the runtime policy onto the poller's execution role and the
 // invoke policy onto the Scheduler invoke role. It prints each role it created.
 func ensureRuntimePolicy(ctx context.Context, cfg aws.Config, out io.Writer) error {
-	acct, err := sts.NewFromConfig(cfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	acct, err := setupCallerAccount(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("resolve account ID: %w", err)
 	}
@@ -101,8 +101,25 @@ func ensureRuntimePolicy(ctx context.Context, cfg aws.Config, out io.Writer) err
 		return fmt.Errorf("no region resolved; set --region, SPORE_REGION, or AWS_REGION")
 	}
 
-	iamClient := iam.NewFromConfig(cfg)
+	return applySetupRoles(ctx, newSetupIAMClient(cfg), region, acct, out)
+}
 
+// setupCallerAccount and newSetupIAMClient are setup's AWS clients, seams so
+// ensureRuntimePolicy is tested without AWS.
+var setupCallerAccount = func(ctx context.Context, cfg aws.Config) (string, error) {
+	out, err := sts.NewFromConfig(cfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	if err != nil {
+		return "", err
+	}
+	return aws.ToString(out.Account), nil
+}
+
+var newSetupIAMClient = func(cfg aws.Config) runtimeiam.IAMAPI { return iam.NewFromConfig(cfg) }
+
+// applySetupRoles is the IAM half of setup, separated so it is tested against a
+// fake IAM: carry the authorized instance roles forward, ensure both roles and
+// their policies, and report what was created and applied.
+func applySetupRoles(ctx context.Context, iamClient runtimeiam.IAMAPI, region, accountID string, out io.Writer) error {
 	// Authorized instance roles (#170) are carried forward from the DEPLOYED policy
 	// before being re-applied. The policy is written with a wholesale
 	// PutRolePolicy, so without this a plain `lagotto setup` would silently revoke
@@ -118,7 +135,7 @@ func ensureRuntimePolicy(ctx context.Context, cfg aws.Config, out io.Writer) err
 	// is what the poller schedule (and a CloudFormation stack's PollerSchedule)
 	// assumes, so without it nothing ever invokes the poller. Before #229 only
 	// `lagotto deploy` created it.
-	created, err := runtimeiam.EnsureSetupRoles(ctx, iamClient, region, aws.ToString(acct.Account), roles)
+	created, err := runtimeiam.EnsureSetupRoles(ctx, iamClient, region, accountID, roles)
 	for _, name := range created {
 		_, _ = fmt.Fprintf(out, "Created IAM role %s\n", name)
 	}

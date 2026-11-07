@@ -63,7 +63,7 @@ func runTeardown(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("load AWS config: %w", err)
 	}
 
-	store := watcher.NewStore(cfg, watchesTable, historyTable)
+	store := newTeardownStore(cfg)
 	out := cmd.OutOrStdout()
 
 	// The role check runs before anything is deleted, so a refusal leaves the
@@ -104,20 +104,52 @@ func runTeardown(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// teardownTables is the slice of the store teardown uses; *watcher.Store
+// satisfies it.
+type teardownTables interface {
+	TablesEmpty(ctx context.Context) (bool, error)
+	DeleteTables(ctx context.Context) ([]string, error)
+}
+
+// newTeardownStore builds the store teardown deletes from. A seam for tests.
+var newTeardownStore = func(cfg aws.Config) teardownTables {
+	return watcher.NewStore(cfg, watchesTable, historyTable)
+}
+
+// regionLister and functionGetter are the EC2 and Lambda calls the poller
+// search makes; *ec2.Client and *lambda.Client satisfy them.
+type regionLister interface {
+	DescribeRegions(ctx context.Context, in *ec2.DescribeRegionsInput, optFns ...func(*ec2.Options)) (*ec2.DescribeRegionsOutput, error)
+}
+
+type functionGetter interface {
+	GetFunction(ctx context.Context, in *lambda.GetFunctionInput, optFns ...func(*lambda.Options)) (*lambda.GetFunctionOutput, error)
+}
+
 // findPollerRegions returns the regions of this account in which the poller
 // function exists. A seam so tests run without AWS.
 var findPollerRegions = func(ctx context.Context, cfg aws.Config) ([]string, error) {
-	// Without AllRegions, DescribeRegions returns the regions enabled for the
-	// account: the only ones a poller can be deployed in.
-	out, err := ec2.NewFromConfig(cfg).DescribeRegions(ctx, &ec2.DescribeRegionsInput{})
+	return pollerRegions(ctx, ec2.NewFromConfig(cfg), func(region string) functionGetter {
+		return lambda.NewFromConfig(cfg, func(o *lambda.Options) { o.Region = region })
+	})
+}
+
+// pollerRegions asks every region enabled for the account whether the poller
+// function exists there. Without AllRegions, DescribeRegions returns only the
+// enabled regions: the only ones a poller can be deployed in. A region that
+// cannot be answered is an error naming it, never "no poller".
+func pollerRegions(ctx context.Context, regions regionLister, lambdaIn func(region string) functionGetter) ([]string, error) {
+	out, err := regions.DescribeRegions(ctx, &ec2.DescribeRegionsInput{})
 	if err != nil {
 		return nil, fmt.Errorf("list the account's regions: %w", err)
+	}
+	if len(out.Regions) == 0 {
+		return nil, fmt.Errorf("list the account's regions: none returned")
 	}
 	var found, unchecked []string
 	for _, r := range out.Regions {
 		region := aws.ToString(r.RegionName)
-		_, gerr := lambda.NewFromConfig(cfg, func(o *lambda.Options) { o.Region = region }).
-			GetFunction(ctx, &lambda.GetFunctionInput{FunctionName: aws.String(deploy.PollerFunctionName)})
+		_, gerr := lambdaIn(region).GetFunction(ctx, &lambda.GetFunctionInput{FunctionName: aws.String(deploy.PollerFunctionName)})
 		var notFound *lambdatypes.ResourceNotFoundException
 		switch {
 		case gerr == nil:
