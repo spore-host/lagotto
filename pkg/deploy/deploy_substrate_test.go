@@ -97,12 +97,12 @@ func TestEnsureBucket_IdempotentWhenAlreadyExists(t *testing.T) {
 	d.httpGet = fakeHTTPGet(t)
 
 	ctx := context.Background()
-	if err := d.ensureBucket(ctx, "lagotto-lambda-123456789012-us-east-1", "us-east-1"); err != nil {
+	if _, err := d.ensureBucket(ctx, "lagotto-lambda-123456789012-us-east-1", "us-east-1", "123456789012", true); err != nil {
 		t.Fatalf("first ensureBucket: %v", err)
 	}
 	// Second call against the SAME bucket must be a no-op success, not a
 	// BucketAlreadyOwnedByYou failure.
-	if err := d.ensureBucket(ctx, "lagotto-lambda-123456789012-us-east-1", "us-east-1"); err != nil {
+	if _, err := d.ensureBucket(ctx, "lagotto-lambda-123456789012-us-east-1", "us-east-1", "123456789012", true); err != nil {
 		t.Fatalf("second ensureBucket (already exists): %v", err)
 	}
 }
@@ -216,7 +216,7 @@ func createLegacyStack(t *testing.T, d *Deployer, stackName string) {
 	ctx := context.Background()
 	bucket := DefaultBucketName("123456789012", "us-east-1")
 	key := LambdaObjectKey(legacyStackVersion)
-	if err := d.ensureBucket(ctx, bucket, "us-east-1"); err != nil {
+	if _, err := d.ensureBucket(ctx, bucket, "us-east-1", "123456789012", true); err != nil {
 		t.Fatalf("ensureBucket: %v", err)
 	}
 	if _, err := d.uploadArtifact(ctx, bucket, key, legacyStackVersion); err != nil {
@@ -264,8 +264,8 @@ func TestSubstrate_Deploy_CreatesAllThreeResources(t *testing.T) {
 	if len(res.Outputs) != len(want) {
 		t.Errorf("outputs has %d keys, want exactly %d (%v)", len(res.Outputs), len(want), res.Outputs)
 	}
-	if len(res.Actions) != 3 {
-		t.Errorf("Actions = %v, want one line per resource", res.Actions)
+	if len(res.Actions) != 4 {
+		t.Errorf("Actions = %v, want one line per resource (bucket, topic, function, schedule)", res.Actions)
 	}
 
 	// All three resources are really there.
@@ -468,8 +468,8 @@ func TestSubstrate_LegacyStackState(t *testing.T) {
 
 // --- Deploy / Teardown wiring, against the in-package fakes -----------------
 //
-// These use Substrate only for S3 (d.s3 is a concrete *s3.Client, not a seam, so
-// ensureBucket/uploadArtifact need a real endpoint) and the recording fakes for
+// These use Substrate only for S3 (the Deploy wiring tests
+// want real S3 semantics for ensureBucket/uploadArtifact; bucket_test.go fakes it) and the recording fakes for
 // Lambda/SNS/Scheduler, where exact arguments are the thing being asserted.
 // Substrate v0.109.0 drops a schedule's Target.RoleArn on the wire, so the role
 // wiring in particular can ONLY be asserted here.
@@ -717,7 +717,7 @@ func TestSubstrate_EnsurePollerFunction(t *testing.T) {
 
 	bucket := DefaultBucketName("123456789012", "us-east-1")
 	key := LambdaObjectKey("0.55.1")
-	if err := d.ensureBucket(ctx, bucket, "us-east-1"); err != nil {
+	if _, err := d.ensureBucket(ctx, bucket, "us-east-1", "123456789012", true); err != nil {
 		t.Fatalf("ensureBucket: %v", err)
 	}
 	sha, err := d.uploadArtifact(ctx, bucket, key, "0.55.1")
@@ -801,7 +801,7 @@ func TestSubstrate_EnsurePollerFunction_IsIdempotent(t *testing.T) {
 	}
 	bucket := DefaultBucketName("123456789012", "us-east-1")
 	key := LambdaObjectKey("0.55.1")
-	if err := d.ensureBucket(ctx, bucket, "us-east-1"); err != nil {
+	if _, err := d.ensureBucket(ctx, bucket, "us-east-1", "123456789012", true); err != nil {
 		t.Fatalf("ensureBucket: %v", err)
 	}
 	sha, err := d.uploadArtifact(ctx, bucket, key, "0.55.1")
@@ -962,7 +962,7 @@ func TestSubstrate_DeleteHelpersTolerateAbsence(t *testing.T) {
 	}
 	bucket := DefaultBucketName("123456789012", "us-east-1")
 	key := LambdaObjectKey("0.55.1")
-	if err := d.ensureBucket(ctx, bucket, "us-east-1"); err != nil {
+	if _, err := d.ensureBucket(ctx, bucket, "us-east-1", "123456789012", true); err != nil {
 		t.Fatalf("ensureBucket: %v", err)
 	}
 	sha, err := d.uploadArtifact(ctx, bucket, key, "0.55.1")
