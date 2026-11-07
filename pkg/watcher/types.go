@@ -124,7 +124,8 @@ type Watch struct {
 	Attempts      int       `json:"attempts,omitempty" dynamodbav:"attempts,omitempty"`
 	LastAttemptAt time.Time `json:"last_attempt_at,omitzero" dynamodbav:"last_attempt_at,omitempty"`
 	// LastError is the most recent failed attempt, as "<class>: <AWS code>:
-	// <message>" (class is one of capacity, quota, terminal, unknown), truncated
+	// <message>" (class is one of capacity, quota, terminal, unknown; prefixed
+	// "no-subnet: <azs>; " when the sweep skipped AZs with no default subnet, #256), truncated
 	// to MaxLastErrorBytes. A later success leaves it in place; LastErrorAt says
 	// when it happened.
 	LastError   string    `json:"last_error,omitempty" dynamodbav:"last_error,omitempty"`

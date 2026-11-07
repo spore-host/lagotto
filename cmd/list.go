@@ -174,7 +174,9 @@ func writeWatchTable(out io.Writer, watches []watcher.Watch, now time.Time, wide
 			expiresCol(w, now),
 			lastPollCol(w, now),
 			strconv.Itoa(w.Attempts),
-			dashIfEmpty(truncate(watcher.ErrorClass(latest), 8)),
+			// 9, not the column's 8: "no-subnet" (#256) is the one 9-byte class,
+			// and "no-su..." would hide it. It only nudges a -o wide row by one.
+			dashIfEmpty(truncate(watcher.ErrorClass(latest), 9)),
 		)
 		if wide && latest != "" {
 			line += fmt.Sprintf(" %s (%s ago)", latest, formatAge(now.Sub(latestAt)))

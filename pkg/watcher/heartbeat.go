@@ -27,6 +27,7 @@ const (
 	ErrClassTerminal = "terminal"
 	ErrClassUnknown  = "unknown"
 	ErrClassSearch   = "search"
+	// ErrClassNoSubnet ("no-subnet", #256) is defined in subnets.go.
 )
 
 // attempt is one action attempt's heartbeat, handed to the store write that the
@@ -60,12 +61,28 @@ func errorClass(kind FailureKind, err error) string {
 // describeAttemptError renders a failed attempt as "<class>: <code>: <message>"
 // (or "<class>: <message>" when there is no AWS code), on one line, truncated to
 // MaxLastErrorBytes. A nil error gives just the class.
+//
+// Two additions keep the useful part inside the 256 bytes (#256):
+//   - an attempt that skipped AZs with no default subnet is prefixed
+//     "no-subnet: <azs>; ", so `list` shows class no-subnet rather than a
+//     plain capacity miss. Not for a quota or other terminal refusal, which
+//     the missing subnet did not cause, unless every candidate lacked one.
+//   - EC2's capacity hint (the AZs its message says have capacity, which it
+//     puts last) is moved ahead of the message: "EC2 suggests <azs>; ...".
 func describeAttemptError(kind FailureKind, err error) string {
 	class := errorClass(kind, err)
 	if err == nil {
 		return class
 	}
 	var b strings.Builder
+	var ns *NoSubnetError
+	if errors.As(err, &ns) && len(ns.AZs) > 0 && class != ErrClassQuota &&
+		(ns.All || kind == FailureCapacity || kind == FailureUnknown) {
+		b.WriteString(ErrClassNoSubnet)
+		b.WriteString(": ")
+		b.WriteString(strings.Join(ns.AZs, ", "))
+		b.WriteString("; ")
+	}
 	b.WriteString(class)
 	msg := err.Error()
 	var apiErr smithy.APIError
@@ -81,6 +98,11 @@ func describeAttemptError(kind FailureKind, err error) string {
 	}
 	if msg = oneLine(msg); msg != "" {
 		b.WriteString(": ")
+		if hint := iceCapacityHint(msg); hint != "" {
+			b.WriteString("EC2 suggests ")
+			b.WriteString(hint)
+			b.WriteString("; ")
+		}
 		b.WriteString(msg)
 	}
 	return truncateBytes(b.String(), MaxLastErrorBytes)

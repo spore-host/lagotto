@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/spore-host/lagotto/pkg/awscfg"
 	"github.com/spore-host/lagotto/pkg/runtimeiam"
+	"github.com/spore-host/lagotto/pkg/watcher"
 )
 
 // fakeAWS is a loopback AWS for the #231 gates: just enough STS, DynamoDB and
@@ -194,6 +196,15 @@ func installFakeAWS(t *testing.T, f *fakeAWS) {
 func runWatchWithFake(t *testing.T, f *fakeAWS) error {
 	t.Helper()
 	installFakeAWS(t, f)
+	// The fake serves no EC2: give the #256 subnet check a stub that can't
+	// resolve regions, which it treats as a warning, never a refusal.
+	prev := newSubnetCoverageChecker
+	newSubnetCoverageChecker = func(aws.Config) *watcher.SubnetCoverageChecker {
+		return watcher.NewSubnetCoverageCheckerWith(
+			func(string) watcher.SubnetCoverageEC2 { return subnetEC2{} },
+			func(context.Context) ([]string, error) { return nil, errors.New("no EC2 in the fake") })
+	}
+	t.Cleanup(func() { newSubnetCoverageChecker = prev })
 	var out bytes.Buffer
 	watchCmd.SetOut(&out)
 	t.Cleanup(func() { watchCmd.SetOut(nil) })

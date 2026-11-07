@@ -24,6 +24,12 @@ alerts topic with no filter policy, which receives every user's email events.
 'lagotto notify-gc' removes unused subscriptions, and with --resubscribe
 subscribes missing ones.
 
+For each active spawn or hold watch it checks default-subnet coverage
+(lagotto#256): the poller launches into the default VPC with no explicit subnet,
+so an AZ that offers the watch's type but has no default subnet is skipped, and
+the watch can never land there. Each such AZ is a warning, with the
+'aws ec2 create-default-subnet' command that fixes it.
+
 It checks that the shared EventBridge Scheduler invoke role's policy allows
 invoking THIS region's poller (lagotto#218: the role is IAM-global, and a deploy
 by lagotto older than v0.65.1 scoped it to the deploying region alone, so every
