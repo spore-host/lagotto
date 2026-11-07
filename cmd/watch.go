@@ -12,7 +12,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/scheduler"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
-	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"github.com/spore-host/lagotto/pkg/awscfg"
 	"github.com/spore-host/lagotto/pkg/deploy"
@@ -193,12 +192,16 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("get caller identity: %w", err)
 	}
 
-	now := time.Now().UTC()
-	expiresAt := now.Add(ttl)
+	// The ID, timestamps and expiry (an until-landed watch's first
+	// acknowledgement deadline) come from watcher.NewWatch, the one place
+	// ExpiresAt and the record's retention TTL are set together (#161, #266).
+	life := watcher.Lifetime{TTL: ttl}
 	if ul.enabled {
-		// The acknowledgement deadline, stored as the expiry so a poller that
-		// predates #239 still stops the watch there (see until_landed.go).
-		expiresAt = now.Add(ul.window())
+		life = watcher.Lifetime{UntilLanded: true, RemindEvery: ul.remindEvery, RemindPauseAfter: ul.pauseAfter}
+	}
+	w, err := watcher.NewWatch(time.Now(), life)
+	if err != nil {
+		return err
 	}
 
 	project := watchProject
@@ -206,37 +209,20 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		project = os.Getenv("LAGOTTO_PROJECT")
 	}
 
-	w := &watcher.Watch{
-		WatchID:             "w-" + uuid.New().String()[:8],
-		UserID:              *identity.Arn,
-		Project:             project,
-		Status:              watcher.StatusActive,
-		Service:             service,
-		InstanceTypePattern: pattern,
-		Regions:             watchRegions,
-		AvailabilityZones:   watchAZs,
-		Spot:                watchSpot,
-		MaxPrice:            watchMaxPrice,
-		Action:              action,
-		NotifyChannels:      channels,
-		LaunchConfigJSON:    launchConfigJSON,
-		SageMakerJobJSON:    sageMakerJobJSON,
-		DesiredCount:        watchMaintain,
-		CompletionCondition: watchUntil,
-		CreatedAt:           now,
-		UpdatedAt:           now,
-		ExpiresAt:           expiresAt,
-		// The record's RETENTION horizon, NOT the watch's TTL (#161). This used to be
-		// expiresAt.Unix(), so DynamoDB hard-deleted the item at the same instant the
-		// poller marked it expired — the tombstone was written and then immediately
-		// vanished. The watch still stops at ExpiresAt; the record outlives it.
-		TTLTimestamp: watcher.RetentionTTL(expiresAt),
-	}
-	if ul.enabled {
-		w.UntilLanded = true
-		w.RemindEverySeconds = int64(ul.remindEvery / time.Second)
-		w.RemindPauseAfter = watcher.DefaultRemindPauseAfter
-	}
+	w.UserID = *identity.Arn
+	w.Project = project
+	w.Service = service
+	w.InstanceTypePattern = pattern
+	w.Regions = watchRegions
+	w.AvailabilityZones = watchAZs
+	w.Spot = watchSpot
+	w.MaxPrice = watchMaxPrice
+	w.Action = action
+	w.NotifyChannels = channels
+	w.LaunchConfigJSON = launchConfigJSON
+	w.SageMakerJobJSON = sageMakerJobJSON
+	w.DesiredCount = watchMaintain
+	w.CompletionCondition = watchUntil
 
 	// Everything `update` re-checks (#257) goes through these two, so an update
 	// cannot store a watch that this command would refuse.

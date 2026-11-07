@@ -8,69 +8,31 @@ import (
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/spore-host/lagotto/pkg/deploy"
+	"github.com/spore-host/lagotto/pkg/arm"
 	"github.com/spore-host/lagotto/pkg/watcher"
 )
 
 // topicEnvVar overrides the alerts topic `lagotto poll` publishes email
 // notifications to (#241).
-const topicEnvVar = "LAGOTTO_SNS_TOPIC_ARN"
+const topicEnvVar = arm.TopicEnvVar
 
 // pollStderr is where `lagotto poll` writes its start-up warnings. A variable
 // so tests can read them.
 var pollStderr io.Writer = os.Stderr
 
-// alertsTopic is the resolved alerts topic for a local poller (#241).
-type alertsTopic struct {
-	// ARN is the topic email channels are published to; "" means none
-	// resolved, so email channels are not delivered.
-	ARN string
-	// Source says where ARN came from, for the start-up line.
-	Source string
-	// Why says why no topic resolved, when ARN is "".
-	Why string
-}
+// alertsTopic is the resolved alerts topic (#241): arm.AlertsTopic.
+type alertsTopic = arm.AlertsTopic
 
-// topicProber is the one check resolveAlertsTopic makes: does the
-// capacity-alerts topic exist in this account and region? *deploy.Deployer
+// topicProber is the one check resolveAlertsTopic makes. *deploy.Deployer
 // satisfies it with sns:GetTopicAttributes, an action `lagotto deploy` and
 // `lagotto doctor` already call.
-type topicProber interface {
-	AlertsTopicPresent(ctx context.Context, region, accountID string) (bool, error)
-}
+type topicProber = arm.TopicProber
 
-// resolveAlertsTopic finds the alerts topic the way the hosted poller gets
-// it (#241). `lagotto deploy` creates lagotto-capacity-alerts in the region it
-// deploys to and wires that ARN into the poller's SNS_TOPIC_ARN; the legacy
-// CloudFormation stack used the same name. So, in order:
-//
-//  1. LAGOTTO_SNS_TOPIC_ARN, when set: an explicit override.
-//  2. lagotto-capacity-alerts in the caller's account and region, when it
-//     exists. If its existence can't be checked (for example AccessDenied on
-//     sns:GetTopicAttributes) the ARN is used anyway, since a hosted-poller
-//     role may publish to a topic it cannot describe; a wrong guess then fails
-//     loudly at publish time.
-//  3. Nothing: email channels are not delivered, and Why says why.
+// resolveAlertsTopic finds the alerts topic the way the hosted poller gets it:
+// LAGOTTO_SNS_TOPIC_ARN, else lagotto-capacity-alerts in the caller's account
+// and region. See arm.ResolveAlertsTopic.
 func resolveAlertsTopic(ctx context.Context, getenv func(string) string, region, accountID string, probe topicProber) alertsTopic {
-	if v := strings.TrimSpace(getenv(topicEnvVar)); v != "" {
-		return alertsTopic{ARN: v, Source: topicEnvVar}
-	}
-	if region == "" {
-		return alertsTopic{Why: "no AWS region is set, so lagotto cannot look for " + deploy.AlertsTopicName}
-	}
-	if accountID == "" {
-		return alertsTopic{Why: "your AWS account could not be resolved (sts:GetCallerIdentity failed), so lagotto cannot look for " + deploy.AlertsTopicName}
-	}
-	arn := deploy.AlertsTopicARN(region, accountID)
-	present, err := probe.AlertsTopicPresent(ctx, region, accountID)
-	switch {
-	case err != nil:
-		return alertsTopic{ARN: arn, Source: fmt.Sprintf("%s in %s, by name (could not confirm it exists: %v)", deploy.AlertsTopicName, region, err)}
-	case !present:
-		return alertsTopic{Why: fmt.Sprintf("%s does not exist in account %s, region %s (`lagotto deploy` creates it)", deploy.AlertsTopicName, accountID, region)}
-	default:
-		return alertsTopic{ARN: arn, Source: fmt.Sprintf("%s in %s, created by `lagotto deploy`", deploy.AlertsTopicName, region)}
-	}
+	return arm.ResolveAlertsTopic(ctx, getenv, region, accountID, probe)
 }
 
 // buildPollNotifier always returns a Notifier (#241). Webhook and sns channels
