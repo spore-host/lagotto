@@ -221,4 +221,7 @@ func (m *MatchResult) clone() *MatchResult {
 type NotifyChannel struct {
 	Type   string `json:"type" dynamodbav:"type"`     // "email", "webhook", "sns"
 	Target string `json:"target" dynamodbav:"target"` // address, URL, or ARN
+	// Subscription is an email channel's delivery state on the alerts topic
+	// (#240), filled in by list/status/watch for display. Never stored.
+	Subscription SubscriptionState `json:"subscription,omitempty" dynamodbav:"-"`
 }

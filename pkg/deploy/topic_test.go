@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/sns"
 	snstypes "github.com/aws/aws-sdk-go-v2/service/sns/types"
 )
 
@@ -181,5 +182,18 @@ func TestDeleteAlertsTopic_AbsentIsNotAnError(t *testing.T) {
 	d3, _ := testDeployer(nil, fs3, nil)
 	if err := d3.deleteAlertsTopic(context.Background(), testRegion, testAccount); err == nil {
 		t.Error("a real delete failure must surface")
+	}
+}
+
+// TestInRegion: the topic probe and delete run in the named region (#248).
+func TestInRegion(t *testing.T) {
+	o := sns.Options{Region: "us-east-2"}
+	inRegion("us-west-2")(&o)
+	if o.Region != "us-west-2" {
+		t.Errorf("Region = %q", o.Region)
+	}
+	inRegion("")(&o)
+	if o.Region != "us-west-2" {
+		t.Errorf("empty region changed it to %q", o.Region)
 	}
 }

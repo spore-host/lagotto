@@ -149,6 +149,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   region. DEPLOYMENT.md's CloudFormation step 1 is just `lagotto setup` again,
   and `lagotto doctor`'s `iam-roles` check now prescribes `lagotto setup`
   rather than a deploy.
+- **`--notify email:` now reaches the address it names, and only that address
+  (#240).** Before, an email channel published to the shared
+  `lagotto-capacity-alerts` topic with no recipient: with no subscriber (the
+  default after `lagotto deploy`) nothing was delivered and nothing said so,
+  and an address someone had subscribed by hand received every user's email
+  events. Now:
+  - **`lagotto watch` subscribes the address** to the alerts topic in this
+    account and region, with a filter policy on the `lagotto_email` message
+    attribute that matches only that address. An address already subscribed is
+    reused, never subscribed twice. AWS sends a confirmation email; `watch`
+    says to check your inbox, and nothing is delivered until the link is
+    clicked. With no alerts topic, or when the address cannot be subscribed,
+    `watch` refuses and names `lagotto deploy`, instead of arming a watch whose
+    emails reach no one. Addresses are stored lower-cased.
+  - **Every email publish carries `lagotto_email=<address>`** (match, expiry,
+    quota cap and retirement), so each subscriber receives only the events of
+    watches that name it. A publish without the attribute reaches no filtered
+    subscription.
+  - **`lagotto list` and `lagotto status` show each email channel's state**:
+    confirmed, pending confirmation, or not subscribed (also in `-o json`, as
+    `notify_channels[].subscription`). `lagotto extend` re-subscribes the
+    addresses of a watch it reactivates.
+  - **`lagotto doctor` has an `email-subscriptions` check**: addresses on
+    active watches that are pending confirmation or not subscribed, unused
+    subscriptions, and any email subscription with no filter policy (it
+    receives every user's email events). All are warnings.
+  - **Subscriptions are removed when no active watch names the address.** The
+    poller does it at the start of each sweep, so a matched, expired, failed
+    or completed watch's address goes on the next sweep, after its last email.
+    `lagotto cancel` does it for the cancelled watch at once, and the new
+    `lagotto notify-gc` does it on demand (`--resubscribe` also re-subscribes
+    active watches' addresses that have no subscription). Only subscriptions
+    carrying lagotto's filter policy are removed. A subscription still pending
+    confirmation cannot be unsubscribed; AWS deletes it within 3 days.
+  - **Every SNS call on a topic runs in the region its ARN names**, not the
+    CLI's or the poller's: an alerts topic set with `LAGOTTO_SNS_TOPIC_ARN` in
+    another region, and an `sns:` channel's own topic in another region, used
+    to be refused by SNS with `InvalidParameter: TopicArn`.
+  - **Re-run `lagotto setup` after upgrading**: the poller's runtime policy
+    gains `sns:ListSubscriptionsByTopic`, `sns:GetSubscriptionAttributes` and
+    `sns:Unsubscribe` on the alerts topic and its subscriptions (never
+    `sns:Subscribe`). Until then the poller logs a warning each sweep, `doctor`
+    reports the missing grants, and `notify-gc` cleans up instead.
+    `docs/reference/cli-iam-actions.md` lists the new CLI actions: `watch`,
+    `extend` and `notify-gc` call `sns:Subscribe`; `cancel` and `notify-gc`
+    call `sns:Unsubscribe`; `list`, `status` and `doctor` read subscriptions.
 
 - **`lagotto poll` and `poll --daemon` now send notifications without
   `LAGOTTO_SNS_TOPIC_ARN`** (#241). The local poller built its notifier only

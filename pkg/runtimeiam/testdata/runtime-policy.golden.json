@@ -33,6 +33,18 @@
     {
       "Effect": "Allow",
       "Action": [
+        "sns:ListSubscriptionsByTopic",
+        "sns:GetSubscriptionAttributes",
+        "sns:Unsubscribe"
+      ],
+      "Resource": [
+        "arn:aws:sns:*:123456789012:lagotto-capacity-alerts",
+        "arn:aws:sns:*:123456789012:lagotto-capacity-alerts:*"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
         "ec2:DescribeInstanceTypes",
         "ec2:DescribeInstanceTypeOfferings",
         "ec2:DescribeSpotPriceHistory",

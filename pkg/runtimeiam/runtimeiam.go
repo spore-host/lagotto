@@ -500,6 +500,17 @@ func PolicyDocument(accountID string, instanceRoles []string) (string, error) {
 		// SNS capacity alerts.
 		{Effect: "Allow", Action: []string{"sns:Publish"},
 			Resource: RegionalARN("sns", accountID, "lagotto-capacity-alerts")},
+		// Email subscription cleanup (#240): each sweep unsubscribes the
+		// per-address subscriptions no active watch names. SNS authorizes
+		// subscription calls against the topic; the topic's subscription ARNs
+		// (topic:uuid) are listed too so the grant holds whichever ARN is
+		// evaluated. Never sns:Subscribe: only the CLI subscribes an address.
+		{Effect: "Allow", Action: []string{
+			"sns:ListSubscriptionsByTopic", "sns:GetSubscriptionAttributes", "sns:Unsubscribe",
+		}, Resource: []string{
+			RegionalARN("sns", accountID, "lagotto-capacity-alerts"),
+			RegionalARN("sns", accountID, "lagotto-capacity-alerts:*"),
+		}},
 		// Capacity discovery (truffle) + spawn launcher read APIs. Region-agnostic
 		// describe reads — Resource "*" as in the template.
 		{Effect: "Allow", Action: []string{

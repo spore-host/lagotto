@@ -18,6 +18,7 @@ There are two paths:
 |---|---|---|
 | Lambda | `lagotto-capacity-poller` (arm64, `provided.al2023`, 512 MB, 900 s) | `lagotto deploy` |
 | SNS topic | `lagotto-capacity-alerts` (KMS encrypted with `alias/aws/sns`) | `lagotto deploy` |
+| SNS email subscriptions | one per `--notify email:` address, on `lagotto-capacity-alerts`, filtered on the `lagotto_email` message attribute so each address receives only its own watches' events (#240) | `lagotto watch`; removed by the poller (next sweep), `lagotto cancel` or `lagotto notify-gc` once no active watch names the address; deleted with the topic |
 | EventBridge schedule | `lagotto-capacity-poller` at `rate(5 minutes)`, starts **DISABLED** | `lagotto deploy` |
 | IAM role | `lagotto-capacity-poller-role` (execution role; its permissions policy is written by `setup`) | `pkg/runtimeiam`: created by `deploy` or `setup` |
 | IAM role | `lagotto-capacity-poller-scheduler-invoke` (assumed by EventBridge Scheduler) | `pkg/runtimeiam`: created by `deploy` **only** |
@@ -173,7 +174,7 @@ Three things to know:
   arn:aws:dynamodb:*:<account>:table/lagotto-watches              (+ /index/*)
   arn:aws:dynamodb:*:<account>:table/lagotto-match-history        (+ /index/*)
   arn:aws:dynamodb:*:<account>:table/lagotto-scheduled-launches   (+ /index/*)
-  arn:aws:sns:*:<account>:lagotto-capacity-alerts
+  arn:aws:sns:*:<account>:lagotto-capacity-alerts                 (+ :* for its subscriptions)
   arn:aws:scheduler:*:<account>:schedule/default/lagotto-capacity-poller
   arn:aws:scheduler:*:<account>:schedule/default/lagotto-launch-*
   ```
@@ -213,7 +214,8 @@ lagotto deploy --teardown
 ```
 
 This deletes the three poller resources, in the order schedule → function → topic
-so nothing can fire into a half-deleted poller. It is idempotent: running it twice
+so nothing can fire into a half-deleted poller. Deleting the topic deletes its
+email subscriptions with it. It is idempotent: running it twice
 succeeds.
 
 **Explicitly retained** (each is listed in the confirmation prompt):

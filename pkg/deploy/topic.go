@@ -125,7 +125,7 @@ func (d *Deployer) convergeTopicAttributes(ctx context.Context, arn string) erro
 // create-vs-absent signal at all.
 func (d *Deployer) alertsTopicExists(ctx context.Context, region, accountID string) (bool, error) {
 	arn := AlertsTopicARN(region, accountID)
-	_, err := d.sns.GetTopicAttributes(ctx, &sns.GetTopicAttributesInput{TopicArn: aws.String(arn)})
+	_, err := d.sns.GetTopicAttributes(ctx, &sns.GetTopicAttributesInput{TopicArn: aws.String(arn)}, inRegion(region))
 	if err == nil {
 		return true, nil
 	}
@@ -139,7 +139,7 @@ func (d *Deployer) alertsTopicExists(ctx context.Context, region, accountID stri
 // topic.
 func (d *Deployer) deleteAlertsTopic(ctx context.Context, region, accountID string) error {
 	arn := AlertsTopicARN(region, accountID)
-	_, err := d.sns.DeleteTopic(ctx, &sns.DeleteTopicInput{TopicArn: aws.String(arn)})
+	_, err := d.sns.DeleteTopic(ctx, &sns.DeleteTopicInput{TopicArn: aws.String(arn)}, inRegion(region))
 	if err == nil || isSNSNotFound(err) {
 		return nil
 	}
@@ -163,4 +163,15 @@ func isSNSNotFound(err error) bool {
 		}
 	}
 	return false
+}
+
+// inRegion makes one SNS call in region, the region of the topic ARN it names,
+// whatever region the client was built for (#240): SNS rejects another
+// region's topic ARN with "InvalidParameter: TopicArn".
+func inRegion(region string) func(*sns.Options) {
+	return func(o *sns.Options) {
+		if region != "" {
+			o.Region = region
+		}
+	}
 }

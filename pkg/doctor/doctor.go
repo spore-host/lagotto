@@ -52,6 +52,7 @@ import (
 
 	"github.com/spore-host/lagotto/pkg/deploy"
 	"github.com/spore-host/lagotto/pkg/runtimeiam"
+	"github.com/spore-host/lagotto/pkg/watcher"
 )
 
 // Status is a check outcome. Only FAIL makes the command exit non-zero: a WARN is
@@ -82,6 +83,7 @@ const (
 	CheckScheduleState = "schedule-state"
 	CheckSchedulerErrs = "scheduler-errors"
 	CheckLegacyStack   = "legacy-stack"
+	CheckEmailSubs     = "email-subscriptions"
 )
 
 // Check is one diagnostic line.
@@ -207,6 +209,9 @@ type Options struct {
 	Metrics MetricsAPI
 	// Now is the clock for the metrics window (time.Now when nil).
 	Now func() time.Time
+	// EmailAudit, when set, reads the alerts topic's email subscriptions
+	// against the active watches' addresses (#240). Read-only.
+	EmailAudit func(ctx context.Context) (watcher.EmailAudit, error)
 }
 
 // State is the raw, read-only observation Evaluate turns into a Report. Each
@@ -254,6 +259,12 @@ type State struct {
 
 	// SchedulerErrors is the best-effort Scheduler target-error count.
 	SchedulerErrors SchedulerErrors
+
+	// Email is the email-subscription audit (#240); EmailChecked is false
+	// when no audit was supplied.
+	Email        watcher.EmailAudit
+	EmailErr     error
+	EmailChecked bool
 
 	LegacyStack       bool
 	LegacyStackStatus string
@@ -337,6 +348,12 @@ func Gather(ctx context.Context, o Options) State {
 		st.ActiveWatches, st.ActiveWatchesErr = o.ActiveWatches(ctx)
 	}
 
+	// 5b. Who receives email, and who is still to confirm (#240)?
+	if o.EmailAudit != nil {
+		st.EmailChecked = true
+		st.Email, st.EmailErr = o.EmailAudit(ctx)
+	}
+
 	// 6. Best effort: is Scheduler failing to invoke its targets?
 	if o.Metrics != nil {
 		now := time.Now
@@ -388,10 +405,92 @@ func Evaluate(st State) *Report {
 	if c, ok := evalSchedulerErrors(st); ok {
 		r.Checks = append(r.Checks, c)
 	}
+	if c, ok := evalEmailSubscriptions(st); ok {
+		r.Checks = append(r.Checks, c)
+	}
 	if c, ok := evalLegacyStack(st); ok {
 		r.Checks = append(r.Checks, c)
 	}
 	return r
+}
+
+// evalEmailSubscriptions reports email delivery (#240): addresses active
+// watches name that have not confirmed their subscription (so receive
+// nothing yet) or have none at all, subscriptions no watch needs, and any
+// subscription with no filter policy, which receives every user's email
+// events. All WARN: an inbox that has not clicked a link yet is not a broken
+// poller, and doctor is a CI gate.
+//
+// ok is false when there is nothing to say: no audit, or no email channel on
+// any active watch and no email subscription on the topic.
+func evalEmailSubscriptions(st State) (Check, bool) {
+	if !st.EmailChecked {
+		return Check{}, false
+	}
+	e := st.Email
+	c := Check{Name: CheckEmailSubs}
+	if st.EmailErr != nil {
+		c.Status = StatusWarn
+		c.Summary = fmt.Sprintf("could not read the alerts topic's email subscriptions (needs sns:ListSubscriptionsByTopic and sns:GetSubscriptionAttributes): %v", st.EmailErr)
+		return c, true
+	}
+	if len(e.Confirmed)+len(e.Pending)+len(e.Missing)+len(e.Unused)+len(e.PendingUnused)+len(e.Unfiltered) == 0 {
+		return Check{}, false
+	}
+	if e.NoTopic {
+		c.Status = StatusWarn
+		c.Summary = fmt.Sprintf("%d address(es) on active watches get no email: there is no alerts topic", len(e.Missing))
+		c.Detail = prefixed("no topic: ", e.Missing)
+		c.Fix = []string{"lagotto deploy --version <release>", "lagotto notify-gc --resubscribe"}
+		return c, true
+	}
+	var problems []string
+	for _, a := range e.Pending {
+		c.Detail = append(c.Detail, "pending confirmation: "+a+" (check the inbox for the AWS Notification confirmation email; SNS deletes an unconfirmed subscription within 3 days)")
+	}
+	if len(e.Pending) > 0 {
+		problems = append(problems, fmt.Sprintf("%d pending confirmation", len(e.Pending)))
+	}
+	for _, a := range e.Missing {
+		c.Detail = append(c.Detail, "not subscribed: "+a+" (nothing is delivered to it)")
+	}
+	if len(e.Missing) > 0 {
+		problems = append(problems, fmt.Sprintf("%d not subscribed", len(e.Missing)))
+		c.Fix = append(c.Fix, "lagotto notify-gc --resubscribe")
+	}
+	for _, a := range e.Unused {
+		c.Detail = append(c.Detail, "unused: "+a+" (no active watch names it; the poller's next sweep or `lagotto notify-gc` unsubscribes it)")
+	}
+	if len(e.Unused) > 0 {
+		problems = append(problems, fmt.Sprintf("%d unused", len(e.Unused)))
+		c.Fix = append(c.Fix, "lagotto notify-gc")
+	}
+	for _, a := range e.PendingUnused {
+		c.Detail = append(c.Detail, "unused, pending: "+a+" (cannot be unsubscribed until confirmed; SNS deletes it within 3 days)")
+	}
+	for _, s := range e.Unfiltered {
+		c.Detail = append(c.Detail, fmt.Sprintf("NO FILTER POLICY: %s (%s) receives every email event on this topic, other users' watches included", s.Address, s.SubscriptionArn))
+		c.Fix = append(c.Fix, fmt.Sprintf("aws sns unsubscribe --region %s --subscription-arn %s  # then: lagotto notify-gc --resubscribe", st.Region, s.SubscriptionArn))
+	}
+	if len(e.Unfiltered) > 0 {
+		problems = append(problems, fmt.Sprintf("%d with no filter policy", len(e.Unfiltered)))
+	}
+	if len(problems) == 0 {
+		c.Status = StatusPass
+		c.Summary = fmt.Sprintf("%d email address(es) on active watches, all confirmed", len(e.Confirmed))
+		return c, true
+	}
+	c.Status = StatusWarn
+	c.Summary = fmt.Sprintf("email subscriptions: %s (%d confirmed)", strings.Join(problems, ", "), len(e.Confirmed))
+	return c, true
+}
+
+func prefixed(prefix string, items []string) []string {
+	out := make([]string, len(items))
+	for i, s := range items {
+		out[i] = prefix + s
+	}
+	return out
 }
 
 // evalRuntimePolicy is the check this command exists for.

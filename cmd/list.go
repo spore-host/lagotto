@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spf13/cobra"
 	"github.com/spore-host/lagotto/pkg/awscfg"
@@ -90,6 +92,14 @@ func runList(cmd *cobra.Command, args []string) error {
 		watches = kept
 	}
 
+	// Email delivery state per channel (#240): pending confirmation, confirmed,
+	// or not subscribed. One SNS read, best effort.
+	ptrs := make([]*watcher.Watch, len(watches))
+	for i := range watches {
+		ptrs[i] = &watches[i]
+	}
+	annotateEmailStates(ctx, emailSubscriberFor(cfg, os.Getenv, aws.ToString(identity.Account)), ptrs)
+
 	if getOutputFormat() == "json" {
 		enc := json.NewEncoder(cmd.OutOrStdout())
 		enc.SetIndent("", "  ")
@@ -102,7 +112,26 @@ func runList(cmd *cobra.Command, args []string) error {
 	}
 
 	writeWatchTable(cmd.OutOrStdout(), watches, time.Now().UTC(), getOutputFormat() == "wide")
+	writeListEmailStates(cmd.OutOrStdout(), watches)
 	return nil
+}
+
+// writeListEmailStates prints, below the table, each active watch's email
+// channels and their subscription state (#240).
+func writeListEmailStates(out io.Writer, watches []watcher.Watch) {
+	header := false
+	for i := range watches {
+		for _, ch := range watches[i].NotifyChannels {
+			if ch.Type != "email" || ch.Subscription == "" {
+				continue
+			}
+			if !header {
+				_, _ = fmt.Fprintln(out, "\nEmail notifications:")
+				header = true
+			}
+			_, _ = fmt.Fprintf(out, "  %-12s %s  %s\n", watches[i].WatchID, ch.Target, ch.Subscription.Describe())
+		}
+	}
 }
 
 // stalePollAfter is how old an active watch's last poll may be before `list`

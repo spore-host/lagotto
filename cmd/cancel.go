@@ -21,7 +21,9 @@ var cancelYes bool
 var cancelCmd = &cobra.Command{
 	Use:   "cancel <watch-id>",
 	Short: "Cancel an active watch, or release a fired hold's capacity reservation",
-	Long: `Cancel an active watch. Any capacity reservation it recorded is released.
+	Long: `Cancel an active watch. Any capacity reservation it recorded is released, and
+each email address it notifies is unsubscribed from the alerts topic unless another
+active watch still names it.
 
 For a --action hold watch that already fired (status: matched), cancel releases
 the reservation it holds. The reservation is targeted and bills at the On-Demand
@@ -56,7 +58,23 @@ func runCancel(cmd *cobra.Command, args []string) error {
 	}
 
 	confirm := func(prompt string) bool { return cancelYes || confirmCancel(prompt) }
-	return cancelWatch(ctx, cmd.OutOrStdout(), os.Stderr, w, watcher.NewHolder(cfg), store.UpdateWatchStatus, confirm)
+	cancelled := false
+	setStatus := func(ctx context.Context, id string, st watcher.WatchStatus) error {
+		if err := store.UpdateWatchStatus(ctx, id, st); err != nil {
+			return err
+		}
+		cancelled = true
+		return nil
+	}
+	if err := cancelWatch(ctx, cmd.OutOrStdout(), os.Stderr, w, watcher.NewHolder(cfg), setStatus, confirm); err != nil {
+		return err
+	}
+	// The watch has ended: unsubscribe any of its email addresses that no other
+	// active watch names (#240). The topic is the one `watch` subscribed to.
+	if cancelled {
+		cleanupWatchEmails(ctx, cmd.OutOrStdout(), os.Stderr, emailSubscriberFor(cfg, os.Getenv, accountFromARN(w.UserID)), store.ListActiveWatches, w)
+	}
+	return nil
 }
 
 // reservationReleaser is the Holder method cancel needs; a fake in tests.

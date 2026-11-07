@@ -3,7 +3,9 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/scheduler"
@@ -97,5 +99,32 @@ func runExtend(cmd *cobra.Command, args []string) error {
 		"WatchID":   watchID,
 		"ExpiresAt": newExpiry.Format(time.RFC3339),
 	}))
+
+	// A reactivated watch's addresses may have been unsubscribed when it
+	// expired (#240): subscribe them again. Best effort: the watch is extended
+	// either way, and this says so if its emails will not be delivered.
+	if reactivate {
+		resubscribeOnReactivate(ctx, cmd.OutOrStdout(), os.Stderr, emailSubscriberFor(cfg, os.Getenv, accountFromARN(w.UserID)), w)
+	}
 	return nil
+}
+
+// resubscribeOnReactivate subscribes a reactivated watch's email addresses,
+// reusing any subscription they still have, and prints each one's state.
+// subs is nil when no alerts topic could be named.
+func resubscribeOnReactivate(ctx context.Context, out, errOut io.Writer, subs emailSubscriber, w *watcher.Watch) {
+	if len(watcher.EmailAddresses(w)) == 0 {
+		return
+	}
+	topic := alertsTopic{Why: "no alerts topic could be resolved"}
+	if subs != nil {
+		topic.ARN = subs.TopicArn()
+	}
+	w.Status = watcher.StatusActive
+	if err := subscribeWatchEmails(ctx, errOut, topic, subs, w); err != nil {
+		_, _ = fmt.Fprintf(errOut, "Warning: email notifications for %s will not be delivered: %v\n", w.WatchID,
+			strings.TrimSuffix(err.Error(), "; no watch was created"))
+		return
+	}
+	writeEmailStates(out, "  Notify:   ", w)
 }

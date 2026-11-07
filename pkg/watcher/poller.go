@@ -61,6 +61,9 @@ type Poller struct {
 	// notifyUnsupported overrides where a #195 retirement notice goes (a stored
 	// watch whose service/action can never fire) — same test seam pattern.
 	notifyUnsupported func(ctx context.Context, w *Watch, reason string) error
+	// reconcileEmail overrides the #240 email-subscription cleanup run at the
+	// start of each sweep — same test seam pattern.
+	reconcileEmail func(ctx context.Context, active []Watch) (ReconcileResult, error)
 	// quotas, when non-nil, enriches a quota-cap report with the account's actual
 	// vCPU limit/usage numbers (#153). OPTIONAL and nil-safe by design: the cap
 	// itself is detected from the RunInstances error, so a poller with no
@@ -211,6 +214,16 @@ func (p *Poller) PollAll(ctx context.Context) (*PollSummary, error) {
 		fmt.Fprintf(os.Stderr, "Polling %d active watches\n", len(watches))
 	}
 
+	// Unsubscribe email addresses no active watch names any more (#240). It runs
+	// on the list loaded BEFORE this sweep's transitions, so an address whose
+	// watch matches or expires in this sweep keeps its subscription until the
+	// next one: the final email is published well before its subscription goes.
+	// `watches` is every active watch, not this poller's filtered scope, so a
+	// project-scoped daemon never drops another project's address.
+	// Best-effort: a cleanup failure (a runtime policy that predates the grant,
+	// say) must not stop the sweep, and `lagotto notify-gc` is the backstop.
+	p.reconcileEmailSubscriptions(ctx, watches)
+
 	// EC2 watches are grouped by region+pattern+spot so they share one truffle
 	// capacity search. SageMaker watches don't use truffle at all — each submits
 	// the user's job directly — so they're handled individually.
@@ -309,6 +322,25 @@ func (p *Poller) PollAll(ctx context.Context) (*PollSummary, error) {
 	}
 
 	return summary, nil
+}
+
+// reconcileEmailSubscriptions is the poller's half of the #240 deleter. The
+// test seam reconcileEmail replaces the Notifier's.
+func (p *Poller) reconcileEmailSubscriptions(ctx context.Context, active []Watch) {
+	reconcile := p.reconcileEmail
+	if reconcile == nil {
+		if p.notifier == nil {
+			return
+		}
+		reconcile = p.notifier.ReconcileEmailSubscriptions
+	}
+	res, err := reconcile(ctx, active)
+	for _, a := range res.Removed {
+		fmt.Fprintf(os.Stderr, "Unsubscribed %s from email notifications: no active watch names it\n", a)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: email subscription cleanup failed (run `lagotto notify-gc`; re-run `lagotto setup` if this is AccessDenied): %v\n", err)
+	}
 }
 
 // PollWatch runs a single poll cycle for one watch and returns the resulting

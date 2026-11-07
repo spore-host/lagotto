@@ -165,6 +165,44 @@ If no topic is found, `poll` warns at start and names every in-scope watch
 whose email channel will not be delivered. Each email it skips is also reported
 as a failed notification. Its webhook and sns channels are still delivered.
 
+### Email notifications
+
+An `email:` channel reaches the address it names, and only that address:
+
+```bash
+lagotto watch p5.48xlarge --notify email:you@example.com
+#   Notify:   email:you@example.com  pending confirmation: check your inbox and click the link; nothing is delivered until you do
+```
+
+- **`watch` subscribes the address** to `lagotto-capacity-alerts` in this
+  account and region (so run `lagotto deploy` first; with no topic, `watch`
+  refuses an email channel). AWS sends an "AWS Notification - Subscription
+  Confirmation" email. **Nothing is delivered until you click its link.** An
+  address that is already subscribed is reused, so a second watch sends no
+  second confirmation.
+- **Each address receives only its own watches' events.** Its subscription has
+  a filter policy on the `lagotto_email` message attribute, and every email
+  lagotto publishes (match, expiry, quota cap, retirement) sets that attribute
+  to the watch's address. In a shared account, one user's watch events never
+  reach another user's inbox.
+- **`lagotto list` and `lagotto status` show each email channel's state**
+  (confirmed, pending confirmation, not subscribed), and `lagotto doctor`
+  reports pending and unsubscribed addresses, plus any email subscription on
+  the topic with no filter policy (one made by hand receives every message).
+- **The subscription is removed when no active watch names the address.** The
+  poller does it at the start of its next sweep after the last such watch
+  matches, expires, fails or completes, so the final email is sent first.
+  `lagotto cancel` does it at once for the cancelled watch, and
+  `lagotto notify-gc` does it on demand. Only subscriptions lagotto created are
+  removed. A subscription still pending confirmation cannot be removed; AWS
+  deletes it within 3 days. `lagotto extend` re-subscribes the addresses of a
+  watch it reactivates, and `lagotto notify-gc --resubscribe` re-subscribes an
+  active watch's address whose confirmation lapsed.
+- **After upgrading, re-run `lagotto setup`**: the hosted poller needs
+  `sns:ListSubscriptionsByTopic`, `sns:GetSubscriptionAttributes` and
+  `sns:Unsubscribe` on the alerts topic for the cleanup. `lagotto doctor`
+  reports the missing grants until it is done.
+
 ### Scoping a daemon in a shared account
 
 By default `poll --daemon` services **every** active watch in the account. In an
