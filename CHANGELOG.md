@@ -267,6 +267,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   next cycle after any failed attempt that skipped an AZ. Takes effect on the
   hosted poller once redeployed with this release (`lagotto deploy`).
 
+### Documentation
+
+- README and DEPLOYMENT.md describe what v0.68.0 adds (#239): how long a watch
+  lives (`--ttl`, or `--until-landed` with `lagotto ack`, reminders and the
+  `unacknowledged` pause), `lagotto update`, cost exposure, the default-subnet
+  coverage check, which features need the poller redeployed, the Go API for
+  programs that create watches (`watcher.NewWatch`, `pkg/arm`,
+  `pkg/testutil/hermetic`), and the full teardown order, including the
+  scheduled-launches table, the per-launch schedules and the artifact bucket.
+  The README also says that a `notify` watch fires when a type is offered,
+  which does not mean a launch would succeed.
+
 ## [0.67.0] - 2026-11-06
 
 ### Added
