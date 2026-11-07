@@ -47,24 +47,26 @@ func reminderPollerWarning(info deploy.PollerInfo, inspectErr error, region stri
 		return ""
 	}
 	minVer := watcher.MinReminderPollerVersion
-	var which string
-	if info.Version == "" {
-		// The Version tag has been stamped since v0.61.0, so an untagged poller
-		// is older than that, and so older than any reminder-sending release.
-		which = "has no Version tag, so it predates v0.61.0"
-	} else {
-		cmp, ok := doctor.CompareVersions(info.Version, minVer)
-		if !ok || cmp >= 0 {
-			return ""
-		}
-		which = "is v" + strings.TrimPrefix(info.Version, "v")
-	}
 	where := ""
 	if region != "" {
 		where = " in " + region
 	}
-	return fmt.Sprintf("Warning: the hosted poller%s %s, older than v%s, the first release that sends until-landed reminders. "+
-		"It will not remind you before watch %s pauses at %s; the watch still pauses safely then, and 'lagotto ack %s' resumes it. "+
-		"Run 'lagotto deploy' to upgrade the poller.",
-		where, which, minVer, w.WatchID, w.ExpiresAt.UTC().Format(time.RFC3339), w.WatchID)
+	tail := fmt.Sprintf("before watch %s pauses at %s; the watch still pauses safely then, and 'lagotto ack %s' resumes it. "+
+		"Run 'lagotto deploy' to upgrade the poller.", w.WatchID, w.ExpiresAt.UTC().Format(time.RFC3339), w.WatchID)
+	if info.Version == "" {
+		// `lagotto deploy` has stamped the tag since v0.61.0, so an untagged
+		// poller is older than that or was not deployed by lagotto. Either way
+		// nothing says it sends reminders. This is the one case doctor also
+		// reports as unknown; here the cost of a wrong warning is a redeploy,
+		// and the cost of a missing one is a surprise pause.
+		return fmt.Sprintf("Warning: the hosted poller%s has no Version tag (deployed before v0.61.0, or not by 'lagotto deploy'), "+
+			"so it may predate v%s, the first release that sends until-landed reminders. If so it will not remind you %s",
+			where, minVer, tail)
+	}
+	cmp, ok := doctor.CompareVersions(info.Version, minVer)
+	if !ok || cmp >= 0 {
+		return ""
+	}
+	return fmt.Sprintf("Warning: the hosted poller%s is v%s, older than v%s, the first release that sends until-landed reminders. "+
+		"It will not remind you %s", where, strings.TrimPrefix(info.Version, "v"), minVer, tail)
 }

@@ -92,7 +92,7 @@ func init() {
 	watchCmd.Flags().StringVar(&watchProject, "project", "", "Project label for scoping a local 'poll --daemon --project' in a shared account (default: $LAGOTTO_PROJECT)")
 	watchCmd.Flags().IntVar(&watchMaintain, "maintain", 0, "Goal-driven fleet: maintain this many workers (relaunching toward the goal, even from zero) until --until holds. Requires --action spawn. 0 = single-shot (default).")
 	watchCmd.Flags().BoolVar(&watchUntilLanded, "until-landed", false, "Keep hunting with no TTL until the launch (--action spawn) or hold lands. The watch pauses itself unless you run 'lagotto ack <id>' within (2+1) × --remind (21d by default). Needs a --notify channel; not with --ttl, --maintain, --until, or --action notify.")
-	watchCmd.Flags().StringVar(&watchRemind, "remind", "7d", "With --until-landed: the acknowledgement interval (1h to 30d). The watch pauses after 2 intervals pass without an ack, so the deadline is 3 × this from creation or the last ack.")
+	watchCmd.Flags().StringVar(&watchRemind, "remind", "7d", "With --until-landed: the reminder interval (1h to 30d). You are reminded after each of the first 2 intervals and warned 24h before the pause; the watch pauses 3 × this after creation or the last ack.")
 	watchCmd.Flags().BoolVarP(&watchYes, "yes", "y", false, "Skip the confirmation prompt that --until-landed --action spawn/hold shows (required when stdin is not a terminal)")
 	watchCmd.Flags().StringVar(&watchUntil, "until", "", "Fleet completion condition, re-checked each poll: 's3-empty: s3://b/manifest minus s3://b/done/', 'http-200: https://…', or 'shell: <cmd>' (shell = local daemon only). When true the fleet retires.")
 }

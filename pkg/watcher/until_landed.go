@@ -25,10 +25,11 @@ import (
 // lost or late reminder (phase 4) can therefore only cause an unwanted pause,
 // never a launch nobody is watching over.
 //
-// Phase 4 (reminders) hooks in here: reminder k (1..RemindPauseAfter) of the
-// current window is due at AckWindowStart()+k×RemindEvery, and the final warning
-// at ExpiresAt-24h. All of those are derived from the stored fields, so a poller
-// never applies its own defaults to someone else's watch.
+// Phase 4 (reminders, reminders.go) builds on this: reminder k
+// (1..RemindPauseAfter) of the current window is due at
+// AckWindowStart()+k×RemindEvery, and the final warning at ExpiresAt-24h. All of
+// those are derived from the stored fields, so a poller never applies its own
+// defaults to someone else's watch.
 
 const (
 	// DefaultRemindEvery is the default --remind interval.
