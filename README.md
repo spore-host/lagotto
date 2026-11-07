@@ -46,6 +46,7 @@ lagotto watch "g6.8xlarge,g6.4xlarge,g6.2xlarge,g6.xlarge" --action spawn --spaw
 lagotto list
 lagotto status <watch-id>
 lagotto extend <watch-id> --ttl 48h
+lagotto update <watch-id> --add-region us-west-2 --add-type g6.xlarge   # widen the search in place; --dry-run shows the diff
 lagotto cancel <watch-id>          # also releases a fired hold's reservation; -y/--yes skips the prompt
 lagotto history
 ```

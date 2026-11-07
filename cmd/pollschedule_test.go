@@ -37,6 +37,8 @@ type fakeAWS struct {
 	getErr, updateErr string
 	// item is the stored watch GetItem returns (DynamoDB JSON), for extend.
 	item string
+	// conditionFails makes every UpdateItem fail its condition (#257).
+	conditionFails bool
 
 	mu        sync.Mutex
 	calls     []string
@@ -105,7 +107,14 @@ func (f *fakeAWS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			f.mu.Lock()
 			f.updates = append(f.updates, string(body))
 			f.mu.Unlock()
+			if f.conditionFails {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, `{"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}`)
+				return
+			}
 			_, _ = io.WriteString(w, `{}`)
+		case "Query":
+			_, _ = io.WriteString(w, `{"Items":[],"Count":0}`)
 		case "GetItem":
 			_, _ = io.WriteString(w, `{"Item":`+f.item+`}`)
 		default:
