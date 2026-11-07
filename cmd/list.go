@@ -202,10 +202,10 @@ func landingDesc(w *watcher.Watch, now time.Time) string {
 	if w.Status != watcher.StatusActive || !w.Landing() {
 		return ""
 	}
-	if w.PendingSince.IsZero() {
+	if w.PendingSince == nil {
 		return "landing " + w.PendingResourceID()
 	}
-	return fmt.Sprintf("landing %s (pending %s)", w.PendingResourceID(), formatAge(now.Sub(w.PendingSince)))
+	return fmt.Sprintf("landing %s (pending %s)", w.PendingResourceID(), formatAge(now.Sub(*w.PendingSince)))
 }
 
 // lastPollCol renders LAST POLL as an age ("4m", "2h", "3d"), or "never". An

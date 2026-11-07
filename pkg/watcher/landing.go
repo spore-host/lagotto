@@ -99,6 +99,14 @@ func (w *Watch) Landing() bool {
 	return w.PendingInstanceID != "" || w.PendingReservationID != ""
 }
 
+// PendingSinceTime is PendingSince, or the zero time when it is unset.
+func (w *Watch) PendingSinceTime() time.Time {
+	if w.PendingSince == nil {
+		return time.Time{}
+	}
+	return *w.PendingSince
+}
+
 // PendingResourceID is the pending instance or reservation id, or "".
 func (w *Watch) PendingResourceID() string {
 	if w.PendingInstanceID != "" {
@@ -119,7 +127,7 @@ func (w *Watch) pendingAttr() string {
 // whole-record write (RecordMatch) leaves no pending_* or marker behind.
 func (w *Watch) clearLanding() {
 	w.PendingInstanceID, w.PendingReservationID, w.PendingRegion = "", "", ""
-	w.PendingSince = time.Time{}
+	w.PendingSince = nil
 	w.PendingMatch = nil
 	if strings.HasPrefix(w.LeaseOwner, LandingLeasePrefix) {
 		w.LeaseOwner, w.LeaseExpiresAt = "", time.Time{}
@@ -232,10 +240,10 @@ func (p *Poller) startLanding(ctx context.Context, w *Watch, m *MatchResult, now
 		return false
 	}
 	w.PendingInstanceID, w.PendingReservationID, w.PendingRegion = instanceID, reservationID, m.Region
-	w.PendingSince = now
+	since := now
+	w.PendingSince = &since
 	w.PendingMatch = m
 	w.LeaseOwner, w.LeaseExpiresAt = landingMarker(id), markerExp
-	w.ConsecutiveFailures = 0
 	w.noteAttempt(&attempt{}, now)
 	summary.Landing++
 	// Unconditional: for the hosted poller CloudWatch is the audience.
@@ -270,12 +278,12 @@ func (p *Poller) pollLanding(ctx context.Context, w *Watch, summary *PollSummary
 	}
 
 	expired := !w.ExpiresAt.IsZero() && now.After(w.ExpiresAt)
-	age := now.Sub(w.PendingSince)
+	age := now.Sub(w.PendingSinceTime())
 	reservation := w.PendingReservationID != ""
 
 	chk, err := p.checkLanding(ctx, w)
 	if err != nil {
-		msg := describeAttemptError(FailureUnknown, fmt.Errorf("landing check for %s: %w", id, err))
+		msg := landingAttemptError(fmt.Sprintf("landing check for %s", id), err)
 		fmt.Fprintf(os.Stderr, "Warning: watch %s: %s\n", w.WatchID, msg)
 		if expired {
 			// The state is unknown, so don't terminate what may be running. Let the
@@ -328,7 +336,7 @@ func (p *Poller) pollLanding(ctx context.Context, w *Watch, summary *PollSummary
 		verb = "cancelled"
 	}
 	if err := p.cancelPending(ctx, w); err != nil {
-		msg := describeAttemptError(FailureUnknown, fmt.Errorf("%s %s; giving up on it failed: %w", id, why, err))
+		msg := landingAttemptError(fmt.Sprintf("%s %s; giving up on it failed", id, why), err)
 		fmt.Fprintf(os.Stderr, "Warning: watch %s: %s\n", w.WatchID, msg)
 		if isAccessDenied(err) {
 			fmt.Fprintf(os.Stderr, "  The poller's runtime role cannot terminate it; redeploy the poller (lagotto deploy) so its role has the #242 grant.\n")
@@ -343,6 +351,18 @@ func (p *Poller) pollLanding(ctx context.Context, w *Watch, summary *PollSummary
 	fmt.Fprintf(os.Stderr, "Watch %s: %s %s; %s it\n", w.WatchID, id, why, verb)
 	chk.ReasonMessage = fmt.Sprintf("%s; lagotto %s it", why, verb)
 	return p.failLanding(ctx, w, chk, ActionLandingTimedOut, now, summary)
+}
+
+// landingAttemptError renders a landing problem caused by err as an unknown-class
+// last_error, keeping our context ahead of the AWS code and message (plain
+// describeAttemptError would keep only the AWS message).
+func landingAttemptError(context string, err error) string {
+	msg := err.Error()
+	var ae smithy.APIError
+	if errors.As(err, &ae) {
+		msg = ae.ErrorMessage()
+	}
+	return describeAttemptError(FailureUnknown, &landingError{code: apiErrorCode(err), msg: context + ": " + msg})
 }
 
 func dashIfBlank(s string) string {
@@ -393,7 +413,7 @@ func landingMatch(w *Watch) *MatchResult {
 	} else {
 		m = MatchResult{
 			WatchID: w.WatchID, UserID: w.UserID, Region: w.PendingRegion,
-			InstanceType: w.InstanceTypePattern, IsSpot: w.Spot, MatchedAt: w.PendingSince,
+			InstanceType: w.InstanceTypePattern, IsSpot: w.Spot, MatchedAt: w.PendingSinceTime(),
 		}
 	}
 	m.InstanceID, m.ReservationID = w.PendingInstanceID, w.PendingReservationID
@@ -426,8 +446,8 @@ func (p *Poller) completeLanding(ctx context.Context, w *Watch, chk landingCheck
 		return
 	}
 	fmt.Fprintf(os.Stderr, "Watch %s: %s landed (%s in %s)\n", w.WatchID, m.InstanceID+m.ReservationID, chk.State, m.AvailabilityZone)
-	if p.notifier != nil {
-		if err := p.notifier.Notify(ctx, w, m); err != nil {
+	if notify := p.matchNotifier(); notify != nil {
+		if err := notify(ctx, w, m); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: notification failed for %s: %v\n", w.WatchID, err)
 		}
 	}
@@ -505,8 +525,8 @@ func (p *Poller) failLanding(ctx context.Context, w *Watch, chk landingCheck, ac
 		return true
 	}
 	fmt.Fprintf(os.Stderr, "Watch %s: %d consecutive launches failed to land; stopping watch\n", w.WatchID, n)
-	if p.notifier != nil {
-		if err := p.notifier.Notify(ctx, w, m); err != nil {
+	if notify := p.matchNotifier(); notify != nil {
+		if err := notify(ctx, w, m); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: notification failed for %s: %v\n", w.WatchID, err)
 		}
 	}
@@ -631,8 +651,10 @@ const pendingRemove = "pending_instance_id, pending_reservation_id, pending_regi
 
 // beginLanding records a launch (instanceID) or hold (reservationID) as landing,
 // in the one UpdateItem the attempt makes: the pending_* fields, the lease
-// marker, last_polled_at, a reset failure streak (the launch succeeded), and the
-// attempt's heartbeat.
+// marker, last_polled_at, and the attempt's heartbeat. It leaves the
+// unclassified-failure streak alone: a launch is not a success until it lands
+// (completeLanding resets it), so launches that keep dying the same way still
+// reach MaxConsecutiveFailures.
 func (s *Store) beginLanding(ctx context.Context, watchID, instanceID, reservationID, region string, m *MatchResult, markerExp time.Time) error {
 	attr, id := "pending_instance_id", instanceID
 	if reservationID != "" {
@@ -647,14 +669,12 @@ func (s *Store) beginLanding(ctx context.Context, watchID, instanceID, reservati
 		":pid":    &types.AttributeValueMemberS{Value: id},
 		":preg":   &types.AttributeValueMemberS{Value: region},
 		":pm":     pm,
-		":zero":   &types.AttributeValueMemberN{Value: "0"},
 		":marker": &types.AttributeValueMemberS{Value: landingMarker(id)},
 		":mexp":   &types.AttributeValueMemberS{Value: markerExp.UTC().Format(time.RFC3339)},
 	}
 	set := []string{
 		attr + " = :pid", "pending_region = :preg", "pending_since = :now", "pending_match = :pm",
-		"last_polled_at = :now", "consecutive_failures = :zero",
-		"lease_owner = :marker", "lease_expires_at = :mexp",
+		"last_polled_at = :now", "lease_owner = :marker", "lease_expires_at = :mexp",
 	}
 	set, add := withAttempt(set, nil, values, &attempt{})
 	if _, err := s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{

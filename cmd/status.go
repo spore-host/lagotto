@@ -115,7 +115,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 func writeLanding(out io.Writer, w *watcher.Watch, now time.Time) {
 	if l := landingDesc(w, now); l != "" {
 		_, _ = fmt.Fprintf(out, "Landing:  %s in %s", strings.TrimPrefix(l, "landing "), dashIfEmpty(w.PendingRegion))
-		if !w.PendingSince.IsZero() {
+		if w.PendingSince != nil {
 			_, _ = fmt.Fprintf(out, "; given up at %s if still pending",
 				w.PendingSince.Add(watcher.PendingLandingTimeout).Format(time.RFC3339))
 		}

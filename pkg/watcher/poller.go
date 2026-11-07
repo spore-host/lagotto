@@ -64,6 +64,9 @@ type Poller struct {
 	// reconcileEmail overrides the #240 email-subscription cleanup run at the
 	// start of each sweep — same test seam pattern.
 	reconcileEmail func(ctx context.Context, active []Watch) (ReconcileResult, error)
+	// notifyMatch overrides where a #239 landing's match (or final failure)
+	// notification goes — same test seam pattern.
+	notifyMatch func(ctx context.Context, w *Watch, m *MatchResult) error
 	// quotas, when non-nil, enriches a quota-cap report with the account's actual
 	// vCPU limit/usage numbers (#153). OPTIONAL and nil-safe by design: the cap
 	// itself is detected from the RunInstances error, so a poller with no
@@ -722,6 +725,18 @@ func (p *Poller) unsupportedNotifier() func(ctx context.Context, w *Watch, reaso
 	}
 	if p.notifier != nil {
 		return p.notifier.NotifyUnsupported
+	}
+	return nil
+}
+
+// matchNotifier resolves where a landing's match notification goes (#239): the
+// test seam if set, else the wired Notifier, else nowhere.
+func (p *Poller) matchNotifier() func(ctx context.Context, w *Watch, m *MatchResult) error {
+	if p.notifyMatch != nil {
+		return p.notifyMatch
+	}
+	if p.notifier != nil {
+		return p.notifier.Notify
 	}
 	return nil
 }

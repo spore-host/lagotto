@@ -176,7 +176,9 @@ type Watch struct {
 	PendingInstanceID    string    `json:"pending_instance_id,omitempty" dynamodbav:"pending_instance_id,omitempty"`
 	PendingReservationID string    `json:"pending_reservation_id,omitempty" dynamodbav:"pending_reservation_id,omitempty"`
 	PendingRegion        string    `json:"pending_region,omitempty" dynamodbav:"pending_region,omitempty"`
-	PendingSince         time.Time `json:"pending_since,omitzero" dynamodbav:"pending_since,omitempty"`
+	// PendingSince is a pointer because the DynamoDB encoder writes a zero
+	// time.Time even with omitempty; nil keeps it off every non-landing record.
+	PendingSince *time.Time `json:"pending_since,omitempty" dynamodbav:"pending_since,omitempty"`
 	// PendingMatch is the match the pending launch/hold came from, so the history
 	// row written when it lands (or fails to) describes the real candidate.
 	PendingMatch *MatchResult `json:"pending_match,omitempty" dynamodbav:"pending_match,omitempty"`
