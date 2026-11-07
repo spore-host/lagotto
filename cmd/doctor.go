@@ -59,6 +59,11 @@ invoking THIS region's poller (lagotto#218: the role is IAM-global, and a deploy
 by lagotto older than v0.65.1 scoped it to the deploying region alone, so every
 other region's schedule failed silently). The policy is evaluated locally.
 
+It lists every lagotto-lambda-<account>-<region> artifact bucket in the account
+(lagotto#264) and warns about each one in a region with no poller, an orphan a
+'deploy --teardown' from before #264 left behind, with the command that deletes
+it. That needs s3:ListAllMyBuckets; without it the check is a warning.
+
 Best effort, it also reports EventBridge Scheduler target errors in the last 24h
 (CloudWatch AWS/Scheduler TargetErrorCount for the poller's schedule group). That
 needs cloudwatch:GetMetricStatistics on your credentials; without it the check
@@ -134,6 +139,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	})
 	report := doctor.Evaluate(state)
 	appendLaunchScheduleCheck(ctx, report, cfg.Region, deploy.New(cfg), store.ScheduledLaunchScheduleNames)
+	appendArtifactBucketCheck(ctx, report, *acct.Account, deploy.New(cfg), regionalArtifactProbe{cfg})
 
 	if err := writeDoctorReport(cmd.OutOrStdout(), report, getOutputFormat()); err != nil {
 		return err

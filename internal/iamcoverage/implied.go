@@ -73,6 +73,11 @@ var impliedRules = concatRules(
 	[]impliedRule{
 		{Op: "s3:CreateBucket", Field: "CreateBucketConfiguration.Tags", Actions: []string{"s3:TagResource"}},
 		{Op: sdkRoot + "feature/s3/transfermanager.UploadObject", Field: "Tagging", Actions: []string{"s3:PutObjectTagging"}},
+		// Deleting a specific object version is s3:DeleteObjectVersion, not
+		// s3:DeleteObject (Service Authorization Reference, Amazon S3; S3 user
+		// guide, "Deleting object versions"). DeleteObjects authorizes each
+		// ObjectIdentifier, so one carrying a VersionId needs it (#264).
+		{Op: "s3:DeleteObjects", Field: "Delete.Objects.VersionId", Actions: []string{"s3:DeleteObjectVersion"}},
 	},
 )
 

@@ -43,7 +43,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/aws-sdk-go-v2/service/scheduler"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 
@@ -132,7 +131,7 @@ var deployCapabilities = []cfntypes.Capability{
 // instant.
 type Deployer struct {
 	cfn     cfnAPI
-	s3      *s3.Client
+	s3      s3API
 	lambda  lambdaAPI
 	sns     snsAPI
 	sched   schedulerAPI
@@ -161,7 +160,7 @@ func New(cfg aws.Config) *Deployer {
 // The order is load-bearing:
 //
 //  1. ensureBucket + uploadArtifact — the code has to be in S3 before anything can
-//     point at it. uploadArtifact hands back the zip's base64 SHA-256 so a re-run
+//     point at it. The default bucket is tagged lagotto-managed (#264, bucket.go). uploadArtifact hands back the zip's base64 SHA-256 so a re-run
 //     with unchanged code can skip the code push.
 //  2. EnsureAlertsTopic — its ARN is an INPUT to the function's SNS_TOPIC_ARN, so
 //     the topic must exist first. Using the ARN the topic call actually returned
@@ -186,13 +185,18 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) (*Result, error) {
 	if opts.Region == "" {
 		return nil, fmt.Errorf("deploy: Region is required (the poller's ARNs are derived from it)")
 	}
+	// Only the derived default bucket is lagotto-managed (#264): tagged, and so
+	// deletable by Teardown. A user-supplied --lambda-bucket is left alone, even
+	// when it happens to be spelled like the default.
 	bucket := opts.Bucket
-	if bucket == "" {
+	managed := bucket == ""
+	if managed {
 		bucket = DefaultBucketName(opts.AccountID, opts.Region)
 	}
 	key := LambdaObjectKey(opts.Version)
 
-	if err := d.ensureBucket(ctx, bucket, opts.Region); err != nil {
+	bucketAction, err := d.ensureBucket(ctx, bucket, opts.Region, opts.AccountID, managed)
+	if err != nil {
 		return nil, err
 	}
 	digest, err := d.uploadArtifact(ctx, bucket, key, opts.Version)
@@ -245,6 +249,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) (*Result, error) {
 			"ScheduledTableName":        orDefault(opts.ScheduledTable, DefaultScheduledTable),
 		},
 		Actions: []string{
+			fmt.Sprintf("artifact bucket %s: %s", bucket, bucketAction),
 			fmt.Sprintf("SNS topic %s: ensured", AlertsTopicName),
 			fmt.Sprintf("Lambda %s: %s", PollerFunctionName, fnAction),
 			fmt.Sprintf("schedule %s: %s", PollerScheduleName, schedAction),
@@ -268,9 +273,9 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) (*Result, error) {
 //   - Both IAM roles. runtimeiam owns them since #146 and the Scheduler invoke
 //     role is shared with the #49 per-launch schedules, so deleting it here would
 //     break a pending `lagotto launch --at`.
-//   - The artifact bucket. ensureBucket creates it OUTSIDE the stack, so even the
-//     old DeleteStack never removed it; changing that silently would be a
-//     surprising data deletion.
+//   - The artifact bucket. DeleteArtifactBucket (bucket.go, #264) is its
+//     deleter, called separately by `deploy --teardown` once this succeeds,
+//     and only for a lagotto-managed default bucket.
 //   - Per-launch lagotto-launch-sl-* schedules. Each belongs to a scheduled
 //     launch recorded in the retained scheduled-launches table, and a
 //     redeployed poller fires them again; deleting them here would strand
@@ -324,24 +329,6 @@ func orDefault(v, d string) string {
 		return d
 	}
 	return v
-}
-
-func (d *Deployer) ensureBucket(ctx context.Context, bucket, region string) error {
-	_, err := d.s3.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(bucket)})
-	if err == nil {
-		return nil // already exists (and we can reach it)
-	}
-	in := &s3.CreateBucketInput{Bucket: aws.String(bucket)}
-	// us-east-1 must NOT set a LocationConstraint; every other region must.
-	if region != "" && region != "us-east-1" {
-		in.CreateBucketConfiguration = &s3types.CreateBucketConfiguration{
-			LocationConstraint: s3types.BucketLocationConstraint(region),
-		}
-	}
-	if _, err := d.s3.CreateBucket(ctx, in); err != nil {
-		return fmt.Errorf("create artifact bucket %s: %w", bucket, err)
-	}
-	return nil
 }
 
 // uploadArtifact downloads the published poller zip and puts it in the artifact
