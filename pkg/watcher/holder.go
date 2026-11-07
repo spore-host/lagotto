@@ -39,6 +39,12 @@ type Holder struct {
 	// them, so the reservation can be launched into without creating a subnet
 	// first (#209). Nil, or an empty result (lookup failed), skips the check.
 	launchableAZs func(ctx context.Context, region string) map[string]bool
+	// describeReservation backs the #239 landing check: a created reservation
+	// counts as held only once DescribeCapacityReservations shows it "active".
+	// Nil = no landing check, so a hold is matched at once, as before #239 (the
+	// test holders that predate it). Set in NewHolder; needs only
+	// ec2:DescribeCapacityReservations, already granted.
+	describeReservation func(ctx context.Context, region, reservationID string) (landingCheck, error)
 }
 
 // NewHolder creates a Holder.
@@ -53,6 +59,9 @@ func NewHolder(cfg aws.Config) *Holder {
 		c := h.cfg.Copy()
 		c.Region = region
 		return ec2.NewFromConfig(c)
+	}
+	h.describeReservation = func(ctx context.Context, region, id string) (landingCheck, error) {
+		return describeReservationState(ctx, h.releaseClient(region), id)
 	}
 	return h
 }
@@ -137,6 +146,9 @@ func (h *Holder) Hold(ctx context.Context, w *Watch, m *MatchResult) error {
 	}
 
 	m.ReservationID = *result.CapacityReservation.CapacityReservationId
+	// The state at create (#239): "active" is held now; anything else ("pending")
+	// is checked on later cycles before the watch counts it as held.
+	m.ReservationState = string(result.CapacityReservation.State)
 	m.ActionTaken = "held"
 	return nil
 }

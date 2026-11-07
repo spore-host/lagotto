@@ -197,6 +197,10 @@ type PollSummary struct {
 	// (#153). These watches stay ACTIVE and keep their running workers, so they're
 	// counted separately from Retrying (capacity dry) and Failed (terminal).
 	QuotaCapped int `json:"quota_capped"`
+	// Landing counts spawn/hold watches whose launch or reservation is waiting to
+	// land (#239): started this cycle, or still pending. They stay ACTIVE and are
+	// checked, not relaunched, next cycle.
+	Landing int `json:"landing"`
 }
 
 // Total returns the number of watches the sweep accounted for.
@@ -253,6 +257,16 @@ func (p *Poller) PollAll(ctx context.Context) (*PollSummary, error) {
 		// sees every watch.
 		if !p.filter.matches(w) {
 			continue
+		}
+		// A watch whose launch or hold is waiting to land (#239) is checked, never
+		// relaunched. It comes before the expiry check so a launch that landed
+		// before the deadline still counts. Only a landing that failed (the watch is
+		// hunting again) goes on, to expire or to a new attempt this cycle.
+		if w.Landing() {
+			if !p.pollLanding(ctx, w, summary) {
+				summary.Watched++
+				continue
+			}
 		}
 		if !w.ExpiresAt.IsZero() && now.After(w.ExpiresAt) {
 			if err := p.store.UpdateWatchStatus(ctx, w.WatchID, StatusExpired); err != nil {
@@ -347,6 +361,9 @@ func (p *Poller) reconcileEmailSubscriptions(ctx context.Context, active []Watch
 // match events (launched or notified). Useful for testing.
 func (p *Poller) PollWatch(ctx context.Context, w *Watch) ([]MatchResult, error) {
 	summary := &PollSummary{}
+	if w.Landing() && !p.pollLanding(ctx, w, summary) {
+		return summary.Matches, nil
+	}
 	if normalizeService(w.Service) == ServiceSageMaker {
 		p.pollSageMakerWatch(ctx, w, summary)
 		return summary.Matches, nil
@@ -881,6 +898,12 @@ func (p *Poller) recordOutcome(ctx context.Context, w *Watch, m *MatchResult, fa
 			fmt.Fprintf(os.Stderr, "Watch %s: %d consecutive unclassified failures; stopping watch\n", w.WatchID, n)
 		}
 		failure = FailureTerminal
+	}
+
+	// A launch or hold that has not landed yet is not a match (#239): record it
+	// as landing (one write, heartbeat included) and check it next cycle.
+	if failure == FailureNone && p.startLanding(ctx, w, m, now, summary) {
+		return
 	}
 
 	// Success clears the streak so it persists via RecordMatch's PutWatch.

@@ -146,16 +146,17 @@ func (s *Spawner) Snipe(ctx context.Context, target SnipeTarget, opts SnipeOptio
 				return nil, err
 			}
 
-			instanceID, az, err := s.launchAcrossAZs(ctx, bt.cfg, bt.target.AZs, bt.customUserData)
+			res, err := s.launchAcrossAZs(ctx, bt.cfg, bt.target.AZs, bt.customUserData)
 			if err == nil {
 				return &MatchResult{
 					Region:           bt.target.Region,
-					AvailabilityZone: az,
+					AvailabilityZone: res.AZ,
 					CandidateAZs:     bt.target.AZs,
 					InstanceType:     bt.target.InstanceType,
 					IsSpot:           bt.target.Spot,
 					MatchedAt:        now(),
-					InstanceID:       instanceID,
+					InstanceID:       res.InstanceID,
+					InstanceState:    res.State,
 					ActionTaken:      "sniped",
 				}, nil
 			}
