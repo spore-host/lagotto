@@ -169,3 +169,65 @@ func TestRunCancelGroup_Substrate(t *testing.T) {
 		t.Error("cancelled an ended group with no active member")
 	}
 }
+
+// `lagotto status <group>` against the emulator, in text and JSON, and the
+// join refusal for another caller's group.
+func TestRunGroupStatus_Substrate(t *testing.T) {
+	env := testutil.SubstrateServer(t)
+	env.CreateWatchesTable(t, watchesTable)
+	env.CreateHistoryTable(t, historyTable)
+	ctx := context.Background()
+	stsClient := sts.NewFromConfig(env.AWSConfig)
+	id, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	me := aws.ToString(id.Arn)
+	store := watcher.NewStore(env.AWSConfig, watchesTable, historyTable)
+	now := time.Now().UTC()
+	for _, w := range []*watcher.Watch{
+		{WatchID: "w-a", UserID: me, Group: "gpu", Status: watcher.StatusActive, Action: watcher.ActionSpawn, InstanceTypePattern: "c7g.large", Regions: []string{"us-east-1"}},
+		{WatchID: "w-b", UserID: me, Group: "gpu", GroupOnExtra: watcher.GroupOnExtraKeep, Status: watcher.StatusActive, Action: watcher.ActionSpawn, InstanceTypePattern: "c7g.xlarge", Regions: []string{"us-east-1"},
+			LastError: "capacity: InsufficientInstanceCapacity: none", LastErrorAt: now},
+	} {
+		g, err := joinWatchGroup(ctx, store, w)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if line := groupJoinedLine(g, w); !strings.Contains(line, "gpu (") {
+			t.Errorf("joined line = %q", line)
+		}
+		w.CreatedAt, w.ExpiresAt = now, now.Add(time.Hour)
+		if err := store.PutWatch(ctx, w); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := joinWatchGroup(ctx, store, &watcher.Watch{WatchID: "w-x", UserID: "arn:aws:iam::000000000000:user/bob", Group: "gpu"}); err == nil ||
+		!strings.Contains(err.Error(), "belongs to another caller") {
+		t.Errorf("another caller joined: %v", err)
+	}
+
+	var out, errOut bytes.Buffer
+	if err := runGroupStatus(ctx, &out, &errOut, store, stsClient, "gpu"); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	for _, want := range []string{"State:    hunting (2 of 2 member(s) active)", "w-a", "w-b", "keep", "w-b last error: capacity"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("status lacks %q:\n%s", want, got)
+		}
+	}
+	prev := outputFormat
+	outputFormat = "json"
+	t.Cleanup(func() { outputFormat = prev })
+	out.Reset()
+	if err := runGroupStatus(ctx, &out, &errOut, store, stsClient, "g-gpu"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `"members"`) || !strings.Contains(out.String(), `"state": "hunting"`) {
+		t.Errorf("json:\n%s", out.String())
+	}
+	if err := runGroupStatus(ctx, &out, &errOut, store, stsClient, "nope"); err == nil {
+		t.Error("status of a missing group")
+	}
+}
