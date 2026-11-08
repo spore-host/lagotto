@@ -325,21 +325,34 @@ func (st *Store) JoinGroup(ctx context.Context, name, owner, watchID string, ttl
 		ttl = g.TTLTimestamp
 	}
 	now := time.Now().UTC()
+	values := map[string]types.AttributeValue{
+		":n":   avS(name),
+		":o":   avS(owner),
+		":h":   avS(string(GroupHunting)),
+		":now": avS(now.Format(time.RFC3339Nano)),
+		":ttl": &types.AttributeValueMemberN{Value: strconv.FormatInt(ttl, 10)},
+		":m":   &types.AttributeValueMemberSS{Value: []string{watchID}},
+	}
+	// Two writes rather than one with if_not_exists, which Substrate does not
+	// evaluate. The condition keeps each honest: create only a group that
+	// does not exist (group_owner, not the key: Substrate evaluates
+	// attribute_not_exists(<hash key>) as false on an UpdateItem that creates
+	// the item), join only one that is still ours and hunting.
+	cond := "group_owner = :o AND group_state = :h"
+	set := "SET updated_at = :now, ttl_timestamp = :ttl ADD group_members :m"
+	if g == nil {
+		cond = "attribute_not_exists(group_owner)"
+		set = "SET group_name = :n, group_owner = :o, group_state = :h, created_at = :now, " +
+			"updated_at = :now, ttl_timestamp = :ttl ADD group_members :m"
+	} else {
+		delete(values, ":n")
+	}
 	_, err = st.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-		TableName:           &st.watchesTable,
-		Key:                 groupKeyAttr(name),
-		ConditionExpression: aws.String("attribute_not_exists(watch_id) OR (group_owner = :o AND group_state = :h)"),
-		UpdateExpression: aws.String("SET group_name = :n, group_owner = if_not_exists(group_owner, :o), " +
-			"group_state = if_not_exists(group_state, :h), created_at = if_not_exists(created_at, :now), " +
-			"updated_at = :now, ttl_timestamp = :ttl ADD group_members :m"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":n":   avS(name),
-			":o":   avS(owner),
-			":h":   avS(string(GroupHunting)),
-			":now": avS(now.Format(time.RFC3339Nano)),
-			":ttl": &types.AttributeValueMemberN{Value: strconv.FormatInt(ttl, 10)},
-			":m":   &types.AttributeValueMemberSS{Value: []string{watchID}},
-		},
+		TableName:                 &st.watchesTable,
+		Key:                       groupKeyAttr(name),
+		ConditionExpression:       aws.String(cond),
+		UpdateExpression:          aws.String(set),
+		ExpressionAttributeValues: values,
 	})
 	if err != nil {
 		if isConditionFailed(err) {
@@ -535,6 +548,22 @@ func (st *Store) CancelGroupMember(ctx context.Context, watchID, reason string) 
 		return false, fmt.Errorf("cancel group member %s: %w", watchID, err)
 	}
 	return true, nil
+}
+
+// setCancelledReason replaces a cancelled watch's tombstone reason.
+func (st *Store) setCancelledReason(ctx context.Context, watchID, reason string) error {
+	_, err := st.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName:                 &st.watchesTable,
+		Key:                       map[string]types.AttributeValue{"watch_id": avS(watchID)},
+		ConditionExpression:       aws.String("attribute_exists(#st)"),
+		UpdateExpression:          aws.String("SET cancelled_reason = :r"),
+		ExpressionAttributeNames:  map[string]string{"#st": "status"},
+		ExpressionAttributeValues: map[string]types.AttributeValue{":r": avS(reason)},
+	})
+	if err != nil {
+		return fmt.Errorf("set cancelled reason on %s: %w", watchID, err)
+	}
+	return nil
 }
 
 // GroupMembers loads the group's member watches that still exist, in id order.

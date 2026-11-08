@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Watch groups: the first member to land cancels its siblings** (#287).
+  `lagotto watch … --group <name>` creates or joins a group; members can
+  differ in pattern, regions, Spot, action (spawn or hold) and spawn config.
+  - Before it launches or reserves, a member claims the group's slot with a
+    DynamoDB conditional write; a member that can't launches nothing that
+    cycle. The winner is decided at landing (`running`, or an `active`
+    reservation), so a launch that dies in pending frees the slot and the group
+    keeps hunting.
+  - When a member wins, every other active member is cancelled with a
+    tombstone (`cancelled_reason`: "group <name> landed by w-… (i-…, type,
+    AZ)", shown by `lagotto status`) and a `group_cancelled` history row. A
+    sibling's pending reservation is released. The group sends one
+    notification, to every member's channels, in place of the winner's own
+    (webhook/SNS `"event": "group_landed"`, with `group` and `cancelled`).
+  - `--group-on-extra terminate|keep` (default `terminate`): a launch that lands
+    after the group was won is terminated through spawn's terminate path (or
+    its reservation released), or kept. Either way the member is cancelled, a
+    `group_extra` history row is written and the member is notified
+    (`"event": "group_extra"`).
+  - `lagotto list` has a `GROUP` column. `lagotto status <group>` shows the
+    group's state (hunting, landed by whom, or cancelled), who holds the slot,
+    each member's status, attempts and last error, and the group's cost
+    exposure: the largest member's, plus the total when a member keeps extras.
+    `lagotto cancel <group>` ends the group and cancels every member.
+  - Not with `--action notify` (deprecated, #283), `--maintain`,
+    `--until-landed` (one acknowledgement clock per group is a follow-up) or
+    `--service sagemaker`. A group belongs to the caller who created it; a
+    group that ended is re-armed when a new member joins.
+  - The group is one item in the watches table (`watch_id` `g-<name>`) with no
+    `status` or `user_id` attribute, so it is in neither GSI: no poller, no
+    `lagotto list` and no spawn dashboard sees it as a watch. No new table, no
+    IAM change; its deleter is the table's TTL and `lagotto teardown`.
+  - Pollers before this release ignore the group fields and poll each member as
+    an independent watch. `lagotto watch --group` warns when the deployed
+    poller is older (`arm.CheckGroupPoller`, `arm.GroupPollerWarning`).
 - **The until-landed reminder-poller warning is exported** (#282) for watch
   creators other than the CLI, such as spore-host-mcp's `lagotto_watch`,
   `lagotto_ack` and `lagotto_status`. `arm.CheckReminderPoller(ctx, inspector,

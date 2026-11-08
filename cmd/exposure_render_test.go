@@ -51,13 +51,13 @@ func TestListTable_Exposure(t *testing.T) {
 	}
 	var out bytes.Buffer
 	writeWatchTable(&out, expWatches(t), hbNow, false)
-	row := "%-12s %-10s %-15s %-20s %-20s %-25s %-6v %-10s %-16s %-25s %-9s %5s %-8s"
+	row := "%-12s %-10s %-15s %-12s %-20s %-20s %-25s %-6v %-10s %-16s %-25s %-9s %5s %-8s"
 	line := func(id, pattern string, spot bool, action, exposure string) string {
-		return strings.TrimRight(fmt.Sprintf(row, id, "active", "-", "user/alice", pattern, "[us-east-1]", spot, action, exposure,
+		return strings.TrimRight(fmt.Sprintf(row, id, "active", "-", "-", "user/alice", pattern, "[us-east-1]", spot, action, exposure,
 			"2026-11-06T13:00:00Z", "1m", "0", "-"), " ")
 	}
 	want := strings.Join([]string{
-		strings.TrimRight(fmt.Sprintf(row, "WATCH ID", "STATUS", "PROJECT", "OWNER", "PATTERN", "REGIONS", "SPOT", "ACTION", "EXPOSURE", "EXPIRES",
+		strings.TrimRight(fmt.Sprintf(row, "WATCH ID", "STATUS", "PROJECT", "GROUP", "OWNER", "PATTERN", "REGIONS", "SPOT", "ACTION", "EXPOSURE", "EXPIRES",
 			"LAST POLL", "TRIES", "LAST ERR"), " "),
 		line("w-spawn000", "c7g.large", false, "spawn", "≤"+money(rate)+"/hr*"),
 		line("w-fleet000", "c7g.large", false, "spawn×4", "≤"+money(4*rate)+"/hr*"),

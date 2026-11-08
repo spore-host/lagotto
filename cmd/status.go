@@ -16,10 +16,16 @@ import (
 )
 
 var statusCmd = &cobra.Command{
-	Use:   "status <watch-id>",
-	Short: "Show details of a watch",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runStatus,
+	Use:   "status <watch-id | group>",
+	Short: "Show details of a watch, or of a watch group and its members",
+	Long: `Show details of a watch (w-…).
+
+Given a watch group's name (lagotto watch --group), show the group's state
+(hunting, landed by which member, or cancelled), who holds its launch slot,
+its cost exposure (the largest member's, since only one is meant to land),
+and each member's status, attempts and last error.`,
+	Args: cobra.ExactArgs(1),
+	RunE: runStatus,
 }
 
 func init() {
@@ -36,6 +42,11 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	store := watcher.NewStore(cfg, watchesTable, historyTable)
+
+	// A watch group (#287): each member's state and the group's.
+	if isGroupArg(watchID) {
+		return runGroupStatus(ctx, cmd.OutOrStdout(), os.Stderr, store, sts.NewFromConfig(cfg), watchID)
+	}
 
 	w, err := getWatchOwned(ctx, store, sts.NewFromConfig(cfg), watchID)
 	if err != nil {
@@ -65,7 +76,13 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	out := cmd.OutOrStdout()
 	_, _ = fmt.Fprintf(out, "Watch:    %s\n", w.WatchID)
 	_, _ = fmt.Fprintf(out, "Status:   %s\n", w.Status)
+	if w.CancelledReason != "" {
+		_, _ = fmt.Fprintf(out, "Cancelled: %s\n", w.CancelledReason)
+	}
 	writeLanding(out, w, time.Now().UTC())
+	if w.Group != "" {
+		_, _ = fmt.Fprintf(out, "Group:    %s (extra landing: %s; lagotto status %s)\n", w.Group, extraVerb(w.GroupOnExtraPolicy()), w.Group)
+	}
 	if w.Project != "" {
 		_, _ = fmt.Fprintf(out, "Project:  %s\n", w.Project)
 	}

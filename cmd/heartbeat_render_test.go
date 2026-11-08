@@ -17,7 +17,7 @@ var hbNow = time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
 func hbWatches() []watcher.Watch {
 	return []watcher.Watch{
 		{ // healthy hunt, polled 3 minutes ago, last attempt short of capacity
-			WatchID: "w-a660980c", Status: watcher.StatusActive, UserID: "arn:aws:iam::123456789012:user/alice",
+			WatchID: "w-a660980c", Status: watcher.StatusActive, Group: "gpu-hunt", UserID: "arn:aws:iam::123456789012:user/alice",
 			InstanceTypePattern: "p5.48xlarge", Regions: []string{"us-west-2", "us-east-1"}, Action: watcher.ActionSpawn,
 			CreatedAt: hbNow.Add(-72 * time.Hour), ExpiresAt: hbNow.Add(30 * 24 * time.Hour), LastPolledAt: hbNow.Add(-3 * time.Minute),
 			Attempts: 812, LastAttemptAt: hbNow.Add(-3 * time.Minute),
@@ -49,18 +49,18 @@ func hbWatches() []watcher.Watch {
 func TestListTable_Heartbeat(t *testing.T) {
 	var out bytes.Buffer
 	writeWatchTable(&out, hbWatches(), hbNow, false)
-	want := `WATCH ID     STATUS     PROJECT         OWNER                PATTERN              REGIONS                   SPOT   ACTION     EXPOSURE         EXPIRES                   LAST POLL TRIES LAST ERR
-w-a660980c   active     -               user/alice           p5.48xlarge          [us-west-2 us-east-1]     false  spawn      unknown          2026-12-06T12:00:00Z      3m          812 capacity
-w-4a1e61d6   active     fieldwork       user/alice           g6e.*                [us-east-1]               false  notify     none             2026-11-07T12:00:00Z      2h!           0 search
-w-0ld00000   active     -               user/alice           c7g.large            [us-west-2]               false  notify     none             2026-11-06T13:00:00Z      never!        0 -
-w-done0000   matched    -               user/alice           g7.24xlarge          [eu-north-1 us-west-2]    false  spawn      unknown          2026-11-05T12:00:00Z      9d            2 quota
+	want := `WATCH ID     STATUS     PROJECT         GROUP        OWNER                PATTERN              REGIONS                   SPOT   ACTION     EXPOSURE         EXPIRES                   LAST POLL TRIES LAST ERR
+w-a660980c   active     -               gpu-hunt     user/alice           p5.48xlarge          [us-west-2 us-east-1]     false  spawn      unknown          2026-12-06T12:00:00Z      3m          812 capacity
+w-4a1e61d6   active     fieldwork       -            user/alice           g6e.*                [us-east-1]               false  notify     none             2026-11-07T12:00:00Z      2h!           0 search
+w-0ld00000   active     -               -            user/alice           c7g.large            [us-west-2]               false  notify     none             2026-11-06T13:00:00Z      never!        0 -
+w-done0000   matched    -               -            user/alice           g7.24xlarge          [eu-north-1 us-west-2]    false  spawn      unknown          2026-11-05T12:00:00Z      9d            2 quota
 `
 	if got := out.String(); got != want {
 		t.Errorf("list table:\n--- got\n%s--- want\n%s", got, want)
 	}
-	// Width stays reasonable: the heartbeat adds 25 columns to the old 147-wide row, EXPIRES is 25 wide for "until landed (ack in 12d)", and EXPOSURE adds 17 (#239).
+	// Width stays reasonable: the heartbeat adds 25 columns to the old 147-wide row, EXPIRES is 25 wide for "until landed (ack in 12d)", and EXPOSURE adds 17 (#239), GROUP 13 (#287).
 	for _, line := range strings.Split(strings.TrimRight(out.String(), "\n"), "\n") {
-		if n := len([]rune(line)); n > 194 {
+		if n := len([]rune(line)); n > 207 {
 			t.Errorf("row is %d wide: %q", n, line)
 		}
 	}

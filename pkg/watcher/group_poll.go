@@ -47,13 +47,13 @@ func (p *Poller) groupEnded(ctx context.Context, w *Watch, summary *PollSummary)
 		return false
 	}
 	if g == nil {
-		p.cancelMember(ctx, w, fmt.Sprintf("group %s no longer exists", w.Group), nil, summary)
+		p.cancelMember(ctx, w, fmt.Sprintf("group %s no longer exists", w.Group), summary)
 		return true
 	}
 	if g.State == GroupHunting || g.WinnerWatch == w.WatchID {
 		return false
 	}
-	p.cancelMember(ctx, w, g.CancelReason(), g, summary)
+	p.cancelMember(ctx, w, g.CancelReason(), summary)
 	return true
 }
 
@@ -75,10 +75,10 @@ func (p *Poller) claimGroupSlot(ctx context.Context, w *Watch, summary *PollSumm
 	case errors.Is(err, ErrGroupClosed):
 		p.cacheGroup(w.Group, g)
 		if g.WinnerWatch != w.WatchID {
-			p.cancelMember(ctx, w, g.CancelReason(), g, summary)
+			p.cancelMember(ctx, w, g.CancelReason(), summary)
 		}
 	case errors.Is(err, ErrGroupMissing):
-		p.cancelMember(ctx, w, fmt.Sprintf("group %s no longer exists", w.Group), nil, summary)
+		p.cancelMember(ctx, w, fmt.Sprintf("group %s no longer exists", w.Group), summary)
 	default:
 		fmt.Fprintf(os.Stderr, "Warning: watch %s: %v; launching nothing this cycle\n", w.WatchID, err)
 	}
@@ -97,8 +97,12 @@ func (p *Poller) releaseGroupSlot(ctx context.Context, w *Watch) {
 }
 
 // cancelMember cancels a member whose group ended, with its tombstone and a
-// group_cancelled history row. g may be nil (the group is gone).
-func (p *Poller) cancelMember(ctx context.Context, w *Watch, reason string, _ *WatchGroup, summary *PollSummary) bool {
+// group_cancelled history row. A member still landing has its pending launch
+// or hold given up per its --group-on-extra policy, after the cancel (a
+// conditional write that succeeds once) claimed it, and the tombstone says
+// what happened to it.
+func (p *Poller) cancelMember(ctx context.Context, w *Watch, reason string, summary *PollSummary) bool {
+	region, instanceID, reservationID := w.PendingRegion, w.PendingInstanceID, w.PendingReservationID
 	ok, err := p.store.CancelGroupMember(ctx, w.WatchID, reason)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: watch %s: could not cancel it for its group: %v\n", w.WatchID, err)
@@ -107,13 +111,22 @@ func (p *Poller) cancelMember(ctx context.Context, w *Watch, reason string, _ *W
 	if !ok {
 		return false
 	}
+	p.markGroupCancelled(w)
+	if instanceID+reservationID != "" {
+		reason += "; its " + p.resourceFate(ctx, w, region, instanceID, reservationID)
+		if err := p.store.setCancelledReason(ctx, w.WatchID, reason); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: watch %s: %v\n", w.WatchID, err)
+		}
+	}
 	now := p.clock()
 	w.Status, w.CancelledReason, w.UpdatedAt = StatusCancelled, reason, now
 	w.clearLanding()
 	fmt.Fprintf(os.Stderr, "Watch %s: cancelled: %s\n", w.WatchID, reason)
 	m := &MatchResult{
-		WatchID: w.WatchID, UserID: w.UserID, Region: firstRegion(w.Regions), InstanceType: w.InstanceTypePattern,
-		IsSpot: w.Spot, MatchedAt: now, ActionTaken: ActionGroupCancelled, GroupDetail: reason,
+		WatchID: w.WatchID, UserID: w.UserID, Region: firstNonEmpty(region, firstRegion(w.Regions)),
+		InstanceType: w.InstanceTypePattern, IsSpot: w.Spot, MatchedAt: now,
+		ActionTaken: ActionGroupCancelled, GroupDetail: reason,
+		InstanceID: instanceID, ReservationID: reservationID,
 	}
 	if err := p.store.RecordHistory(ctx, m); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to record group cancellation for %s: %v\n", w.WatchID, err)
@@ -193,9 +206,24 @@ func (p *Poller) resourceFate(ctx context.Context, w *Watch, region, instanceID,
 // (keep), then cancels the member with its tombstone, writes a group_extra
 // history row and notifies the member's channels.
 func (p *Poller) handleExtraLanding(ctx context.Context, w *Watch, m *MatchResult, g *WatchGroup, now time.Time, summary *PollSummary) {
+	// Claim the outcome first: the conditional cancel succeeds once, so a
+	// sibling cancel (or another poller) that resolved this watch already is
+	// not repeated. The reason is completed below, once the fate is known.
+	ok, err := p.store.CancelGroupMember(ctx, w.WatchID, g.CancelReason()+"; this watch's launch landed too late")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: watch %s: could not cancel it after its extra landing: %v (will retry)\n", w.WatchID, err)
+		return
+	}
+	if !ok {
+		return
+	}
+	p.markGroupCancelled(w)
 	fate := p.resourceFate(ctx, w, m.Region, m.InstanceID, m.ReservationID)
 	reason := fmt.Sprintf("%s; this watch's launch landed too late and its %s", g.CancelReason(), fate)
 	fmt.Fprintf(os.Stderr, "Watch %s: extra landing: %s\n", w.WatchID, reason)
+	if err := p.store.setCancelledReason(ctx, w.WatchID, reason); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: watch %s: could not record what happened to its extra landing: %v\n", w.WatchID, err)
+	}
 
 	row := *m
 	row.ActionTaken, row.GroupDetail = ActionGroupExtra, reason
@@ -204,9 +232,6 @@ func (p *Poller) handleExtraLanding(ctx context.Context, w *Watch, m *MatchResul
 	}
 	if err := p.store.RecordHistory(ctx, &row); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to record extra landing for %s: %v\n", w.WatchID, err)
-	}
-	if _, err := p.store.CancelGroupMember(ctx, w.WatchID, reason); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: watch %s: could not cancel it after its extra landing: %v\n", w.WatchID, err)
 	}
 	w.clearLanding()
 	w.Status, w.CancelledReason, w.UpdatedAt = StatusCancelled, reason, now
@@ -243,11 +268,7 @@ func (p *Poller) finishGroup(ctx context.Context, winner *Watch, m *MatchResult,
 			if sw == nil || sw.Status != StatusActive {
 				continue
 			}
-			reason := g.CancelReason()
-			if sw.Landing() {
-				reason += "; its " + p.resourceFate(ctx, sw, sw.PendingRegion, sw.PendingInstanceID, sw.PendingReservationID)
-			}
-			if p.cancelMember(ctx, sw, reason, g, summary) {
+			if p.cancelMember(ctx, sw, g.CancelReason(), summary) {
 				cancelled = append(cancelled, sw)
 			}
 		}
@@ -338,4 +359,11 @@ func (p *Poller) forceLanding(ctx context.Context, w *Watch, m *MatchResult, now
 	w.noteAttempt(&attempt{}, now)
 	summary.Landing++
 	return true
+}
+
+func (p *Poller) markGroupCancelled(w *Watch) {
+	if p.groupCancelled == nil {
+		p.groupCancelled = map[string]bool{}
+	}
+	p.groupCancelled[w.WatchID] = true
 }

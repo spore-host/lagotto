@@ -92,6 +92,9 @@ type Poller struct {
 	throttle *ThrottleBook
 	// groups caches each watch group read this sweep (#287); reset by PollAll.
 	groups map[string]*WatchGroup
+	// groupCancelled marks the watches a group cancelled this sweep (#287),
+	// so the sweep's own copy of a sibling is not polled after it.
+	groupCancelled map[string]bool
 	// notifyGroupLanded / notifyGroupExtra override where a #287 group's
 	// landed notification, and a member's extra-landing notice, go — same
 	// test seam pattern.
@@ -264,7 +267,7 @@ func (p *Poller) PollAll(ctx context.Context) (*PollSummary, error) {
 		fmt.Fprintf(os.Stderr, "Polling %d active watches\n", len(watches))
 	}
 	// Watch groups are re-read each sweep (#287).
-	p.groups = nil
+	p.groups, p.groupCancelled = nil, nil
 	// Rebuild the account's throttle state from every active watch (#254),
 	// not only this poller's scope: a throttle is the account's, whoever
 	// earned it.
@@ -312,6 +315,10 @@ func (p *Poller) PollAll(ctx context.Context) (*PollSummary, error) {
 		// project's watch in a shared account. An unscoped poller (hosted Lambda)
 		// sees every watch.
 		if !p.filter.matches(w) {
+			continue
+		}
+		// A sibling its group cancelled earlier in this sweep (#287).
+		if p.groupCancelled[w.WatchID] {
 			continue
 		}
 		// A watch whose launch or hold is waiting to land (#239) is checked, never
@@ -1300,6 +1307,9 @@ func (p *Poller) pollGroup(ctx context.Context, regions []string, pattern string
 	now := time.Now().UTC()
 
 	for _, w := range watches {
+		if p.groupCancelled[w.WatchID] {
+			continue // its group cancelled it earlier in this sweep (#287)
+		}
 		// Every candidate this watch matches, one per (type, region), cheapest
 		// first. The head is the bestMatch the pre-#238 poller picked.
 		candidates := rankedCandidates(w, results, spotResults, spot, now)
