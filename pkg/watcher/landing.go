@@ -90,6 +90,10 @@ type landingCheck struct {
 	// timestamp of the transition, e.g. "Server.InternalError (2026-11-06
 	// 23:49:12 GMT)" (#255). Empty for a reservation.
 	TransitionReason string
+	// SporedSeen: the instance carries a tag spored writes once it is up
+	// (spawn:last-heartbeat or spawn:spored-version, #255). Read from the same
+	// DescribeInstances, so it costs no extra call and no extra IAM.
+	SporedSeen bool
 	// NotFound: the describe succeeded but does not know the resource.
 	NotFound bool
 }
@@ -469,6 +473,9 @@ func (p *Poller) completeLanding(ctx context.Context, w *Watch, chk landingCheck
 		m.InstanceState, m.ActionTaken = chk.State, "spawned"
 	}
 	w.clearLanding()
+	if !reservation {
+		p.armSporedCheck(w, m, chk.SporedSeen, now)
+	}
 	w.ConsecutiveFailures = 0
 	// RecordMatch writes the whole record, so the pending fields and the marker
 	// go with it. If it fails they are still there, and the next cycle retries.
@@ -535,7 +542,8 @@ func (p *Poller) failLanding(ctx context.Context, w *Watch, chk landingCheck, ac
 	// LostAt is when this poller saw the landing fail (#255): MatchedAt stays the
 	// launch time, and EC2 forgets a terminated instance after about an hour, so
 	// the history row is the only lasting record of when and why it went.
-	m.LostAt = now
+	lostAt := now
+	m.LostAt = &lostAt
 	if reservation {
 		m.ReservationState = chk.State
 	} else {
@@ -698,6 +706,7 @@ func describeInstanceState(ctx context.Context, api instanceDescribeAPI, instanc
 				c.ReasonMessage = aws.ToString(in.StateReason.Message)
 			}
 			c.TransitionReason = aws.ToString(in.StateTransitionReason)
+			c.SporedSeen = hasSporedTag(in.Tags)
 			return c, nil
 		}
 	}

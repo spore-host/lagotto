@@ -714,13 +714,17 @@ func (n *Notifier) NotifyLandingLost(ctx context.Context, w *Watch, m *MatchResu
 	if len(w.NotifyChannels) == 0 {
 		return nil
 	}
-	subject := landingLostSubject(m, stopped)
-	body := landingLostBody(w, m, stopped)
 	payload, err := json.Marshal(landingLostPayload(w, m, stopped))
 	if err != nil {
 		return fmt.Errorf("marshal lost-launch payload: %w", err)
 	}
+	return n.fanOut(ctx, w, landingLostSubject(m, stopped), landingLostBody(w, m, stopped), payload)
+}
 
+// fanOut sends one event to every channel on the watch: the human subject and
+// body to email, the JSON payload to a webhook (re-validated at send time, as
+// in Notify) or the user's own SNS topic. Unknown channel types are skipped.
+func (n *Notifier) fanOut(ctx context.Context, w *Watch, subject, body string, payload []byte) error {
 	var lastErr error
 	for _, ch := range w.NotifyChannels {
 		var err error
@@ -746,6 +750,72 @@ func (n *Notifier) NotifyLandingLost(ctx context.Context, w *Watch, m *MatchResu
 		}
 	}
 	return lastErr
+}
+
+// NotifySporedUnconfirmed tells the user that a matched spawn's instance is up
+// (or was) but spored never checked in within SporedCheckWindow (#255). It is
+// advisory: lagotto did not terminate the instance. m is the spored_unconfirmed
+// history row; m.SporedDetail says what was seen and what to check.
+func (n *Notifier) NotifySporedUnconfirmed(ctx context.Context, w *Watch, m *MatchResult) error {
+	if len(w.NotifyChannels) == 0 {
+		return nil
+	}
+	payload, err := json.Marshal(sporedUnconfirmedPayload(w, m))
+	if err != nil {
+		return fmt.Errorf("marshal spored_unconfirmed payload: %w", err)
+	}
+	return n.fanOut(ctx, w, sporedUnconfirmedSubject(m), sporedUnconfirmedBody(w, m), payload)
+}
+
+// sporedUnconfirmedSubject renders the subject line. Pure, for tests.
+func sporedUnconfirmedSubject(m *MatchResult) string {
+	return fmt.Sprintf("[lagotto] %s %s in %s: spored has not checked in", m.InstanceType, m.InstanceID, m.Region)
+}
+
+// sporedUnconfirmedBody renders the body. Pure, for tests.
+func sporedUnconfirmedBody(w *Watch, m *MatchResult) string {
+	running := "-"
+	if !m.LandedAt.IsZero() {
+		running = m.LandedAt.Format(time.RFC3339)
+	}
+	return fmt.Sprintf(`The instance lagotto launched for watch %s reached running, but spored
+(the spore.host agent that enforces its TTL and runs its job) has not
+checked in within %s.
+
+Instance ID:       %s
+Instance Type:     %s
+Region:            %s
+Availability Zone: %s
+Running At:        %s
+State Now:         %s
+
+%s
+
+The watch stays matched; lagotto will not check again.
+`,
+		w.WatchID, SporedCheckWindow,
+		m.InstanceID, m.InstanceType, m.Region, dashIfEmpty(m.AvailabilityZone),
+		running, dashIfEmpty(m.InstanceState), m.SporedDetail)
+}
+
+// sporedUnconfirmedPayload is the machine-readable event. Like the other
+// sibling payloads, the "event" key is new to THIS payload only.
+func sporedUnconfirmedPayload(w *Watch, m *MatchResult) map[string]interface{} {
+	payload := map[string]interface{}{
+		"watch_id":          w.WatchID,
+		"event":             ActionSporedUnconfirmed,
+		"instance_id":       m.InstanceID,
+		"instance_type":     m.InstanceType,
+		"region":            m.Region,
+		"availability_zone": m.AvailabilityZone,
+		"state":             m.InstanceState,
+		"detail":            m.SporedDetail,
+		"checked_at":        m.MatchedAt.Format(time.RFC3339),
+	}
+	if !m.LandedAt.IsZero() {
+		payload["running_at"] = m.LandedAt.Format(time.RFC3339)
+	}
+	return payload
 }
 
 // lostWhat names the lost resource: "launch i-..." or "hold cr-...".
@@ -789,7 +859,7 @@ func landingLostBody(w *Watch, m *MatchResult, stopped bool) string {
 		reason = "(EC2 gave no reason)"
 	}
 	lostAt := "-"
-	if !m.LostAt.IsZero() {
+	if m.LostAt != nil {
 		lostAt = m.LostAt.Format(time.RFC3339)
 	}
 	return fmt.Sprintf(`The %s that lagotto launched for watch %s did not land.
@@ -837,7 +907,7 @@ func landingLostPayload(w *Watch, m *MatchResult, stopped bool) map[string]inter
 		"state":             lostState(m),
 		"reason":            m.LandingReason,
 	}
-	if !m.LostAt.IsZero() {
+	if m.LostAt != nil {
 		payload["lost_at"] = m.LostAt.Format(time.RFC3339)
 	}
 	if m.InstanceID != "" {

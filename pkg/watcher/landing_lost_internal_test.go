@@ -58,7 +58,7 @@ func TestLanding255_LostInPendingIsRecordedNotifiedAndRearmed(t *testing.T) {
 	if want := "Server.InternalError: Internal error on launch (transition: Service initiated (2026-11-06 23:49:12 GMT))"; r.LandingReason != want {
 		t.Errorf("landing_reason = %q, want %q", r.LandingReason, want)
 	}
-	if r.LostAt.Before(before) || !r.LostAt.After(r.MatchedAt.Add(-time.Second)) {
+	if r.LostAt == nil || r.LostAt.Before(before) || !r.LostAt.After(r.MatchedAt.Add(-time.Second)) {
 		t.Errorf("lost_at = %v (matched_at %v), want the time the poller saw it", r.LostAt, r.MatchedAt)
 	}
 
@@ -81,7 +81,7 @@ func TestLanding255_TimedOutIsNotified(t *testing.T) {
 		!strings.Contains(h.lost[0].LandingReason, "lagotto terminated it") {
 		t.Errorf("lost = %+v stopped=%v", h.lost, h.lostStop)
 	}
-	if hist := h.history(t, "w-to"); len(hist) != 1 || hist[0].LostAt.IsZero() {
+	if hist := h.history(t, "w-to"); len(hist) != 1 || hist[0].LostAt == nil {
 		t.Errorf("history = %+v, want a timed-out row with lost_at", hist)
 	}
 }
@@ -143,7 +143,7 @@ func lostMatch() *MatchResult {
 		WatchID: "w-255", InstanceType: "g7e.48xlarge", Region: "us-west-2", AvailabilityZone: "us-west-2a",
 		MatchedAt: time.Date(2026, 11, 6, 23, 47, 29, 0, time.UTC), ActionTaken: ActionLandingFailed,
 		InstanceID: "i-0abc", InstanceState: "terminated", LandingReason: "Server.InternalError: Internal error on launch",
-		LostAt: time.Date(2026, 11, 6, 23, 52, 0, 0, time.UTC),
+		LostAt: ptrTime(time.Date(2026, 11, 6, 23, 52, 0, 0, time.UTC)),
 	}
 }
 
@@ -245,3 +245,5 @@ func TestNotifyLandingLost_Publishes(t *testing.T) {
 		t.Errorf("err = %v, want blocked unsafe webhook URL", err)
 	}
 }
+
+func ptrTime(t time.Time) *time.Time { return &t }

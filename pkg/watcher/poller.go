@@ -70,6 +70,9 @@ type Poller struct {
 	// notifyLost overrides where a #255 lost-launch notification goes (a launch
 	// or hold that did not land) — same test seam pattern.
 	notifyLost func(ctx context.Context, w *Watch, m *MatchResult, stopped bool) error
+	// notifySporedUnconfirmed overrides where a #255 spored_unconfirmed notice
+	// goes — same test seam pattern.
+	notifySporedUnconfirmed func(ctx context.Context, w *Watch, m *MatchResult) error
 	// notifyReminder overrides where a #239 until-landed reminder goes — same
 	// test seam pattern.
 	notifyReminder func(ctx context.Context, w *Watch, r ReminderStage, now time.Time) error
@@ -225,6 +228,11 @@ type PollSummary struct {
 	// made none because their candidates are backing off from a throttle
 	// (#254). They stay active and are also counted in Retrying.
 	Throttled int `json:"throttled,omitempty"`
+	// SporedChecks counts matched spawn watches whose spored check-in was
+	// followed up this cycle (#255). They are matched; this is not a transition.
+	SporedChecks int `json:"spored_checks"`
+	// SporedUnconfirmed counts the ones resolved as spored_unconfirmed.
+	SporedUnconfirmed int `json:"spored_unconfirmed"`
 }
 
 // Total returns the number of watches the sweep accounted for.
@@ -245,6 +253,10 @@ func (p *Poller) PollAll(ctx context.Context) (*PollSummary, error) {
 	// not only this poller's scope: a throttle is the account's, whoever
 	// earned it.
 	p.book().StartSweep(p.clock(), watches)
+	// Follow up on matched spawns whose spored has not checked in yet (#255).
+	// Before this sweep's matches, so a check armed this cycle is not described
+	// twice in it.
+	p.pollSporedChecks(ctx, summary)
 
 	// Unsubscribe email addresses no active watch names any more (#240). It runs
 	// on the list loaded BEFORE this sweep's transitions, so an address whose
@@ -856,6 +868,18 @@ func (p *Poller) lostNotifier() func(ctx context.Context, w *Watch, m *MatchResu
 	return nil
 }
 
+// sporedNotifier resolves where a #255 spored_unconfirmed notice goes: the
+// test seam if set, else the wired Notifier, else nowhere.
+func (p *Poller) sporedNotifier() func(ctx context.Context, w *Watch, m *MatchResult) error {
+	if p.notifySporedUnconfirmed != nil {
+		return p.notifySporedUnconfirmed
+	}
+	if p.notifier != nil {
+		return p.notifier.NotifySporedUnconfirmed
+	}
+	return nil
+}
+
 // expiredNotifier resolves where a TTL-expiry notification goes: the test seam if
 // set, else the wired Notifier, else nowhere (a notify-less watch still gets the
 // persisted status=expired tombstone, `lagotto status` and `lagotto history`).
@@ -1145,6 +1169,11 @@ func (p *Poller) recordOutcome(ctx context.Context, w *Watch, m *MatchResult, fa
 	// Success clears the streak so it persists via RecordMatch's PutWatch.
 	if failure == FailureNone {
 		w.ConsecutiveFailures = 0
+		// An instance already running at RunInstances still gets the #255 spored
+		// check-in follow-up, armed on the record RecordMatch writes.
+		if m.ActionTaken == "spawned" && !m.LandedAt.IsZero() {
+			p.armSporedCheck(w, m, false, now)
+		}
 	}
 	// RecordMatch writes the whole record, so the heartbeat travels on it.
 	if !counted {

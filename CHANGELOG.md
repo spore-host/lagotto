@@ -106,6 +106,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     no longer repeated when EC2's message starts with it.
   - `lagotto history` prints a detail line under a lost landing (instance,
     state, reason, when seen) and no longer gives it a wait-to-acquire.
+  - **spored check-in follow-up (advisory).** A spawn watch still matches at
+    `running`. After that the poller checks the instance for spored's
+    `spawn:last-heartbeat` or `spawn:spored-version` tag, once per sweep, for
+    up to 10 minutes. It uses the DescribeInstances the landing check already
+    makes, so no new IAM is needed. If the tag appears, the match row and the
+    watch's `last_match` get `spored_confirmed_at` and nothing else happens.
+    If it does not appear in time, or the instance stops or terminates first,
+    the poller writes a `spored_unconfirmed` history row and notifies the
+    watch's channels (webhook/SNS `event: spored_unconfirmed`). Both give the
+    instance, how long it has been running, and a note that a watch whose
+    spawn config names its own `iam_role` may lack `ec2:CreateTags`. lagotto
+    never terminates the instance, and the follow-up then stops. Holds are not
+    checked. The pending check is stored as three attributes on the matched
+    watch (`spored_check_instance_id`, `_region`, `_until`), which an older
+    poller ignores.
 
 ## [0.68.0] - 2026-11-07
 

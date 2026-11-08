@@ -218,6 +218,9 @@ func renderHistory(out io.Writer, matches []watcher.MatchResult, gaveUp []watche
 			if d := lostDetail(m); d != "" {
 				_, _ = fmt.Fprintf(out, "  %s\n", d)
 			}
+			if m.SporedDetail != "" {
+				_, _ = fmt.Fprintf(out, "  %s\n", m.SporedDetail)
+			}
 		}
 	}
 
@@ -261,7 +264,7 @@ func renderHistory(out io.Writer, matches []watcher.MatchResult, gaveUp []watche
 // not a quota refusal (#238) and not an update's audit row (#257).
 func acquiredSomething(m watcher.MatchResult) bool {
 	return m.ActionTaken != watcher.ActionQuotaInfeasible && m.ActionTaken != watcher.ActionUpdated &&
-		!isLostLanding(m)
+		!isLostLanding(m) && m.ActionTaken != watcher.ActionSporedUnconfirmed
 }
 
 // isLostLanding reports whether a history row is a launch or hold that did not
@@ -287,7 +290,7 @@ func lostDetail(m watcher.MatchResult) string {
 		parts = append(parts, m.LandingReason)
 	}
 	d := strings.Join(parts, ": ")
-	if !m.LostAt.IsZero() {
+	if m.LostAt != nil {
 		d += " (seen " + m.LostAt.Format(time.RFC3339) + ")"
 	}
 	return d

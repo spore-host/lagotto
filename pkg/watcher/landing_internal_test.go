@@ -284,7 +284,7 @@ func TestLanding_TerminatedResumesInSameCycle(t *testing.T) {
 	}
 	// #255: the loss itself is notified, with the reason, and the watch hunts on.
 	if len(h.lost) != 1 || h.lost[0].InstanceID != "i-1" || h.lostStop[0] ||
-		!strings.Contains(h.lost[0].LandingReason, "Server.InsufficientInstanceCapacity") || h.lost[0].LostAt.IsZero() {
+		!strings.Contains(h.lost[0].LandingReason, "Server.InsufficientInstanceCapacity") || h.lost[0].LostAt == nil {
 		t.Errorf("lost = %+v stopped=%v, want one hunting-again notice for i-1", h.lost, h.lostStop)
 	}
 }

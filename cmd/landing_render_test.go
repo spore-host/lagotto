@@ -139,7 +139,7 @@ func TestRenderHistory_LostLandingRow(t *testing.T) {
 			WatchID: "w-255", InstanceType: "g7e.48xlarge", Region: "us-west-2", AvailabilityZone: "us-west-2a",
 			ActionTaken: watcher.ActionLandingFailed, MatchedAt: at, WaitToAcquireSeconds: &wait,
 			InstanceID: "i-0abc", InstanceState: "terminated", LandingReason: "Server.InternalError: Internal error on launch",
-			LostAt: at.Add(5 * time.Minute),
+			LostAt: func() *time.Time { t := at.Add(5 * time.Minute); return &t }(),
 		},
 		{
 			WatchID: "w-hold", InstanceType: "p5.48xlarge", Region: "us-east-1",
@@ -165,5 +165,26 @@ func TestRenderHistory_LostLandingRow(t *testing.T) {
 	}
 	if d := lostDetail(watcher.MatchResult{ActionTaken: "spawned", InstanceID: "i-1"}); d != "" {
 		t.Errorf("a spawned row got a lost detail %q", d)
+	}
+}
+
+// #255 item 1b: a spored_unconfirmed row shows its detail and no wait.
+func TestRenderHistory_SporedUnconfirmedRow(t *testing.T) {
+	wait := 3600.0
+	matches := []watcher.MatchResult{{
+		WatchID: "w-sp", InstanceType: "g7e.48xlarge", Region: "us-west-2", ActionTaken: watcher.ActionSporedUnconfirmed,
+		MatchedAt: time.Date(2026, 11, 7, 0, 0, 0, 0, time.UTC), WaitToAcquireSeconds: &wait, InstanceID: "i-0abc",
+		SporedDetail: "instance i-0abc is running but spored has not checked in 10m0s after it was seen running.",
+	}}
+	var buf bytes.Buffer
+	if err := renderHistory(&buf, matches, nil); err != nil {
+		t.Fatal(err)
+	}
+	s := buf.String()
+	if !strings.Contains(s, "spored_unconfirmed") || !strings.Contains(s, "  instance i-0abc is running but spored has not checked in") {
+		t.Errorf("history:\n%s", s)
+	}
+	if strings.Contains(s, "1h0m") {
+		t.Errorf("a spored_unconfirmed row shows a wait-to-acquire:\n%s", s)
 	}
 }
