@@ -553,7 +553,13 @@ func matchEmailSubjectBody(w *Watch, m *MatchResult) (string, string) {
 		spotLabel = "Spot"
 	}
 	subject := fmt.Sprintf("[lagotto] %s capacity found in %s", m.InstanceType, m.Region)
-	body := fmt.Sprintf(`Capacity found for your watch %s
+	headline := "Capacity found for your watch"
+	if isNotifyOnly(w) {
+		// A notify watch matched an offering, not capacity (#283).
+		subject = fmt.Sprintf("[lagotto] %s offered in %s (%s)", m.InstanceType, m.Region, NotifyOfferedNote)
+		headline = "Offered (" + NotifyOfferedNote + ") for your watch"
+	}
+	body := fmt.Sprintf(`%s %s
 
 Instance Type: %s
 Region: %s
@@ -564,7 +570,7 @@ Matched At: %s
 Watch Pattern: %s
 Action Taken: %s
 `,
-		w.WatchID,
+		headline, w.WatchID,
 		m.InstanceType,
 		m.Region,
 		m.AvailabilityZone,
@@ -586,7 +592,28 @@ Action Taken: %s
   It bills at the On-Demand rate until it expires; release it early with: lagotto cancel %s
 `, m.ReservationID, m.AvailabilityZone, HoldLaunchCommandFor(w, m), w.WatchID)
 	}
+	if isNotifyOnly(w) {
+		body += "\n" + NotifyDeprecation + "\n"
+	}
 	return subject, body
+}
+
+// isNotifyOnly reports whether w is an EC2 --action notify watch, whose match
+// is an offering, not capacity (#283). A SageMaker notify watch never matches:
+// the poller retires it (#195).
+func isNotifyOnly(w *Watch) bool {
+	return w.Action == ActionNotify && normalizeService(w.Service) == ServiceEC2
+}
+
+// addNotifyDeprecation marks a notify watch's match payload (#283): what it
+// checked, and that the action is deprecated.
+func addNotifyDeprecation(payload map[string]interface{}, w *Watch) {
+	if !isNotifyOnly(w) {
+		return
+	}
+	payload["deprecated"] = true
+	payload["note"] = NotifyOfferedNote
+	payload["deprecation"] = NotifyDeprecation
 }
 
 func (n *Notifier) sendWebhook(ctx context.Context, url string, w *Watch, m *MatchResult) error {
@@ -638,6 +665,7 @@ func matchWebhookPayload(w *Watch, m *MatchResult) map[string]interface{} {
 		payload["instance_id"] = m.InstanceID
 	}
 	addReservation(payload, m)
+	addNotifyDeprecation(payload, w)
 	return payload
 }
 
@@ -657,6 +685,7 @@ func matchSNSPayload(w *Watch, m *MatchResult) map[string]interface{} {
 		payload["instance_id"] = m.InstanceID
 	}
 	addReservation(payload, m)
+	addNotifyDeprecation(payload, w)
 	return payload
 }
 

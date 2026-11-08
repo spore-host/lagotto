@@ -55,6 +55,12 @@ so an AZ that offers the watch's type but has no default subnet is skipped, and
 the watch can never land there. Each such AZ is a warning, with the
 'aws ec2 create-default-subnet' command that fixes it.
 
+It lists every active --action notify watch as a warning (lagotto#283): notify
+is deprecated and will be removed in a later release, because it reports that a
+type is offered at or under the max price, not that there is capacity. Use
+--action hold or --action spawn instead. The check is omitted when there are
+none.
+
 It checks that the shared EventBridge Scheduler invoke role's policy allows
 invoking THIS region's poller (lagotto#218: the role is IAM-global, and a deploy
 by lagotto older than v0.65.1 scoped it to the deploying region alone, so every
@@ -149,6 +155,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	})
 	report := doctor.Evaluate(state)
 	appendLaunchScheduleCheck(ctx, report, cfg.Region, deploy.New(cfg), store.ScheduledLaunchScheduleNames)
+	appendNotifyWatchCheck(ctx, report, store.ListActiveWatches)
 	appendArtifactBucketCheck(ctx, report, *acct.Account, deploy.New(cfg), regionalArtifactProbe{cfg})
 	appendCallerCheck(ctx, report, iam.NewFromConfig(cfg), aws.ToString(acct.Arn), *acct.Account, cfg.Region)
 
@@ -156,6 +163,19 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	return doctorExitError(report)
+}
+
+// appendNotifyWatchCheck adds doctor's deprecated notify-watch check (#283)
+// to report, when there is an active notify watch. A failed read adds nothing:
+// the poller schedule check reports it.
+func appendNotifyWatchCheck(ctx context.Context, report *doctor.Report, list func(context.Context) ([]watcher.Watch, error)) {
+	watches, err := list(ctx)
+	if err != nil {
+		return
+	}
+	if c, ok := doctor.EvalNotifyWatches(watches); ok {
+		report.Checks = append(report.Checks, c)
+	}
 }
 
 // activeSubnetCoverage checks each spawn/hold watch's default-subnet coverage
