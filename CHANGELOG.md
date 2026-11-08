@@ -34,7 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     exposure: the largest member's, plus the total when a member keeps extras.
     `lagotto cancel <group>` ends the group and cancels every member.
   - Not with `--action notify` (deprecated, #283), `--maintain`,
-    `--until-landed` (one acknowledgement clock per group is a follow-up) or
+    `--until-landed` (one acknowledgement clock per group is #290) or
     `--service sagemaker`. A group belongs to the caller who created it; a
     group that ended is re-armed when a new member joins.
   - The group is one item in the watches table (`watch_id` `g-<name>`) with no

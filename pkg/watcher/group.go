@@ -204,7 +204,7 @@ func ParseGroupOnExtra(s string) (string, error) {
 	case GroupOnExtraKeep:
 		return GroupOnExtraKeep, nil
 	case "hold":
-		return "", fmt.Errorf("--group-on-extra hold is not supported yet (lagotto#287 follow-up); use terminate or keep")
+		return "", fmt.Errorf("--group-on-extra hold is not supported yet (lagotto#291); use terminate or keep")
 	}
 	return "", fmt.Errorf("invalid --group-on-extra %q: must be terminate or keep", s)
 }
@@ -240,7 +240,7 @@ func ValidateGroupMember(w *Watch) error {
 	case w.DesiredCount > 0:
 		return errors.New("--group is not supported with --maintain: a fleet keeps launching toward its goal, so it has no single landing to win")
 	case w.UntilLanded:
-		return errors.New("--group is not supported with --until-landed yet: a group would need one acknowledgement and reminder clock for all its members (lagotto#287 follow-up)")
+		return errors.New("--group is not supported with --until-landed yet: a group would need one acknowledgement and reminder clock for all its members (lagotto#290)")
 	}
 	return nil
 }
