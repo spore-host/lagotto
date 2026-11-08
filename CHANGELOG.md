@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Deprecated
+
+- **`--action notify` is deprecated** (#283) and will be removed in a later
+  0.x release. A notify watch fires when the type is *offered* in the region at
+  or under your max price. That is not a capacity check: it launches and
+  reserves nothing, and a p5.48xlarge notify watch fired within 3 minutes while
+  a real launch in the same AZs got `InsufficientInstanceCapacity`. Use
+  `--action hold` (reserve the capacity) or `--action spawn` (launch it).
+  Notify still works in this release:
+  - `lagotto watch --action notify`, a `lagotto watch` with no `--action` (the
+    default is still notify, and that warning asks you to pass `--action`
+    explicitly), and `lagotto update` on a notify watch print a deprecation
+    warning on stderr. Stdout is unchanged; `-o json` adds a `deprecations`
+    field (`[{"id": "action-notify", "message": …}]`).
+  - The `--action` help marks notify deprecated.
+  - A notify watch's notification now says the type was *offered, not a
+    capacity check* (the email subject no longer says "capacity found"), and its
+    webhook and SNS payloads carry `"deprecated": true`, a `note` and the
+    `deprecation` text.
+  - `lagotto doctor` has a `notify-watches` warning listing the active notify
+    watches. It never fails, and is omitted when there are none.
+  - The warning text is exported as `watcher.NotifyDeprecation` (with
+    `NotifyDefaultActionNote` and `ActionDeprecations`) for the other front ends.
+  - Notification channels (`--notify email:/webhook:/sns:`) are not deprecated:
+    spawn and hold watches, reminders and fleet events report through them.
+
 ## [0.68.0] - 2026-11-07
 
 ### Added

@@ -32,11 +32,12 @@ scoop install lagotto
 ## Quick Start
 
 ```bash
-# Watch for any p5 instance and notify when available
-lagotto watch "p5.*" --action notify --ttl 7d
-
-# Watch and auto-launch when capacity appears
+# Watch and auto-launch when capacity appears (the launch is the capacity test)
 lagotto watch "g5.xlarge" --action spawn --spawn-config my-job.yaml
+
+# Watch for any p5 instance and reserve it when capacity appears
+# (a 30-minute targeted Capacity Reservation, billed at the On-Demand rate once held)
+lagotto watch "p5.*" --action hold --ttl 7d --notify email:you@example.com
 
 # Watch several interchangeable rungs at once — a comma-separated list matches
 # ANY of the listed types (first one with capacity wins)
@@ -185,7 +186,7 @@ lagotto update <watch-id> --add-region us-west-2 --add-type g6.xlarge --dry-run
 |--------|----------|
 | `spawn` | "if this lands: up to $X/hr (≈$Y/day)", × N for a `--maintain N` fleet |
 | `hold` | "30 min reserved at up to $Y/hr (≈$Z), billed even if unused" |
-| `notify` | launches and reserves nothing |
+| `notify` (deprecated) | launches and reserves nothing; offering only, not a capacity check |
 | SageMaker | unknown |
 
 - The rate is your `--max-price` cap when you set one, labelled as your cap and
@@ -393,16 +394,31 @@ The dedup key is the instance `Name` tag (`--name`, or the spawn config's `name`
 
 | Action | Description |
 |--------|-------------|
-| `notify` | Signal only — send an email/webhook/SNS notification; nothing is launched or reserved |
 | `spawn` | Launch an instance from a config file (`RunInstances`) — this is the launchability test |
 | `hold` | Reserve capacity via an On-Demand Capacity Reservation (`CreateCapacityReservation`) — billable once held; stricter than launchability |
+| `notify` | **Deprecated** (#283), removed in a later release. Offering only, not a capacity check: it fires when the type is offered at or under `--max-price`, and launches and reserves nothing |
+
+Pass `--action` explicitly. It still defaults to `notify` in this release, and a
+watch created without it gets the deprecation warning too.
 
 The three actions differ in what they *do* when a match appears:
 
-- **`notify`** signals only — it never launches or reserves anything. It fires
-  when the type is *offered* in a region or AZ, which is not a sign that a
-  launch would succeed: for a scarce type that is offered everywhere (p5, say)
-  it can fire on the first poll. Use `spawn` or `hold` to wait for real capacity.
+- **`notify`** is **deprecated** and will be removed in a later release
+  ([#283](https://github.com/spore-host/lagotto/issues/283)). It never launches
+  or reserves anything. It fires when the type is *offered* in a region at or
+  under your max price, which is not a capacity check: a p5.48xlarge notify
+  watch fired within 3 minutes while a real launch in the same AZs got
+  `InsufficientInstanceCapacity`. Use `spawn` or `hold` to wait for real
+  capacity.
+  - `lagotto watch` (with `--action notify`, or with no `--action`) and
+    `lagotto update` on a notify watch still work, but print a deprecation
+    warning to stderr. With `-o json` the warning is in a `deprecations` field
+    (`id: "action-notify"`); stdout carries nothing else.
+  - A notify watch's notification says the type was *offered, not a capacity
+    check*, and its webhook and SNS payloads carry `"deprecated": true`.
+  - `lagotto doctor` lists active notify watches as a warning.
+  - An update cannot change a watch's action: create a new `--action hold` or
+    `--action spawn` watch and `lagotto cancel` the notify one.
 - **`spawn`** launches an instance via `RunInstances`. Because the launch is the
   actual capacity test, `--action spawn` is the way to check whether a type will
   really launch right now.
@@ -510,8 +526,9 @@ whichever binary ran it. Upgrading lagotto without re-running `setup` therefore
 leaves the poller on the old permissions, and the only evidence is an
 `AccessDenied` in the poller's CloudWatch Logs. `doctor` also flags a poller
 Lambda older than your CLI, missing tables/roles/poller/topic/schedule, a
-schedule that's switched off while watches are active, and a leftover
-CloudFormation stack.
+schedule that's switched off while watches are active, a leftover
+CloudFormation stack, and (as a warning) each active `--action notify` watch,
+since notify is deprecated.
 
 It is strictly read-only (there is no `--fix`) and exits non-zero only when a
 check FAILS, so it can gate CI. `-o json` gives the machine-readable form,
