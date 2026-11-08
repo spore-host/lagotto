@@ -204,7 +204,7 @@ func writeQuotaInfeasible(out io.Writer, w *watcher.Watch, now time.Time) {
 func writeHeartbeat(out io.Writer, w *watcher.Watch, now time.Time) {
 	if !w.LastPolledAt.IsZero() {
 		stale := ""
-		if w.Status == watcher.StatusActive && now.Sub(w.LastPolledAt) > stalePollAfter {
+		if w.Status == watcher.StatusActive && now.Sub(w.LastPolledAt) > watcher.StalePollAfter {
 			stale = "; stale: the poller may be disabled, or its capacity search failing"
 		}
 		_, _ = fmt.Fprintf(out, "Last polled: %s (%s ago%s)\n", w.LastPolledAt.Format(time.RFC3339), formatAge(now.Sub(w.LastPolledAt)), stale)

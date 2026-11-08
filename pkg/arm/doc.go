@@ -18,6 +18,11 @@
 //   - Email subscriptions (#240): SubscribeWatchEmails subscribes each email
 //     address on the watch BEFORE it is stored (refusing if one cannot be), and
 //     CleanupWatchEmails is a cancel path's half of the deleter.
+//   - The reminder poller (#239, #282). An until-landed watch is only reminded
+//     before its deadline by a hosted poller at least
+//     watcher.MinReminderPollerVersion. CheckReminderPoller returns the
+//     warning to show when the deployed one is older (or untagged), on create,
+//     ack and status.
 //
 // Constructing the watch itself is watcher.NewWatch, which sets the expiry and
 // the record's retention TTL together (spore-host-mcp#77).

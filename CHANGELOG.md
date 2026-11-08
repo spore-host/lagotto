@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The until-landed reminder-poller warning is exported** (#282) for watch
+  creators other than the CLI, such as spore-host-mcp's `lagotto_watch`,
+  `lagotto_ack` and `lagotto_status`. `arm.CheckReminderPoller(ctx, inspector,
+  region, w, resumeHint)` inspects the hosted poller (an `arm.PollerInspector`,
+  which `*deploy.Deployer` satisfies). `arm.ReminderPollerWarning(info,
+  inspectErr, region, w, resumeHint)` decides from an inspection you already
+  have. Both return the warning, or `""` when there is nothing to warn about or
+  no way to know. The poller is inspected only for an active until-landed
+  watch. `resumeHint` names your resume step (for example `lagotto_ack`); `""`
+  gives the CLI's `'lagotto ack <id>'` (`arm.CLIResumeHint`). The CLI now calls
+  this through a thin wrapper, and what it prints is unchanged.
+- **`watcher.StalePollAfter`** (15 minutes, #282) is exported: the age at which
+  `lagotto list` flags an active watch's last poll with `!` and `status` calls
+  it stale. Other callers can flag the same staleness without guessing a
+  threshold.
+
 ### Deprecated
 
 - **`--action notify` is deprecated** (#283) and will be removed in a later
