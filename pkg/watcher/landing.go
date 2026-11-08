@@ -557,12 +557,13 @@ func (p *Poller) failLanding(ctx context.Context, w *Watch, chk landingCheck, ac
 	w.LastError, w.LastErrorAt = msg, now
 	w.LastPolledAt = now
 
-	// #254 AZ cool-off hook: a capacity-class landing failure (kind ==
-	// FailureCapacity, m.AvailabilityZone set) is the same "this AZ cannot place
-	// the type right now" signal as a refused RunInstances, and an EC2-initiated
-	// Server.InternalError while pending is the impaired-AZ case #255 hit. The
-	// #254 cool-off belongs here, keyed on (m.Region, m.AvailabilityZone,
-	// m.InstanceType); this PR deliberately does not build a second one.
+	// An instance EC2 killed in pending for lack of capacity says its AZ cannot
+	// place launches right now: cool the AZ off (#254's API, reason
+	// "early-death") so the relaunch below, and the next sweeps, try elsewhere.
+	if earlyDeathCoolsOff(reservation, chk) {
+		c := p.CoolOffAZ(ctx, w, m.Region, chk.AZ, "", "early-death")
+		fmt.Fprintf(os.Stderr, "Watch %s: %s died in pending (%s); cooling off %s\n", w.WatchID, id, chk.ReasonCode, c.Describe())
+	}
 
 	if kind == FailureCapacity {
 		w.ConsecutiveFailures = 0
@@ -621,6 +622,19 @@ func landingReason(chk landingCheck) string {
 		}
 	}
 	return oneLine(strings.TrimSpace(reason))
+}
+
+// earlyDeathCoolsOff reports whether a failed landing should cool its AZ off
+// (#254/#255): an instance (not a reservation) in a known AZ that EC2
+// terminated with an insufficient-capacity reason. A user- or
+// instance-initiated shutdown, a Spot reclaim, a timeout, a stop and an
+// internal error are not evidence that the AZ cannot place launches.
+func earlyDeathCoolsOff(reservation bool, chk landingCheck) bool {
+	if reservation || chk.AZ == "" || chk.NotFound || instancePhase(chk.State) != phaseGone {
+		return false
+	}
+	code := chk.ReasonCode
+	return strings.Contains(code, "InsufficientInstanceCapacity") || strings.Contains(code, "InsufficientCapacity")
 }
 
 func nonEmpty(ss ...string) []string {

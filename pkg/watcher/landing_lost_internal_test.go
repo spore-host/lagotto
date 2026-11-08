@@ -247,3 +247,80 @@ func TestNotifyLandingLost_Publishes(t *testing.T) {
 }
 
 func ptrTime(t time.Time) *time.Time { return &t }
+
+// #254 x #255: an instance EC2 killed in pending for lack of capacity cools its
+// AZ off (reason early-death), so the same-cycle relaunch goes to another AZ
+// and the cool-off is persisted for the next sweep.
+func TestLanding255_EarlyDeathCoolsOffAZ(t *testing.T) {
+	h := newLandHarness(t)
+	res := qiResults(qiCandidate{"m7g.medium", landRegion, 0.04, 1})
+	res[0].AvailableAZs = []string{landRegion + "a", landRegion + "b"}
+	h.poller.truffle = &fakeSearcher{results: res}
+	h.placeAZ = landRegion + "a"
+	h.put(t, landWatch(t, "w-cool"))
+	h.cycle(t)
+	if len(h.attempted) != 1 || h.attempted[0] != landRegion+"a" {
+		t.Fatalf("first attempt = %v, want %sa", h.attempted, landRegion)
+	}
+	h.describe = func(id string) (landingCheck, error) {
+		if id != "i-1" {
+			return landingCheck{State: "pending"}, nil
+		}
+		return landingCheck{State: "terminated", AZ: landRegion + "a",
+			ReasonCode: "Server.InsufficientInstanceCapacity", ReasonMessage: "Insufficient capacity."}, nil
+	}
+	h.cycle(t)
+	if len(h.attempted) != 2 || h.attempted[1] != landRegion+"b" {
+		t.Errorf("relaunch attempted %v, want the other AZ %sb", h.attempted, landRegion)
+	}
+	got := h.get(t, "w-cool")
+	if len(got.AZCooloffs) != 1 || got.AZCooloffs[0].AZ != landRegion+"a" || got.AZCooloffs[0].Reason != "early-death" {
+		t.Errorf("persisted cool-offs = %+v, want %sa early-death", got.AZCooloffs, landRegion)
+	}
+}
+
+// Only a capacity death in a known AZ cools off; a user- or instance-initiated
+// shutdown, a Spot reclaim, an internal error, a stop, a timeout, a missing AZ
+// or a reservation does not.
+func TestEarlyDeathCoolsOff(t *testing.T) {
+	ice := landingCheck{State: "terminated", AZ: "us-west-2a", ReasonCode: "Server.InsufficientInstanceCapacity"}
+	if !earlyDeathCoolsOff(false, ice) {
+		t.Error("ICE in a known AZ must cool off")
+	}
+	sd := ice
+	sd.State = "shutting-down"
+	if !earlyDeathCoolsOff(false, sd) {
+		t.Error("ICE while shutting-down must cool off")
+	}
+	for name, c := range map[string]landingCheck{
+		"user":      {State: "terminated", AZ: "us-west-2a", ReasonCode: "Client.UserInitiatedShutdown"},
+		"instance":  {State: "terminated", AZ: "us-west-2a", ReasonCode: "Client.InstanceInitiatedShutdown"},
+		"spot":      {State: "terminated", AZ: "us-west-2a", ReasonCode: "Server.SpotInstanceTermination"},
+		"internal":  {State: "terminated", AZ: "us-west-2a", ReasonCode: "Server.InternalError"},
+		"stopped":   {State: "stopped", AZ: "us-west-2a", ReasonCode: "Server.InsufficientInstanceCapacity"},
+		"pending":   {State: "pending", AZ: "us-west-2a"},
+		"no AZ":     {State: "terminated", ReasonCode: "Server.InsufficientInstanceCapacity"},
+		"not found": {State: "not-found", AZ: "us-west-2a", NotFound: true, ReasonCode: "Server.InsufficientInstanceCapacity"},
+	} {
+		if earlyDeathCoolsOff(false, c) {
+			t.Errorf("%s: cooled off", name)
+		}
+	}
+	if earlyDeathCoolsOff(true, ice) {
+		t.Error("a reservation cooled off")
+	}
+}
+
+// A non-capacity early death leaves the AZ alone.
+func TestLanding255_ShutdownDoesNotCoolOff(t *testing.T) {
+	h := newLandHarness(t)
+	h.put(t, landWatch(t, "w-nocool"))
+	h.cycle(t)
+	h.describe = func(string) (landingCheck, error) {
+		return landingCheck{State: "terminated", AZ: landRegion + "c", ReasonCode: "Client.UserInitiatedShutdown"}, nil
+	}
+	h.cycle(t)
+	if got := h.get(t, "w-nocool"); len(got.AZCooloffs) != 0 {
+		t.Errorf("cool-offs = %+v, want none", got.AZCooloffs)
+	}
+}

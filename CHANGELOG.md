@@ -121,6 +121,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     checked. The pending check is stored as three attributes on the matched
     watch (`spored_check_instance_id`, `_region`, `_until`), which an older
     poller ignores.
+  - A spawn EC2 terminates in `pending` with an insufficient-capacity reason
+    in a known AZ now cools that AZ off through the #254 cool-off
+    (`CoolOffAZ`, reason `early-death`). The relaunch in the same sweep, and
+    later sweeps, go to another AZ. A user- or instance-initiated shutdown, a
+    Spot reclaim, `Server.InternalError`, a stop, a timeout or a failed hold
+    does not cool off an AZ.
 
 ## [0.68.0] - 2026-11-07
 
