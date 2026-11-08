@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -134,8 +133,14 @@ func TestGroup_SlotRace_OneLaunchPerSweep(t *testing.T) {
 	}
 }
 
-// The conditional write behind the slot: of many concurrent claimants exactly
-// one wins, and an expired slot can be taken over.
+// The conditional write behind the slot: of many claimants exactly one wins,
+// and an expired slot can be taken over.
+//
+// The claims are made one after another, not from goroutines: Substrate does
+// not serialize concurrent conditional UpdateItems on one item
+// (scttfrdmn/substrate#1449), so a concurrent version is flaky against it
+// while real DynamoDB serializes them. The race the poller faces is the same
+// condition evaluated against whichever claim landed first, which this pins.
 func TestGroup_ReserveSlotIsExclusive(t *testing.T) {
 	h := newLandHarness(t)
 	ctx := context.Background()
@@ -146,27 +151,18 @@ func TestGroup_ReserveSlotIsExclusive(t *testing.T) {
 		}
 	}
 	now := time.Now().UTC()
-	var wg sync.WaitGroup
-	var mu sync.Mutex
 	won, held := 0, 0
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			_, err := h.store.ReserveGroupSlot(ctx, "race", fmt.Sprintf("w-%d", i), now)
-			mu.Lock()
-			defer mu.Unlock()
-			switch {
-			case err == nil:
-				won++
-			case errors.Is(err, ErrGroupSlotHeld):
-				held++
-			default:
-				t.Errorf("claim %d: %v", i, err)
-			}
-		}(i)
+	for i := n - 1; i >= 0; i-- {
+		_, err := h.store.ReserveGroupSlot(ctx, "race", fmt.Sprintf("w-%d", i), now)
+		switch {
+		case err == nil:
+			won++
+		case errors.Is(err, ErrGroupSlotHeld):
+			held++
+		default:
+			t.Errorf("claim %d: %v", i, err)
+		}
 	}
-	wg.Wait()
 	if won != 1 || held != n-1 {
 		t.Fatalf("won=%d held=%d, want 1/%d", won, held, n-1)
 	}
