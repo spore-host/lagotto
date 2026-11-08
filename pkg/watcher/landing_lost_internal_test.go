@@ -3,6 +3,7 @@ package watcher
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -186,6 +187,14 @@ func TestNotifyLandingLost_Content(t *testing.T) {
 	if p := landingLostPayload(w, m, true); p["status"] != string(StatusFailed) {
 		t.Errorf("stopped payload status = %v", p["status"])
 	}
+	hold := &MatchResult{InstanceType: "p5.48xlarge", Region: "us-east-1", ActionTaken: ActionLandingFailed,
+		ReservationID: "cr-1", ReservationState: "failed"}
+	if got := landingLostSubject(hold, false); !strings.Contains(got, "p5.48xlarge hold in us-east-1") {
+		t.Errorf("hold subject = %q", got)
+	}
+	if p := landingLostPayload(w, hold, false); p["reservation_id"] != "cr-1" || p["state"] != "failed" || p["instance_id"] != nil || p["lost_at"] != nil {
+		t.Errorf("hold payload = %v", p)
+	}
 }
 
 func TestNotifyLandingLost_NoChannelsIsNoop(t *testing.T) {
@@ -203,5 +212,36 @@ func TestLostNotifierResolution(t *testing.T) {
 	p.notifier = &Notifier{}
 	if p.lostNotifier() == nil {
 		t.Error("wired notifier not used")
+	}
+}
+
+// Through NotifyLandingLost itself: the email gets the human text on the alerts
+// topic, a raw SNS channel the JSON event, an unsafe webhook is refused at send
+// time, and an unknown channel type is skipped.
+func TestNotifyLandingLost_Publishes(t *testing.T) {
+	w := &Watch{WatchID: "w-255", NotifyChannels: []NotifyChannel{
+		{Type: "email", Target: "a@example.com"},
+		{Type: "sns", Target: "arn:aws:sns:us-west-2:111122223333:mine"},
+		{Type: "pager", Target: "x"},
+	}}
+	pub := &capturePublisher{}
+	n := &Notifier{snsClient: pub, topicArn: "arn:aws:sns:us-west-2:111122223333:lagotto-capacity-alerts", httpClient: &http.Client{}}
+	if err := n.NotifyLandingLost(context.Background(), w, lostMatch(), false); err != nil {
+		t.Fatalf("NotifyLandingLost: %v", err)
+	}
+	if len(pub.msgs) != 2 {
+		t.Fatalf("published %d messages, want 2", len(pub.msgs))
+	}
+	if aws.ToString(pub.msgs[0].TopicArn) != n.topicArn || !strings.Contains(aws.ToString(pub.msgs[0].Message), "did not land") {
+		t.Errorf("email publish = %s / %q", aws.ToString(pub.msgs[0].TopicArn), aws.ToString(pub.msgs[0].Message))
+	}
+	var ev map[string]interface{}
+	if err := json.Unmarshal([]byte(aws.ToString(pub.msgs[1].Message)), &ev); err != nil || ev["event"] != ActionLandingFailed {
+		t.Errorf("sns message = %q (%v), want the landing_failed event", aws.ToString(pub.msgs[1].Message), err)
+	}
+
+	bad := &Watch{WatchID: "w-bad", NotifyChannels: []NotifyChannel{{Type: "webhook", Target: "http://169.254.169.254/latest/meta-data/"}}}
+	if err := n.NotifyLandingLost(context.Background(), bad, lostMatch(), true); err == nil || !strings.Contains(err.Error(), "blocked unsafe webhook URL") {
+		t.Errorf("err = %v, want blocked unsafe webhook URL", err)
 	}
 }
