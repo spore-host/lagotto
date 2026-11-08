@@ -146,7 +146,7 @@ func (s *Spawner) Snipe(ctx context.Context, target SnipeTarget, opts SnipeOptio
 				return nil, err
 			}
 
-			res, err := s.launchAcrossAZs(ctx, bt.cfg, bt.target.AZs, bt.customUserData)
+			res, err := s.launchAcrossAZs(ctx, bt.cfg, bt.target.AZs, bt.customUserData, true)
 			if err == nil {
 				return &MatchResult{
 					Region:           bt.target.Region,

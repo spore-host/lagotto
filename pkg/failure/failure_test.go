@@ -146,14 +146,91 @@ func TestIsQuotaExceeded_StillClassifiesTerminal(t *testing.T) {
 
 func TestLabel(t *testing.T) {
 	cases := map[failure.FailureKind]string{
-		failure.FailureNone:     "none",
-		failure.FailureCapacity: "capacity, will retry",
-		failure.FailureTerminal: "terminal, stopping watch",
-		failure.FailureUnknown:  "unknown, will retry (capped)",
+		failure.FailureNone:      "none",
+		failure.FailureCapacity:  "capacity, will retry",
+		failure.FailureTerminal:  "terminal, stopping watch",
+		failure.FailureUnknown:   "unknown, will retry (capped)",
+		failure.FailureThrottled: "throttled, backing off",
 	}
 	for k, want := range cases {
 		if got := failure.Label(k); got != want {
 			t.Errorf("Label(%v) = %q, want %q", k, got, want)
 		}
+	}
+}
+
+// throttleMsgAZ is EC2's message from the 2026-11-06 us-west-2 event (#254),
+// verbatim from CloudTrail.
+const throttleMsgAZ = "Request limit exceeded. Your ec2:RunInstances request has been throttled due to an " +
+	"operational issue in availability zone usw2-az1. Throttling will be removed once the issue is resolved."
+
+// sdkThrottle builds the error chain the AWS SDK and spawn's launcher hand
+// lagotto for a throttled RunInstances: smithy.GenericAPIError inside
+// retry's MaxAttemptsError inside an OperationError, wrapped by spawn's
+// "provision: launch:" layer.
+func sdkThrottle(code, msg string) error {
+	api := &smithy.GenericAPIError{Code: code, Message: msg, Fault: smithy.FaultClient}
+	maxed := fmt.Errorf("exceeded maximum number of attempts, 3, %w", api)
+	op := &smithy.OperationError{ServiceID: "EC2", OperationName: "RunInstances", Err: maxed}
+	return fmt.Errorf("provision: launch: failed to launch instance: %s: %w", code, op)
+}
+
+// TestClassifyFailure_ThrottlingIsRetryableNotTerminal is the #254 guard:
+// before it, RequestLimitExceeded classified FailureUnknown, so a throttling
+// streak ran a watch into the unknown-failure cap and ended it as
+// spawn_failed. A throttle is never terminal and never unknown.
+func TestClassifyFailure_ThrottlingIsRetryableNotTerminal(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"ec2 az-scoped", sdkThrottle("RequestLimitExceeded", throttleMsgAZ)},
+		{"ec2 plain", sdkThrottle("RequestLimitExceeded", "Request limit exceeded.")},
+		{"Throttling", &apiErr{"Throttling"}},
+		{"ThrottlingException", &apiErr{"ThrottlingException"}},
+		{"flattened", errors.New("launch instance (tried 2 AZ(s)): RequestLimitExceeded: Request limit exceeded.")},
+		{"lagotto backoff skip", fmt.Errorf("us-west-2: %w", failure.ErrThrottled)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := failure.ClassifyFailure(c.err)
+			if got != failure.FailureThrottled {
+				t.Fatalf("ClassifyFailure = %v, want FailureThrottled", got)
+			}
+			if !failure.IsThrottled(c.err) {
+				t.Error("IsThrottled = false")
+			}
+			if failure.IsQuotaExceeded(c.err) {
+				t.Error("a throttle must not read as a quota refusal")
+			}
+		})
+	}
+	if failure.IsThrottled(&apiErr{"InsufficientInstanceCapacity"}) {
+		t.Error("capacity is not a throttle")
+	}
+	if got := failure.ClassifyFailure(&apiErr{"RequestLimitExceeded"}); got == failure.FailureTerminal || got == failure.FailureUnknown {
+		t.Errorf("RequestLimitExceeded = %v", got)
+	}
+}
+
+func TestThrottledAZID(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"az-scoped", sdkThrottle("RequestLimitExceeded", throttleMsgAZ), "usw2-az1"},
+		{"local zone", sdkThrottle("RequestLimitExceeded", "throttled due to an operational issue in availability zone usw2-lax1-az1."), "usw2-lax1-az1"},
+		{"flattened", errors.New("RequestLimitExceeded: " + throttleMsgAZ), "usw2-az1"},
+		{"no az", sdkThrottle("RequestLimitExceeded", "Request limit exceeded."), ""},
+		{"not a throttle", errors.New("InsufficientInstanceCapacity in availability zone usw2-az1"), ""},
+		{"nil", nil, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := failure.ThrottledAZID(c.err); got != c.want {
+				t.Errorf("ThrottledAZID = %q, want %q", got, c.want)
+			}
+		})
 	}
 }

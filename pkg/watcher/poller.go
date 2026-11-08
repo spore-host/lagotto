@@ -79,6 +79,11 @@ type Poller struct {
 	// servicequotas read permission (or an older runtime policy) still reports
 	// "capped at M/N" — it just reports it without the numbers.
 	quotas quotacheck.Lookup
+	// throttle is the account's EC2 throttling state (#254): per-region
+	// backoff and AZ cool-offs, shared with the spawner and holder and
+	// rebuilt from the watches at the start of each sweep. Created on first
+	// use (book), so a Poller built as a literal in a test has one too.
+	throttle *ThrottleBook
 }
 
 // WatchFilter scopes a poll sweep to a subset of watches (#47). A zero-value
@@ -213,6 +218,10 @@ type PollSummary struct {
 	// Reminded counts until-landed watches sent an acknowledgement reminder this
 	// cycle (#239). They stay active; a reminder is not a state transition.
 	Reminded int `json:"reminded"`
+	// Throttled counts watches whose attempt EC2 throttled this cycle, or that
+	// made none because their candidates are backing off from a throttle
+	// (#254). They stay active and are also counted in Retrying.
+	Throttled int `json:"throttled,omitempty"`
 }
 
 // Total returns the number of watches the sweep accounted for.
@@ -229,6 +238,10 @@ func (p *Poller) PollAll(ctx context.Context) (*PollSummary, error) {
 	if p.verbose {
 		fmt.Fprintf(os.Stderr, "Polling %d active watches\n", len(watches))
 	}
+	// Rebuild the account's throttle state from every active watch (#254),
+	// not only this poller's scope: a throttle is the account's, whoever
+	// earned it.
+	p.book().StartSweep(p.clock(), watches)
 
 	// Unsubscribe email addresses no active watch names any more (#240). It runs
 	// on the list loaded BEFORE this sweep's transitions, so an address whose
@@ -395,6 +408,7 @@ func (p *Poller) reconcileEmailSubscriptions(ctx context.Context, active []Watch
 // match events (launched or notified). Useful for testing.
 func (p *Poller) PollWatch(ctx context.Context, w *Watch) ([]MatchResult, error) {
 	summary := &PollSummary{}
+	p.book().StartSweep(p.clock(), []Watch{*w})
 	if w.Landing() && !p.pollLanding(ctx, w, summary) {
 		return summary.Matches, nil
 	}
@@ -635,7 +649,16 @@ func (p *Poller) pollFleetWatch(ctx context.Context, w *Watch, summary *PollSumm
 		return
 	}
 
+	// Back off from an EC2 throttle (#254), as a single-shot watch does.
+	if reason, held := p.candidateThrottled(&Watch{Action: ActionSpawn}, bestMatch, p.clock()); held {
+		p.skipThrottled(ctx, w, reason, summary)
+		return
+	}
+	before := p.book().version()
 	out := p.fillFleetGap(ctx, w, bestMatch, gap, summary)
+	if p.book().version() != before {
+		p.persistThrottle(ctx, w, p.clock())
+	}
 	if p.verbose {
 		fmt.Fprintf(os.Stderr, "Watch %s: topped up %d/%d workers (fleet now ~%d/%d)\n",
 			w.WatchID, out.Launched, gap, running+out.Launched, w.DesiredCount)
@@ -1040,6 +1063,23 @@ func (p *Poller) recordOutcome(ctx context.Context, w *Watch, m *MatchResult, fa
 	}
 	now := time.Now().UTC()
 
+	if failure == FailureThrottled {
+		// EC2 throttled the attempt (#254). Never terminal, and not counted
+		// toward MaxConsecutiveFailures: a throttle says nothing about the
+		// config. The streak is left as it was. The backoff itself is in the
+		// throttle book, already updated by the spawner or holder.
+		if p.verbose {
+			fmt.Fprintf(os.Stderr, "Watch %s: throttled by EC2; backing off, will retry\n", w.WatchID)
+		}
+		summary.Retrying++
+		summary.Throttled++
+		w.noteAttempt(hb, now)
+		if err := p.store.setThrottleState(ctx, w.WatchID, w.Throttle, w.AZCooloffs, hb, ""); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to record throttled attempt for %s: %v\n", w.WatchID, err)
+		}
+		return
+	}
+
 	if failure == FailureCapacity {
 		if p.verbose {
 			fmt.Fprintf(os.Stderr, "Watch %s: capacity unavailable; will retry next cycle\n", w.WatchID)
@@ -1201,6 +1241,26 @@ func (p *Poller) pollGroup(ctx context.Context, regions []string, pattern string
 			_ = p.store.UpdateLastPolled(ctx, w.WatchID)
 			continue
 		}
+		// Skip candidates backing off from an EC2 throttle (#254): a region
+		// throttled for the account, or one whose every offered AZ a throttle
+		// named impaired. The others are still tried, cheapest first; with
+		// none left the watch waits, active, without calling EC2.
+		var throttleReason string
+		unthrottled := eligible[:0:0]
+		for _, c := range eligible {
+			if reason, held := p.candidateThrottled(w, c, p.clock()); held {
+				if throttleReason == "" {
+					throttleReason = reason
+				}
+				continue
+			}
+			unthrottled = append(unthrottled, c)
+		}
+		if len(unthrottled) == 0 {
+			p.skipThrottled(ctx, w, throttleReason, summary)
+			continue
+		}
+		eligible = unthrottled
 		bestMatch := eligible[0]
 
 		if p.verbose {
@@ -1274,7 +1334,14 @@ func (p *Poller) actOnCandidates(ctx context.Context, w *Watch, eligible []*Matc
 			}
 		}
 
+		before := p.book().version()
 		failure, err := p.runAction(ctx, w, cand)
+		if p.book().version() != before {
+			// The attempt was throttled, or cooled an AZ off (#254): write the
+			// account's throttle state onto this watch, so the next sweep (a
+			// new invocation) still obeys it.
+			p.persistThrottle(ctx, w, p.clock())
+		}
 		if err == nil || !IsQuotaExceeded(err) {
 			p.recordOutcome(ctx, w, cand, failure, err, summary)
 			return

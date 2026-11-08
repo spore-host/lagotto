@@ -89,10 +89,8 @@ func (l *SageMakerLauncher) submit(ctx context.Context, client *sagemaker.Client
 
 	out, err := client.CreateTrainingJob(ctx, &input)
 	if err != nil {
-		// Synchronous errors are quota (ResourceLimitExceeded) or validation —
-		// retrying won't help. Capacity is never reported synchronously.
 		m.ActionTaken = "sagemaker_submit_failed"
-		return sageMakerOutcome{Kind: FailureTerminal}, fmt.Errorf("create training job: %w", err)
+		return sageMakerOutcome{Kind: submitFailureKind(err)}, fmt.Errorf("create training job: %w", err)
 	}
 
 	if out.TrainingJobArn != nil {
@@ -102,6 +100,18 @@ func (l *SageMakerLauncher) submit(ctx context.Context, client *sagemaker.Client
 	m.ActionTaken = "sagemaker_submitted"
 	// Submitted — capacity outcome unknown yet. Stay active; check next cycle.
 	return sageMakerOutcome{Kind: FailureCapacity, JobName: jobName}, nil
+}
+
+// submitFailureKind classifies a synchronous CreateTrainingJob error. Those
+// are quota (ResourceLimitExceeded) or validation, and retrying won't help, so
+// they are terminal; capacity is never reported synchronously. The exception
+// is a throttle (ThrottlingException, #254), which is transient by definition
+// and must not end the watch.
+func submitFailureKind(err error) FailureKind {
+	if IsThrottled(err) {
+		return FailureThrottled
+	}
+	return FailureTerminal
 }
 
 // check describes the in-flight job and maps its status to an outcome.

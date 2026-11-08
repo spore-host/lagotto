@@ -61,6 +61,8 @@ func errorClass(kind FailureKind, err error) string {
 		return ErrClassCapacity
 	case FailureTerminal:
 		return ErrClassTerminal
+	case FailureThrottled:
+		return ErrClassThrottled
 	default:
 		return ErrClassUnknown
 	}
@@ -75,6 +77,8 @@ func errorClass(kind FailureKind, err error) string {
 //     "no-subnet: <azs>; ", so `list` shows class no-subnet rather than a
 //     plain capacity miss. Not for a quota or other terminal refusal, which
 //     the missing subnet did not cause, unless every candidate lacked one.
+//   - an attempt whose sweep skipped AZs a throttle named impaired is
+//     prefixed "impaired: <az> (<az-id>) until HH:MMZ; " (#254).
 //   - EC2's capacity hint (the AZs its message says have capacity, which it
 //     puts last) is moved ahead of the message: "EC2 suggests <azs>; ...".
 func describeAttemptError(kind FailureKind, err error) string {
@@ -85,10 +89,19 @@ func describeAttemptError(kind FailureKind, err error) string {
 	var b strings.Builder
 	var ns *NoSubnetError
 	if errors.As(err, &ns) && len(ns.AZs) > 0 && class != ErrClassQuota &&
-		(ns.All || kind == FailureCapacity || kind == FailureUnknown) {
+		(ns.All || kind == FailureCapacity || kind == FailureUnknown || kind == FailureThrottled) {
 		b.WriteString(ErrClassNoSubnet)
 		b.WriteString(": ")
 		b.WriteString(strings.Join(ns.AZs, ", "))
+		b.WriteString("; ")
+	}
+	// AZs skipped because a throttle named them impaired (#254), so `list`
+	// shows impaired rather than whatever the next AZ said.
+	var ce *AZCooloffError
+	if errors.As(err, &ce) && len(ce.Cooloffs) > 0 {
+		b.WriteString(ErrClassAZImpaired)
+		b.WriteString(": ")
+		b.WriteString(describeCooloffs(ce.Cooloffs))
 		b.WriteString("; ")
 	}
 	b.WriteString(class)
