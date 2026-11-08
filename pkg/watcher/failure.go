@@ -26,6 +26,10 @@ const (
 	// FailureUnknown means an unrecognized-but-plausibly-transient error: retried
 	// like capacity, but counted toward the per-watch consecutive-failure cap.
 	FailureUnknown = failure.FailureUnknown
+	// FailureThrottled means AWS throttled the attempt, or lagotto skipped it
+	// to back off from a throttle (#254): retried after a backoff, never
+	// terminal, never counted toward MaxConsecutiveFailures.
+	FailureThrottled = failure.FailureThrottled
 )
 
 // ClassifyFailure inspects a spawn/hold error and decides whether to retry.
@@ -36,6 +40,14 @@ var ClassifyFailure = failure.ClassifyFailure
 // quota/limit (#116), a finer-grained signal than ClassifyFailure's
 // FailureTerminal. Alias of [failure.IsQuotaExceeded].
 var IsQuotaExceeded = failure.IsQuotaExceeded
+
+// IsThrottled reports whether err is a throttle (#254). Alias of
+// [failure.IsThrottled].
+var IsThrottled = failure.IsThrottled
+
+// ThrottledAZID returns the AZ ID a throttle names as impaired, or "" (#254).
+// Alias of [failure.ThrottledAZID].
+var ThrottledAZID = failure.ThrottledAZID
 
 // failureLabel returns a short human label for log lines.
 func failureLabel(k FailureKind) string {

@@ -52,6 +52,14 @@ type Spawner struct {
 	// with no default subnet: the user may be creating one (#256). Nil = no
 	// cache to drop (test spawners).
 	forgetLaunchableAZs func(region string)
+	// throttle is the poller's shared throttling state (#254): the spawner
+	// skips AZs cooling off and records the throttles it meets. Nil = none
+	// (a spawner used without a poller), so nothing is skipped or recorded.
+	throttle *ThrottleBook
+	// azNameForID maps a zone ID named by an AZ-scoped throttle to this
+	// account's AZ name (#254). Nil = unmapped: the AZ attempted is taken to
+	// be the one named.
+	azNameForID func(ctx context.Context, region, azID string) string
 }
 
 // S3Client returns the S3 lister for s3-empty completion conditions (#70), or
@@ -65,7 +73,9 @@ func NewSpawner(ctx context.Context) (*Spawner, error) {
 		return nil, fmt.Errorf("create spawn client: %w", err)
 	}
 	subnets := newDefaultSubnetAZLookup(client.Config())
+	azIDs := newAZIDResolver(client.Config())
 	return &Spawner{
+		azNameForID:         azIDs.resolve,
 		client:              client,
 		provision:           launcher.Provision,
 		listInstances:       client.ListInstances,
@@ -263,7 +273,7 @@ func (s *Spawner) Spawn(ctx context.Context, w *Watch, m *MatchResult) error {
 		attempts = []string{m.AvailabilityZone} // may be "" → let EC2 choose the AZ
 	}
 
-	res, err := s.launchAcrossAZs(ctx, cfg, attempts, customUserData)
+	res, err := s.launchAcrossAZs(ctx, cfg, attempts, customUserData, true)
 	if err != nil {
 		m.ActionTaken = "spawn_failed"
 		return err
@@ -382,7 +392,13 @@ type launched struct {
 // idle/on-complete enforcement) and appends the user's script after it —
 // setting cfg.UserData directly here would skip Provision's bootstrap-building
 // step entirely (it only builds one when config.UserData is empty).
-func (s *Spawner) launchAcrossAZs(ctx context.Context, cfg spawnaws.LaunchConfig, attempts []string, customUserData string) (launched, error) {
+//
+// Throttling (#254): a throttle that names an impaired AZ cools that AZ off
+// and the sweep moves on to the next AZ; any other throttle backs the region
+// off and stops the sweep, since every AZ would be refused alike. With
+// skipCooledOff, AZs already cooling off are skipped without a call; if that
+// leaves nothing to try, the attempt fails as throttled with no AWS call.
+func (s *Spawner) launchAcrossAZs(ctx context.Context, cfg spawnaws.LaunchConfig, attempts []string, customUserData string, skipCooledOff bool) (launched, error) {
 	// Drop AZs the account can't place a default-VPC instance in (no default
 	// subnet, e.g. us-west-2d), so we don't waste an attempt or surface a
 	// confusing InvalidInput mid-sweep (#150). Fails open when undeterminable.
@@ -395,7 +411,16 @@ func (s *Spawner) launchAcrossAZs(ctx context.Context, cfg spawnaws.LaunchConfig
 		provision = launcher.Provision
 	}
 	var lastErr error
+	var cooled []AZCooloff // AZs skipped, or cooled off during this sweep (#254)
+	var tried []string
 	for _, a := range attempts {
+		if skipCooledOff {
+			if c, ok := s.throttle.AZCooledOff(cfg.Region, a, time.Now().UTC()); ok {
+				cooled = append(cooled, c)
+				continue
+			}
+		}
+		tried = append(tried, a)
 		cfg.AvailabilityZone = a
 		result, perr := provision(ctx, s.client, cfg, launcher.Options{
 			// Keyless: the poller Lambda has no SSH key. SSM-only launch.
@@ -409,11 +434,25 @@ func (s *Spawner) launchAcrossAZs(ctx context.Context, cfg spawnaws.LaunchConfig
 			return launched{InstanceID: result.InstanceID, AZ: az, State: result.State}, nil
 		}
 		lastErr = perr
-		if ClassifyFailure(perr) == FailureTerminal {
+		kind := ClassifyFailure(perr)
+		if kind == FailureTerminal {
 			break
 		}
+		if kind == FailureThrottled {
+			c, azScoped := noteThrottle(ctx, s.throttle, s.azNameForID, cfg.Region, a, perr, time.Now().UTC())
+			if !azScoped {
+				break // the region is throttled: don't spin through its other AZs
+			}
+			cooled = append(cooled, c)
+		}
 	}
-	err := fmt.Errorf("launch instance (tried %d AZ(s): %v): %w", len(attempts), attempts, lastErr)
+	if len(tried) == 0 {
+		return launched{}, errThrottledSkip(cfg.Region, cooled)
+	}
+	err := fmt.Errorf("launch instance (tried %d AZ(s): %v): %w", len(tried), tried, lastErr)
+	if len(cooled) > 0 {
+		err = &AZCooloffError{Cooloffs: cooled, Err: err}
+	}
 	if len(noSubnet) > 0 {
 		// Say which AZs were skipped for want of a default subnet (#256): EC2's
 		// own message often names one of them as the AZ with capacity. And
@@ -510,7 +549,9 @@ func (s *Spawner) LaunchScheduled(ctx context.Context, sl *ScheduledLaunch) (str
 	if az != "" {
 		attempts = []string{az}
 	}
-	res, err := s.launchAcrossAZs(ctx, cfg, attempts, customUserData)
+	// A scheduled launch does not skip cooling-off AZs: it is usually pinned
+	// to one by its reservation, and fires once at a chosen time.
+	res, err := s.launchAcrossAZs(ctx, cfg, attempts, customUserData, false)
 	return res.InstanceID, err
 }
 
@@ -569,7 +610,7 @@ func (s *Spawner) RunScheduled(ctx context.Context, sl *ScheduledLaunch) (Schedu
 		// for a short period. An unclassified blip near the boundary is likewise
 		// worth a retry. A terminal error (bad config) or a post-launch failure is
 		// not — retrying can't help.
-		if fk := ClassifyFailure(err); sl.ReservationID != "" && (fk == FailureCapacity || fk == FailureUnknown) {
+		if fk := ClassifyFailure(err); sl.ReservationID != "" && (fk == FailureCapacity || fk == FailureUnknown || fk == FailureThrottled) {
 			return OutcomeRetry, fmt.Sprintf("launch hit transient capacity at the boundary: %v", err), nil
 		}
 		return OutcomeFailed, "", err

@@ -49,12 +49,18 @@ type Holder struct {
 	// test holders that predate it). Set in NewHolder; needs only
 	// ec2:DescribeCapacityReservations, already granted.
 	describeReservation func(ctx context.Context, region, reservationID string) (landingCheck, error)
+	// throttle and azNameForID are the spawner's #254 throttling seams: AZs
+	// cooling off are not reserved in, and a throttled create is recorded.
+	// Nil = none.
+	throttle    *ThrottleBook
+	azNameForID func(ctx context.Context, region, azID string) string
 }
 
 // NewHolder creates a Holder.
 func NewHolder(cfg aws.Config) *Holder {
 	subnets := newDefaultSubnetAZLookup(cfg)
-	h := &Holder{cfg: cfg, launchableAZs: subnets.lookup, forgetLaunchableAZs: subnets.forget}
+	h := &Holder{cfg: cfg, launchableAZs: subnets.lookup, forgetLaunchableAZs: subnets.forget,
+		azNameForID: newAZIDResolver(cfg).resolve}
 	h.releaseClient = func(region string) holderReleaseAPI {
 		c := h.cfg.Copy()
 		c.Region = region
@@ -90,6 +96,20 @@ func (h *Holder) chooseHoldAZ(ctx context.Context, m *MatchResult) (az string, n
 	if len(candidates) == 0 {
 		candidates = []string{m.AvailabilityZone}
 	}
+	// Don't reserve in an AZ a throttle named impaired (#254).
+	var cooled []AZCooloff
+	open := candidates[:0:0]
+	for _, az := range candidates {
+		if c, ok := h.throttle.AZCooledOff(m.Region, az, time.Now().UTC()); ok {
+			cooled = append(cooled, c)
+			continue
+		}
+		open = append(open, az)
+	}
+	if len(open) == 0 {
+		return "", nil, errThrottledSkip(m.Region, cooled)
+	}
+	candidates = open
 	if h.launchableAZs == nil {
 		return candidates[0], nil, nil
 	}
@@ -166,6 +186,9 @@ func (h *Holder) Hold(ctx context.Context, w *Watch, m *MatchResult) error {
 	})
 	if err != nil {
 		m.ActionTaken = "hold_failed"
+		if IsThrottled(err) {
+			noteThrottle(ctx, h.throttle, h.azNameForID, m.Region, az, err, time.Now().UTC())
+		}
 		if len(noSubnet) > 0 {
 			h.forgetSubnets(m.Region)
 		}

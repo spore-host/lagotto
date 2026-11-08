@@ -266,7 +266,7 @@ func TestLaunchAcrossAZs_NoSubnet(t *testing.T) {
 		forgetLaunchableAZs: func(region string) { forgot = region },
 	}
 	_, err := sp.launchAcrossAZs(context.Background(), spawnaws.LaunchConfig{Region: "us-west-2"},
-		[]string{"us-west-2a", "us-west-2b", "us-west-2c", "us-west-2d"}, "")
+		[]string{"us-west-2a", "us-west-2b", "us-west-2c", "us-west-2d"}, "", true)
 	if !reflect.DeepEqual(tried, []string{"us-west-2a", "us-west-2b", "us-west-2c"}) {
 		t.Errorf("tried %v, want a/b/c", tried)
 	}
@@ -297,7 +297,7 @@ func TestLaunchAcrossAZs_AllNoSubnetFailsOpen(t *testing.T) {
 		},
 		launchableAZs: func(context.Context, string) map[string]bool { return map[string]bool{"us-west-2a": true} },
 	}
-	_, err := sp.launchAcrossAZs(context.Background(), spawnaws.LaunchConfig{Region: "us-west-2"}, []string{"us-west-2d"}, "")
+	_, err := sp.launchAcrossAZs(context.Background(), spawnaws.LaunchConfig{Region: "us-west-2"}, []string{"us-west-2d"}, "", true)
 	if !reflect.DeepEqual(tried, []string{"us-west-2d"}) {
 		t.Errorf("tried %v, want the one candidate (fail open)", tried)
 	}
@@ -320,7 +320,7 @@ func TestLaunchAcrossAZs_SuccessNotWrapped(t *testing.T) {
 		launchableAZs:       func(context.Context, string) map[string]bool { return map[string]bool{"us-west-2a": true} },
 		forgetLaunchableAZs: func(string) { t.Error("forget called on a success") },
 	}
-	res, err := sp.launchAcrossAZs(context.Background(), spawnaws.LaunchConfig{Region: "us-west-2"}, []string{"us-west-2d", "us-west-2a"}, "")
+	res, err := sp.launchAcrossAZs(context.Background(), spawnaws.LaunchConfig{Region: "us-west-2"}, []string{"us-west-2d", "us-west-2a"}, "", true)
 	if err != nil || res.AZ != "us-west-2a" {
 		t.Fatalf("res = %+v, err = %v", res, err)
 	}

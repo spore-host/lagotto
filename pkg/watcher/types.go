@@ -134,7 +134,7 @@ type Watch struct {
 	Attempts      int       `json:"attempts,omitempty" dynamodbav:"attempts,omitempty"`
 	LastAttemptAt time.Time `json:"last_attempt_at,omitzero" dynamodbav:"last_attempt_at,omitempty"`
 	// LastError is the most recent failed attempt, as "<class>: <AWS code>:
-	// <message>" (class is one of capacity, quota, terminal, unknown; prefixed
+	// <message>" (class is one of capacity, quota, terminal, unknown, throttled; prefixed
 	// "no-subnet: <azs>; " when the sweep skipped AZs with no default subnet, #256), truncated
 	// to MaxLastErrorBytes. A later success leaves it in place; LastErrorAt says
 	// when it happened.
@@ -190,6 +190,15 @@ type Watch struct {
 	// ignores it (and keeps its old terminal-on-quota behaviour). When the watch
 	// does fail this way, QuotaCapReason holds the message listing them all.
 	QuotaInfeasible []QuotaInfeasibility `json:"quota_infeasible,omitempty" dynamodbav:"quota_infeasible,omitempty"`
+	// Throttle and AZCooloffs are the account's EC2 throttling state as this
+	// watch last saw it (#254): per-region backoff after a throttled request,
+	// and AZs skipped because a throttle named them impaired. The poller is
+	// stateless across invocations, so each sweep rebuilds one shared
+	// ThrottleBook from every active watch's copy, and whichever watch is
+	// polled next obeys the backoff another watch earned. omitempty, so older
+	// records read back empty and an older poller ignores them.
+	Throttle   []RegionThrottle `json:"throttle,omitempty" dynamodbav:"throttle,omitempty"`
+	AZCooloffs []AZCooloff      `json:"az_cooloff,omitempty" dynamodbav:"az_cooloff,omitempty"`
 	// Two-phase landing (#239 phase 2). A spawn watch whose RunInstances
 	// returned, or a hold watch whose reservation was created, is not yet
 	// matched: the instance is usually still "pending" and can still be
