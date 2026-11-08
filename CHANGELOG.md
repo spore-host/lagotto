@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.69.0] - 2026-11-08
+
 ### Added
 
 - **Watch groups: the first member to land cancels its siblings** (#287).
@@ -2423,7 +2425,8 @@ Initial tagged release from the standalone `spore-host/lagotto` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/lagotto/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.68.0...HEAD
+[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.69.0...HEAD
+[0.69.0]: https://github.com/spore-host/lagotto/compare/v0.68.0...v0.69.0
 [0.68.0]: https://github.com/spore-host/lagotto/compare/v0.67.0...v0.68.0
 [0.67.0]: https://github.com/spore-host/lagotto/compare/v0.66.0...v0.67.0
 [0.66.0]: https://github.com/spore-host/lagotto/compare/v0.65.1...v0.66.0
