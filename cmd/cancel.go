@@ -22,9 +22,15 @@ var (
 )
 
 var cancelCmd = &cobra.Command{
-	Use:   "cancel <watch-id | scheduled-launch-id>",
-	Short: "Cancel an active watch or a scheduled launch, or release a fired hold's capacity reservation",
-	Long: `Cancel an active watch (w-…) or a scheduled launch (sl-…, from 'lagotto launch').
+	Use:   "cancel <watch-id | scheduled-launch-id | group>",
+	Short: "Cancel an active watch, a watch group or a scheduled launch, or release a fired hold's capacity reservation",
+	Long: `Cancel an active watch (w-…), a watch group (its name, from 'lagotto watch
+--group'), or a scheduled launch (sl-…, from 'lagotto launch').
+
+A group: the group ends, and every active member is cancelled as a watch is,
+with the tombstone "group <name> cancelled". A member's launch still landing
+is not terminated (its TTL applies); a member's pending reservation is
+released.
 
 A watch: any capacity reservation it recorded is released, and
 each email address it notifies is unsubscribed from the alerts topic unless another
@@ -70,6 +76,14 @@ func runCancel(cmd *cobra.Command, args []string) error {
 
 	store := watcher.NewStore(cfg, watchesTable, historyTable)
 
+	// A watch group (#287): end it and cancel every member.
+	if isGroupArg(watchID) {
+		return runCancelGroup(ctx, cmd.OutOrStdout(), os.Stderr, store, sts.NewFromConfig(cfg), watcher.NewHolder(cfg), watchID,
+			func(w *watcher.Watch) {
+				cleanupWatchEmails(ctx, cmd.OutOrStdout(), os.Stderr, emailSubscriberFor(cfg, os.Getenv, accountFromARN(w.UserID)), store.ListActiveWatches, w)
+			})
+	}
+
 	// Verify the watch exists AND the caller owns it (#41).
 	w, err := getWatchOwned(ctx, store, sts.NewFromConfig(cfg), watchID)
 	if err != nil {
@@ -90,6 +104,13 @@ func runCancel(cmd *cobra.Command, args []string) error {
 	}
 	// The watch has ended: unsubscribe any of its email addresses that no other
 	// active watch names (#240). The topic is the one `watch` subscribed to.
+	// A group member frees its group's launch slot (#287), so a sibling can
+	// launch at once instead of after the slot expires.
+	if cancelled && w.Group != "" {
+		if err := store.ReleaseGroupSlot(ctx, w.Group, w.WatchID); err != nil {
+			fmt.Fprintf(os.Stderr, "Note: %v (it expires on its own)\n", err)
+		}
+	}
 	if cancelled {
 		cleanupWatchEmails(ctx, cmd.OutOrStdout(), os.Stderr, emailSubscriberFor(cfg, os.Getenv, accountFromARN(w.UserID)), store.ListActiveWatches, w)
 	}

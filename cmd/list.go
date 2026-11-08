@@ -34,6 +34,9 @@ Besides each watch's definition, the table shows its heartbeat:
              watch is flagged "!" when that is over 15 minutes: the poller is
              disabled or failing, or its capacity search keeps failing.
   TRIES      how many launch/hold/notify attempts it has made.
+  GROUP      the watch group it belongs to (lagotto watch --group): the
+             first member to land cancels the others. "lagotto status
+             <group>" shows the whole group.
   LAST ERR   the class of its latest error: capacity, quota, terminal,
              unknown, or search (the capacity search itself failed).
 
@@ -148,8 +151,8 @@ func writeListEmailStates(out io.Writer, watches []watcher.Watch) {
 // writeWatchTable renders the `list` table. now is a parameter so the ages are
 // testable against a fixed clock. wide (`-o wide`) adds the full last error.
 func writeWatchTable(out io.Writer, watches []watcher.Watch, now time.Time, wide bool) {
-	const row = "%-12s %-10s %-15s %-20s %-20s %-25s %-6v %-10s %-16s %-25s %-9s %5s %-8s"
-	header := fmt.Sprintf(row, "WATCH ID", "STATUS", "PROJECT", "OWNER", "PATTERN", "REGIONS", "SPOT", "ACTION", "EXPOSURE", "EXPIRES",
+	const row = "%-12s %-10s %-15s %-12s %-20s %-20s %-25s %-6v %-10s %-16s %-25s %-9s %5s %-8s"
+	header := fmt.Sprintf(row, "WATCH ID", "STATUS", "PROJECT", "GROUP", "OWNER", "PATTERN", "REGIONS", "SPOT", "ACTION", "EXPOSURE", "EXPIRES",
 		"LAST POLL", "TRIES", "LAST ERR")
 	if wide {
 		header += " LAST ERROR"
@@ -172,6 +175,7 @@ func writeWatchTable(out io.Writer, watches []watcher.Watch, now time.Time, wide
 			w.WatchID,
 			statusCol(w),
 			dashIfEmpty(truncate(w.Project, 15)),
+			dashIfEmpty(truncate(w.Group, 12)),
 			truncate(shortOwner(w.UserID), 20),
 			truncate(w.InstanceTypePattern, 20),
 			regions,

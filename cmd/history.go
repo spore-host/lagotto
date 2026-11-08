@@ -151,9 +151,13 @@ func historyEntries(matches []watcher.MatchResult, gaveUp []watcher.Watch) []any
 	entries := make([]any, 0, len(matches)+len(gaveUp))
 	for _, m := range matches {
 		event := "match"
-		if m.ActionTaken == watcher.ActionUpdated {
+		switch m.ActionTaken {
+		case watcher.ActionUpdated:
 			// An audit row (#257), not a match: it acquired nothing.
 			event = "updated"
+		case watcher.ActionGroupCancelled, watcher.ActionGroupExtra:
+			// A watch group's audit rows (#287).
+			event = m.ActionTaken
 		}
 		entries = append(entries, matchEntry{MatchResult: m, Event: event})
 	}
@@ -221,6 +225,9 @@ func renderHistory(out io.Writer, matches []watcher.MatchResult, gaveUp []watche
 			if m.SporedDetail != "" {
 				_, _ = fmt.Fprintf(out, "  %s\n", m.SporedDetail)
 			}
+			if m.GroupDetail != "" {
+				_, _ = fmt.Fprintf(out, "  %s\n", m.GroupDetail)
+			}
 		}
 	}
 
@@ -264,7 +271,8 @@ func renderHistory(out io.Writer, matches []watcher.MatchResult, gaveUp []watche
 // not a quota refusal (#238) and not an update's audit row (#257).
 func acquiredSomething(m watcher.MatchResult) bool {
 	return m.ActionTaken != watcher.ActionQuotaInfeasible && m.ActionTaken != watcher.ActionUpdated &&
-		!isLostLanding(m) && m.ActionTaken != watcher.ActionSporedUnconfirmed
+		!isLostLanding(m) && m.ActionTaken != watcher.ActionSporedUnconfirmed &&
+		m.ActionTaken != watcher.ActionGroupCancelled && m.ActionTaken != watcher.ActionGroupExtra
 }
 
 // isLostLanding reports whether a history row is a launch or hold that did not

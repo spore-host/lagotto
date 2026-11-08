@@ -203,6 +203,46 @@ lagotto update <watch-id> --add-region us-west-2 --add-type g6.xlarge --dry-run
 - `-o json` on `watch`, `list` and `status`, and the reminder's webhook/sns JSON,
   carry an `exposure` object.
 
+## Watch groups: any one of several searches will do
+
+When any one of several *different* searches would do (a g7e.2xlarge in
+us-east-2, or a g7e.8xlarge in us-west-2, or a g6e as a fallback, each with
+its own spawn config), put them in a group. The first member to land wins and
+every other member is cancelled:
+
+```bash
+lagotto watch g7e.2xlarge --regions us-east-2 --action spawn --spawn-config a.yaml --group blackwell
+lagotto watch g7e.8xlarge --regions us-west-2 --action spawn --spawn-config b.yaml --group blackwell
+lagotto watch 'g6e.*'     --regions us-east-1 --action hold --group blackwell
+
+lagotto status blackwell   # the group's state and each member's
+lagotto cancel blackwell   # end the group and cancel every member
+```
+
+- **The first to land wins.** Landing means the instance is `running` (or the
+  reservation `active`), not that RunInstances returned. A launch that dies in
+  pending is not a win, and the group keeps hunting.
+- **One launch at a time.** Before it launches or reserves, a member claims the
+  group's slot with a conditional write. While one member's launch is landing,
+  the others launch nothing.
+- **The siblings are cancelled** with a tombstone (`lagotto status <id>` shows
+  "group blackwell landed by w-… (i-…, type, AZ)") and a `group_cancelled` row
+  in `lagotto history`. A sibling's pending reservation is released. The group
+  sends one notification, to every member's channels, naming the winner.
+- **An extra landing** (a launch that lands after the group was won) is
+  terminated through spawn's terminate path, or its reservation released, and
+  its member is told. With `--group-on-extra keep` it is left running instead.
+- **Members** can be `--action spawn` or `hold`. Not with `--action notify`
+  (deprecated), `--maintain`, `--until-landed` (not yet) or `--service
+  sagemaker`. A group belongs to the caller who created it. `lagotto update`
+  never moves a watch between groups.
+- `lagotto list` has a `GROUP` column. `lagotto status <group>` shows the
+  group's cost exposure as its largest member's, since only one is meant to
+  land, plus the total if every member that keeps extras lands.
+- **Pollers before v0.69.0 ignore groups** and poll each member as an
+  independent watch. `lagotto watch --group` warns when the deployed poller is
+  older; run `lagotto deploy`.
+
 ## Goal-driven fleets
 
 By default a watch fires its action **once** and retires. A **fleet watch**

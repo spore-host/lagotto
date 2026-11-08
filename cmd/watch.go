@@ -38,6 +38,8 @@ var (
 	watchRemind          string
 	watchYes             bool
 	watchRequireQuota    bool
+	watchGroup           string
+	watchGroupOnExtra    string
 )
 
 var watchCmd = &cobra.Command{
@@ -108,6 +110,8 @@ func init() {
 	watchCmd.Flags().StringVar(&watchRemind, "remind", "7d", "With --until-landed: the reminder interval (1h to 30d). You are reminded after each of the first 2 intervals and warned 24h before the pause; the watch pauses 3 × this after creation or the last ack.")
 	watchCmd.Flags().BoolVarP(&watchYes, "yes", "y", false, "Skip the confirmation prompt that --until-landed --action spawn/hold shows (required when stdin is not a terminal)")
 	watchCmd.Flags().BoolVar(&watchRequireQuota, "require-quota", false, "With --maintain: refuse to create the watch (exit status 3) when the account's EC2 vCPU quota, read in every --regions region, provably can't hold --maintain N workers. A quota that can't be read is unknown, not zero: the watch is then created anyway, with a note.")
+	watchCmd.Flags().StringVar(&watchGroup, "group", "", "Join (or create) a watch group: the first member to land wins and every other member is cancelled. Members may differ in pattern, regions, Spot and spawn config; --action spawn or hold only, not with --maintain, --until-landed or --service sagemaker. 'lagotto status <group>' and 'lagotto cancel <group>' act on the whole group.")
+	watchCmd.Flags().StringVar(&watchGroupOnExtra, "group-on-extra", "", "With --group: what happens to this member's launch if it lands after the group was already won: terminate (default; a hold's reservation is released) or keep")
 	watchCmd.Flags().StringVar(&watchUntil, "until", "", "Fleet completion condition, re-checked each poll: 's3-empty: s3://b/manifest minus s3://b/done/', 'http-200: https://…', or 'shell: <cmd>' (shell = local daemon only). When true the fleet retires.")
 }
 
@@ -187,6 +191,14 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(os.Stderr, "note: shell completion conditions run only on the local 'poll --daemon' (the hosted poller has no shell sandbox).")
 	}
 
+	// Watch groups (#287): refused before any AWS call when the combination
+	// can't be a member. Checked again on the built watch below.
+	groupOnExtra, err := validateGroupFlags(watchGroup, watchGroupOnExtra, cmd.Flags().Changed("group-on-extra"),
+		&watcher.Watch{Group: watchGroup, Service: service, Action: action, DesiredCount: watchMaintain, UntilLanded: ul.enabled})
+	if err != nil {
+		return err
+	}
+
 	// Parse notify channels
 	channels, err := parseNotifyChannels(watchNotify)
 	if err != nil {
@@ -248,6 +260,11 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	w.SageMakerJobJSON = sageMakerJobJSON
 	w.DesiredCount = watchMaintain
 	w.CompletionCondition = watchUntil
+	w.Group = watchGroup
+	w.GroupOnExtra = groupOnExtra
+	if err := watcher.ValidateGroupMember(w); err != nil {
+		return err
+	}
 
 	// Everything `update` re-checks (#257) goes through these two, so an update
 	// cannot store a watch that this command would refuse.
@@ -295,6 +312,16 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	// refused watch is not also lectured and stdout / -o json stay clean.
 	deprecations := watcher.ActionDeprecations(w.Action, cmd.Flags().Changed("action"))
 	writeDeprecations(cmd.ErrOrStderr(), deprecations)
+	// Join the group before the watch is stored (#287), so a member is never
+	// polled without its group: a refused join stores nothing.
+	var group *watcher.WatchGroup
+	if w.Group != "" {
+		group, err = joinWatchGroup(ctx, store, w)
+		if err != nil {
+			return err
+		}
+		warnIfPollerPredatesGroups(ctx, cfg, os.Stderr, w)
+	}
 	if err := store.PutWatch(ctx, w); err != nil {
 		return fmt.Errorf("create watch: %w", err)
 	}
@@ -326,6 +353,9 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Max price: $%.4f/hr\n", w.MaxPrice)
 	}
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Action:   %s\n", w.Action)
+	if group != nil {
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Group:    %s\n", groupJoinedLine(group, w))
+	}
 	writeExposure(cmd.OutOrStdout(), "  Exposure: ", w.Exposure)
 	if action == watcher.ActionSpawn && w.Service == watcher.ServiceEC2 {
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Spawn config: %s\n", watchSpawnConfig)
