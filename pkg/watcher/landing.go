@@ -86,6 +86,14 @@ type landingCheck struct {
 	// "Server.InsufficientInstanceCapacity"). Empty for a reservation.
 	ReasonCode    string
 	ReasonMessage string
+	// TransitionReason is EC2's StateTransitionReason, which carries EC2's own
+	// timestamp of the transition, e.g. "Server.InternalError (2026-11-06
+	// 23:49:12 GMT)" (#255). Empty for a reservation.
+	TransitionReason string
+	// SporedSeen: the instance carries a tag spored writes once it is up
+	// (spawn:last-heartbeat or spawn:spored-version, #255). Read from the same
+	// DescribeInstances, so it costs no extra call and no extra IAM.
+	SporedSeen bool
 	// NotFound: the describe succeeded but does not know the resource.
 	NotFound bool
 }
@@ -465,6 +473,9 @@ func (p *Poller) completeLanding(ctx context.Context, w *Watch, chk landingCheck
 		m.InstanceState, m.ActionTaken = chk.State, "spawned"
 	}
 	w.clearLanding()
+	if !reservation {
+		p.armSporedCheck(w, m, chk.SporedSeen, now)
+	}
 	w.ConsecutiveFailures = 0
 	// RecordMatch writes the whole record, so the pending fields and the marker
 	// go with it. If it fails they are still there, and the next cycle retries.
@@ -495,7 +506,7 @@ func (p *Poller) completeLanding(ctx context.Context, w *Watch, chk landingCheck
 func (p *Poller) failLanding(ctx context.Context, w *Watch, chk landingCheck, action string, now time.Time, summary *PollSummary) bool {
 	reservation := w.PendingReservationID != ""
 	kind := landingFailureKind(reservation, action, chk)
-	reason := oneLine(strings.TrimSpace(strings.Join(nonEmpty(chk.ReasonCode, chk.ReasonMessage), ": ")))
+	reason := landingReason(chk)
 	id := w.PendingResourceID()
 	what := "instance " + id
 	if reservation {
@@ -528,6 +539,11 @@ func (p *Poller) failLanding(ctx context.Context, w *Watch, chk landingCheck, ac
 	if action == ActionLandingTimedOut {
 		m.LandingReason = chk.ReasonMessage
 	}
+	// LostAt is when this poller saw the landing fail (#255): MatchedAt stays the
+	// launch time, and EC2 forgets a terminated instance after about an hour, so
+	// the history row is the only lasting record of when and why it went.
+	lostAt := now
+	m.LostAt = &lostAt
 	if reservation {
 		m.ReservationState = chk.State
 	} else {
@@ -540,8 +556,18 @@ func (p *Poller) failLanding(ctx context.Context, w *Watch, chk landingCheck, ac
 	w.clearLanding()
 	w.LastError, w.LastErrorAt = msg, now
 	w.LastPolledAt = now
+
+	// An instance EC2 killed in pending for lack of capacity says its AZ cannot
+	// place launches right now: cool the AZ off (#254's API, reason
+	// "early-death") so the relaunch below, and the next sweeps, try elsewhere.
+	if earlyDeathCoolsOff(reservation, chk) {
+		c := p.CoolOffAZ(ctx, w, m.Region, chk.AZ, "", "early-death")
+		fmt.Fprintf(os.Stderr, "Watch %s: %s died in pending (%s); cooling off %s\n", w.WatchID, id, chk.ReasonCode, c.Describe())
+	}
+
 	if kind == FailureCapacity {
 		w.ConsecutiveFailures = 0
+		p.sendLost(ctx, w, m, false)
 		return true
 	}
 	if n <= 0 {
@@ -549,20 +575,66 @@ func (p *Poller) failLanding(ctx context.Context, w *Watch, chk landingCheck, ac
 	}
 	w.ConsecutiveFailures = n
 	if n < MaxConsecutiveFailures {
+		p.sendLost(ctx, w, m, false)
 		return true
 	}
 	fmt.Fprintf(os.Stderr, "Watch %s: %d consecutive launches failed to land; stopping watch\n", w.WatchID, n)
-	if notify := p.matchNotifier(); notify != nil {
-		if err := notify(ctx, w, m); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: notification failed for %s: %v\n", w.WatchID, err)
-		}
-	}
+	w.Status = StatusFailed
+	p.sendLost(ctx, w, m, true)
 	if err := p.store.UpdateWatchStatus(ctx, w.WatchID, StatusFailed); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to update watch status for %s: %v\n", w.WatchID, err)
 	}
 	w.Status = StatusFailed
 	summary.Failed++
 	return false
+}
+
+// sendLost tells the watch's channels that a launch or hold was lost before
+// it landed (#255): which resource, the state EC2 reported, its reason, and
+// whether the watch is hunting again or stopped. Every loss is sent, not only
+// the one that stops the watch: a launched instance that disappears is the
+// thing a person waiting on an unattended hunt most needs to hear about.
+func (p *Poller) sendLost(ctx context.Context, w *Watch, m *MatchResult, stopped bool) {
+	notify := p.lostNotifier()
+	if notify == nil {
+		return
+	}
+	if err := notify(ctx, w, m, stopped); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: lost-launch notification failed for %s: %v\n", w.WatchID, err)
+	}
+}
+
+// landingReason is the history reason for a failed landing: EC2's StateReason
+// code and message, then its StateTransitionReason (which carries EC2's own
+// timestamp) when it says something the StateReason does not.
+func landingReason(chk landingCheck) string {
+	parts := nonEmpty(chk.ReasonCode, chk.ReasonMessage)
+	// EC2 often repeats the code at the start of the message.
+	if len(parts) == 2 && strings.HasPrefix(parts[1], parts[0]) {
+		parts = parts[1:]
+	}
+	reason := strings.Join(parts, ": ")
+	if tr := strings.TrimSpace(chk.TransitionReason); tr != "" && !strings.Contains(reason, tr) {
+		if reason == "" {
+			reason = tr
+		} else {
+			reason += " (transition: " + tr + ")"
+		}
+	}
+	return oneLine(strings.TrimSpace(reason))
+}
+
+// earlyDeathCoolsOff reports whether a failed landing should cool its AZ off
+// (#254/#255): an instance (not a reservation) in a known AZ that EC2
+// terminated with an insufficient-capacity reason. A user- or
+// instance-initiated shutdown, a Spot reclaim, a timeout, a stop and an
+// internal error are not evidence that the AZ cannot place launches.
+func earlyDeathCoolsOff(reservation bool, chk landingCheck) bool {
+	if reservation || chk.AZ == "" || chk.NotFound || instancePhase(chk.State) != phaseGone {
+		return false
+	}
+	code := chk.ReasonCode
+	return strings.Contains(code, "InsufficientInstanceCapacity") || strings.Contains(code, "InsufficientCapacity")
 }
 
 func nonEmpty(ss ...string) []string {
@@ -647,6 +719,8 @@ func describeInstanceState(ctx context.Context, api instanceDescribeAPI, instanc
 				c.ReasonCode = aws.ToString(in.StateReason.Code)
 				c.ReasonMessage = aws.ToString(in.StateReason.Message)
 			}
+			c.TransitionReason = aws.ToString(in.StateTransitionReason)
+			c.SporedSeen = hasSporedTag(in.Tags)
 			return c, nil
 		}
 	}

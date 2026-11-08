@@ -221,6 +221,15 @@ type Watch struct {
 	// PendingMatch is the match the pending launch/hold came from, so the history
 	// row written when it lands (or fails to) describes the real candidate.
 	PendingMatch *MatchResult `json:"pending_match,omitempty" dynamodbav:"pending_match,omitempty"`
+	// The spored check-in follow-up (#255, see spored_check.go). Set on a
+	// matched spawn watch when its instance landed with no spored tag yet;
+	// removed when spored's tag appears, or when SporedCheckUntil passes and the
+	// poller records spored_unconfirmed. Never on any other watch. A pre-#255
+	// poller never loads a matched watch, so it ignores them.
+	SporedCheckInstanceID string `json:"spored_check_instance_id,omitempty" dynamodbav:"spored_check_instance_id,omitempty"`
+	SporedCheckRegion     string `json:"spored_check_region,omitempty" dynamodbav:"spored_check_region,omitempty"`
+	// SporedCheckUntil is a pointer for the same reason as PendingSince.
+	SporedCheckUntil *time.Time `json:"spored_check_until,omitempty" dynamodbav:"spored_check_until,omitempty"`
 	// Until-landed (#239 phase 3; see until_landed.go). UntilLanded watches have
 	// no TTL: ExpiresAt is their rolling acknowledgement deadline instead, set to
 	// (RemindPauseAfter+1) × RemindEverySeconds from creation or the last `ack`.
@@ -312,6 +321,15 @@ type MatchResult struct {
 	InstanceState    string    `json:"instance_state,omitempty" dynamodbav:"instance_state,omitempty"`
 	ReservationState string    `json:"reservation_state,omitempty" dynamodbav:"reservation_state,omitempty"`
 	LandingReason    string    `json:"landing_reason,omitempty" dynamodbav:"landing_reason,omitempty"`
+	// LostAt is when the poller saw a landing fail (landing_failed /
+	// landing_timed_out rows, #255). Zero on every other row.
+	LostAt *time.Time `json:"lost_at,omitempty" dynamodbav:"lost_at,omitempty"`
+	// SporedConfirmedAt is when the poller first saw spored's tag on a matched
+	// spawn's instance (#255). Set on the watch's last_match and the spawned
+	// history row; nil when not (yet) confirmed. SporedDetail explains a
+	// spored_unconfirmed row.
+	SporedConfirmedAt *time.Time `json:"spored_confirmed_at,omitempty" dynamodbav:"spored_confirmed_at,omitempty"`
+	SporedDetail      string     `json:"spored_detail,omitempty" dynamodbav:"spored_detail,omitempty"`
 	// QuotaDetail explains a quota_infeasible row (#238): the error code, the
 	// vCPUs the type needs, and the quota numbers when known. Empty otherwise.
 	QuotaDetail string `json:"quota_detail,omitempty" dynamodbav:"quota_detail,omitempty"`

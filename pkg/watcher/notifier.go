@@ -702,6 +702,223 @@ func (n *Notifier) sendSNS(ctx context.Context, topicArn string, w *Watch, m *Ma
 	return err
 }
 
+// NotifyLandingLost tells the user that a launch (or hold) lagotto made for
+// the watch was lost before it landed (#255): the instance terminated, stopped
+// or never left pending, or the reservation failed. stopped says whether this
+// loss also stopped the watch (MaxConsecutiveFailures); otherwise the watch is
+// hunting again. A sibling of Notify, not a match notification: nothing was
+// acquired, and the match email would say "capacity found".
+//
+// Same channel fan-out and webhook re-validation as Notify.
+func (n *Notifier) NotifyLandingLost(ctx context.Context, w *Watch, m *MatchResult, stopped bool) error {
+	if len(w.NotifyChannels) == 0 {
+		return nil
+	}
+	payload, err := json.Marshal(landingLostPayload(w, m, stopped))
+	if err != nil {
+		return fmt.Errorf("marshal lost-launch payload: %w", err)
+	}
+	return n.fanOut(ctx, w, landingLostSubject(m, stopped), landingLostBody(w, m, stopped), payload)
+}
+
+// fanOut sends one event to every channel on the watch: the human subject and
+// body to email, the JSON payload to a webhook (re-validated at send time, as
+// in Notify) or the user's own SNS topic. Unknown channel types are skipped.
+func (n *Notifier) fanOut(ctx context.Context, w *Watch, subject, body string, payload []byte) error {
+	var lastErr error
+	for _, ch := range w.NotifyChannels {
+		var err error
+		switch ch.Type {
+		case "email":
+			err = n.publishEmail(ctx, ch.Target, subject, body)
+		case "webhook":
+			if verr := ValidateWebhookURL(ch.Target); verr != nil {
+				err = fmt.Errorf("blocked unsafe webhook URL: %w", verr)
+			} else {
+				err = n.postWebhookJSON(ch.Target, payload)
+			}
+		case "sns":
+			_, err = n.snsClient.Publish(ctx, &sns.PublishInput{
+				TopicArn: aws.String(ch.Target),
+				Message:  aws.String(string(payload)),
+			}, InARNRegion(ch.Target))
+		default:
+			continue
+		}
+		if err != nil {
+			lastErr = err
+		}
+	}
+	return lastErr
+}
+
+// NotifySporedUnconfirmed tells the user that a matched spawn's instance is up
+// (or was) but spored never checked in within SporedCheckWindow (#255). It is
+// advisory: lagotto did not terminate the instance. m is the spored_unconfirmed
+// history row; m.SporedDetail says what was seen and what to check.
+func (n *Notifier) NotifySporedUnconfirmed(ctx context.Context, w *Watch, m *MatchResult) error {
+	if len(w.NotifyChannels) == 0 {
+		return nil
+	}
+	payload, err := json.Marshal(sporedUnconfirmedPayload(w, m))
+	if err != nil {
+		return fmt.Errorf("marshal spored_unconfirmed payload: %w", err)
+	}
+	return n.fanOut(ctx, w, sporedUnconfirmedSubject(m), sporedUnconfirmedBody(w, m), payload)
+}
+
+// sporedUnconfirmedSubject renders the subject line. Pure, for tests.
+func sporedUnconfirmedSubject(m *MatchResult) string {
+	return fmt.Sprintf("[lagotto] %s %s in %s: spored has not checked in", m.InstanceType, m.InstanceID, m.Region)
+}
+
+// sporedUnconfirmedBody renders the body. Pure, for tests.
+func sporedUnconfirmedBody(w *Watch, m *MatchResult) string {
+	running := "-"
+	if !m.LandedAt.IsZero() {
+		running = m.LandedAt.Format(time.RFC3339)
+	}
+	return fmt.Sprintf(`The instance lagotto launched for watch %s reached running, but spored
+(the spore.host agent that enforces its TTL and runs its job) has not
+checked in within %s.
+
+Instance ID:       %s
+Instance Type:     %s
+Region:            %s
+Availability Zone: %s
+Running At:        %s
+State Now:         %s
+
+%s
+
+The watch stays matched; lagotto will not check again.
+`,
+		w.WatchID, SporedCheckWindow,
+		m.InstanceID, m.InstanceType, m.Region, dashIfEmpty(m.AvailabilityZone),
+		running, dashIfEmpty(m.InstanceState), m.SporedDetail)
+}
+
+// sporedUnconfirmedPayload is the machine-readable event. Like the other
+// sibling payloads, the "event" key is new to THIS payload only.
+func sporedUnconfirmedPayload(w *Watch, m *MatchResult) map[string]interface{} {
+	payload := map[string]interface{}{
+		"watch_id":          w.WatchID,
+		"event":             ActionSporedUnconfirmed,
+		"instance_id":       m.InstanceID,
+		"instance_type":     m.InstanceType,
+		"region":            m.Region,
+		"availability_zone": m.AvailabilityZone,
+		"state":             m.InstanceState,
+		"detail":            m.SporedDetail,
+		"checked_at":        m.MatchedAt.Format(time.RFC3339),
+	}
+	if !m.LandedAt.IsZero() {
+		payload["running_at"] = m.LandedAt.Format(time.RFC3339)
+	}
+	return payload
+}
+
+// lostWhat names the lost resource: "launch i-..." or "hold cr-...".
+func lostWhat(m *MatchResult) string {
+	if m.ReservationID != "" {
+		return "capacity reservation " + m.ReservationID
+	}
+	return "instance " + m.InstanceID
+}
+
+// lostState is the state the poller last saw, for the notification.
+func lostState(m *MatchResult) string {
+	if m.ReservationID != "" {
+		return m.ReservationState
+	}
+	return m.InstanceState
+}
+
+// landingLostSubject renders the lost-launch subject line. Pure, for tests.
+func landingLostSubject(m *MatchResult, stopped bool) string {
+	verb := "launch"
+	if m.ReservationID != "" {
+		verb = "hold"
+	}
+	tail := "still hunting"
+	if stopped {
+		tail = "watch stopped"
+	}
+	return fmt.Sprintf("[lagotto] %s %s in %s lost before it landed: %s", m.InstanceType, verb, m.Region, tail)
+}
+
+// landingLostBody renders the lost-launch body: what was lost, EC2's reason,
+// the timestamps, and what lagotto does next.
+func landingLostBody(w *Watch, m *MatchResult, stopped bool) string {
+	next := "The watch is still ACTIVE: lagotto is hunting again and will launch the next\ncapacity it finds. Nothing for you to do unless you want to stop it\n(lagotto cancel " + w.WatchID + ")."
+	if stopped {
+		next = fmt.Sprintf("The watch has STOPPED (status: failed): %d launches in a row were lost\nfor a reason other than capacity, so retrying looks unlikely to help.\nCheck the reason above and create the watch again.", MaxConsecutiveFailures)
+	}
+	reason := m.LandingReason
+	if reason == "" {
+		reason = "(EC2 gave no reason)"
+	}
+	lostAt := "-"
+	if m.LostAt != nil {
+		lostAt = m.LostAt.Format(time.RFC3339)
+	}
+	return fmt.Sprintf(`The %s that lagotto launched for watch %s did not land.
+
+Instance Type:     %s
+Region:            %s
+Availability Zone: %s
+Launched At:       %s
+Lost At:           %s (when lagotto saw it)
+State:             %s
+Reason:            %s
+
+%s
+`,
+		lostWhat(m), w.WatchID,
+		m.InstanceType, m.Region, dashIfEmpty(m.AvailabilityZone),
+		m.MatchedAt.Format(time.RFC3339), lostAt,
+		dashIfEmpty(lostState(m)), reason, next)
+}
+
+func dashIfEmpty(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+// landingLostPayload is the machine-readable lost-launch event. Like the other
+// sibling payloads, the "event" key is new to THIS payload only; it is the
+// history action (landing_failed or landing_timed_out).
+func landingLostPayload(w *Watch, m *MatchResult, stopped bool) map[string]interface{} {
+	status := StatusActive
+	if stopped {
+		status = StatusFailed
+	}
+	payload := map[string]interface{}{
+		"watch_id":          w.WatchID,
+		"event":             m.ActionTaken,
+		"status":            string(status),
+		"instance_type":     m.InstanceType,
+		"region":            m.Region,
+		"availability_zone": m.AvailabilityZone,
+		"is_spot":           m.IsSpot,
+		"launched_at":       m.MatchedAt.Format(time.RFC3339),
+		"state":             lostState(m),
+		"reason":            m.LandingReason,
+	}
+	if m.LostAt != nil {
+		payload["lost_at"] = m.LostAt.Format(time.RFC3339)
+	}
+	if m.InstanceID != "" {
+		payload["instance_id"] = m.InstanceID
+	}
+	if m.ReservationID != "" {
+		payload["reservation_id"] = m.ReservationID
+	}
+	return payload
+}
+
 // NotifyUnsupported tells the user that the poller retired a watch because its
 // service/action combination can never fire (#195): a notify-only SageMaker
 // watch stored before `watch` refused the combination. A sibling of Notify, not

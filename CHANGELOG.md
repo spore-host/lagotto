@@ -87,6 +87,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     and `ErrThrottled`. `pkg/watcher` exports `Poller.CoolOffAZ` and
     `Poller.AZCooledOff`, so other code that learns an AZ is impaired can use
     the same cool-off.
+- **A spawn or hold lost before it lands is now notified, and history keeps
+  why** (#255). Since 0.67.0 (#239) a launch only matches once it is
+  `running`, so a watch no longer completes as `spawned` on an instance EC2
+  then kills in `pending`. What was still missing:
+  - Every lost launch or hold (`landing_failed`, `landing_timed_out`) is now
+    sent to the watch's channels, with the instance or reservation, its state,
+    EC2's reason, and whether the watch is hunting again or stopped. Before,
+    only the tenth unclassified loss in a row was sent, and it went out as the
+    match email ("capacity found"). The email subject is
+    `[lagotto] <type> launch in <region> lost before it landed: still hunting`
+    (or `watch stopped`). Webhook and SNS get a new event payload: `event`
+    (the history action), `status`, `instance_id` or `reservation_id`,
+    `state`, `reason`, `launched_at`, `lost_at`. The match payload is unchanged.
+  - The history row also records `lost_at` (when the poller saw the loss;
+    `matched_at` stays the launch time) and EC2's `StateTransitionReason`,
+    which carries EC2's own timestamp, alongside the `StateReason`. The code is
+    no longer repeated when EC2's message starts with it.
+  - `lagotto history` prints a detail line under a lost landing (instance,
+    state, reason, when seen) and no longer gives it a wait-to-acquire.
+  - **spored check-in follow-up (advisory).** A spawn watch still matches at
+    `running`. After that the poller checks the instance for spored's
+    `spawn:last-heartbeat` or `spawn:spored-version` tag, once per sweep, for
+    up to 10 minutes. It uses the DescribeInstances the landing check already
+    makes, so no new IAM is needed. If the tag appears, the match row and the
+    watch's `last_match` get `spored_confirmed_at` and nothing else happens.
+    If it does not appear in time, or the instance stops or terminates first,
+    the poller writes a `spored_unconfirmed` history row and notifies the
+    watch's channels (webhook/SNS `event: spored_unconfirmed`). Both give the
+    instance, how long it has been running, and a note that a watch whose
+    spawn config names its own `iam_role` may lack `ec2:CreateTags`. lagotto
+    never terminates the instance, and the follow-up then stops. Holds are not
+    checked. The pending check is stored as three attributes on the matched
+    watch (`spored_check_instance_id`, `_region`, `_until`), which an older
+    poller ignores.
+  - A spawn EC2 terminates in `pending` with an insufficient-capacity reason
+    in a known AZ now cools that AZ off through the #254 cool-off
+    (`CoolOffAZ`, reason `early-death`). The relaunch in the same sweep, and
+    later sweeps, go to another AZ. A user- or instance-initiated shutdown, a
+    Spot reclaim, `Server.InternalError`, a stop, a timeout or a failed hold
+    does not cool off an AZ.
 
 ## [0.68.0] - 2026-11-07
 

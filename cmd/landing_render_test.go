@@ -126,3 +126,65 @@ func TestCancel_LandingInstanceNote(t *testing.T) {
 		t.Errorf("errOut = %q", errOut.String())
 	}
 }
+
+// #255: a launch lost before it landed shows in history with the instance, the
+// state, EC2's reason and when it was seen, and no wait-to-acquire (nothing was
+// acquired). EC2 forgets a terminated instance after about an hour, so this row
+// is the only lasting record.
+func TestRenderHistory_LostLandingRow(t *testing.T) {
+	wait := 3600.0
+	at := time.Date(2026, 11, 6, 23, 47, 29, 0, time.UTC)
+	matches := []watcher.MatchResult{
+		{
+			WatchID: "w-255", InstanceType: "g7e.48xlarge", Region: "us-west-2", AvailabilityZone: "us-west-2a",
+			ActionTaken: watcher.ActionLandingFailed, MatchedAt: at, WaitToAcquireSeconds: &wait,
+			InstanceID: "i-0abc", InstanceState: "terminated", LandingReason: "Server.InternalError: Internal error on launch",
+			LostAt: func() *time.Time { t := at.Add(5 * time.Minute); return &t }(),
+		},
+		{
+			WatchID: "w-hold", InstanceType: "p5.48xlarge", Region: "us-east-1",
+			ActionTaken: watcher.ActionLandingTimedOut, MatchedAt: at, WaitToAcquireSeconds: &wait,
+			ReservationID: "cr-1", ReservationState: "pending", LandingReason: "still pending after 11m; lagotto cancelled it",
+		},
+	}
+	var buf bytes.Buffer
+	if err := renderHistory(&buf, matches, nil); err != nil {
+		t.Fatal(err)
+	}
+	s := buf.String()
+	for _, want := range []string{
+		"  i-0abc terminated: Server.InternalError: Internal error on launch (seen 2026-11-06T23:52:29Z)",
+		"  cr-1 pending: still pending after 11m; lagotto cancelled it\n",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("history missing %q:\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, "1h0m") {
+		t.Errorf("a lost landing shows a wait-to-acquire:\n%s", s)
+	}
+	if d := lostDetail(watcher.MatchResult{ActionTaken: "spawned", InstanceID: "i-1"}); d != "" {
+		t.Errorf("a spawned row got a lost detail %q", d)
+	}
+}
+
+// #255 item 1b: a spored_unconfirmed row shows its detail and no wait.
+func TestRenderHistory_SporedUnconfirmedRow(t *testing.T) {
+	wait := 3600.0
+	matches := []watcher.MatchResult{{
+		WatchID: "w-sp", InstanceType: "g7e.48xlarge", Region: "us-west-2", ActionTaken: watcher.ActionSporedUnconfirmed,
+		MatchedAt: time.Date(2026, 11, 7, 0, 0, 0, 0, time.UTC), WaitToAcquireSeconds: &wait, InstanceID: "i-0abc",
+		SporedDetail: "instance i-0abc is running but spored has not checked in 10m0s after it was seen running.",
+	}}
+	var buf bytes.Buffer
+	if err := renderHistory(&buf, matches, nil); err != nil {
+		t.Fatal(err)
+	}
+	s := buf.String()
+	if !strings.Contains(s, "spored_unconfirmed") || !strings.Contains(s, "  instance i-0abc is running but spored has not checked in") {
+		t.Errorf("history:\n%s", s)
+	}
+	if strings.Contains(s, "1h0m") {
+		t.Errorf("a spored_unconfirmed row shows a wait-to-acquire:\n%s", s)
+	}
+}
