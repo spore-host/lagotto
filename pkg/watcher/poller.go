@@ -90,6 +90,13 @@ type Poller struct {
 	// rebuilt from the watches at the start of each sweep. Created on first
 	// use (book), so a Poller built as a literal in a test has one too.
 	throttle *ThrottleBook
+	// groups caches each watch group read this sweep (#287); reset by PollAll.
+	groups map[string]*WatchGroup
+	// notifyGroupLanded / notifyGroupExtra override where a #287 group's
+	// landed notification, and a member's extra-landing notice, go — same
+	// test seam pattern.
+	notifyGroupLanded func(ctx context.Context, w *Watch, g *WatchGroup, m *MatchResult, cancelled []string) error
+	notifyGroupExtra  func(ctx context.Context, w *Watch, g *WatchGroup, m *MatchResult) error
 }
 
 // WatchFilter scopes a poll sweep to a subset of watches (#47). A zero-value
@@ -233,6 +240,13 @@ type PollSummary struct {
 	SporedChecks int `json:"spored_checks"`
 	// SporedUnconfirmed counts the ones resolved as spored_unconfirmed.
 	SporedUnconfirmed int `json:"spored_unconfirmed"`
+	// GroupCancelled counts watch-group members cancelled this cycle because
+	// their group landed or ended (#287); GroupExtra the members whose launch
+	// landed after their group was won; GroupWaiting the members that launched
+	// nothing because a sibling holds the group's slot (also in Retrying).
+	GroupCancelled int `json:"group_cancelled,omitempty"`
+	GroupExtra     int `json:"group_extra,omitempty"`
+	GroupWaiting   int `json:"group_waiting,omitempty"`
 }
 
 // Total returns the number of watches the sweep accounted for.
@@ -249,6 +263,8 @@ func (p *Poller) PollAll(ctx context.Context) (*PollSummary, error) {
 	if p.verbose {
 		fmt.Fprintf(os.Stderr, "Polling %d active watches\n", len(watches))
 	}
+	// Watch groups are re-read each sweep (#287).
+	p.groups = nil
 	// Rebuild the account's throttle state from every active watch (#254),
 	// not only this poller's scope: a throttle is the account's, whoever
 	// earned it.
@@ -307,6 +323,11 @@ func (p *Poller) PollAll(ctx context.Context) (*PollSummary, error) {
 				summary.Watched++
 				continue
 			}
+		}
+		// A watch-group member whose group already landed or was cancelled is
+		// cancelled with a tombstone, not polled (#287).
+		if groupManaged(w) && p.groupEnded(ctx, w, summary) {
+			continue
 		}
 		if !w.ExpiresAt.IsZero() && now.After(w.ExpiresAt) {
 			// An until-landed watch has no TTL; passing ExpiresAt means nobody
@@ -1165,6 +1186,25 @@ func (p *Poller) recordOutcome(ctx context.Context, w *Watch, m *MatchResult, fa
 	if failure == FailureNone && p.startLanding(ctx, w, m, now, summary) {
 		return
 	}
+	// A watch-group member that landed at once (#287) must win its group
+	// before it is a match; a sibling that won first makes this an extra.
+	var group *WatchGroup
+	groupWon := false
+	if failure == FailureNone && groupManaged(w) && (m.ActionTaken == "spawned" || m.ActionTaken == "held") {
+		won, ok := p.winGroup(ctx, w, m, now, summary)
+		if !ok {
+			// The group could not be written: record the launch as landing, so
+			// the next cycle decides it, rather than a match nobody arbitrated.
+			if p.forceLanding(ctx, w, m, now, summary) {
+				return
+			}
+		}
+		if ok && !won {
+			return
+		}
+		groupWon = won
+		group = p.groups[w.Group]
+	}
 
 	// Success clears the streak so it persists via RecordMatch's PutWatch.
 	if failure == FailureNone {
@@ -1183,7 +1223,10 @@ func (p *Poller) recordOutcome(ctx context.Context, w *Watch, m *MatchResult, fa
 	if err := p.store.RecordMatch(ctx, w, m); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to record match for %s: %v\n", w.WatchID, err)
 	}
-	if p.notifier != nil {
+	if groupWon {
+		// The group's one notification replaces the member's own (#287).
+		defer p.finishGroup(ctx, w, m, group, now, summary)
+	} else if p.notifier != nil {
 		if err := p.notifier.Notify(ctx, w, m); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: notification failed for %s: %v\n", w.WatchID, err)
 		}
@@ -1332,7 +1375,20 @@ func (p *Poller) pollGroup(ctx context.Context, regions []string, pattern string
 			}
 		}
 
+		// A watch-group member claims its group's slot first (#287), so two
+		// members never launch for the same group at once. It is kept while the
+		// launch is landing and released otherwise.
+		if groupManaged(w) && !p.claimGroupSlot(ctx, w, summary) {
+			if p.leaseOwner != "" {
+				_ = p.store.ReleaseLease(ctx, w.WatchID, p.leaseOwner)
+			}
+			continue
+		}
+
 		p.actOnCandidates(ctx, w, eligible, results, spotResults, spot, summary)
+		if groupManaged(w) && !w.Landing() {
+			p.releaseGroupSlot(ctx, w)
+		}
 
 		// Release the lease now (#47): a capacity-retrying watch stays active, so
 		// freeing the lease lets the next cycle (this poller or another) re-claim

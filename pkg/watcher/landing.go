@@ -472,6 +472,22 @@ func (p *Poller) completeLanding(ctx context.Context, w *Watch, chk landingCheck
 	} else {
 		m.InstanceState, m.ActionTaken = chk.State, "spawned"
 	}
+	// A watch-group member wins its group at landing, or its launch is an
+	// extra (#287). Decided before anything is recorded as a match.
+	var group *WatchGroup
+	groupWon := false
+	if groupManaged(w) {
+		won, ok := p.winGroup(ctx, w, m, now, summary)
+		if !ok {
+			// The group could not be written: stay landing and decide next cycle.
+			p.keepLanding(ctx, w, landingMarker(w.PendingResourceID()), now, "", summary)
+			return
+		}
+		if !won {
+			return
+		}
+		groupWon, group = true, p.groups[w.Group]
+	}
 	w.clearLanding()
 	if !reservation {
 		p.armSporedCheck(w, m, chk.SporedSeen, now)
@@ -484,7 +500,7 @@ func (p *Poller) completeLanding(ctx context.Context, w *Watch, chk landingCheck
 		return
 	}
 	fmt.Fprintf(os.Stderr, "Watch %s: %s landed (%s in %s)\n", w.WatchID, m.InstanceID+m.ReservationID, chk.State, m.AvailabilityZone)
-	if notify := p.matchNotifier(); notify != nil {
+	if notify := p.matchNotifier(); notify != nil && !groupWon {
 		if err := notify(ctx, w, m); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: notification failed for %s: %v\n", w.WatchID, err)
 		}
@@ -495,6 +511,11 @@ func (p *Poller) completeLanding(ctx context.Context, w *Watch, chk landingCheck
 	w.Status = StatusMatched
 	summary.Launched++
 	summary.Matches = append(summary.Matches, *m)
+	if groupWon {
+		// Cancel the siblings and send the group's one notification, which
+		// replaces the member's own (#287).
+		p.finishGroup(ctx, w, m, group, now, summary)
+	}
 }
 
 // failLanding records a landing that did not land and returns the watch to
@@ -529,6 +550,9 @@ func (p *Poller) failLanding(ctx context.Context, w *Watch, chk landingCheck, ac
 		return false
 	}
 	fmt.Fprintf(os.Stderr, "Watch %s: %s; hunting again\n", w.WatchID, msg)
+	// A lost landing is not a win: free the group's slot so the group stays
+	// armed (#287).
+	p.releaseGroupSlot(ctx, w)
 
 	m := landingMatch(w)
 	if chk.AZ != "" {
@@ -675,6 +699,7 @@ func (p *Poller) dropLanding(ctx context.Context, w *Watch, msg string) bool {
 		return false
 	}
 	fmt.Fprintf(os.Stderr, "Watch %s: expiring with %s unresolved; it is bounded by its own TTL\n", w.WatchID, w.PendingResourceID())
+	p.releaseGroupSlot(ctx, w)
 	w.clearLanding()
 	w.LastError, w.LastErrorAt = msg, time.Now().UTC()
 	return true

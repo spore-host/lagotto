@@ -254,6 +254,19 @@ type Watch struct {
 	// expiry: ExpiredReasonUnacknowledged for an until-landed watch whose
 	// deadline passed (it is paused; `ack` resumes it). Cleared on resume.
 	ExpiredReason string `json:"expired_reason,omitempty" dynamodbav:"expired_reason,omitempty"`
+	// Watch groups (#287; see group.go). Group names the group this watch
+	// joined at creation; the first member to land wins and the others are
+	// cancelled. GroupOnExtra is what happens to this member's launch if it lands
+	// after the group was won: terminate (the default, also when empty) or keep.
+	// Both omitempty, so a non-member's record is unchanged, and a pre-#287
+	// poller ignores them: it polls a member as an independent watch.
+	// `lagotto update` never changes them.
+	Group        string `json:"group,omitempty" dynamodbav:"group_name,omitempty"`
+	GroupOnExtra string `json:"group_on_extra,omitempty" dynamodbav:"group_on_extra,omitempty"`
+	// CancelledReason is the tombstone of a watch cancelled by its group (#287):
+	// "group <name> landed by w-… (i-…, type, AZ)", or the extra landing it
+	// lost. Empty for a watch the user cancelled.
+	CancelledReason string `json:"cancelled_reason,omitempty" dynamodbav:"cancelled_reason,omitempty"`
 	// LeaseOwner / LeaseExpiresAt guard the double-poller race (#47): before a
 	// poller acts on a match it claims a short lease, so two daemons (or a daemon
 	// + the hosted Lambda) can't both fire the same watch. A lease past its expiry
@@ -333,6 +346,10 @@ type MatchResult struct {
 	// QuotaDetail explains a quota_infeasible row (#238): the error code, the
 	// vCPUs the type needs, and the quota numbers when known. Empty otherwise.
 	QuotaDetail string `json:"quota_detail,omitempty" dynamodbav:"quota_detail,omitempty"`
+	// GroupDetail explains a group_cancelled or group_extra row (#287): the
+	// group, its winner, and what happened to this member's launch. Empty
+	// otherwise.
+	GroupDetail string `json:"group_detail,omitempty" dynamodbav:"group_detail,omitempty"`
 	// ChangedFields lists the watch attributes an `updated` row (#257,
 	// ActionUpdated) changed. Empty on every other row.
 	ChangedFields []string `json:"changed_fields,omitempty" dynamodbav:"changed_fields,omitempty"`
