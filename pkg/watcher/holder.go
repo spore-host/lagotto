@@ -100,7 +100,7 @@ func (h *Holder) chooseHoldAZ(ctx context.Context, m *MatchResult) (az string, n
 	var cooled []AZCooloff
 	open := candidates[:0:0]
 	for _, az := range candidates {
-		if c, ok := h.throttle.AZCooledOff(m.Region, az, time.Now().UTC()); ok {
+		if c, ok := h.throttle.AZCooledOff(m.Region, az, h.throttle.now()); ok {
 			cooled = append(cooled, c)
 			continue
 		}
@@ -187,7 +187,7 @@ func (h *Holder) Hold(ctx context.Context, w *Watch, m *MatchResult) error {
 	if err != nil {
 		m.ActionTaken = "hold_failed"
 		if IsThrottled(err) {
-			noteThrottle(ctx, h.throttle, h.azNameForID, m.Region, az, err, time.Now().UTC())
+			noteThrottle(ctx, h.throttle, h.azNameForID, m.Region, az, err, h.throttle.now())
 		}
 		if len(noSubnet) > 0 {
 			h.forgetSubnets(m.Region)

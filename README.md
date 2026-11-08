@@ -467,6 +467,27 @@ spawn and hold watch. A failed attempt that skipped AZs says so: its
 rather than a plain capacity miss. After you create a default subnet, the hosted
 poller notices it within 15 minutes (once it runs lagotto v0.68.0 or later).
 
+### When EC2 throttles launches
+
+EC2 sometimes throttles `RunInstances` with `RequestLimitExceeded`, most often
+during an AZ operational issue ("... throttled due to an operational issue in
+availability zone usw2-az1"). A throttle never ends a watch, and it does not
+count toward the cap of 10 unrecognised failures in a row. The poller backs off
+for every watch in the account:
+
+- **A throttle that names an AZ** cools that AZ off for 45 minutes. The poller
+  maps the AZ ID to your account's AZ name from your subnets. Every watch skips
+  that AZ and still tries its other AZs and regions. `last_error` starts
+  `impaired: us-west-2a (usw2-az1) until 00:07Z; `.
+- **Any other throttle** backs off the whole region. It is not tried again in
+  that sweep, and after that only when the backoff has passed. The backoff
+  doubles with each throttle in a row, from 30 seconds up to 10 minutes, with
+  jitter. A watch that skipped a cycle this way has `last_poll_error`
+  `throttled: us-west-2: RequestLimitExceeded, backing off until ...`.
+
+`lagotto list` shows the class (`throttled` or `impaired`). The state is stored
+on the watches, so the hosted poller keeps it from one run to the next.
+
 ## Deployment
 
 `lagotto deploy` stands the hosted poller up in your own AWS account with direct

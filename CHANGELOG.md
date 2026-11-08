@@ -7,42 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- **EC2 throttling no longer ends a watch, and the poller backs off** (#254).
-  During an AZ operational issue EC2 throttles `RunInstances` with
-  `RequestLimitExceeded` ("... throttled due to an operational issue in
-  availability zone usw2-az1"). The poller counted that as an unrecognised
-  failure, so a throttle ended watches that had waited 17-49 h for capacity as
-  `spawn_failed`, and it retried every 2-3 s across watches, which is what EC2's
-  throttling penalises. Now:
-  - `RequestLimitExceeded`, `Throttling` and `ThrottlingException` are a new
-    `throttled` class. A throttle never ends a watch and never counts toward
-    the 10-failure cap for unrecognised errors.
-  - A throttle that names no AZ backs the whole region off for every watch in
-    the account: not tried again in the same sweep, then exponential backoff
-    with jitter from 30 s to a 10-minute cap. It resets after 30 minutes with
-    no throttle.
-  - A throttle that names an AZ ID cools that AZ off for 45 minutes. The poller
-    maps the ID to the account's AZ name with `ec2:DescribeSubnets`, which it
-    already has. Every watch skips that AZ and still tries its other AZs and
-    regions.
-  - The state is stored on the watches (`throttle`, `az_cooloff`), so the
-    hosted poller keeps it between invocations. The runtime policy is
-    unchanged.
-  - `lagotto list` and `status` show it. A throttled attempt is
-    `throttled: RequestLimitExceeded: ...`, a sweep that skipped an impaired AZ
-    starts `az-impaired: us-west-2a (usw2-az1) until 00:07Z; ...`, and a cycle
-    skipped while backing off sets `last_poll_error` to
-    `throttled: us-west-2: RequestLimitExceeded, backing off until ...`. The
-    poll summary has a `throttled` count.
-  - A Capacity Block scheduled launch that is throttled at its start time is
-    retried, as a capacity error there already is.
-  - `pkg/failure` exports `FailureThrottled`, `IsThrottled`, `ThrottledAZID`
-    and `ErrThrottled`. `pkg/watcher` exports `Poller.CoolOffAZ` and
-    `Poller.AZCooledOff`, so other code that learns an AZ is impaired can use
-    the same cool-off.
-
 ### Deprecated
 
 - **`--action notify` is deprecated** (#283) and will be removed in a later
@@ -68,6 +32,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `NotifyDefaultActionNote` and `ActionDeprecations`) for the other front ends.
   - Notification channels (`--notify email:/webhook:/sns:`) are not deprecated:
     spawn and hold watches, reminders and fleet events report through them.
+
+### Fixed
+
+- **EC2 throttling no longer ends a watch, and the poller backs off** (#254).
+  During an AZ operational issue EC2 throttles `RunInstances` with
+  `RequestLimitExceeded` ("... throttled due to an operational issue in
+  availability zone usw2-az1"). The poller counted that as an unrecognised
+  failure, so a throttle ended watches that had waited 17-49 h for capacity as
+  `spawn_failed`, and it retried every 2-3 s across watches, which is what EC2's
+  throttling penalises. Now:
+  - `RequestLimitExceeded`, `Throttling` and `ThrottlingException` are a new
+    `throttled` class. A throttle never ends a watch and never counts toward
+    the 10-failure cap for unrecognised errors.
+  - A throttle that names no AZ backs the whole region off for every watch in
+    the account: not tried again in the same sweep, then exponential backoff
+    with jitter from 30 s to a 10-minute cap. It resets after 30 minutes with
+    no throttle.
+  - A throttle that names an AZ ID cools that AZ off for 45 minutes. The poller
+    maps the ID to the account's AZ name with `ec2:DescribeSubnets`, which it
+    already has. Every watch skips that AZ and still tries its other AZs and
+    regions.
+  - The state is stored on the watches (`throttle`, `az_cooloff`), so the
+    hosted poller keeps it between invocations. The runtime policy is
+    unchanged.
+  - `lagotto list` and `status` show it. A throttled attempt is
+    `throttled: RequestLimitExceeded: ...`, a sweep that skipped an impaired AZ
+    starts `impaired: us-west-2a (usw2-az1) until 00:07Z; ...`, and a cycle
+    skipped while backing off sets `last_poll_error` to
+    `throttled: us-west-2: RequestLimitExceeded, backing off until ...`. The
+    poll summary has a `throttled` count.
+  - A Capacity Block scheduled launch that is throttled at its start time is
+    retried, as a capacity error there already is. A throttled SageMaker
+    `CreateTrainingJob` is retried too; before, it ended the watch.
+  - `pkg/failure` exports `FailureThrottled`, `IsThrottled`, `ThrottledAZID`
+    and `ErrThrottled`. `pkg/watcher` exports `Poller.CoolOffAZ` and
+    `Poller.AZCooledOff`, so other code that learns an AZ is impaired can use
+    the same cool-off.
 
 ## [0.68.0] - 2026-11-07
 

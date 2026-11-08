@@ -415,7 +415,7 @@ func (s *Spawner) launchAcrossAZs(ctx context.Context, cfg spawnaws.LaunchConfig
 	var tried []string
 	for _, a := range attempts {
 		if skipCooledOff {
-			if c, ok := s.throttle.AZCooledOff(cfg.Region, a, time.Now().UTC()); ok {
+			if c, ok := s.throttle.AZCooledOff(cfg.Region, a, s.throttle.now()); ok {
 				cooled = append(cooled, c)
 				continue
 			}
@@ -439,7 +439,7 @@ func (s *Spawner) launchAcrossAZs(ctx context.Context, cfg spawnaws.LaunchConfig
 			break
 		}
 		if kind == FailureThrottled {
-			c, azScoped := noteThrottle(ctx, s.throttle, s.azNameForID, cfg.Region, a, perr, time.Now().UTC())
+			c, azScoped := noteThrottle(ctx, s.throttle, s.azNameForID, cfg.Region, a, perr, s.throttle.now())
 			if !azScoped {
 				break // the region is throttled: don't spin through its other AZs
 			}

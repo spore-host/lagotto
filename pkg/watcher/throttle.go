@@ -69,7 +69,7 @@ const (
 	ErrClassThrottled = "throttled"
 	// ErrClassAZImpaired prefixes an attempt whose sweep skipped AZs that a
 	// throttle named impaired, like ErrClassNoSubnet does for missing subnets.
-	ErrClassAZImpaired = "az-impaired"
+	ErrClassAZImpaired = "impaired"
 )
 
 // RegionThrottle is one region's backoff after a throttle that named no AZ.
@@ -156,6 +156,17 @@ type ThrottleBook struct {
 	// jitter picks the delay actually applied for a nominal backoff d. A seam
 	// for tests; nil = a uniform pick in [d/2, d].
 	jitter func(d time.Duration) time.Duration
+	// clock is the time the spawner and holder stamp throttles with: the
+	// poller's clock, so one sweep uses one time source. Nil = time.Now.
+	clock func() time.Time
+}
+
+// now is the book's clock, in UTC. Valid on a nil book.
+func (b *ThrottleBook) now() time.Time {
+	if b == nil || b.clock == nil {
+		return time.Now().UTC()
+	}
+	return b.clock().UTC()
 }
 
 // NewThrottleBook returns an empty book.
@@ -441,6 +452,7 @@ func (r *azIDResolver) resolve(ctx context.Context, region, azID string) string 
 func (p *Poller) book() *ThrottleBook {
 	if p.throttle == nil {
 		p.throttle = NewThrottleBook()
+		p.throttle.clock = p.clock
 	}
 	if p.spawner != nil && p.spawner.throttle == nil {
 		p.spawner.throttle = p.throttle

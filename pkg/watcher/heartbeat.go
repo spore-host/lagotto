@@ -70,7 +70,7 @@ func errorClass(kind FailureKind, err error) string {
 //     plain capacity miss. Not for a quota or other terminal refusal, which
 //     the missing subnet did not cause, unless every candidate lacked one.
 //   - an attempt whose sweep skipped AZs a throttle named impaired is
-//     prefixed "az-impaired: <az> (<az-id>) until HH:MMZ; " (#254).
+//     prefixed "impaired: <az> (<az-id>) until HH:MMZ; " (#254).
 //   - EC2's capacity hint (the AZs its message says have capacity, which it
 //     puts last) is moved ahead of the message: "EC2 suggests <azs>; ...".
 func describeAttemptError(kind FailureKind, err error) string {
@@ -88,7 +88,7 @@ func describeAttemptError(kind FailureKind, err error) string {
 		b.WriteString("; ")
 	}
 	// AZs skipped because a throttle named them impaired (#254), so `list`
-	// shows az-impaired rather than whatever the next AZ said.
+	// shows impaired rather than whatever the next AZ said.
 	var ce *AZCooloffError
 	if errors.As(err, &ce) && len(ce.Cooloffs) > 0 {
 		b.WriteString(ErrClassAZImpaired)
