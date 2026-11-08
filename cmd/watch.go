@@ -62,6 +62,13 @@ status 3), but only when the quota was read in every --regions region and
 provably can't hold the goal; an unreadable quota is unknown, not zero, so the
 watch is then created with a note saying it could not be checked.
 
+--action notify is deprecated (lagotto#283) and will be removed in a later
+release, and so is the notify default when no --action is given. A notify
+watch only checks that the type is offered in the region at or under
+--max-price, not a capacity check: it launches and reserves nothing. It still
+works, with a warning on stderr. Use --action hold (reserve the capacity) or
+--action spawn (launch it) to wait for real capacity.
+
 If the pattern matches no instance type your region(s) offer, the first poll
 prints a warning (a likely typo) but keeps watching in case the type appears.
 
@@ -89,7 +96,7 @@ func init() {
 	watchCmd.Flags().StringSliceVar(&watchAZs, "azs", nil, "Availability zones to pin/order within the region(s), comma-separated (e.g. us-west-2b,us-west-2c). Empty = all AZs. AZ breadth is free (same-region data locality), so all AZs are tried each poll.")
 	watchCmd.Flags().BoolVar(&watchSpot, "spot", false, "Watch for Spot capacity (default: On-Demand)")
 	watchCmd.Flags().Float64Var(&watchMaxPrice, "max-price", 0, "Maximum acceptable price per hour (0 = any)")
-	watchCmd.Flags().StringVar(&watchAction, "action", "notify", "Action on match: notify, spawn, hold")
+	watchCmd.Flags().StringVar(&watchAction, "action", "notify", "Action on match: spawn (launch it), hold (reserve it), or notify (deprecated: offering only, not a capacity check). The notify default is deprecated too: pass --action explicitly")
 	watchCmd.Flags().StringVar(&watchTTL, "ttl", "24h", "How long to keep watching (e.g., 24h, 7d)")
 	watchCmd.Flags().StringSliceVar(&watchNotify, "notify", nil, "Notification channels (e.g., email:user@example.com, webhook:https://..., sns:<topic-arn>). An email address is subscribed to the alerts topic and must confirm by clicking the link in the AWS Notification email before anything is delivered.")
 	watchCmd.Flags().StringVar(&watchSpawnConfig, "spawn-config", "", "lagotto spawn-config YAML (required for --action spawn; not spawn launch --config, see README for its keys — unknown keys are rejected): a local path, an s3://bucket/key URI, or '-' for stdin. Any user_data_file / iam_policy_file it references is read now and stored inline, so a hosted poller can launch it with no access to this machine.")
@@ -254,7 +261,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	quotaReport, roleCheck := pre.Quota, pre.Role
+	quotaReport := pre.Quota
 
 	store := watcher.NewStore(cfg, watchesTable, historyTable)
 
@@ -284,6 +291,10 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	}
 	warnUndeliverableUntilLanded(os.Stderr, w)
 	warnIfPollerPredatesReminders(ctx, cfg, os.Stderr, w)
+	// --action notify is deprecated (#283). Stderr, after every refusal, so a
+	// refused watch is not also lectured and stdout / -o json stay clean.
+	deprecations := watcher.ActionDeprecations(w.Action, cmd.Flags().Changed("action"))
+	writeDeprecations(cmd.ErrOrStderr(), deprecations)
 	if err := store.PutWatch(ctx, w); err != nil {
 		return fmt.Errorf("create watch: %w", err)
 	}
@@ -296,20 +307,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 
 	cliExposure(w)
 	if getOutputFormat() == "json" {
-		enc := json.NewEncoder(cmd.OutOrStdout())
-		enc.SetIndent("", "  ")
-		if quotaReport != nil || roleCheck != nil || pre.Gate != nil {
-			// The quota report and the instance-role verdict ride alongside the watch
-			// (their own struct tags do the rest), so a scripted caller can see what
-			// was printed to stderr.
-			return enc.Encode(struct {
-				*watcher.Watch
-				QuotaWarning *quotacheck.Report `json:"quota_warning,omitempty"`
-				QuotaGate    *quotacheck.Gate   `json:"quota_gate,omitempty"`
-				InstanceRole *InstanceRoleCheck `json:"instance_role_check,omitempty"`
-			}{Watch: w, QuotaWarning: quotaReport, QuotaGate: pre.Gate, InstanceRole: roleCheck})
-		}
-		return enc.Encode(w)
+		return encodeWatchJSON(cmd.OutOrStdout(), w, pre, deprecations)
 	}
 
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Created watch %s\n", w.WatchID)
@@ -349,6 +347,34 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	}
 	writeEmailStates(cmd.OutOrStdout(), "  Notify:   ", w)
 	return nil
+}
+
+// encodeWatchJSON is `watch -o json`'s output: the watch, with the quota
+// report, the quota gate, the instance-role verdict and any deprecations riding
+// alongside it (their own struct tags do the rest), so a scripted caller can
+// see what was printed to stderr.
+func encodeWatchJSON(out io.Writer, w *watcher.Watch, pre preflightResult, deprecations []watcher.Deprecation) error {
+	enc := json.NewEncoder(out)
+	enc.SetIndent("", "  ")
+	if pre.Quota == nil && pre.Role == nil && pre.Gate == nil && len(deprecations) == 0 {
+		return enc.Encode(w)
+	}
+	return enc.Encode(struct {
+		*watcher.Watch
+		QuotaWarning *quotacheck.Report    `json:"quota_warning,omitempty"`
+		QuotaGate    *quotacheck.Gate      `json:"quota_gate,omitempty"`
+		InstanceRole *InstanceRoleCheck    `json:"instance_role_check,omitempty"`
+		Deprecations []watcher.Deprecation `json:"deprecations,omitempty"`
+	}{Watch: w, QuotaWarning: pre.Quota, QuotaGate: pre.Gate, InstanceRole: pre.Role, Deprecations: deprecations})
+}
+
+// writeDeprecations prints each deprecation as a warning, to errOut (stderr):
+// stdout and -o json carry none of it, the JSON output has a "deprecations"
+// field instead.
+func writeDeprecations(errOut io.Writer, deprecations []watcher.Deprecation) {
+	for _, d := range deprecations {
+		_, _ = fmt.Fprintf(errOut, "warning: %s\n", strings.ReplaceAll(d.Message, "\n", "\n  "))
+	}
 }
 
 // quotaSummaryRow is the one-line "Quota:" row echoed in the human watch-create

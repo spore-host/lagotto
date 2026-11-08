@@ -167,19 +167,27 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	// Updating a notify watch keeps a deprecated action (#283); its action
+	// cannot be changed in place, hence the warning's pointer to a new watch.
+	deprecations := watcher.ActionDeprecations(w.Action, true)
+	for i := range deprecations {
+		deprecations[i].Message += fmt.Sprintf("\n'update' cannot change a watch's action: create a new watch with --action hold or --action spawn, then 'lagotto cancel %s'.", w.WatchID)
+	}
+	writeDeprecations(cmd.ErrOrStderr(), deprecations)
 
 	reactivate := w.Status != watcher.StatusActive
 	res := updateResult{
-		WatchID:     w.WatchID,
-		DryRun:      o.dryRun,
-		Reactivated: reactivate,
-		OldStatus:   w.Status,
-		Changes:     changes,
-		ResetState:  searchChanged(changes),
-		Watch:       nw,
-		Quota:       pre.Quota,
-		Gate:        pre.Gate,
-		Role:        pre.Role,
+		WatchID:      w.WatchID,
+		DryRun:       o.dryRun,
+		Reactivated:  reactivate,
+		OldStatus:    w.Status,
+		Changes:      changes,
+		ResetState:   searchChanged(changes),
+		Watch:        nw,
+		Quota:        pre.Quota,
+		Gate:         pre.Gate,
+		Role:         pre.Role,
+		Deprecations: deprecations,
 	}
 	if o.dryRun {
 		return writeUpdate(out, getOutputFormat(), res)
@@ -633,6 +641,9 @@ type updateResult struct {
 	Quota       *quotacheck.Report  `json:"quota_warning,omitempty"`
 	Gate        *quotacheck.Gate    `json:"quota_gate,omitempty"`
 	Role        *InstanceRoleCheck  `json:"instance_role_check,omitempty"`
+	// Deprecations are the deprecated features the watch uses (#283), also
+	// printed to stderr.
+	Deprecations []watcher.Deprecation `json:"deprecations,omitempty"`
 }
 
 // writeUpdate prints the before/after diff of an update (or a dry run).

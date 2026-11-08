@@ -153,7 +153,10 @@ cat /tmp/lagotto-out.json
 what this `lagotto` binary expects: a runtime IAM policy that is missing grants
 (re-run `lagotto setup`), a poller Lambda older than the CLI, missing tables,
 roles, topic or schedule, a schedule that is off while watches are active, and a
-leftover CloudFormation stack. It exits non-zero if any check fails.
+leftover CloudFormation stack. It also warns about each active `--action notify`
+watch: notify is deprecated (#283) because it reports an offering, not
+capacity, and those watches should move to `--action hold` or `--action spawn`.
+It exits non-zero if any check fails; warnings never do.
 (`lagotto status <watch-id>` shows a single watch, not the deployment.)
 
 ## Runtime permissions: `lagotto setup`
