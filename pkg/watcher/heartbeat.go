@@ -19,6 +19,14 @@ import (
 // cycle, so keep it to what a human reads.
 const MaxLastErrorBytes = 256
 
+// StalePollAfter is how old an active watch's last poll may be before it is
+// flagged stale (#239; exported in #282 so non-CLI callers flag the same
+// staleness). `lagotto list` marks it "!" in LAST POLL, and `status` says
+// "stale". The hosted poller runs every 5 minutes, so 15 is three missed
+// cycles: the poller is disabled, broken, or its search is failing. Strictly
+// older than this is stale; exactly this old is not.
+const StalePollAfter = 15 * time.Minute
+
 // Error classes, the first word of LastError / LastPollError. `lagotto list`
 // shows just the class; `status`, `list -o wide` and JSON show the whole string.
 const (

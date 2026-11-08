@@ -139,11 +139,11 @@ func TestFormatAgeAndLastPoll(t *testing.T) {
 		}
 	}
 	// Exactly at the threshold is not stale; just past it is.
-	w := &watcher.Watch{Status: watcher.StatusActive, LastPolledAt: hbNow.Add(-stalePollAfter)}
+	w := &watcher.Watch{Status: watcher.StatusActive, LastPolledAt: hbNow.Add(-watcher.StalePollAfter)}
 	if got := lastPollCol(w, hbNow); got != "15m" {
 		t.Errorf("at threshold = %q", got)
 	}
-	w.LastPolledAt = hbNow.Add(-stalePollAfter - time.Minute)
+	w.LastPolledAt = hbNow.Add(-watcher.StalePollAfter - time.Minute)
 	if got := lastPollCol(w, hbNow); got != "16m!" {
 		t.Errorf("past threshold = %q", got)
 	}

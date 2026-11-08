@@ -2,64 +2,17 @@ package cmd
 
 import (
 	"bytes"
-	"errors"
 	"os"
 	"regexp"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/spore-host/lagotto/pkg/deploy"
 	"github.com/spore-host/lagotto/pkg/doctor"
 	"github.com/spore-host/lagotto/pkg/watcher"
 )
 
-func TestReminderPollerWarning(t *testing.T) {
-	deadline := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
-	ul := &watcher.Watch{WatchID: "w-ul", Status: watcher.StatusActive, UntilLanded: true, ExpiresAt: deadline}
-	paused := *ul
-	paused.Status = watcher.StatusExpired
-	ttl := *ul
-	ttl.UntilLanded = false
-
-	for _, tc := range []struct {
-		name  string
-		w     *watcher.Watch
-		info  deploy.PollerInfo
-		err   error
-		wants []string // "" = no warning
-	}{
-		{"older poller", ul, deploy.PollerInfo{Exists: true, Version: "0.67.0"}, nil,
-			[]string{"in us-east-1 is v0.67.0, older than v" + watcher.MinReminderPollerVersion, "pauses at 2026-11-27T12:00:00Z", "lagotto ack w-ul", "lagotto deploy"}},
-		{"v-prefixed older poller", ul, deploy.PollerInfo{Exists: true, Version: "v0.66.0"}, nil, []string{"is v0.66.0,"}},
-		{"untagged poller", ul, deploy.PollerInfo{Exists: true}, nil, []string{"has no Version tag", "may predate v" + watcher.MinReminderPollerVersion}},
-		{"the minimum itself", ul, deploy.PollerInfo{Exists: true, Version: watcher.MinReminderPollerVersion}, nil, nil},
-		{"newer poller", ul, deploy.PollerInfo{Exists: true, Version: "9.0.0"}, nil, nil},
-		{"dev-build poller: cannot tell", ul, deploy.PollerInfo{Exists: true, Version: "dev"}, nil, nil},
-		{"no poller here (poll --daemon)", ul, deploy.PollerInfo{}, nil, nil},
-		{"cannot inspect (AccessDenied)", ul, deploy.PollerInfo{}, errors.New("AccessDenied: lambda:GetFunction"), nil},
-		{"paused watch", &paused, deploy.PollerInfo{Exists: true, Version: "0.67.0"}, nil, nil},
-		{"TTL watch", &ttl, deploy.PollerInfo{Exists: true, Version: "0.67.0"}, nil, nil},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got := reminderPollerWarning(tc.info, tc.err, "us-east-1", tc.w)
-			if len(tc.wants) == 0 {
-				if got != "" {
-					t.Fatalf("warning = %q, want none", got)
-				}
-				return
-			}
-			for _, want := range tc.wants {
-				if !strings.Contains(got, want) {
-					t.Errorf("warning %q missing %q", got, want)
-				}
-			}
-		})
-	}
-	if got := reminderPollerWarning(deploy.PollerInfo{Exists: true, Version: "0.1.0"}, nil, "", ul); !strings.Contains(got, "the hosted poller is v0.1.0") {
-		t.Errorf("with no region the warning should name none: %q", got)
-	}
-}
+// The decision and its text are tested in pkg/arm (reminderpoller_test.go); the
+// tests here run the CLI's wrapper end to end.
 
 // TestMinReminderPollerVersionMatchesChangelog holds watcher.MinReminderPollerVersion
 // to the CHANGELOG: while the reminders entry is unreleased the constant must be

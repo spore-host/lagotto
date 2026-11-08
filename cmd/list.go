@@ -145,11 +145,6 @@ func writeListEmailStates(out io.Writer, watches []watcher.Watch) {
 	}
 }
 
-// stalePollAfter is how old an active watch's last poll may be before `list`
-// flags it with "!" (#239). The hosted poller runs every 5 minutes, so 15 is
-// three missed cycles: the poller is disabled, broken, or its search is failing.
-const stalePollAfter = 15 * time.Minute
-
 // writeWatchTable renders the `list` table. now is a parameter so the ages are
 // testable against a fixed clock. wide (`-o wide`) adds the full last error.
 func writeWatchTable(out io.Writer, watches []watcher.Watch, now time.Time, wide bool) {
@@ -277,20 +272,20 @@ func landingDesc(w *watcher.Watch, now time.Time) string {
 }
 
 // lastPollCol renders LAST POLL as an age ("4m", "2h", "3d"), or "never". An
-// ACTIVE watch whose last poll is older than stalePollAfter is flagged "!"; so is
+// ACTIVE watch whose last poll is older than watcher.StalePollAfter is flagged "!"; so is
 // an active one never polled though created longer ago than that. A finished
 // watch is not polled any more, so its age is shown unflagged.
 func lastPollCol(w *watcher.Watch, now time.Time) string {
 	active := w.Status == watcher.StatusActive
 	if w.LastPolledAt.IsZero() {
-		if active && !w.CreatedAt.IsZero() && now.Sub(w.CreatedAt) > stalePollAfter {
+		if active && !w.CreatedAt.IsZero() && now.Sub(w.CreatedAt) > watcher.StalePollAfter {
 			return "never!"
 		}
 		return "never"
 	}
 	age := now.Sub(w.LastPolledAt)
 	s := formatAge(age)
-	if active && age > stalePollAfter {
+	if active && age > watcher.StalePollAfter {
 		s += "!"
 	}
 	return s
