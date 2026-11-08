@@ -40,6 +40,8 @@ type landHarness struct {
 	terminated []string
 	termErr    error
 	notified   []MatchResult
+	lost       []MatchResult // #255 lost-launch notifications
+	lostStop   []bool        // their stopped flag
 }
 
 func newLandHarness(t *testing.T) *landHarness {
@@ -72,6 +74,11 @@ func newLandHarness(t *testing.T) *landHarness {
 	}
 	h.poller.notifyMatch = func(_ context.Context, _ *Watch, m *MatchResult) error {
 		h.notified = append(h.notified, *m)
+		return nil
+	}
+	h.poller.notifyLost = func(_ context.Context, _ *Watch, m *MatchResult, stopped bool) error {
+		h.lost = append(h.lost, *m)
+		h.lostStop = append(h.lostStop, stopped)
 		return nil
 	}
 	h.poller.notifyExpired = func(context.Context, *Watch) error { return nil }
@@ -273,7 +280,12 @@ func TestLanding_TerminatedResumesInSameCycle(t *testing.T) {
 		t.Errorf("history = %+v, want one landing_failed row for i-1", hist)
 	}
 	if len(h.notified) != 0 {
-		t.Errorf("notified = %+v, want none", h.notified)
+		t.Errorf("match notified = %+v, want none", h.notified)
+	}
+	// #255: the loss itself is notified, with the reason, and the watch hunts on.
+	if len(h.lost) != 1 || h.lost[0].InstanceID != "i-1" || h.lostStop[0] ||
+		!strings.Contains(h.lost[0].LandingReason, "Server.InsufficientInstanceCapacity") || h.lost[0].LostAt.IsZero() {
+		t.Errorf("lost = %+v stopped=%v, want one hunting-again notice for i-1", h.lost, h.lostStop)
 	}
 }
 
@@ -305,8 +317,18 @@ func TestLanding_BootstrapShutdownCountsTowardStop(t *testing.T) {
 	if got.Status != StatusFailed {
 		t.Errorf("status = %q, want failed at the cap", got.Status)
 	}
-	if len(h.notified) != 1 || h.notified[0].ActionTaken != ActionLandingFailed {
-		t.Errorf("notified = %+v, want the final failure once", h.notified)
+	// Every loss is notified (#255), only the last as stopping the watch; the
+	// match notifier (whose email says "capacity found") is never used for one.
+	if len(h.notified) != 0 {
+		t.Errorf("match notified = %+v, want none", h.notified)
+	}
+	if len(h.lost) != MaxConsecutiveFailures {
+		t.Fatalf("lost notices = %d, want %d (one per lost launch)", len(h.lost), MaxConsecutiveFailures)
+	}
+	for i, stopped := range h.lostStop {
+		if want := i == MaxConsecutiveFailures-1; stopped != want || h.lost[i].ActionTaken != ActionLandingFailed {
+			t.Errorf("lost[%d] = %s stopped=%v, want landing_failed stopped=%v", i, h.lost[i].ActionTaken, stopped, want)
+		}
 	}
 	if got.Landing() {
 		t.Errorf("a failed watch is still landing %s", got.PendingResourceID())

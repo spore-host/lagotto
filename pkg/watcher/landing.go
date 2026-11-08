@@ -86,6 +86,10 @@ type landingCheck struct {
 	// "Server.InsufficientInstanceCapacity"). Empty for a reservation.
 	ReasonCode    string
 	ReasonMessage string
+	// TransitionReason is EC2's StateTransitionReason, which carries EC2's own
+	// timestamp of the transition, e.g. "Server.InternalError (2026-11-06
+	// 23:49:12 GMT)" (#255). Empty for a reservation.
+	TransitionReason string
 	// NotFound: the describe succeeded but does not know the resource.
 	NotFound bool
 }
@@ -495,7 +499,7 @@ func (p *Poller) completeLanding(ctx context.Context, w *Watch, chk landingCheck
 func (p *Poller) failLanding(ctx context.Context, w *Watch, chk landingCheck, action string, now time.Time, summary *PollSummary) bool {
 	reservation := w.PendingReservationID != ""
 	kind := landingFailureKind(reservation, action, chk)
-	reason := oneLine(strings.TrimSpace(strings.Join(nonEmpty(chk.ReasonCode, chk.ReasonMessage), ": ")))
+	reason := landingReason(chk)
 	id := w.PendingResourceID()
 	what := "instance " + id
 	if reservation {
@@ -528,6 +532,10 @@ func (p *Poller) failLanding(ctx context.Context, w *Watch, chk landingCheck, ac
 	if action == ActionLandingTimedOut {
 		m.LandingReason = chk.ReasonMessage
 	}
+	// LostAt is when this poller saw the landing fail (#255): MatchedAt stays the
+	// launch time, and EC2 forgets a terminated instance after about an hour, so
+	// the history row is the only lasting record of when and why it went.
+	m.LostAt = now
 	if reservation {
 		m.ReservationState = chk.State
 	} else {
@@ -540,8 +548,17 @@ func (p *Poller) failLanding(ctx context.Context, w *Watch, chk landingCheck, ac
 	w.clearLanding()
 	w.LastError, w.LastErrorAt = msg, now
 	w.LastPolledAt = now
+
+	// #254 AZ cool-off hook: a capacity-class landing failure (kind ==
+	// FailureCapacity, m.AvailabilityZone set) is the same "this AZ cannot place
+	// the type right now" signal as a refused RunInstances, and an EC2-initiated
+	// Server.InternalError while pending is the impaired-AZ case #255 hit. The
+	// #254 cool-off belongs here, keyed on (m.Region, m.AvailabilityZone,
+	// m.InstanceType); this PR deliberately does not build a second one.
+
 	if kind == FailureCapacity {
 		w.ConsecutiveFailures = 0
+		p.sendLost(ctx, w, m, false)
 		return true
 	}
 	if n <= 0 {
@@ -549,20 +566,53 @@ func (p *Poller) failLanding(ctx context.Context, w *Watch, chk landingCheck, ac
 	}
 	w.ConsecutiveFailures = n
 	if n < MaxConsecutiveFailures {
+		p.sendLost(ctx, w, m, false)
 		return true
 	}
 	fmt.Fprintf(os.Stderr, "Watch %s: %d consecutive launches failed to land; stopping watch\n", w.WatchID, n)
-	if notify := p.matchNotifier(); notify != nil {
-		if err := notify(ctx, w, m); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: notification failed for %s: %v\n", w.WatchID, err)
-		}
-	}
+	w.Status = StatusFailed
+	p.sendLost(ctx, w, m, true)
 	if err := p.store.UpdateWatchStatus(ctx, w.WatchID, StatusFailed); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to update watch status for %s: %v\n", w.WatchID, err)
 	}
 	w.Status = StatusFailed
 	summary.Failed++
 	return false
+}
+
+// sendLost tells the watch's channels that a launch or hold was lost before
+// it landed (#255): which resource, the state EC2 reported, its reason, and
+// whether the watch is hunting again or stopped. Every loss is sent, not only
+// the one that stops the watch: a launched instance that disappears is the
+// thing a person waiting on an unattended hunt most needs to hear about.
+func (p *Poller) sendLost(ctx context.Context, w *Watch, m *MatchResult, stopped bool) {
+	notify := p.lostNotifier()
+	if notify == nil {
+		return
+	}
+	if err := notify(ctx, w, m, stopped); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: lost-launch notification failed for %s: %v\n", w.WatchID, err)
+	}
+}
+
+// landingReason is the history reason for a failed landing: EC2's StateReason
+// code and message, then its StateTransitionReason (which carries EC2's own
+// timestamp) when it says something the StateReason does not.
+func landingReason(chk landingCheck) string {
+	parts := nonEmpty(chk.ReasonCode, chk.ReasonMessage)
+	// EC2 often repeats the code at the start of the message.
+	if len(parts) == 2 && strings.HasPrefix(parts[1], parts[0]) {
+		parts = parts[1:]
+	}
+	reason := strings.Join(parts, ": ")
+	if tr := strings.TrimSpace(chk.TransitionReason); tr != "" && !strings.Contains(reason, tr) {
+		if reason == "" {
+			reason = tr
+		} else {
+			reason += " (transition: " + tr + ")"
+		}
+	}
+	return oneLine(strings.TrimSpace(reason))
 }
 
 func nonEmpty(ss ...string) []string {
@@ -647,6 +697,7 @@ func describeInstanceState(ctx context.Context, api instanceDescribeAPI, instanc
 				c.ReasonCode = aws.ToString(in.StateReason.Code)
 				c.ReasonMessage = aws.ToString(in.StateReason.Message)
 			}
+			c.TransitionReason = aws.ToString(in.StateTransitionReason)
 			return c, nil
 		}
 	}

@@ -67,6 +67,9 @@ type Poller struct {
 	// notifyMatch overrides where a #239 landing's match (or final failure)
 	// notification goes — same test seam pattern.
 	notifyMatch func(ctx context.Context, w *Watch, m *MatchResult) error
+	// notifyLost overrides where a #255 lost-launch notification goes (a launch
+	// or hold that did not land) — same test seam pattern.
+	notifyLost func(ctx context.Context, w *Watch, m *MatchResult, stopped bool) error
 	// notifyReminder overrides where a #239 until-landed reminder goes — same
 	// test seam pattern.
 	notifyReminder func(ctx context.Context, w *Watch, r ReminderStage, now time.Time) error
@@ -837,6 +840,18 @@ func (p *Poller) matchNotifier() func(ctx context.Context, w *Watch, m *MatchRes
 	}
 	if p.notifier != nil {
 		return p.notifier.Notify
+	}
+	return nil
+}
+
+// lostNotifier resolves where a #255 lost-launch notification goes: the test
+// seam if set, else the wired Notifier, else nowhere.
+func (p *Poller) lostNotifier() func(ctx context.Context, w *Watch, m *MatchResult, stopped bool) error {
+	if p.notifyLost != nil {
+		return p.notifyLost
+	}
+	if p.notifier != nil {
+		return p.notifier.NotifyLandingLost
 	}
 	return nil
 }

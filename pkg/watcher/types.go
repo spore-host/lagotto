@@ -312,6 +312,9 @@ type MatchResult struct {
 	InstanceState    string    `json:"instance_state,omitempty" dynamodbav:"instance_state,omitempty"`
 	ReservationState string    `json:"reservation_state,omitempty" dynamodbav:"reservation_state,omitempty"`
 	LandingReason    string    `json:"landing_reason,omitempty" dynamodbav:"landing_reason,omitempty"`
+	// LostAt is when the poller saw a landing fail (landing_failed /
+	// landing_timed_out rows, #255). Zero on every other row.
+	LostAt time.Time `json:"lost_at,omitzero" dynamodbav:"lost_at,omitempty"`
 	// QuotaDetail explains a quota_infeasible row (#238): the error code, the
 	// vCPUs the type needs, and the quota numbers when known. Empty otherwise.
 	QuotaDetail string `json:"quota_detail,omitempty" dynamodbav:"quota_detail,omitempty"`

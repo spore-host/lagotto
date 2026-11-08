@@ -702,6 +702,153 @@ func (n *Notifier) sendSNS(ctx context.Context, topicArn string, w *Watch, m *Ma
 	return err
 }
 
+// NotifyLandingLost tells the user that a launch (or hold) lagotto made for
+// the watch was lost before it landed (#255): the instance terminated, stopped
+// or never left pending, or the reservation failed. stopped says whether this
+// loss also stopped the watch (MaxConsecutiveFailures); otherwise the watch is
+// hunting again. A sibling of Notify, not a match notification: nothing was
+// acquired, and the match email would say "capacity found".
+//
+// Same channel fan-out and webhook re-validation as Notify.
+func (n *Notifier) NotifyLandingLost(ctx context.Context, w *Watch, m *MatchResult, stopped bool) error {
+	if len(w.NotifyChannels) == 0 {
+		return nil
+	}
+	subject := landingLostSubject(m, stopped)
+	body := landingLostBody(w, m, stopped)
+	payload, err := json.Marshal(landingLostPayload(w, m, stopped))
+	if err != nil {
+		return fmt.Errorf("marshal lost-launch payload: %w", err)
+	}
+
+	var lastErr error
+	for _, ch := range w.NotifyChannels {
+		var err error
+		switch ch.Type {
+		case "email":
+			err = n.publishEmail(ctx, ch.Target, subject, body)
+		case "webhook":
+			if verr := ValidateWebhookURL(ch.Target); verr != nil {
+				err = fmt.Errorf("blocked unsafe webhook URL: %w", verr)
+			} else {
+				err = n.postWebhookJSON(ch.Target, payload)
+			}
+		case "sns":
+			_, err = n.snsClient.Publish(ctx, &sns.PublishInput{
+				TopicArn: aws.String(ch.Target),
+				Message:  aws.String(string(payload)),
+			}, InARNRegion(ch.Target))
+		default:
+			continue
+		}
+		if err != nil {
+			lastErr = err
+		}
+	}
+	return lastErr
+}
+
+// lostWhat names the lost resource: "launch i-..." or "hold cr-...".
+func lostWhat(m *MatchResult) string {
+	if m.ReservationID != "" {
+		return "capacity reservation " + m.ReservationID
+	}
+	return "instance " + m.InstanceID
+}
+
+// lostState is the state the poller last saw, for the notification.
+func lostState(m *MatchResult) string {
+	if m.ReservationID != "" {
+		return m.ReservationState
+	}
+	return m.InstanceState
+}
+
+// landingLostSubject renders the lost-launch subject line. Pure, for tests.
+func landingLostSubject(m *MatchResult, stopped bool) string {
+	verb := "launch"
+	if m.ReservationID != "" {
+		verb = "hold"
+	}
+	tail := "still hunting"
+	if stopped {
+		tail = "watch stopped"
+	}
+	return fmt.Sprintf("[lagotto] %s %s in %s lost before it landed: %s", m.InstanceType, verb, m.Region, tail)
+}
+
+// landingLostBody renders the lost-launch body: what was lost, EC2's reason,
+// the timestamps, and what lagotto does next.
+func landingLostBody(w *Watch, m *MatchResult, stopped bool) string {
+	next := "The watch is still ACTIVE: lagotto is hunting again and will launch the next\ncapacity it finds. Nothing for you to do unless you want to stop it\n(lagotto cancel " + w.WatchID + ")."
+	if stopped {
+		next = fmt.Sprintf("The watch has STOPPED (status: failed): %d launches in a row were lost\nfor a reason other than capacity, so retrying looks unlikely to help.\nCheck the reason above and create the watch again.", MaxConsecutiveFailures)
+	}
+	reason := m.LandingReason
+	if reason == "" {
+		reason = "(EC2 gave no reason)"
+	}
+	lostAt := "-"
+	if !m.LostAt.IsZero() {
+		lostAt = m.LostAt.Format(time.RFC3339)
+	}
+	return fmt.Sprintf(`The %s that lagotto launched for watch %s did not land.
+
+Instance Type:     %s
+Region:            %s
+Availability Zone: %s
+Launched At:       %s
+Lost At:           %s (when lagotto saw it)
+State:             %s
+Reason:            %s
+
+%s
+`,
+		lostWhat(m), w.WatchID,
+		m.InstanceType, m.Region, dashIfEmpty(m.AvailabilityZone),
+		m.MatchedAt.Format(time.RFC3339), lostAt,
+		dashIfEmpty(lostState(m)), reason, next)
+}
+
+func dashIfEmpty(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+// landingLostPayload is the machine-readable lost-launch event. Like the other
+// sibling payloads, the "event" key is new to THIS payload only; it is the
+// history action (landing_failed or landing_timed_out).
+func landingLostPayload(w *Watch, m *MatchResult, stopped bool) map[string]interface{} {
+	status := StatusActive
+	if stopped {
+		status = StatusFailed
+	}
+	payload := map[string]interface{}{
+		"watch_id":          w.WatchID,
+		"event":             m.ActionTaken,
+		"status":            string(status),
+		"instance_type":     m.InstanceType,
+		"region":            m.Region,
+		"availability_zone": m.AvailabilityZone,
+		"is_spot":           m.IsSpot,
+		"launched_at":       m.MatchedAt.Format(time.RFC3339),
+		"state":             lostState(m),
+		"reason":            m.LandingReason,
+	}
+	if !m.LostAt.IsZero() {
+		payload["lost_at"] = m.LostAt.Format(time.RFC3339)
+	}
+	if m.InstanceID != "" {
+		payload["instance_id"] = m.InstanceID
+	}
+	if m.ReservationID != "" {
+		payload["reservation_id"] = m.ReservationID
+	}
+	return payload
+}
+
 // NotifyUnsupported tells the user that the poller retired a watch because its
 // service/action combination can never fire (#195): a notify-only SageMaker
 // watch stored before `watch` refused the combination. A sibling of Notify, not

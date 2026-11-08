@@ -87,6 +87,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     and `ErrThrottled`. `pkg/watcher` exports `Poller.CoolOffAZ` and
     `Poller.AZCooledOff`, so other code that learns an AZ is impaired can use
     the same cool-off.
+- **A spawn or hold lost before it lands is now notified, and history keeps
+  why** (#255). Since 0.67.0 (#239) a launch only matches once it is
+  `running`, so a watch no longer completes as `spawned` on an instance EC2
+  then kills in `pending`. What was still missing:
+  - Every lost launch or hold (`landing_failed`, `landing_timed_out`) is now
+    sent to the watch's channels, with the instance or reservation, its state,
+    EC2's reason, and whether the watch is hunting again or stopped. Before,
+    only the tenth unclassified loss in a row was sent, and it went out as the
+    match email ("capacity found"). The email subject is
+    `[lagotto] <type> launch in <region> lost before it landed: still hunting`
+    (or `watch stopped`). Webhook and SNS get a new event payload: `event`
+    (the history action), `status`, `instance_id` or `reservation_id`,
+    `state`, `reason`, `launched_at`, `lost_at`. The match payload is unchanged.
+  - The history row also records `lost_at` (when the poller saw the loss;
+    `matched_at` stays the launch time) and EC2's `StateTransitionReason`,
+    which carries EC2's own timestamp, alongside the `StateReason`. The code is
+    no longer repeated when EC2's message starts with it.
+  - `lagotto history` prints a detail line under a lost landing (instance,
+    state, reason, when seen) and no longer gives it a wait-to-acquire.
 
 ## [0.68.0] - 2026-11-07
 

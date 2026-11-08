@@ -215,6 +215,9 @@ func renderHistory(out io.Writer, matches []watcher.MatchResult, gaveUp []watche
 			if len(m.ChangedFields) > 0 {
 				_, _ = fmt.Fprintf(out, "  changed: %s\n", strings.Join(m.ChangedFields, ", "))
 			}
+			if d := lostDetail(m); d != "" {
+				_, _ = fmt.Fprintf(out, "  %s\n", d)
+			}
 		}
 	}
 
@@ -257,5 +260,35 @@ func renderHistory(out io.Writer, matches []watcher.MatchResult, gaveUp []watche
 // acquiredSomething reports whether a history row can have a wait-to-acquire:
 // not a quota refusal (#238) and not an update's audit row (#257).
 func acquiredSomething(m watcher.MatchResult) bool {
-	return m.ActionTaken != watcher.ActionQuotaInfeasible && m.ActionTaken != watcher.ActionUpdated
+	return m.ActionTaken != watcher.ActionQuotaInfeasible && m.ActionTaken != watcher.ActionUpdated &&
+		!isLostLanding(m)
+}
+
+// isLostLanding reports whether a history row is a launch or hold that did not
+// land (#239/#255).
+func isLostLanding(m watcher.MatchResult) bool {
+	return m.ActionTaken == watcher.ActionLandingFailed || m.ActionTaken == watcher.ActionLandingTimedOut
+}
+
+// lostDetail is the detail line under a lost-landing row (#255): which
+// resource, the state the poller saw, EC2's reason and when it was seen. EC2
+// forgets a terminated instance after about an hour, so this row is the only
+// lasting record of why it went.
+func lostDetail(m watcher.MatchResult) string {
+	if !isLostLanding(m) {
+		return ""
+	}
+	id, state := m.InstanceID, m.InstanceState
+	if m.ReservationID != "" {
+		id, state = m.ReservationID, m.ReservationState
+	}
+	parts := []string{strings.TrimSpace(id + " " + state)}
+	if m.LandingReason != "" {
+		parts = append(parts, m.LandingReason)
+	}
+	d := strings.Join(parts, ": ")
+	if !m.LostAt.IsZero() {
+		d += " (seen " + m.LostAt.Format(time.RFC3339) + ")"
+	}
+	return d
 }
