@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Build and test with Go 1.26.11 / 1.27.4: GO-2026-6859 (net/http: an HTTP/1 server crash from a `MaxBytesReader` header race), published 2026-11-11.
+
 ## [0.69.0] - 2026-11-08
 
 ### Added
