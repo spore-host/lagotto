@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The generated CLI reference escapes `<group>` in `lagotto list`'s help** (libs v0.51.5, spore-host/libs#73). A wrapped, indented help line reached the spore.host docs site raw, where it compiled as an unclosed HTML tag and failed the docs build, blocking the shared CLI-reference sync (spore-host/spore-host#647).
+
 ## [0.69.1] - 2026-11-11
 
 ### Security

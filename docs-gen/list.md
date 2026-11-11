@@ -10,7 +10,7 @@ Besides each watch's definition, the table shows its heartbeat:
   TRIES      how many launch/hold/notify attempts it has made.
   GROUP      the watch group it belongs to (lagotto watch --group): the
              first member to land cancels the others. "lagotto status
-             <group>" shows the whole group.
+             &lt;group&gt;" shows the whole group.
   LAST ERR   the class of its latest error: capacity, quota, terminal,
              unknown, or search (the capacity search itself failed).
 
