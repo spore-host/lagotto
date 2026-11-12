@@ -72,12 +72,16 @@ func authorizeWatchOwner(ctx context.Context, stsClient stsIdentityAPI, watchID 
 	if err != nil {
 		return nil, fmt.Errorf("get caller identity: %w", err)
 	}
-	caller := aws.ToString(identity.Arn)
-
-	// A watch with no recorded owner (legacy) is only accessible if we also can't
-	// determine a caller — otherwise treat the owner as authoritative.
-	if w.UserID != "" && w.UserID != caller {
+	callerID := aws.ToString(identity.UserId)
+	if !watcher.OwnedBy(w.OwnerID, w.UserID, callerID, aws.ToString(identity.Arn)) {
 		return nil, notFound
+	}
+	// A watch created before owner ids were recorded passed on its ARN: note
+	// the caller's id on it, so the next write that carries it (`lagotto
+	// update`) records it.
+	if w.OwnerID == "" && w.UserID != "" && callerID != "" {
+		w.OwnerID = callerID
+		w.OwnerIDBackfill = true
 	}
 	return w, nil
 }

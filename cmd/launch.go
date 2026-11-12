@@ -192,12 +192,13 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 			launchReservationID, cr.State, cr.StartDate, cr.EndDate, expr, retryUntil.UTC().Format(time.RFC3339))
 	}
 
-	userID := ""
+	userID, ownerID := "", ""
 	acctID := ""
 	if id, ierr := sts.NewFromConfig(cfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{}); ierr == nil {
 		if id.Arn != nil {
 			userID = *id.Arn
 		}
+		ownerID = aws.ToString(id.UserId)
 		if id.Account != nil {
 			acctID = *id.Account
 		}
@@ -230,6 +231,7 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 	sl := &watcher.ScheduledLaunch{
 		ScheduleID:       scheduleID,
 		UserID:           userID,
+		OwnerID:          ownerID,
 		Status:           watcher.ScheduledPending,
 		Region:           region,
 		AvailabilityZone: launchAZ,

@@ -247,6 +247,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	}
 
 	w.UserID = *identity.Arn
+	w.OwnerID = aws.ToString(identity.UserId)
 	w.Project = project
 	w.Service = service
 	w.InstanceTypePattern = pattern

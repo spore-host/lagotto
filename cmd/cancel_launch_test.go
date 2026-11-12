@@ -262,3 +262,34 @@ func TestRunCancelScheduledLaunch_Substrate(t *testing.T) {
 		t.Errorf("unknown id: %v, want not found", err)
 	}
 }
+
+type fullIdentity struct{ arn, userID string }
+
+func (f fullIdentity) GetCallerIdentity(context.Context, *sts.GetCallerIdentityInput, ...func(*sts.Options)) (*sts.GetCallerIdentityOutput, error) {
+	return &sts.GetCallerIdentityOutput{Arn: aws.String(f.arn), UserId: aws.String(f.userID)}, nil
+}
+
+// A record with an owner id is owned by that principal id alone; a legacy
+// watch that passes on its ARN gets the caller's id noted for `update`.
+func TestAuthorizeOwnerByPrincipalID(t *testing.T) {
+	ctx := context.Background()
+	const arn = "arn:aws:sts::123456789012:assumed-role/Dev/alice"
+	sl := pendingLaunch()
+	sl.UserID, sl.OwnerID = arn, "AROAOLD:alice"
+	if _, err := authorizeLaunchOwner(ctx, fullIdentity{arn, "AROANEW:alice"}, "sl-aaaa", "us-east-1", sl); err == nil {
+		t.Error("a different principal id with the same ARN owns the launch")
+	}
+	if _, err := authorizeLaunchOwner(ctx, fullIdentity{arn, "AROAOLD:alice"}, "sl-aaaa", "us-east-1", sl); err != nil {
+		t.Errorf("owner: %v", err)
+	}
+
+	w := &watcher.Watch{WatchID: "w-1", UserID: arn}
+	got, err := authorizeWatchOwner(ctx, fullIdentity{arn, "AROAOLD:alice"}, "w-1", w)
+	if err != nil || got.OwnerID != "AROAOLD:alice" || !got.OwnerIDBackfill {
+		t.Errorf("legacy watch: %+v, %v; want the owner id noted for backfill", got, err)
+	}
+	w2 := &watcher.Watch{WatchID: "w-2", UserID: arn, OwnerID: "AROAOLD:alice"}
+	if _, err := authorizeWatchOwner(ctx, fullIdentity{arn, "AROANEW:alice"}, "w-2", w2); err == nil {
+		t.Error("a different principal id with the same ARN owns the watch")
+	}
+}

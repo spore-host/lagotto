@@ -74,6 +74,17 @@ const QuotaCapBackstopInterval = 6 * time.Hour
 type Watch struct {
 	WatchID string `json:"watch_id" dynamodbav:"watch_id"`
 	UserID  string `json:"user_id" dynamodbav:"user_id"`
+	// OwnerID is the creator's unique principal id (sts GetCallerIdentity
+	// UserId, the value IAM exposes as ${aws:userid}): AIDA… for an IAM user,
+	// AROA…:<session> for an assumed role. Unlike UserID (an ARN, kept for
+	// display and spawn's dashboard), it changes when a role is deleted and
+	// re-created under the same name, and it is the identity an IAM policy can
+	// key on. When set, ownership is checked against it ([OwnedBy]). Empty on
+	// a watch created before it existed; `lagotto update` fills it in.
+	OwnerID string `json:"owner_id,omitempty" dynamodbav:"owner_id,omitempty"`
+	// OwnerIDBackfill marks an OwnerID filled in by the CLI on read, not yet
+	// stored. Never stored itself.
+	OwnerIDBackfill bool `json:"-" dynamodbav:"-"`
 	// Project is an optional grouping label (set at watch-create via --project or
 	// $LAGOTTO_PROJECT) so a local `poll --daemon --project X` services only its
 	// own project's watches in a shared account, instead of every watch (#47).

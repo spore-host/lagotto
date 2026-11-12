@@ -75,7 +75,7 @@ func authorizeLaunchOwner(ctx context.Context, stsClient stsIdentityAPI, id, reg
 	if err != nil {
 		return nil, fmt.Errorf("get caller identity: %w", err)
 	}
-	if sl.UserID != "" && sl.UserID != aws.ToString(identity.Arn) {
+	if !watcher.OwnedBy(sl.OwnerID, sl.UserID, aws.ToString(identity.UserId), aws.ToString(identity.Arn)) {
 		return nil, notFound
 	}
 	return sl, nil

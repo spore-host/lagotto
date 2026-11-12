@@ -243,6 +243,11 @@ func applyWatchUpdate(ctx context.Context, cfg aws.Config, store *watcher.Store,
 	}
 
 	fields := changedFields(changes)
+	if nw.OwnerIDBackfill {
+		// A watch created before owner ids were recorded: store the caller's,
+		// now that the ARN check has passed (watcher.OwnedBy).
+		fields = append(fields, watcher.FieldOwnerID)
+	}
 	err = store.UpdateWatchFields(ctx, nw, watcher.WatchUpdate{
 		Fields:     fields,
 		Version:    version,

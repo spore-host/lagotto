@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Watches and scheduled launches record their creator's principal id** (`owner_id`, the STS `UserId`) next to the ARN, and ownership is checked against it when present, so a role deleted and re-created under the same name does not inherit the old role's watches. A watch created before this records it on its next `lagotto update`.
 - **A watch with no `iam_role` now launches with `lagotto-instance-role`**, which `lagotto setup` creates with spawn's spored/SSM baseline, instead of spawn's shared `spored-instance-role`. `setup --instance-role NAME` now requires the role to exist, adds the same baseline to it and creates its instance profile; `--revoke-instance-role` deletes the profile setup created. `lagotto teardown --iam-roles` deletes `lagotto-instance-role` and those profiles. **After upgrading, run `lagotto setup`** (with the new poller deployed): until then hosted launches fail. A workload that needs more than the baseline (for example S3 access) needs a role an administrator authorizes with `setup --instance-role`, named by `iam_role`.
 
 ## [0.69.2] - 2026-11-11

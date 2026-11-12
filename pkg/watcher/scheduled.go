@@ -49,8 +49,10 @@ const (
 // launch config is the same SpawnConfigFile JSON a watch stores, so it inherits
 // the #38 TTL guarantee and the reservation/capacity-block passthrough.
 type ScheduledLaunch struct {
-	ScheduleID       string                `json:"schedule_id" dynamodbav:"schedule_id"`
-	UserID           string                `json:"user_id" dynamodbav:"user_id"`
+	ScheduleID string `json:"schedule_id" dynamodbav:"schedule_id"`
+	UserID     string `json:"user_id" dynamodbav:"user_id"`
+	// OwnerID is the creator's unique principal id, as on [Watch.OwnerID].
+	OwnerID          string                `json:"owner_id,omitempty" dynamodbav:"owner_id,omitempty"`
 	Status           ScheduledLaunchStatus `json:"status" dynamodbav:"status"`
 	Region           string                `json:"region" dynamodbav:"region"`
 	AvailabilityZone string                `json:"availability_zone,omitempty" dynamodbav:"availability_zone,omitempty"`
