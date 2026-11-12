@@ -41,7 +41,7 @@ func (p *Poller) cacheGroup(name string, g *WatchGroup) {
 // conditional write, still keeps the member from launching into an ended
 // group.
 func (p *Poller) groupEnded(ctx context.Context, w *Watch, summary *PollSummary) bool {
-	g, err := p.sweepGroup(ctx, w.Group)
+	g, err := p.sweepGroup(ctx, w.GroupRef())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: watch %s: could not read group %s: %v\n", w.WatchID, w.Group, err)
 		return false
@@ -61,7 +61,7 @@ func (p *Poller) groupEnded(ctx context.Context, w *Watch, summary *PollSummary)
 // false means launch nothing this cycle: a sibling holds the slot, or the group
 // ended (the member is then cancelled), or the claim could not be made.
 func (p *Poller) claimGroupSlot(ctx context.Context, w *Watch, summary *PollSummary) bool {
-	g, err := p.store.ReserveGroupSlot(ctx, w.Group, w.WatchID, p.clock())
+	g, err := p.store.ReserveGroupSlot(ctx, w.GroupRef(), w.WatchID, p.clock())
 	switch {
 	case err == nil:
 		return true
@@ -73,7 +73,7 @@ func (p *Poller) claimGroupSlot(ctx context.Context, w *Watch, summary *PollSumm
 		summary.GroupWaiting++
 		_ = p.store.UpdateLastPolled(ctx, w.WatchID)
 	case errors.Is(err, ErrGroupClosed):
-		p.cacheGroup(w.Group, g)
+		p.cacheGroup(w.GroupRef(), g)
 		if g.WinnerWatch != w.WatchID {
 			p.cancelMember(ctx, w, g.CancelReason(), summary)
 		}
@@ -91,7 +91,7 @@ func (p *Poller) releaseGroupSlot(ctx context.Context, w *Watch) {
 	if !groupManaged(w) {
 		return
 	}
-	if err := p.store.ReleaseGroupSlot(ctx, w.Group, w.WatchID); err != nil {
+	if err := p.store.ReleaseGroupSlot(ctx, w.GroupRef(), w.WatchID); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: watch %s: %v (it expires on its own within %s)\n", w.WatchID, err, groupSlotTTL)
 	}
 }
@@ -146,7 +146,7 @@ func (p *Poller) winGroup(ctx context.Context, w *Watch, m *MatchResult, now tim
 		fmt.Fprintf(os.Stderr, "Warning: watch %s: could not record its landing for group %s: %v (will retry)\n", w.WatchID, w.Group, err)
 		return false, false
 	}
-	p.cacheGroup(w.Group, g)
+	p.cacheGroup(w.GroupRef(), g)
 	if won || g.WinnerWatch == w.WatchID {
 		fmt.Fprintf(os.Stderr, "Watch %s: won group %s with %s\n", w.WatchID, w.Group, m.InstanceID+m.ReservationID)
 		return true, true
@@ -250,7 +250,7 @@ func (p *Poller) handleExtraLanding(ctx context.Context, w *Watch, m *MatchResul
 func (p *Poller) finishGroup(ctx context.Context, winner *Watch, m *MatchResult, g *WatchGroup, now time.Time, summary *PollSummary) {
 	if g == nil || len(g.Members) == 0 {
 		// The win is recorded but the member list could not be read; re-read.
-		if rg, err := p.store.GetGroup(ctx, winner.Group); err == nil && rg != nil {
+		if rg, err := p.store.GetGroup(ctx, winner.GroupRef()); err == nil && rg != nil {
 			g = rg
 		}
 	}
@@ -258,6 +258,13 @@ func (p *Poller) finishGroup(ctx context.Context, winner *Watch, m *MatchResult,
 	if g != nil {
 		for _, id := range g.Members {
 			if id == winner.WatchID {
+				continue
+			}
+			// Only members in the winner's own owner scope: a group item names
+			// its members itself, and must not be able to have the poller cancel
+			// a watch under another owner's key.
+			if !SameScope(id, winner.WatchID) {
+				fmt.Fprintf(os.Stderr, "Warning: group %s lists %s, which is not in its owner's scope; ignored\n", winner.Group, id)
 				continue
 			}
 			sw, err := p.store.GetWatch(ctx, id)

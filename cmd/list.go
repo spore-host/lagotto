@@ -79,7 +79,7 @@ func runList(cmd *cobra.Command, args []string) error {
 
 	store := watcher.NewStore(cfg, watchesTable, historyTable)
 
-	watches, err := store.ListWatchesByUser(ctx, *identity.Arn, listStatusFilter(listAll))
+	watches, err := listCallerWatches(ctx, store, identity, listStatusFilter(listAll))
 	if err != nil {
 		return fmt.Errorf("list watches: %w", err)
 	}
@@ -91,6 +91,7 @@ func runList(cmd *cobra.Command, args []string) error {
 	filter := &watcher.WatchFilter{Project: listProject}
 	if listMine {
 		filter.Owner = *identity.Arn
+		filter.OwnerID = aws.ToString(identity.UserId)
 	}
 	if !filter.Empty() {
 		kept := watches[:0]
@@ -143,7 +144,7 @@ func writeListEmailStates(out io.Writer, watches []watcher.Watch) {
 				_, _ = fmt.Fprintln(out, "\nEmail notifications:")
 				header = true
 			}
-			_, _ = fmt.Fprintf(out, "  %-12s %s  %s\n", watches[i].WatchID, ch.Target, ch.Subscription.Describe())
+			_, _ = fmt.Fprintf(out, "  %-12s %s  %s\n", watcher.ShortID(watches[i].WatchID), ch.Target, ch.Subscription.Describe())
 		}
 	}
 }
@@ -172,7 +173,7 @@ func writeWatchTable(out io.Writer, watches []watcher.Watch, now time.Time, wide
 		}
 		latest, latestAt := w.LatestError()
 		line := fmt.Sprintf(row,
-			w.WatchID,
+			watcher.ShortID(w.WatchID),
 			statusCol(w),
 			dashIfEmpty(truncate(w.Project, 15)),
 			dashIfEmpty(truncate(w.Group, 12)),

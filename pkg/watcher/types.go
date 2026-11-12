@@ -82,6 +82,11 @@ type Watch struct {
 	// key on. When set, ownership is checked against it ([OwnedBy]). Empty on
 	// a watch created before it existed; `lagotto update` fills it in.
 	OwnerID string `json:"owner_id,omitempty" dynamodbav:"owner_id,omitempty"`
+	// LegacyWatchID is the key this watch had before `lagotto setup` moved it
+	// under its owner's prefix (MigrateOwnerKeys). Instances it launched
+	// before the move carry it in their lagotto:watch tag, so a fleet counts
+	// them under either.
+	LegacyWatchID string `json:"legacy_watch_id,omitempty" dynamodbav:"legacy_watch_id,omitempty"`
 	// OwnerIDBackfill marks an OwnerID filled in by the CLI on read, not yet
 	// stored. Never stored itself.
 	OwnerIDBackfill bool `json:"-" dynamodbav:"-"`

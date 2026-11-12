@@ -293,3 +293,36 @@ func TestAuthorizeOwnerByPrincipalID(t *testing.T) {
 		t.Error("a different principal id with the same ARN owns the watch")
 	}
 }
+
+// TestWatchKeysAndScopedOwnership: a short id is looked up under the caller's
+// own prefix first, then as a legacy key; a scoped record is the caller's only
+// when its key is under the caller's id (IAM refuses the read otherwise; the
+// CLI applies the same rule).
+func TestWatchKeysAndScopedOwnership(t *testing.T) {
+	if got := watchKeys("w-1", "AIDAA"); len(got) != 2 || got[0] != "AIDAA/w-1" || got[1] != "w-1" {
+		t.Errorf("watchKeys(short) = %v", got)
+	}
+	if got := watchKeys("AIDAB/w-1", "AIDAA"); len(got) != 1 || got[0] != "AIDAB/w-1" {
+		t.Errorf("watchKeys(full) = %v", got)
+	}
+	id := &sts.GetCallerIdentityOutput{Arn: aws.String("arn:aws:iam::123456789012:user/a"), UserId: aws.String("AIDAA")}
+	if _, err := authorizeIdentity(id, "AIDAB/w-1", &watcher.Watch{WatchID: "AIDAB/w-1", UserID: "arn:aws:iam::123456789012:user/a"}); err == nil {
+		t.Error("another owner's scoped watch was authorized because it names the caller's ARN")
+	}
+	if _, err := authorizeIdentity(id, "AIDAA/w-1", &watcher.Watch{WatchID: "AIDAA/w-1"}); err != nil {
+		t.Errorf("own scoped watch: %v", err)
+	}
+
+	ctx := context.Background()
+	reads := map[string]*watcher.Watch{"AIDAB/w-9": {WatchID: "AIDAB/w-9"}}
+	get := func(key string) (*watcher.Watch, string, error) {
+		if w, ok := reads[key]; ok {
+			return w, "", nil
+		}
+		return nil, "", nil
+	}
+	if _, _, err := resolveOwnedWatch(ctx, fullIdentity{"arn:aws:iam::123456789012:user/a", "AIDAA"}, "AIDAB/w-9", get); err == nil ||
+		!strings.Contains(err.Error(), "not found") {
+		t.Errorf("another owner's full key: %v, want not found", err)
+	}
+}

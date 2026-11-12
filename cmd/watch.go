@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/scheduler"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spf13/cobra"
+	"github.com/spore-host/lagotto/pkg/arm"
 	"github.com/spore-host/lagotto/pkg/awscfg"
 	"github.com/spore-host/lagotto/pkg/deploy"
 	"github.com/spore-host/lagotto/pkg/quotacheck"
@@ -248,6 +249,9 @@ func runWatch(cmd *cobra.Command, args []string) error {
 
 	w.UserID = *identity.Arn
 	w.OwnerID = aws.ToString(identity.UserId)
+	// The record's key carries its owner (watcher.OwnerKey), which is what the
+	// lagotto-cli-user policy authorizes on: only the caller's own prefix.
+	w.WatchID = watcher.OwnerKey(w.OwnerID, w.WatchID)
 	w.Project = project
 	w.Service = service
 	w.InstanceTypePattern = pattern
@@ -323,6 +327,9 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		}
 		warnIfPollerPredatesGroups(ctx, cfg, os.Stderr, w)
 	}
+	if msg := arm.CheckOwnerKeyPoller(ctx, deploy.New(cfg), cfg.Region, w); msg != "" {
+		_, _ = fmt.Fprintln(os.Stderr, msg)
+	}
 	if err := store.PutWatch(ctx, w); err != nil {
 		return fmt.Errorf("create watch: %w", err)
 	}
@@ -338,7 +345,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		return encodeWatchJSON(cmd.OutOrStdout(), w, pre, deprecations)
 	}
 
-	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Created watch %s\n", w.WatchID)
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Created watch %s\n", watcher.ShortID(w.WatchID))
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Pattern:  %s\n", w.InstanceTypePattern)
 	if w.Service == watcher.ServiceSageMaker {
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Service:  sagemaker (submits your SageMaker job, retries on CapacityError)\n")

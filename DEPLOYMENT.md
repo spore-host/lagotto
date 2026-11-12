@@ -241,6 +241,13 @@ aws iam attach-group-policy --group-name <group> \
   and only to `scheduler.amazonaws.com`; `sns:Subscribe` only by email;
   `ec2:CancelCapacityReservation` only on reservations tagged
   `lagotto:managed=true`. `*` only for actions IAM does not scope.
+- **Owner-scoped table access.** Item actions on the three tables
+  (`GetItem`, `PutItem`, `UpdateItem`, `Query`, `BatchGetItem`) only where
+  `dynamodb:LeadingKeys` is under `${aws:userid}/`, with a `Null` condition so a
+  request without a partition key (a Scan) is refused; no `Scan`, no
+  `DeleteItem`, and `Query` on `owner_id-index` only for the caller's own id. Run
+  `lagotto setup` after upgrading: it moves older records under their owners'
+  ids before it writes this policy.
 - **Not covered:** `poll`, which needs the poller's own launch permissions
   (`ec2:RunInstances` and passing instance roles), and `setup`, `deploy` and `teardown`.
 - `s3://` spawn configs: name their buckets with `lagotto setup --config-bucket

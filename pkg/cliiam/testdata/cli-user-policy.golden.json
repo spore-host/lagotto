@@ -7,12 +7,7 @@
         "dynamodb:CreateTable",
         "dynamodb:DescribeTable",
         "dynamodb:DescribeTimeToLive",
-        "dynamodb:GetItem",
-        "dynamodb:PutItem",
-        "dynamodb:Query",
-        "dynamodb:Scan",
         "dynamodb:TagResource",
-        "dynamodb:UpdateItem",
         "dynamodb:UpdateTimeToLive"
       ],
       "Resource": [
@@ -22,16 +17,45 @@
       ]
     },
     {
-      "Sid": "LagottoTableIndexes",
+      "Sid": "OwnItems",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:Query",
+        "dynamodb:UpdateItem"
+      ],
+      "Resource": [
+        "arn:aws:dynamodb:*:123456789012:table/lagotto-watches",
+        "arn:aws:dynamodb:*:123456789012:table/lagotto-match-history",
+        "arn:aws:dynamodb:*:123456789012:table/lagotto-scheduled-launches"
+      ],
+      "Condition": {
+        "ForAllValues:StringLike": {
+          "dynamodb:LeadingKeys": [
+            "${aws:userid}/*"
+          ]
+        },
+        "Null": {
+          "dynamodb:LeadingKeys": "false"
+        }
+      }
+    },
+    {
+      "Sid": "OwnIndex",
       "Effect": "Allow",
       "Action": [
         "dynamodb:Query"
       ],
-      "Resource": [
-        "arn:aws:dynamodb:*:123456789012:table/lagotto-watches/index/*",
-        "arn:aws:dynamodb:*:123456789012:table/lagotto-match-history/index/*",
-        "arn:aws:dynamodb:*:123456789012:table/lagotto-scheduled-launches/index/*"
-      ]
+      "Resource": "arn:aws:dynamodb:*:123456789012:table/lagotto-watches/index/owner_id-index",
+      "Condition": {
+        "ForAllValues:StringEquals": {
+          "dynamodb:LeadingKeys": [
+            "${aws:userid}"
+          ]
+        }
+      }
     },
     {
       "Sid": "PollerSchedule",

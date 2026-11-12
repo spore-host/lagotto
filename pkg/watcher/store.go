@@ -18,6 +18,7 @@ import (
 // interface so tests can substitute a fake — in particular one that returns a
 // Query or Scan result across several pages (#181).
 type dynamoAPI interface {
+	BatchGetItem(context.Context, *dynamodb.BatchGetItemInput, ...func(*dynamodb.Options)) (*dynamodb.BatchGetItemOutput, error)
 	CreateTable(context.Context, *dynamodb.CreateTableInput, ...func(*dynamodb.Options)) (*dynamodb.CreateTableOutput, error)
 	DeleteTable(context.Context, *dynamodb.DeleteTableInput, ...func(*dynamodb.Options)) (*dynamodb.DeleteTableOutput, error)
 	DescribeTable(context.Context, *dynamodb.DescribeTableInput, ...func(*dynamodb.Options)) (*dynamodb.DescribeTableOutput, error)
@@ -1112,6 +1113,7 @@ func watchesTableSchema(name string) *dynamodb.CreateTableInput {
 			{AttributeName: aws.String("watch_id"), AttributeType: types.ScalarAttributeTypeS},
 			{AttributeName: aws.String("user_id"), AttributeType: types.ScalarAttributeTypeS},
 			{AttributeName: aws.String("status"), AttributeType: types.ScalarAttributeTypeS},
+			{AttributeName: aws.String(OwnerIDAttr), AttributeType: types.ScalarAttributeTypeS},
 		},
 		KeySchema: []types.KeySchemaElement{
 			{AttributeName: aws.String("watch_id"), KeyType: types.KeyTypeHash},
@@ -1127,6 +1129,7 @@ func watchesTableSchema(name string) *dynamodb.CreateTableInput {
 				KeySchema:  []types.KeySchemaElement{{AttributeName: aws.String("status"), KeyType: types.KeyTypeHash}},
 				Projection: &types.Projection{ProjectionType: types.ProjectionTypeAll},
 			},
+			ownerIndex(),
 		},
 	}
 }

@@ -24,6 +24,15 @@ roles you name with --instance-role (which must exist; setup creates their
 instance profiles) and, for SageMaker watches, the execution roles you name with
 --sagemaker-role. Every lagotto user can launch with an authorized role.
 
+Every record a CLI user creates is keyed under the creator's principal id
+(&lt;id&gt;/w-…), and lagotto-cli-user lets each caller read and write only the records
+under its own id, enforced by IAM (dynamodb:LeadingKeys). Before writing that
+policy, setup adds the owner index to a watches table that predates it and moves
+every older record (watches, groups, match history, scheduled launches) under its
+creator's id: each in one transaction, so nothing is lost or duplicated, and it is
+safe to re-run. Records whose creator cannot be resolved are left in place and
+listed; the poller still services them.
+
 It also writes the customer-managed policy lagotto-cli-user (lagotto#232): the
 least-privilege permissions the everyday commands need with YOUR credentials
 (watch, update, ack, extend, cancel, list, status, history, launch, notify-gc,

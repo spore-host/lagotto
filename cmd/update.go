@@ -154,7 +154,7 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 	}
 	out := cmd.OutOrStdout()
 	if len(changes) == 0 {
-		_, _ = fmt.Fprintf(out, "Watch %s already has those settings; nothing to update.\n", w.WatchID)
+		_, _ = fmt.Fprintf(out, "Watch %s already has those settings; nothing to update.\n", watcher.ShortID(w.WatchID))
 		return nil
 	}
 
@@ -171,7 +171,7 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 	// cannot be changed in place, hence the warning's pointer to a new watch.
 	deprecations := watcher.ActionDeprecations(w.Action, true)
 	for i := range deprecations {
-		deprecations[i].Message += fmt.Sprintf("\n'update' cannot change a watch's action: create a new watch with --action hold or --action spawn, then 'lagotto cancel %s'.", w.WatchID)
+		deprecations[i].Message += fmt.Sprintf("\n'update' cannot change a watch's action: create a new watch with --action hold or --action spawn, then 'lagotto cancel %s'.", watcher.ShortID(w.WatchID))
 	}
 	writeDeprecations(cmd.ErrOrStderr(), deprecations)
 
@@ -314,17 +314,17 @@ func checkUpdatable(w *watcher.Watch, reactivate bool, now time.Time) error {
 	case watcher.StatusActive:
 	case watcher.StatusExpired, watcher.StatusFailed:
 		if !reactivate {
-			return fmt.Errorf("watch %s is %s: pass --reactivate to update it and make it active again", w.WatchID, w.Status)
+			return fmt.Errorf("watch %s is %s: pass --reactivate to update it and make it active again", watcher.ShortID(w.WatchID), w.Status)
 		}
 		if !w.ExpiresAt.After(now) {
 			if w.Status == watcher.StatusExpired {
 				return fmt.Errorf("watch %s is expired and its deadline (%s) has passed, so reactivating it would expire it again at once: "+
 					"run 'lagotto extend %s' to reactivate it with a new deadline, then update it", w.WatchID, w.ExpiresAt.Format(time.RFC3339), w.WatchID)
 			}
-			return fmt.Errorf("watch %s is failed and its deadline (%s) has passed: create a new watch instead", w.WatchID, w.ExpiresAt.Format(time.RFC3339))
+			return fmt.Errorf("watch %s is failed and its deadline (%s) has passed: create a new watch instead", watcher.ShortID(w.WatchID), w.ExpiresAt.Format(time.RFC3339))
 		}
 	default:
-		return fmt.Errorf("watch %s is %s; only an active watch (or an expired or failed one, with --reactivate) can be updated", w.WatchID, w.Status)
+		return fmt.Errorf("watch %s is %s; only an active watch (or an expired or failed one, with --reactivate) can be updated", watcher.ShortID(w.WatchID), w.Status)
 	}
 	if err := landingRefusal(w); err != nil {
 		return err
@@ -432,7 +432,7 @@ func applyUpdate(w *watcher.Watch, o updateOpts, loadSpawn func(string) ([]byte,
 
 	if o.spawnConfig != "" {
 		if nw.Service == watcher.ServiceSageMaker || nw.Action != watcher.ActionSpawn {
-			return nil, nil, fmt.Errorf("--spawn-config applies only to an EC2 --action spawn watch; watch %s is --action %s", w.WatchID, w.Action)
+			return nil, nil, fmt.Errorf("--spawn-config applies only to an EC2 --action spawn watch; watch %s is --action %s", watcher.ShortID(w.WatchID), w.Action)
 		}
 		b, err := loadSpawn(o.spawnConfig)
 		if err != nil {
@@ -662,7 +662,7 @@ func writeUpdate(out io.Writer, format string, r updateResult) error {
 	if r.DryRun {
 		verb = "Dry run: would update"
 	}
-	_, _ = fmt.Fprintf(out, "%s watch %s:\n", verb, r.WatchID)
+	_, _ = fmt.Fprintf(out, "%s watch %s:\n", verb, watcher.ShortID(r.WatchID))
 	for _, c := range r.Changes {
 		_, _ = fmt.Fprintf(out, "  %-22s %s -> %s\n", c.Field+":", displayValue(c.Field, c.Before), displayValue(c.Field, c.After))
 	}

@@ -48,7 +48,7 @@ func withGroupNotes(h *landHarness) *groupNotes {
 // join stores w as a member of its group, the way `lagotto watch --group` does.
 func (h *landHarness) join(t *testing.T, w *Watch) {
 	t.Helper()
-	if _, err := h.store.JoinGroup(context.Background(), w.Group, w.UserID, w.WatchID, w.TTLTimestamp); err != nil {
+	if _, err := h.store.JoinGroup(context.Background(), w.GroupRef(), w.UserID, w.WatchID, w.TTLTimestamp); err != nil {
 		t.Fatalf("JoinGroup(%s): %v", w.WatchID, err)
 	}
 	h.put(t, w)

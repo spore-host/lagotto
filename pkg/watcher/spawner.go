@@ -363,7 +363,7 @@ func (s *Spawner) countRunningFleet(ctx context.Context, w *Watch) (int, error) 
 			return 0, fmt.Errorf("list instances in %s: %w", region, err)
 		}
 		for _, in := range insts {
-			if in.Tags[FleetTagKey] != w.WatchID {
+			if tag := in.Tags[FleetTagKey]; tag != w.WatchID && (w.LegacyWatchID == "" || tag != w.LegacyWatchID) {
 				continue
 			}
 			if in.State != "running" && in.State != "pending" {

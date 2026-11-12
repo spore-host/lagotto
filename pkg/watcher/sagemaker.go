@@ -92,9 +92,9 @@ func (l *SageMakerLauncher) submit(ctx context.Context, client *sagemaker.Client
 
 	// Generate a unique, traceable job name per attempt (SageMaker job names must
 	// be unique within an account+region; reusing one would collide).
-	jobName := fmt.Sprintf("lagotto-%s-%d", w.WatchID, w.MatchCount+1)
+	jobName := sageMakerJobName(w)
 	input.TrainingJobName = aws.String(jobName)
-	addLagottoTag(&input, w.WatchID)
+	addLagottoTag(&input, ShortID(w.WatchID))
 
 	out, err := client.CreateTrainingJob(ctx, &input)
 	if err != nil {
@@ -158,6 +158,19 @@ func (l *SageMakerLauncher) check(ctx context.Context, client *sagemaker.Client,
 
 // addLagottoTag stamps the job with the watch ID so lagotto-submitted probe/run
 // jobs are filterable (job records are immutable and can't be deleted).
+// sageMakerJobName is the job name for the watch's next attempt:
+// lagotto-[<owner tag>-]<short id>-<attempt>. Job names allow only
+// [A-Za-z0-9-] and must be unique in the account and region, so the owner is
+// carried as a short digest (OwnerTag), not verbatim. The runtime policy's
+// SageMaker grant covers training-job/lagotto-*.
+func sageMakerJobName(w *Watch) string {
+	prefix := "lagotto-"
+	if t := OwnerTag(KeyOwner(w.WatchID)); t != "" {
+		prefix += t + "-"
+	}
+	return fmt.Sprintf("%s%s-%d", prefix, ShortID(w.WatchID), w.MatchCount+1)
+}
+
 func addLagottoTag(input *sagemaker.CreateTrainingJobInput, watchID string) {
 	input.Tags = append(input.Tags, smTag("lagotto:watch-id", watchID), smTag("lagotto:managed", "true"))
 }

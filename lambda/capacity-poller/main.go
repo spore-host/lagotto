@@ -217,7 +217,7 @@ func rearmBoundaryRetry(ctx context.Context, sl *watcher.ScheduledLaunch) error 
 
 	// A fresh schedule name per attempt so the prior one's pending DELETE can't
 	// collide with the new create.
-	retryName := fmt.Sprintf("lagotto-launch-%s-r%d", sl.ScheduleID, sl.Attempts)
+	retryName := fmt.Sprintf("lagotto-launch-%s-r%d", watcher.ShortID(sl.ScheduleID), sl.Attempts) // as deploy.LaunchScheduleName
 	expr := fmt.Sprintf("at(%s)", next.Format("2006-01-02T15:04:05"))
 	payload := fmt.Sprintf(`{"scheduled_launch_id":%q}`, sl.ScheduleID)
 	_, err := schedulerClient.CreateSchedule(ctx, &scheduler.CreateScheduleInput{

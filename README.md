@@ -393,6 +393,31 @@ watch, so two daemons — or a local daemon racing the hosted Lambda — can't b
 launch the same watch. A crashed poller's lease ages out automatically. Disable
 with `--no-lease` (not recommended when more than one poller runs).
 
+### Who can see a watch
+
+Each watch, group, match-history row and scheduled launch is stored under its
+creator's AWS principal id (`<id>/w-1a2b3c4d`; the CLI shows and accepts the
+short `w-1a2b3c4d`). The `lagotto-cli-user` policy lets a caller read and write
+only the records under its own id, so IAM, not the CLI, keeps one user's watches
+from another's. What "one user" means is the principal id IAM reports
+(`${aws:userid}`):
+
+- an IAM user: that user;
+- IAM Identity Center or console federation: that person (the session name is
+  their user name, which they cannot choose);
+- a role assumed with `sts:AssumeRole`: the role **and the session name**. The
+  caller chooses the session name, so everyone who can assume the same role can
+  act as any of its sessions; they share ownership. Give each person their own
+  role, or pin the session name in the role's trust policy (for example
+  `sts:RoleSessionName` = `${aws:username}`). Keep it the same across logins:
+  a tool that makes up a new session name each time (the AWS CLI's default
+  `botocore-session-…`, for example) sees a new owner each time; set
+  `role_session_name` in the profile.
+
+`lagotto setup` moves watches created before this under their creators' ids. The
+hosted poller reads every watch; a watch can only refer to records under its own
+owner's id (its group, a group's members).
+
 ## Scheduled launches
 
 Where `watch` fires when *capacity* appears, `lagotto launch` fires at a *time* —

@@ -58,9 +58,19 @@ func TestPolicyDocumentGolden(t *testing.T) {
 // TestPolicyHasNoPolicyVariables: ${aws:PrincipalAccount} and friends in a
 // Resource pass Access Analyzer and the simulator but fail a real
 // CreatePolicy ("failed legacy parsing", spawn#1069).
+//
+// The one variable allowed is ${aws:userid}, and only in a Condition value
+// (the owner-scoped item access), which IAM resolves per request and a real
+// CreatePolicy accepts.
 func TestPolicyHasNoPolicyVariables(t *testing.T) {
-	if doc := goldenDoc(t); strings.Contains(doc, "${") {
-		t.Errorf("the CLI-user policy contains a policy variable:\n%s", doc)
+	doc := goldenDoc(t)
+	for _, st := range parseStatements(t, doc) {
+		if strings.Contains(string(st.Resource), "${") {
+			t.Errorf("%s: a policy variable in a Resource: %s", st.Sid, st.Resource)
+		}
+	}
+	if rest := strings.ReplaceAll(doc, "${aws:userid}", ""); strings.Contains(rest, "${") {
+		t.Errorf("the CLI-user policy contains a policy variable other than ${aws:userid}:\n%s", doc)
 	}
 }
 
@@ -90,7 +100,7 @@ type parsedStatement struct {
 	Sid       string
 	Action    []string
 	Resource  json.RawMessage
-	Condition map[string]map[string]string
+	Condition map[string]map[string]json.RawMessage
 }
 
 func parseStatements(t *testing.T, doc string) []parsedStatement {
@@ -106,12 +116,23 @@ func parseStatements(t *testing.T, doc string) []parsedStatement {
 // service. An ec2: key on an ssm: action never matches: a silent implicit deny
 // that CreatePolicy accepts (spawn#665).
 func TestConditionKeysMatchActionService(t *testing.T) {
-	known := map[string]bool{"iam:PassedToService": true, "sns:Protocol": true, "ec2:ResourceTag/" + holdTagKey: true}
+	known := map[string]bool{"iam:PassedToService": true, "sns:Protocol": true, "ec2:ResourceTag/" + holdTagKey: true,
+		"dynamodb:LeadingKeys": true}
+	// The caller check models StringEquals, and the owner-scoped statements'
+	// LeadingKeys operators through their own context (ownerScoped).
+	ops := map[string]bool{"StringEquals": true, "ForAllValues:StringLike": true, "ForAllValues:StringEquals": true, "Null": true}
 	n := 0
 	for _, st := range parseStatements(t, goldenDoc(t)) {
 		for op, kv := range st.Condition {
+			if !ops[op] {
+				t.Errorf("%s: condition operator %s is not one the caller check models", st.Sid, op)
+			}
 			if op != "StringEquals" {
-				t.Errorf("%s: condition operator %s; the caller check only models StringEquals", st.Sid, op)
+				for key := range kv {
+					if key != "dynamodb:LeadingKeys" {
+						t.Errorf("%s: %s on %s; only dynamodb:LeadingKeys is owner-scoped", st.Sid, op, key)
+					}
+				}
 			}
 			for key := range kv {
 				n++
@@ -128,8 +149,8 @@ func TestConditionKeysMatchActionService(t *testing.T) {
 			}
 		}
 	}
-	if n != 3 {
-		t.Errorf("found %d condition keys, want 3 (PassRole, Subscribe, CancelCapacityReservation)", n)
+	if n != 6 {
+		t.Errorf("found %d condition keys, want 6 (PassRole, Subscribe, CancelCapacityReservation, and LeadingKeys x3)", n)
 	}
 }
 

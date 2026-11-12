@@ -46,6 +46,15 @@ roles you name with --instance-role (which must exist; setup creates their
 instance profiles) and, for SageMaker watches, the execution roles you name with
 --sagemaker-role. Every lagotto user can launch with an authorized role.
 
+Every record a CLI user creates is keyed under the creator's principal id
+(<id>/w-…), and lagotto-cli-user lets each caller read and write only the records
+under its own id, enforced by IAM (dynamodb:LeadingKeys). Before writing that
+policy, setup adds the owner index to a watches table that predates it and moves
+every older record (watches, groups, match history, scheduled launches) under its
+creator's id: each in one transaction, so nothing is lost or duplicated, and it is
+safe to re-run. Records whose creator cannot be resolved are left in place and
+listed; the poller still services them.
+
 It also writes the customer-managed policy lagotto-cli-user (lagotto#232): the
 least-privilege permissions the everyday commands need with YOUR credentials
 (watch, update, ack, extend, cancel, list, status, history, launch, notify-gc,
@@ -120,7 +129,16 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// 3. The CLI-user policy (#232): what the people who run lagotto need.
+	// 3. Owner-scoped keys: the owner index and every legacy record moved under
+	// its owner's prefix, BEFORE the owner-scoped CLI-user policy below makes
+	// legacy keys unreachable to CLI users.
+	if _, err := ensureOwnerKeys(ctx, newOwnerKeysDynamo(cfg), newPrincipalIDs(cfg), watcher.MigrateTables{
+		Watches: watchesTable, History: historyTable, Scheduled: store.ScheduledTable(),
+	}, out); err != nil {
+		return err
+	}
+
+	// 4. The CLI-user policy (#232): what the people who run lagotto need.
 	acct, err := setupCallerAccount(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("resolve account ID: %w", err)

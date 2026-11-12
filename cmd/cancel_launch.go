@@ -37,16 +37,30 @@ func cancelLaunchCmd(id, region string) string {
 // around cancelScheduledLaunch.
 func runCancelScheduledLaunch(ctx context.Context, out, errOut io.Writer, cfg aws.Config, id string) error {
 	store := watcher.NewStore(cfg, watchesTable, historyTable)
-	sl, err := store.GetScheduledLaunch(ctx, id)
+	stsClient := sts.NewFromConfig(cfg)
+	identity, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
 	if err != nil {
-		// No scheduled-launches table in this region: nothing was ever launched here.
-		var noTable *types.ResourceNotFoundException
-		if !errors.As(err, &noTable) {
+		return fmt.Errorf("get caller identity: %w", err)
+	}
+	// The caller's own key first, then a legacy one (see watchKeys).
+	var sl *watcher.ScheduledLaunch
+	for _, key := range watchKeys(id, aws.ToString(identity.UserId)) {
+		got, err := store.GetScheduledLaunch(ctx, key)
+		if err != nil {
+			// No scheduled-launches table in this region: nothing was ever
+			// launched here. A denial is a key outside the caller's prefix.
+			var noTable *types.ResourceNotFoundException
+			if errors.As(err, &noTable) || isAccessDenied(err) {
+				continue
+			}
 			return err
 		}
-		sl = nil
+		if got != nil {
+			sl = got
+			break
+		}
 	}
-	sl, err = authorizeLaunchOwner(ctx, sts.NewFromConfig(cfg), id, cfg.Region, sl)
+	sl, err = authorizeLaunchOwner(ctx, stsClient, id, cfg.Region, sl)
 	if err != nil {
 		return err
 	}
@@ -75,7 +89,11 @@ func authorizeLaunchOwner(ctx context.Context, stsClient stsIdentityAPI, id, reg
 	if err != nil {
 		return nil, fmt.Errorf("get caller identity: %w", err)
 	}
-	if !watcher.OwnedBy(sl.OwnerID, sl.UserID, aws.ToString(identity.UserId), aws.ToString(identity.Arn)) {
+	if owner := watcher.KeyOwner(sl.ScheduleID); owner != "" {
+		if owner != aws.ToString(identity.UserId) {
+			return nil, notFound
+		}
+	} else if !watcher.OwnedBy(sl.OwnerID, sl.UserID, aws.ToString(identity.UserId), aws.ToString(identity.Arn)) {
 		return nil, notFound
 	}
 	return sl, nil

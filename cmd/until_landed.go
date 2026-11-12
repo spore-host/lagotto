@@ -166,7 +166,7 @@ func writeExpires(out io.Writer, w *watcher.Watch, now time.Time) {
 	switch {
 	case w.Paused():
 		_, _ = fmt.Fprintf(out, "Expires:  until landed; PAUSED at %s, not acknowledged in time\n", w.ExpiresAt.Format(time.RFC3339))
-		_, _ = fmt.Fprintf(out, "  Resume the hunt with: lagotto ack %s\n", w.WatchID)
+		_, _ = fmt.Fprintf(out, "  Resume the hunt with: lagotto ack %s\n", watcher.ShortID(w.WatchID))
 	case w.Status == watcher.StatusActive:
 		_, _ = fmt.Fprintf(out, "Expires:  until landed; pauses %s (in %s) unless acknowledged\n",
 			w.ExpiresAt.Format(time.RFC3339), formatAge(w.ExpiresAt.Sub(now)))

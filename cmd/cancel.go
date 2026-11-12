@@ -107,7 +107,7 @@ func runCancel(cmd *cobra.Command, args []string) error {
 	// A group member frees its group's launch slot (#287), so a sibling can
 	// launch at once instead of after the slot expires.
 	if cancelled && w.Group != "" {
-		if err := store.ReleaseGroupSlot(ctx, w.Group, w.WatchID); err != nil {
+		if err := store.ReleaseGroupSlot(ctx, w.GroupRef(), w.WatchID); err != nil {
 			fmt.Fprintf(os.Stderr, "Note: %v (it expires on its own)\n", err)
 		}
 	}
@@ -164,7 +164,7 @@ func cancelWatch(ctx context.Context, out, errOut io.Writer, w *watcher.Watch, r
 
 	switch {
 	case w.Status == watcher.StatusActive:
-		if !confirm(fmt.Sprintf("Cancel watch %s (%s)?", w.WatchID, w.InstanceTypePattern)) {
+		if !confirm(fmt.Sprintf("Cancel watch %s (%s)?", watcher.ShortID(w.WatchID), w.InstanceTypePattern)) {
 			_, _ = fmt.Fprintln(out, "Aborted.")
 			return nil
 		}
@@ -183,7 +183,7 @@ func cancelWatch(ctx context.Context, out, errOut io.Writer, w *watcher.Watch, r
 		if err := setStatus(ctx, w.WatchID, watcher.StatusCancelled); err != nil {
 			return fmt.Errorf("cancel watch: %w", err)
 		}
-		_, _ = fmt.Fprintf(out, "Cancelled watch %s\n", w.WatchID)
+		_, _ = fmt.Fprintf(out, "Cancelled watch %s\n", watcher.ShortID(w.WatchID))
 		// A launch still landing (#239) is the user's instance now: cancel does not
 		// terminate it, and no poller checks it any more. Say so, and how.
 		if w.PendingInstanceID != "" {
@@ -195,7 +195,7 @@ func cancelWatch(ctx context.Context, out, errOut io.Writer, w *watcher.Watch, r
 
 	case w.Status == watcher.StatusMatched && resID != "":
 		m := w.LastMatch
-		if !confirm(fmt.Sprintf("Release capacity reservation %s (%s) held by watch %s?", resID, m.AvailabilityZone, w.WatchID)) {
+		if !confirm(fmt.Sprintf("Release capacity reservation %s (%s) held by watch %s?", resID, m.AvailabilityZone, watcher.ShortID(w.WatchID))) {
 			_, _ = fmt.Fprintln(out, "Aborted.")
 			return nil
 		}
@@ -206,14 +206,14 @@ func cancelWatch(ctx context.Context, out, errOut io.Writer, w *watcher.Watch, r
 					"Otherwise it expires on its own 30 minutes after it was created (matched at %s)",
 					err, m.Region, m.MatchedAt.UTC().Format(time.RFC3339))
 			}
-			return fmt.Errorf("release capacity reservation for watch %s: %w", w.WatchID, err)
+			return fmt.Errorf("release capacity reservation for watch %s: %w", watcher.ShortID(w.WatchID), err)
 		}
 		reportRelease(out, resID, m.AvailabilityZone, outcome)
-		_, _ = fmt.Fprintf(out, "Watch %s stays matched.\n", w.WatchID)
+		_, _ = fmt.Fprintf(out, "Watch %s stays matched.\n", watcher.ShortID(w.WatchID))
 		return nil
 
 	default:
-		return fmt.Errorf("watch %s is not active (status: %s)", w.WatchID, w.Status)
+		return fmt.Errorf("watch %s is not active (status: %s)", watcher.ShortID(w.WatchID), w.Status)
 	}
 }
 

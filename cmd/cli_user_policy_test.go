@@ -24,7 +24,13 @@ import (
 // lagotto-cli-user policy deliberately does not grant, each with why. Empty
 // today: every reachable action is granted, resource-scoped. An entry must
 // still be reachable and must not be granted; the gate checks both.
-var cliUserNotGranted = map[string]string{}
+var cliUserNotGranted = map[string]string{
+	// Item access is owner-scoped (dynamodb:LeadingKeys under the caller's own
+	// prefix), and a Scan has no partition key to scope: it would return every
+	// owner's records. doctor's table checks that scan report "not checked"
+	// for a CLI user; an administrator's doctor runs them.
+	"dynamodb:Scan": "owner-scoped item access: a Scan reads every owner's records",
+}
 
 // cliUserPolicyProblems is the gate's decision, in both directions:
 //

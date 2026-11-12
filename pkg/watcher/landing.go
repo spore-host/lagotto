@@ -486,7 +486,7 @@ func (p *Poller) completeLanding(ctx context.Context, w *Watch, chk landingCheck
 		if !won {
 			return
 		}
-		groupWon, group = true, p.groups[w.Group]
+		groupWon, group = true, p.groups[w.GroupRef()]
 	}
 	w.clearLanding()
 	if !reservation {
