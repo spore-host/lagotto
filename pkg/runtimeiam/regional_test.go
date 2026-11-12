@@ -42,7 +42,7 @@ func TestEnsureRuntimeRole_PolicyConvergesAcrossRegions(t *testing.T) {
 	f := &fakeIAM{}
 	var written []string
 	for _, region := range regions {
-		if err := EnsureRuntimeRole(context.Background(), f, region, account, roles); err != nil {
+		if err := EnsureRuntimeRole(context.Background(), f, region, account, Authorizations{InstanceRoles: roles}); err != nil {
 			t.Fatalf("EnsureRuntimeRole(%s): %v", region, err)
 		}
 		written = append(written, f.inline[key])

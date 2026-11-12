@@ -42,8 +42,8 @@ var spawnConfigKeyHints = map[string]string{
 	"az":               "use `lagotto watch --azs` to restrict availability zones",
 	"azs":              "use `lagotto watch --azs` to restrict availability zones",
 	"availabilityzone": "use `lagotto watch --azs` to restrict availability zones",
-	"s3read":           "grant bucket access with iam_policy (e.g. s3:ReadOnly) or iam_policy_document",
-	"s3write":          "grant bucket access with iam_policy (e.g. s3:ReadWrite) or iam_policy_document",
+	"s3read":           "grant bucket access with iam_role: a role an administrator authorized with 'lagotto setup --instance-role'",
+	"s3write":          "grant bucket access with iam_role: a role an administrator authorized with 'lagotto setup --instance-role'",
 	"instanceprofile":  "name an existing role with iam_role",
 	"completiondelay":  "there is no completion delay setting; see completion_file and on_complete",
 }

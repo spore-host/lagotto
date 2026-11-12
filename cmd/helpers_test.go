@@ -152,7 +152,7 @@ func TestLoadSpawnConfig(t *testing.T) {
 
 	t.Run("valid yaml", func(t *testing.T) {
 		path := filepath.Join(dir, "ok.yaml")
-		if err := os.WriteFile(path, []byte("name: test\ninstance_type: g5.xlarge\n"), 0o644); err != nil {
+		if err := os.WriteFile(path, []byte("name: test\ninstance_type: g5.xlarge\nRoleArn: arn:aws:iam::123456789012:role/sm-exec\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		data, err := loadSageMakerConfig(path)
@@ -162,6 +162,22 @@ func TestLoadSpawnConfig(t *testing.T) {
 		// Re-marshaled as JSON for DynamoDB storage.
 		if len(data) == 0 || data[0] != '{' {
 			t.Errorf("expected JSON output, got: %s", data)
+		}
+	})
+
+	t.Run("no or reserved RoleArn", func(t *testing.T) {
+		for name, body := range map[string]string{
+			"none":     "name: test\n",
+			"reserved": "RoleArn: arn:aws:iam::123456789012:role/spored-instance-role\n",
+			"wildcard": "RoleArn: arn:aws:iam::123456789012:role/*\n",
+		} {
+			path := filepath.Join(dir, name+".yaml")
+			if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := loadSageMakerConfig(path); err == nil {
+				t.Errorf("%s: accepted", name)
+			}
 		}
 	})
 

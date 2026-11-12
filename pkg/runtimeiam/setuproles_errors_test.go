@@ -69,7 +69,7 @@ func TestEnsureSetupRoles_ReportsEachFailure(t *testing.T) {
 		{"PutRolePolicy", SchedulerInvokeRoleName, []string{RoleName, SchedulerInvokeRoleName}},
 	} {
 		f := &errIAM{fakeIAM: &fakeIAM{}, call: tc.call, role: tc.role}
-		created, err := EnsureSetupRoles(context.Background(), f, "us-west-2", "123456789012", nil)
+		created, err := EnsureSetupRoles(context.Background(), f, "us-west-2", "123456789012", Authorizations{})
 		if err == nil || !strings.Contains(err.Error(), tc.role) {
 			t.Errorf("%s on %s: err = %v, want one naming the role", tc.call, tc.role, err)
 		}
@@ -84,10 +84,10 @@ func TestEnsureRolesAndRuntimeRole_PropagateFailures(t *testing.T) {
 	if err := EnsureRoles(context.Background(), &errIAM{fakeIAM: &fakeIAM{}, call: "CreateRole", role: RoleName}, "us-west-2", "123456789012"); err == nil {
 		t.Error("EnsureRoles ignored a poller-role failure")
 	}
-	if err := EnsureRuntimeRole(context.Background(), &errIAM{fakeIAM: &fakeIAM{}, call: "AttachRolePolicy"}, "us-west-2", "123456789012", nil); err == nil {
+	if err := EnsureRuntimeRole(context.Background(), &errIAM{fakeIAM: &fakeIAM{}, call: "AttachRolePolicy"}, "us-west-2", "123456789012", Authorizations{}); err == nil {
 		t.Error("EnsureRuntimeRole ignored a poller-role failure")
 	}
-	if err := EnsureRuntimeRole(context.Background(), &errIAM{fakeIAM: &fakeIAM{}, call: "PutRolePolicy"}, "us-west-2", "123456789012", nil); err == nil ||
+	if err := EnsureRuntimeRole(context.Background(), &errIAM{fakeIAM: &fakeIAM{}, call: "PutRolePolicy"}, "us-west-2", "123456789012", Authorizations{}); err == nil ||
 		!strings.Contains(err.Error(), "put role policy") {
 		t.Errorf("EnsureRuntimeRole PutRolePolicy failure: %v", err)
 	}

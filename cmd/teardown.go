@@ -56,7 +56,10 @@ teardown stops before deleting any table.
 
 --iam-roles also deletes the two IAM roles 'lagotto setup' and 'lagotto deploy'
 create (lagotto-capacity-poller-role and lagotto-capacity-poller-scheduler-invoke),
-with their policies. The roles are account-global and shared by the poller in every
+with their policies, and the instance role 'lagotto setup' creates for launches
+(lagotto-instance-role, with its instance profile), plus the instance profile setup
+created for each role authorized with --instance-role (the role itself is yours and
+is left in place). The roles are account-global and shared by the poller in every
 region, so this first checks every region enabled in the account and refuses, before
 deleting anything, while a poller still exists in any of them (remove each with
 'lagotto deploy --teardown --region <region>') or when a region cannot be checked.
@@ -75,7 +78,7 @@ func init() {
 	rootCmd.AddCommand(teardownCmd)
 	teardownCmd.Flags().BoolVar(&teardownForce, "force", false, "Delete even if the tables still contain records")
 	teardownCmd.Flags().BoolVar(&teardownIAMRoles, "iam-roles", false,
-		"Also delete lagotto's two account-global IAM roles and the lagotto-cli-user policy (detached from everyone first); "+
+		"Also delete lagotto's account-global IAM roles (the poller's two and its instance role) and the lagotto-cli-user policy (detached from everyone first); "+
 			"refused while a poller exists in any region")
 }
 
@@ -135,6 +138,11 @@ func runTeardown(cmd *cobra.Command, args []string) error {
 			"Delete it yourself if it is yours.\n", name)
 	}
 	if teardownIAMRoles {
+		// The instance role and profiles first, while the poller role's policy
+		// still names the authorized roles whose profiles setup created.
+		if err := deleteInstanceRoles(ctx, newInstanceRoleTeardown(cfg), out); err != nil {
+			return err
+		}
 		if err := deleteCLIOwnedRoles(ctx, newRoleDeleter(cfg), out); err != nil {
 			return err
 		}
@@ -276,6 +284,69 @@ func deleteCLIOwnedRoles(ctx context.Context, client runtimeiam.RoleDeleteAPI, o
 	}
 	if len(deleted) == 0 {
 		_, _ = fmt.Fprintf(out, "No lagotto IAM roles to delete (%s already absent).\n", strings.Join(runtimeiam.CLIOwnedRoles, ", "))
+	}
+	return nil
+}
+
+// instanceRoleTeardown is what `teardown --iam-roles` needs to remove the
+// instance roles and profiles `setup` created. A seam for tests.
+type instanceRoleTeardown interface {
+	// AuthorizedRoles are the instance roles the deployed poller policy
+	// authorizes (none when there is no policy).
+	AuthorizedRoles(ctx context.Context) ([]string, error)
+	DeleteInstanceRole(ctx context.Context) (bool, error)
+	DeleteManagedProfile(ctx context.Context, roleName string) (bool, error)
+}
+
+var newInstanceRoleTeardown = func(cfg aws.Config) instanceRoleTeardown {
+	return iamInstanceRoleTeardown{client: iam.NewFromConfig(cfg)}
+}
+
+type iamInstanceRoleTeardown struct{ client *iam.Client }
+
+func (t iamInstanceRoleTeardown) AuthorizedRoles(ctx context.Context) ([]string, error) {
+	doc, err := runtimeiam.ReadRuntimePolicy(ctx, t.client)
+	switch {
+	case err == nil:
+		return runtimeiam.AuthorizedInstanceRoles(doc)
+	case errors.Is(err, runtimeiam.ErrRoleNotFound), errors.Is(err, runtimeiam.ErrPolicyNotFound):
+		return nil, nil
+	default:
+		return nil, err
+	}
+}
+
+func (t iamInstanceRoleTeardown) DeleteInstanceRole(ctx context.Context) (bool, error) {
+	return runtimeiam.DeleteInstanceRole(ctx, t.client)
+}
+
+func (t iamInstanceRoleTeardown) DeleteManagedProfile(ctx context.Context, roleName string) (bool, error) {
+	return runtimeiam.DeleteManagedInstanceProfile(ctx, t.client, roleName)
+}
+
+// deleteInstanceRoles deletes lagotto's own instance role and profile, and
+// the instance profile setup created for each authorized role (never the
+// administrator's role itself), reporting each.
+func deleteInstanceRoles(ctx context.Context, t instanceRoleTeardown, out io.Writer) error {
+	authorized, err := t.AuthorizedRoles(ctx)
+	if err != nil {
+		return fmt.Errorf("read the authorized instance roles (to delete the profiles setup created for them): %w", err)
+	}
+	for _, name := range authorized {
+		gone, err := t.DeleteManagedProfile(ctx, name)
+		if err != nil {
+			return fmt.Errorf("delete instance profile %s: %w", name, err)
+		}
+		if gone {
+			_, _ = fmt.Fprintf(out, "Deleted instance profile %s (created by setup; the role is yours and was left)\n", name)
+		}
+	}
+	gone, err := t.DeleteInstanceRole(ctx)
+	if err != nil {
+		return fmt.Errorf("delete instance role %s: %w", runtimeiam.InstanceRoleName, err)
+	}
+	if gone {
+		_, _ = fmt.Fprintf(out, "Deleted IAM role and instance profile %s\n", runtimeiam.InstanceRoleName)
 	}
 	return nil
 }

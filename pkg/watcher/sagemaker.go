@@ -8,6 +8,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sagemaker"
 	smtypes "github.com/aws/aws-sdk-go-v2/service/sagemaker/types"
+	"github.com/spore-host/lagotto/pkg/failure"
 )
 
 // SageMakerLauncher submits the user's SageMaker job and tracks it across poll
@@ -79,6 +80,14 @@ func (l *SageMakerLauncher) submit(ctx context.Context, client *sagemaker.Client
 	var input sagemaker.CreateTrainingJobInput
 	if err := json.Unmarshal(w.SageMakerJobJSON, &input); err != nil {
 		return sageMakerOutcome{Kind: FailureTerminal}, fmt.Errorf("unmarshal sagemaker job: %w", err)
+	}
+	// Re-validated here, not only at watch creation: the stored item can be
+	// edited in DynamoDB directly. The role must be a plain, unreserved role
+	// ARN; IAM then lets the poller pass only the roles an administrator
+	// authorized with `lagotto setup --sagemaker-role`.
+	if _, err := SageMakerJobRoleARN(w.SageMakerJobJSON); err != nil {
+		m.ActionTaken = "sagemaker_submit_failed"
+		return sageMakerOutcome{Kind: FailureTerminal}, fmt.Errorf("%w: %v", failure.ErrConfigRefused, err)
 	}
 
 	// Generate a unique, traceable job name per attempt (SageMaker job names must

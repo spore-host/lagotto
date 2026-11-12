@@ -110,8 +110,7 @@ func TestCheckInstanceRoleRefusesUnauthorized(t *testing.T) {
 	for _, want := range []string{
 		irTestRole, // names the role
 		"lagotto setup --instance-role " + irTestRole, // names the exact remediation
-		"iam:GetRole", // names what is missing
-		"iam:PassRole",
+		"iam:PassRole", // names what is missing
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("refusal must contain %q:\n%s", want, msg)
@@ -144,7 +143,7 @@ func TestCheckInstanceRoleAcceptsAuthorized(t *testing.T) {
 }
 
 // TestCheckInstanceRoleSkipsWithoutANamedRole: the common case. An empty iam_role
-// becomes spawn-instance-<hash>, which the stock policy already covers, so there is
+// launches with lagotto-instance-role, which the stock policy always covers, so there is
 // nothing to check and no reason to call AWS.
 func TestCheckInstanceRoleSkipsWithoutANamedRole(t *testing.T) {
 	var out bytes.Buffer

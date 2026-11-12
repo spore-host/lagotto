@@ -136,6 +136,22 @@ func (f *setupIAM) PutRolePolicy(_ context.Context, in *iam.PutRolePolicyInput, 
 	return &iam.PutRolePolicyOutput{}, nil
 }
 
+// fakeProfiles records the instance profiles setup provisions and deletes.
+type fakeProfiles struct {
+	ensured, deleted []string
+	err              error
+}
+
+func (f *fakeProfiles) EnsureInstanceProfile(_ context.Context, role string) error {
+	f.ensured = append(f.ensured, role)
+	return f.err
+}
+
+func (f *fakeProfiles) DeleteManagedProfile(_ context.Context, role string) (bool, error) {
+	f.deleted = append(f.deleted, role)
+	return true, nil
+}
+
 func newSetupIAM() *setupIAM {
 	return &setupIAM{roles: map[string]bool{}, inline: map[string]string{}}
 }
@@ -146,7 +162,7 @@ func TestApplySetupRoles_FreshAccount(t *testing.T) {
 	resetSetupRoleFlags(t, nil, nil)
 	f := newSetupIAM()
 	var out bytes.Buffer
-	if err := applySetupRoles(context.Background(), f, "us-west-2", "123456789012", &out); err != nil {
+	if err := applySetupRoles(context.Background(), f, &fakeProfiles{}, "us-west-2", "123456789012", &out); err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
@@ -168,8 +184,9 @@ func TestApplySetupRoles_RerunCarriesRolesForwardAndCreatesNothing(t *testing.T)
 	f := newSetupIAM()
 	f.roles[runtimeiam.RoleName], f.roles[runtimeiam.SchedulerInvokeRoleName] = true, true
 	f.inline[runtimeiam.RoleName+"/"+runtimeiam.PolicyName] = irAuthorizedPolicy(t, "loop-node-role")
+	f.roles["loop-node-role"] = true
 	var out bytes.Buffer
-	if err := applySetupRoles(context.Background(), f, "us-east-1", "123456789012", &out); err != nil {
+	if err := applySetupRoles(context.Background(), f, &fakeProfiles{}, "us-east-1", "123456789012", &out); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(out.String(), "Created IAM role") || len(f.created) != 0 {
@@ -186,7 +203,7 @@ func TestApplySetupRoles_Errors(t *testing.T) {
 	f := newSetupIAM()
 	f.readErr = errors.New("AccessDenied: iam:GetRolePolicy")
 	f.roles[runtimeiam.RoleName] = true
-	if err := applySetupRoles(context.Background(), f, "us-west-2", "123456789012", &bytes.Buffer{}); err == nil ||
+	if err := applySetupRoles(context.Background(), f, &fakeProfiles{}, "us-west-2", "123456789012", &bytes.Buffer{}); err == nil ||
 		!strings.Contains(err.Error(), "preserve authorized instance roles") {
 		t.Errorf("an unreadable deployed policy must stop setup: %v", err)
 	}
@@ -194,7 +211,7 @@ func TestApplySetupRoles_Errors(t *testing.T) {
 	f = newSetupIAM()
 	f.putErr = errors.New("MalformedPolicyDocument")
 	var out bytes.Buffer
-	err := applySetupRoles(context.Background(), f, "us-west-2", "123456789012", &out)
+	err := applySetupRoles(context.Background(), f, &fakeProfiles{}, "us-west-2", "123456789012", &out)
 	if err == nil || !strings.Contains(err.Error(), "MalformedPolicyDocument") {
 		t.Errorf("a PutRolePolicy failure must fail setup: %v", err)
 	}
@@ -271,11 +288,14 @@ func stubTeardown(t *testing.T, tables *fakeTables, roles runtimeiam.RoleDeleteA
 		return aws.Config{Region: "us-west-2"}, nil
 	})
 	oldStore, oldDeleter, oldRoles, oldForce := newTeardownStore, newRoleDeleter, teardownIAMRoles, teardownForce
+	oldInstanceRoles := newInstanceRoleTeardown
 	newTeardownStore = func(aws.Config) teardownTables { return tables }
 	newRoleDeleter = func(aws.Config) runtimeiam.RoleDeleteAPI { return roles }
+	newInstanceRoleTeardown = func(aws.Config) instanceRoleTeardown { return &fakeInstanceRoleTeardown{} }
 	teardownIAMRoles, teardownForce = iamRoles, force
 	t.Cleanup(func() {
 		newTeardownStore, newRoleDeleter, teardownIAMRoles, teardownForce = oldStore, oldDeleter, oldRoles, oldForce
+		newInstanceRoleTeardown = oldInstanceRoles
 	})
 	stubPolicyDeleter(t, &fakePolicyDeleter{})
 }
@@ -409,8 +429,9 @@ func TestTeardownSeamDefaults(t *testing.T) {
 func TestEnsureRuntimePolicy(t *testing.T) {
 	resetSetupRoleFlags(t, nil, nil)
 	f := newSetupIAM()
-	oldAcct, oldIAM := setupCallerAccount, newSetupIAMClient
-	t.Cleanup(func() { setupCallerAccount, newSetupIAMClient = oldAcct, oldIAM })
+	oldAcct, oldIAM, oldProfiles := setupCallerAccount, newSetupIAMClient, newInstanceProfileSetup
+	t.Cleanup(func() { setupCallerAccount, newSetupIAMClient, newInstanceProfileSetup = oldAcct, oldIAM, oldProfiles })
+	newInstanceProfileSetup = func(aws.Config) instanceProfileSetup { return &fakeProfiles{} }
 	setupCallerAccount = func(context.Context, aws.Config) (string, error) { return "123456789012", nil }
 	newSetupIAMClient = func(aws.Config) runtimeiam.IAMAPI { return f }
 
@@ -536,5 +557,96 @@ func TestRunTeardown_ScheduleFailureKeepsTables(t *testing.T) {
 	}
 	if !strings.Contains(out, "Deleted schedule lagotto-launch-sl-aaaa") {
 		t.Errorf("a schedule deleted before the failure is not reported:\n%s", out)
+	}
+}
+
+type fakeInstanceRoleTeardown struct {
+	authorized []string
+	deleted    []string
+}
+
+func (f *fakeInstanceRoleTeardown) AuthorizedRoles(context.Context) ([]string, error) {
+	return f.authorized, nil
+}
+
+func (f *fakeInstanceRoleTeardown) DeleteInstanceRole(context.Context) (bool, error) {
+	f.deleted = append(f.deleted, runtimeiam.InstanceRoleName)
+	return true, nil
+}
+
+func (f *fakeInstanceRoleTeardown) DeleteManagedProfile(_ context.Context, name string) (bool, error) {
+	f.deleted = append(f.deleted, "profile:"+name)
+	return true, nil
+}
+
+// TestApplySetupRoles_ProvisionsInstanceProfiles: setup provides every
+// instance profile the poller may launch with (it creates none itself),
+// refuses an authorized role that does not exist, and removes the profile it
+// created for a revoked role.
+func TestApplySetupRoles_ProvisionsInstanceProfiles(t *testing.T) {
+	resetSetupRoleFlags(t, []string{"gpu-role"}, nil)
+	f := newSetupIAM()
+	f.roles["gpu-role"] = true
+	p := &fakeProfiles{}
+	if err := applySetupRoles(context.Background(), f, p, "us-west-2", "123456789012", &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(p.ensured, ",") != runtimeiam.InstanceRoleName+",gpu-role" {
+		t.Errorf("ensured = %v", p.ensured)
+	}
+
+	resetSetupRoleFlags(t, []string{"missing-role"}, nil)
+	if err := applySetupRoles(context.Background(), newSetupIAM(), &fakeProfiles{}, "us-west-2", "123456789012", &bytes.Buffer{}); err == nil ||
+		!strings.Contains(err.Error(), "does not exist") {
+		t.Errorf("a missing authorized role: %v", err)
+	}
+
+	resetSetupRoleFlags(t, nil, []string{"gpu-role"})
+	f.inline[runtimeiam.RoleName+"/"+runtimeiam.PolicyName] = irAuthorizedPolicy(t, "gpu-role")
+	p = &fakeProfiles{}
+	if err := applySetupRoles(context.Background(), f, p, "us-west-2", "123456789012", &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.deleted) != 1 || p.deleted[0] != "gpu-role" {
+		t.Errorf("revoke deleted %v, want [gpu-role]", p.deleted)
+	}
+	if strings.Contains(f.inline[runtimeiam.RoleName+"/"+runtimeiam.PolicyName], ":role/gpu-role") {
+		t.Error("a revoked role is still passable")
+	}
+
+	resetSetupRoleFlags(t, []string{"spored-instance-role"}, nil)
+	if err := applySetupRoles(context.Background(), newSetupIAM(), &fakeProfiles{}, "us-west-2", "123456789012", &bytes.Buffer{}); err == nil {
+		t.Error("setup authorized spawn's shared spored-instance-role")
+	}
+}
+
+func TestApplySetupRoles_SageMakerRoles(t *testing.T) {
+	resetSetupRoleFlags(t, nil, nil)
+	sm := "arn:aws:iam::123456789012:role/service-role/sm-exec"
+	old := setupSageMakerRoles
+	setupSageMakerRoles = []string{sm}
+	t.Cleanup(func() { setupSageMakerRoles = old })
+	f := newSetupIAM()
+	if err := applySetupRoles(context.Background(), f, &fakeProfiles{}, "us-west-2", "123456789012", &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	doc := f.inline[runtimeiam.RoleName+"/"+runtimeiam.PolicyName]
+	if !strings.Contains(doc, sm) || !strings.Contains(doc, "sagemaker.amazonaws.com") {
+		t.Errorf("the SageMaker role is not passable:\n%s", doc)
+	}
+	setupSageMakerRoles = []string{"arn:aws:iam::999999999999:role/x"}
+	if err := applySetupRoles(context.Background(), newSetupIAM(), &fakeProfiles{}, "us-west-2", "123456789012", &bytes.Buffer{}); err == nil {
+		t.Error("a role in another account was authorized")
+	}
+}
+
+func TestDeleteInstanceRoles(t *testing.T) {
+	f := &fakeInstanceRoleTeardown{authorized: []string{"gpu-role"}}
+	var out bytes.Buffer
+	if err := deleteInstanceRoles(context.Background(), f, &out); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(f.deleted, ",") != "profile:gpu-role,"+runtimeiam.InstanceRoleName {
+		t.Errorf("deleted = %v", f.deleted)
 	}
 }

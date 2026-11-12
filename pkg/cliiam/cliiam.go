@@ -79,12 +79,10 @@ func PolicyARN(accountID string) string {
 //   - `setup`, `deploy`, `teardown`: administrator commands. They create and
 //     delete IAM roles and policies, Lambda functions, topics and tables.
 //   - `poll`: it runs the poller on the caller's machine, so it needs what the
-//     hosted poller's role has: ec2:RunInstances, and iam:CreateRole,
-//     iam:PutRolePolicy and iam:PassRole on the spawn-instance* roles it
-//     launches with. A principal that can write a role's policy and pass that
-//     role to EC2 can grant itself anything, so putting poll here would make
-//     every CLI user an administrator. A local `poll --daemon` is run by whoever
-//     already has those permissions.
+//     hosted poller's role has: ec2:RunInstances and iam:PassRole on the
+//     instance roles it launches with, which would let every CLI user launch
+//     instances directly. A local `poll --daemon` is run by whoever already has
+//     those permissions.
 //
 // `notify-gc` and `version` are included at no cost: notify-gc needs only SNS
 // actions on the alerts topic that `update` and `cancel` already need, and

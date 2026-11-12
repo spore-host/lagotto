@@ -484,7 +484,7 @@ iam_policy_file: /path/to/policy.json
 		t.Errorf("IAMPolicyFile = %q", cfg.IAMPolicyFile)
 	}
 	// Neither is a LaunchConfig field directly — like IAMPolicies, the spawner
-	// composes them into an IAMRoleConfig via buildIAMProfile, not ToLaunchConfig.
+	// composes them into an IAMRoleConfig via buildCallerIAMProfile, not ToLaunchConfig.
 }
 
 // TestFullExampleConfig_AllSixNewFields exercises all six #129 fields together

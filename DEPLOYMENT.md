@@ -169,7 +169,15 @@ submit SageMaker jobs, and manage its schedule. Since #242 it also lets the poll
 terminate the instances spawn launched (gated on `spawn:managed=true`, for
 `--if-exists replace` and the teardown after a failed `fsx_create` setup) and
 create the `fsx_create` FSx filesystem and its S3 backing bucket, which must be
-named `lagotto-fsx-*` (the S3 grants cover only that prefix). CI checks the
+named `lagotto-fsx-*` (the S3 grants cover only that prefix).
+
+**The poller writes no IAM.** It cannot create, tag or change a role or
+instance profile. It may pass to EC2 only `lagotto-instance-role` (which `setup`
+creates with spawn's spored/SSM baseline) and the roles named with `setup
+--instance-role` (which must exist; `setup` creates their instance profiles),
+and to SageMaker only the role ARNs named with `setup --sagemaker-role`. A
+watch's `iam_policy*` settings are refused, and the poller re-checks every
+stored watch before launching. CI checks the
 policy against the poller Lambda's own AWS calls, discovered from the code. lagotto codifies that policy in Go
 (`pkg/runtimeiam`) as the single source of truth, the same way it owns its tables —
 so adding a permission is a code change, not a template edit.
@@ -234,7 +242,7 @@ aws iam attach-group-policy --group-name <group> \
   `ec2:CancelCapacityReservation` only on reservations tagged
   `lagotto:managed=true`. `*` only for actions IAM does not scope.
 - **Not covered:** `poll`, which needs the poller's own launch permissions
-  (writing and passing instance roles), and `setup`, `deploy` and `teardown`.
+  (`ec2:RunInstances` and passing instance roles), and `setup`, `deploy` and `teardown`.
 - `s3://` spawn configs: name their buckets with `lagotto setup --config-bucket
   <bucket>` (repeatable). They are carried forward on later runs;
   `--revoke-config-bucket` removes one.

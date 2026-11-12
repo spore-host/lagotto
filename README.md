@@ -71,16 +71,33 @@ on_complete: terminate
 completion_file: /tmp/JOB_DONE   # spored watches this path for the completion signal
 volume_size: 100                 # root EBS volume size, in GiB
 spot_max_price: "0.90"           # cap the Spot bid; omit for on-demand-price default
-iam_policy: s3:ReadWrite
+iam_role: my-workload-role       # a role an administrator authorized (see below)
 tags:                             # extra EC2 tags, alongside spawn's own spawn:* tags
   project: fieldwork
   owner: buckai
 ```
 
 `user_data` (inline, or `@path` to read a script from disk) / `user_data_file`
-add a custom bootstrap payload appended after spored installs; `iam_role` /
-`iam_policy_file` grant a pre-built role or a scoped custom policy document
-instead of (or alongside) `iam_policy`'s built-in shorthands.
+add a custom bootstrap payload appended after spored installs. The file is read
+when the watch is created, on your machine; the stored watch carries the text.
+
+**Instance permissions come from a role an administrator provides.** The hosted
+poller creates and changes no IAM role. A watch with no `iam_role` launches with
+`lagotto-instance-role`, which `lagotto setup` creates with spawn's spored/SSM
+baseline and nothing else. For more (an S3 bucket, say), an administrator creates
+a role and authorizes it once:
+
+```bash
+lagotto setup --instance-role my-workload-role                       # EC2 instance role (must exist)
+lagotto setup --sagemaker-role arn:aws:iam::<acct>:role/<path>/<name>  # SageMaker execution role
+```
+
+and the spawn config names it with `iam_role: my-workload-role` (a SageMaker job
+names it in its `RoleArn`). Every lagotto user in the account can then launch
+with it, so authorize only roles they may all have. `iam_policy`,
+`iam_policy_file` and `iam_policy_document` are refused, as is an `iam_role` of
+spawn's shared `spored-instance-role`: the poller re-checks every stored watch
+before it launches, and stops one that sets them.
 
 An unknown key is an error at `watch`/`launch` time, naming the key and the
 nearest accepted one: `az:` (use `--azs`), `s3_read:`, `instance_profile:` or a

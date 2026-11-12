@@ -191,7 +191,7 @@ func TestEvaluate_ReportingOnlyGrantsDoNotClaimTheWatchDies(t *testing.T) {
 // load-bearing grant the terminal warning is correct and must survive.
 func TestEvaluate_RequiredGrantStillClaimsTheWatchDies(t *testing.T) {
 	st := healthyState(t)
-	st.PolicyDoc = policyWithout(t, "iam:GetRole")
+	st.PolicyDoc = policyWithout(t, "ec2:RunInstances")
 
 	c := find(t, Evaluate(st), CheckRuntimePolicy)
 	body := c.Summary + "\n" + strings.Join(c.Detail, "\n")

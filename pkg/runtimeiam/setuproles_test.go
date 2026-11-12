@@ -18,7 +18,7 @@ import (
 // short of `lagotto deploy` that created the role its stack's schedule assumes.
 func TestEnsureSetupRoles_CreatesBothOnAFreshAccount(t *testing.T) {
 	f := &fakeIAM{}
-	created, err := EnsureSetupRoles(context.Background(), f, "us-west-2", "123456789012", nil)
+	created, err := EnsureSetupRoles(context.Background(), f, "us-west-2", "123456789012", Authorizations{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func TestEnsureSetupRoles_CreatesBothOnAFreshAccount(t *testing.T) {
 // and rewrites both policies in place.
 func TestEnsureSetupRoles_Idempotent(t *testing.T) {
 	f := &fakeIAM{existing: map[string]bool{RoleName: true, SchedulerInvokeRoleName: true}}
-	created, err := EnsureSetupRoles(context.Background(), f, "us-east-1", "123456789012", []string{"my-role"})
+	created, err := EnsureSetupRoles(context.Background(), f, "us-east-1", "123456789012", Authorizations{InstanceRoles: []string{"my-role"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestEnsureSetupRoles_Idempotent(t *testing.T) {
 // setup before #229 has the poller role only.
 func TestEnsureSetupRoles_OnlyTheMissingRoleIsReported(t *testing.T) {
 	f := &fakeIAM{existing: map[string]bool{RoleName: true}}
-	created, err := EnsureSetupRoles(context.Background(), f, "us-west-2", "123456789012", nil)
+	created, err := EnsureSetupRoles(context.Background(), f, "us-west-2", "123456789012", Authorizations{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestEnsureSetupRoles_OnlyTheMissingRoleIsReported(t *testing.T) {
 func TestEnsureSetupRoles_RequiresRegionAndAccount(t *testing.T) {
 	for _, tc := range [][2]string{{"", "123456789012"}, {"us-west-2", ""}} {
 		f := &fakeIAM{}
-		if _, err := EnsureSetupRoles(context.Background(), f, tc[0], tc[1], nil); err == nil {
+		if _, err := EnsureSetupRoles(context.Background(), f, tc[0], tc[1], Authorizations{}); err == nil {
 			t.Errorf("EnsureSetupRoles(%q, %q) did not fail", tc[0], tc[1])
 		}
 		if len(f.created) != 0 || f.calls != 0 {
@@ -166,7 +166,7 @@ func setUpFakeRoles() *fakeRoleDeleter {
 func TestDeleteRoles_DeletesWhatSetupCreates(t *testing.T) {
 	// Build the account with the real create path, then delete it.
 	created := &fakeIAM{}
-	if _, err := EnsureSetupRoles(context.Background(), created, "us-west-2", "123456789012", nil); err != nil {
+	if _, err := EnsureSetupRoles(context.Background(), created, "us-west-2", "123456789012", Authorizations{}); err != nil {
 		t.Fatal(err)
 	}
 	f := setUpFakeRoles()

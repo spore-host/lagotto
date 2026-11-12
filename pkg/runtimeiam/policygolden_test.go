@@ -14,15 +14,19 @@ import (
 
 var updateRuntimePolicyGolden = flag.Bool("update-runtime-policy", false, "rewrite "+runtimePolicyGolden)
 
-// runtimePolicyGolden is the runtime policy for a fixed account and one
-// authorized instance role, pretty-printed.
+// runtimePolicyGolden is the runtime policy for a fixed account, one
+// authorized instance role and one authorized SageMaker execution role,
+// pretty-printed.
 const runtimePolicyGolden = "testdata/runtime-policy.golden.json"
 
 // TestPolicyDocumentGolden pins the exact runtime policy. Any change to what
 // the poller may do shows up as a reviewed diff of this file; regenerate with
 // `go test ./pkg/runtimeiam -run TestPolicyDocumentGolden -args -update-runtime-policy`.
 func TestPolicyDocumentGolden(t *testing.T) {
-	doc, err := PolicyDocument("123456789012", []string{"my-instance-role"})
+	doc, err := PolicyDocumentFor("123456789012", Authorizations{
+		InstanceRoles:  []string{"my-instance-role"},
+		SageMakerRoles: []string{"arn:aws:iam::123456789012:role/service-role/my-sagemaker-role"},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
