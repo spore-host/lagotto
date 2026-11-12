@@ -98,3 +98,57 @@ func TestListWatchesByOwner(t *testing.T) {
 		t.Errorf("active = %v, %v", active, err)
 	}
 }
+
+// batchFlaky returns some keys unprocessed once, then serves them; or fails.
+type batchFlaky struct {
+	dynamoAPI
+	unprocessedOnce bool
+	fail            bool
+}
+
+func (b *batchFlaky) BatchGetItem(ctx context.Context, in *dynamodb.BatchGetItemInput, o ...func(*dynamodb.Options)) (*dynamodb.BatchGetItemOutput, error) {
+	if b.fail {
+		return nil, errInjected
+	}
+	if b.unprocessedOnce {
+		b.unprocessedOnce = false
+		return &dynamodb.BatchGetItemOutput{UnprocessedKeys: in.RequestItems}, nil
+	}
+	return b.dynamoAPI.BatchGetItem(ctx, in, o...)
+}
+
+func TestListWatchesByOwner_BatchPaths(t *testing.T) {
+	e := newMKEnv(t)
+	ctx := context.Background()
+	it := legacyWatch(OwnerKey(scopeA, "w-1"), "arn:a")
+	it[OwnerIDAttr] = avS(scopeA)
+	e.put(t, e.t.Watches, it)
+	if _, err := e.store.ListWatchesByOwner(ctx, "", ""); err == nil {
+		t.Error("no owner id was accepted")
+	}
+	real := e.store.client
+	e.store.client = &batchFlaky{dynamoAPI: real, unprocessedOnce: true}
+	if ws, err := e.store.ListWatchesByOwner(ctx, scopeA, ""); err != nil || len(ws) != 1 {
+		t.Errorf("unprocessed keys retried: %v, %v", ws, err)
+	}
+	e.store.client = &batchFlaky{dynamoAPI: real, fail: true}
+	if _, err := e.store.ListWatchesByOwner(ctx, scopeA, ""); err == nil {
+		t.Error("a BatchGetItem failure was swallowed")
+	}
+}
+
+// A moved-launch marker is followed only from a legacy id, to an
+// owner-scoped record that names that id as its own.
+func TestGetScheduledLaunch_MarkerRules(t *testing.T) {
+	e := newMKEnv(t)
+	ctx := context.Background()
+	e.put(t, e.t.Scheduled, map[string]types.AttributeValue{"schedule_id": avS(OwnerKey(scopeA, "sl-1")), "legacy_id": avS("sl-other"), "status": avS("pending")})
+	e.put(t, e.t.Scheduled, map[string]types.AttributeValue{"schedule_id": avS("sl-1"), "moved_to": avS(OwnerKey(scopeA, "sl-1"))})
+	e.put(t, e.t.Scheduled, map[string]types.AttributeValue{"schedule_id": avS("sl-2"), "moved_to": avS("sl-3")})
+	e.put(t, e.t.Scheduled, map[string]types.AttributeValue{"schedule_id": avS("sl-4"), "moved_to": avS(OwnerKey(scopeA, "sl-missing"))})
+	for _, id := range []string{"sl-1", "sl-2", "sl-4"} {
+		if sl, err := e.store.GetScheduledLaunch(ctx, id); err != nil || sl != nil {
+			t.Errorf("%s resolved to %+v (%v)", id, sl, err)
+		}
+	}
+}
