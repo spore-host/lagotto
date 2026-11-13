@@ -12,6 +12,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	cfntypes "github.com/aws/aws-sdk-go-v2/service/cloudformation/types"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
 	lambdatypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
 	"github.com/aws/aws-sdk-go-v2/service/scheduler"
@@ -264,8 +265,18 @@ func TestSubstrate_Deploy_CreatesAllThreeResources(t *testing.T) {
 	if len(res.Outputs) != len(want) {
 		t.Errorf("outputs has %d keys, want exactly %d (%v)", len(res.Outputs), len(want), res.Outputs)
 	}
-	if len(res.Actions) != 4 {
-		t.Errorf("Actions = %v, want one line per resource (bucket, topic, function, schedule)", res.Actions)
+	if len(res.Actions) != 5 {
+		t.Errorf("Actions = %v, want one line per resource (bucket, topic, log group, function, schedule)", res.Actions)
+	}
+
+	// The log group is there, tagged as lagotto's and with a retention (#305).
+	if r, err := d.pollerLogRetention(ctx, "us-east-1"); err != nil || r == nil || *r != PollerLogRetentionDays {
+		t.Errorf("log group retention after Deploy = %v, %v; want %d days", r, err, PollerLogRetentionDays)
+	}
+	if tags, err := d.logs.(*cloudwatchlogs.Client).ListTagsForResource(ctx, &cloudwatchlogs.ListTagsForResourceInput{
+		ResourceArn: aws.String(PollerLogGroupARN("us-east-1", "123456789012")),
+	}); err != nil || tags.Tags[ManagedTagKey] != ManagedTagValue {
+		t.Errorf("log group tags after Deploy = %v, %v; want %s=%s", tags, err, ManagedTagKey, ManagedTagValue)
 	}
 
 	// All three resources are really there.
@@ -359,7 +370,8 @@ func TestSubstrate_Deploy_PreservesEnabledSchedule(t *testing.T) {
 }
 
 // TestSubstrate_Teardown_RemovesAllThreeAndIsRepeatable covers the cutover from
-// DeleteStack to explicit deletes: all three go, and a second Teardown is a no-op
+// DeleteStack to explicit deletes: all three go, and the log group with them
+// (#305), and a second Teardown is a no-op
 // success rather than a pile of NotFound errors.
 func TestSubstrate_Teardown_RemovesAllThreeAndIsRepeatable(t *testing.T) {
 	d := substrateDeployer(t)
@@ -374,10 +386,13 @@ func TestSubstrate_Teardown_RemovesAllThreeAndIsRepeatable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
-	if len(deleted) != 3 {
-		t.Errorf("Teardown deleted %v, want all three resources", deleted)
+	if len(deleted) != 4 {
+		t.Errorf("Teardown deleted %v, want all four resources", deleted)
 	}
 
+	if _, err := d.pollerLogRetention(ctx, "us-east-1"); err == nil {
+		t.Error("the poller log group is still there after Teardown (#305)")
+	}
 	if _, err := d.lambda.GetFunction(ctx, &lambda.GetFunctionInput{FunctionName: aws.String(PollerFunctionName)}); err == nil {
 		t.Error("the poller Lambda is still there after Teardown")
 	}
@@ -573,8 +588,9 @@ func TestDeploy_RequiresAccountAndRegion(t *testing.T) {
 	}
 }
 
-// TestTeardown_DeletesInTheRightOrder: schedule → function → topic, so nothing can
-// fire into a half-deleted poller.
+// TestTeardown_DeletesInTheRightOrder: schedule → function → log group → topic,
+// so nothing can fire into a half-deleted poller, and Lambda cannot recreate the
+// log group after it is gone (#305).
 func TestTeardown_DeletesInTheRightOrder(t *testing.T) {
 	log := &callLog{}
 	l := &fakeLambda{log: log, getOut: &lambda.GetFunctionOutput{
@@ -587,12 +603,13 @@ func TestTeardown_DeletesInTheRightOrder(t *testing.T) {
 		attributes: map[string]string{"DisplayName": "Lagotto Capacity Alerts"}}
 	sc := &fakeScheduler{log: log, getOut: &scheduler.GetScheduleOutput{Name: aws.String(PollerScheduleName)}}
 	d, _ := testDeployer(l, sn, sc)
+	d.logs = &fakeLogs{log: log, exists: true}
 
 	deleted, err := d.Teardown(context.Background(), "us-east-1", "123456789012")
 	if err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
-	want := []string{"DeleteSchedule", "DeleteFunction", "DeleteTopic"}
+	want := []string{"DeleteSchedule", "DeleteFunction", "DeleteLogGroup", "DeleteTopic"}
 	if len(log.calls) != len(want) {
 		t.Fatalf("delete calls = %v, want %v", log.calls, want)
 	}
@@ -601,8 +618,8 @@ func TestTeardown_DeletesInTheRightOrder(t *testing.T) {
 			t.Errorf("delete call %d = %s, want %s (order: %v, want %v)", i, log.calls[i], w, log.calls, want)
 		}
 	}
-	if len(deleted) != 3 {
-		t.Errorf("Teardown reported %v, want all three resources", deleted)
+	if len(deleted) != 4 {
+		t.Errorf("Teardown reported %v, want all four resources", deleted)
 	}
 }
 

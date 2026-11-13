@@ -640,7 +640,7 @@ including the exact missing or extra IAM grants.
 ### Removing it
 
 `lagotto deploy --teardown` removes one region's poller (schedule, Lambda,
-topic) and its lagotto-managed artifact bucket. `lagotto teardown` removes the
+its log group, topic) and its lagotto-managed artifact bucket. `lagotto teardown` removes the
 three DynamoDB tables and the per-launch `lagotto-launch-sl-*` schedules, and
 `lagotto teardown --iam-roles` the two account-wide IAM roles once no region
 runs a poller. [DEPLOYMENT.md](DEPLOYMENT.md#teardown) has what each one deletes

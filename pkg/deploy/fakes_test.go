@@ -79,6 +79,7 @@ func (f *fakeLambda) GetFunction(_ context.Context, _ *lambda.GetFunctionInput, 
 
 func (f *fakeLambda) CreateFunction(_ context.Context, in *lambda.CreateFunctionInput, _ ...func(*lambda.Options)) (*lambda.CreateFunctionOutput, error) {
 	f.createCalls = append(f.createCalls, in)
+	f.log.add("CreateFunction")
 	if err := nextErr(f.createErrs, len(f.createCalls)-1); err != nil {
 		return nil, err
 	}
@@ -511,5 +512,5 @@ func (s *fakeSleeper) sleep(d time.Duration) { s.calls = append(s.calls, d) }
 // testDeployer builds a Deployer wired to the given fakes with an instant sleep.
 func testDeployer(l lambdaAPI, sn snsAPI, sc schedulerAPI) (*Deployer, *fakeSleeper) {
 	sl := &fakeSleeper{}
-	return &Deployer{lambda: l, sns: sn, sched: sc, sleep: sl.sleep}, sl
+	return &Deployer{lambda: l, sns: sn, sched: sc, logs: &fakeLogs{}, sleep: sl.sleep}, sl
 }

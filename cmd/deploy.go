@@ -53,8 +53,13 @@ older CloudFormation-deployed stack, this command adopts its resources
 automatically (they all have fixed names) and tells you how to detach the stack
 with --migrate-from-cloudformation.
 
-Use --teardown to delete the poller, topic and schedule, and then the default
-artifact bucket lagotto-lambda-<account>-<region> with every object version in
+Deploy also creates the poller's CloudWatch Logs log group
+/aws/lambda/lagotto-capacity-poller before the function, with a 30-day retention
+and the lagotto:managed=cli tag, so Lambda never creates an unowned one. A group
+that already exists is tagged, and given the retention only if it has none.
+
+Use --teardown to delete the poller's schedule, Lambda, log group and SNS topic
+in this region, and then the default artifact bucket lagotto-lambda-<account>-<region> with every object version in
 it. The bucket is deleted only when this account owns it and it carries the
 lagotto:managed=cli tag, which deploy writes when it creates the bucket and
 back-fills on an existing default-named bucket. A --lambda-bucket you supplied
@@ -72,7 +77,7 @@ func init() {
 	f.StringVar(&deployVersion, "version", Version, "lagotto release version to pull the poller Lambda from")
 	f.StringVar(&deployEnv, "environment", "production", "Environment tag (production, staging, development)")
 	f.StringVar(&deployBucket, "lambda-bucket", "", "S3 bucket for the Lambda artifact (default: lagotto-lambda-<account>-<region>, created if absent)")
-	f.BoolVar(&deployTeardown, "teardown", false, "Delete the poller, SNS topic, schedule and lagotto-managed artifact bucket instead of deploying them")
+	f.BoolVar(&deployTeardown, "teardown", false, "Delete the poller, its log group, SNS topic, schedule and lagotto-managed artifact bucket instead of deploying them")
 	f.BoolVar(&deployMigrate, "migrate-from-cloudformation", false, "Detach the legacy --stack-name stack from every resource it owns (retain-only change set, verify, delete) before deploying")
 	f.BoolVarP(&deployYes, "yes", "y", false, "Skip the confirmation prompt")
 }
@@ -137,7 +142,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 			return terr
 		}
 		if len(deleted) == 0 {
-			_, _ = fmt.Fprintln(out, "Nothing to delete — the poller, topic and schedule are already gone.")
+			_, _ = fmt.Fprintln(out, "Nothing to delete — the poller, log group, topic and schedule are already gone.")
 		}
 		// The artifact bucket goes last (#264), and only after the poller is gone:
 		// DeleteArtifactBucket deletes the DEFAULT bucket alone, and only when this
@@ -320,12 +325,12 @@ func deployTeardownPrompt(region, acctID, userBucket string) string {
 		}
 	}
 	return fmt.Sprintf(`Delete the lagotto poller in %s (account %s)?
-This deletes the schedule %s, the Lambda %s and the SNS topic %s%s`+`RETAINED: the DynamoDB tables %s ('lagotto teardown' deletes those),
+This deletes the schedule %s, the Lambda %s, its log group %s and the SNS topic %s%s`+`RETAINED: the DynamoDB tables %s ('lagotto teardown' deletes those),
 RETAINED: the IAM roles %s and %s (CLI-owned, IAM-global: shared by every region's poller and by per-launch scheduled launches),
 %sRETAINED: any per-launch 'lagotto-launch-sl-*' schedules: they belong to the scheduled launches in those tables ('lagotto teardown' deletes both).
 Continue?`,
 		region, acctID,
-		deploy.PollerScheduleName, deploy.PollerFunctionName, deploy.AlertsTopicName, bucketLine,
+		deploy.PollerScheduleName, deploy.PollerFunctionName, deploy.PollerLogGroupName, deploy.AlertsTopicName, bucketLine,
 		strings.Join(cliTables(), ", "),
 		runtimeiam.RoleName, runtimeiam.SchedulerInvokeRoleName,
 		retainedUser)
