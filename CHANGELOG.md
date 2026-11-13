@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A watch created without `--regions` now matches** (#306). An empty region list means "all enabled regions" (and `lagotto list` shows it as `(all enabled)`), but the hosted poller passed the empty list straight to the capacity search, which then searched zero regions: the watch never matched, and the only sign was the "check for typos" warning. The poller now resolves an empty list to the account's enabled regions (`ec2:DescribeRegions`, already granted; cached for 10 minutes), and records a poll error on the watch if they can't be listed, rather than searching nothing.
+
 ## [0.70.0] - 2026-11-12
 
 ### Added
