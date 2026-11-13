@@ -168,8 +168,9 @@ func reportReconcile(out io.Writer, res watcher.ReconcileResult) {
 var notifyGCResubscribe bool
 
 var notifyGCCmd = &cobra.Command{
-	Use:   "notify-gc",
-	Short: "Remove email subscriptions no active watch needs",
+	Use:         "notify-gc",
+	Annotations: level(levelAdvanced),
+	Short:       "Remove email subscriptions no active watch needs",
 	Long: `Reconcile the email subscriptions on the alerts topic (lagotto-capacity-alerts)
 with the active watches in this account and region.
 

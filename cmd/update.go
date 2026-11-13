@@ -56,8 +56,9 @@ type updateOpts struct {
 var updateFlags updateOpts
 
 var updateCmd = &cobra.Command{
-	Use:   "update <watch-id>",
-	Short: "Change an existing watch's search in place",
+	Use:         "update <watch-id>",
+	Annotations: level(levelAdvanced),
+	Short:       "Change an existing watch's search in place",
 	Long: `Change what an existing watch hunts for (its instance types, regions, AZs,
 Spot, maximum price), who it tells (--notify), its spawn config, or its project,
 without cancelling it. The watch keeps its ID, its attempt count, last error,

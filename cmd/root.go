@@ -35,7 +35,8 @@ var (
 )
 
 var rootCmd = &cobra.Command{
-	Use: "lagotto",
+	Use:         "lagotto",
+	Annotations: level(levelBasic),
 	// Short and Long set after i18n initialization
 }
 

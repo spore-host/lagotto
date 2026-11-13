@@ -20,8 +20,9 @@ import (
 )
 
 var setupCmd = &cobra.Command{
-	Use:   "setup",
-	Short: "Create lagotto's DynamoDB tables, the hosted poller's IAM roles, and the CLI-user policy",
+	Use:         "setup",
+	Annotations: level(levelAdvanced),
+	Short:       "Create lagotto's DynamoDB tables, the hosted poller's IAM roles, and the CLI-user policy",
 	Long: `Provision lagotto's backend: the DynamoDB tables it uses to store watches and
 match history (lagotto-watches and lagotto-match-history by default; override with
 --watches-table / --history-table), and both CLI-owned IAM roles: the poller's

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`docs-gen/_levels.json`: the disclosure level of every command and flag** (#297), for the spore.host portal's CLI⇄GUI parity gate. `lagotto gen-docs` writes it beside the markdown reference, which is unchanged. Each command's level comes from its `spore.host/level` cobra annotation, and each flag's from the same annotation on the flag (unannotated flags are `advanced`). Every command must set a level explicitly, and a test fails when one does not. The basic set is `watch` (with `--action`), `list`, `status`, `ack`, `cancel` and `history`. The format, `spore.host/cli-levels/v1`, is proposed for spawn and truffle too.
+
 ### Fixed
 
 - **A watch created without `--regions` now matches** (#306). An empty region list means "all enabled regions" (and `lagotto list` shows it as `(all enabled)`), but the hosted poller passed the empty list straight to the capacity search, which then searched zero regions: the watch never matched, and the only sign was the "check for typos" warning. The poller now resolves an empty list to the account's enabled regions (`ec2:DescribeRegions`, already granted; cached for 10 minutes), and records a poll error on the watch if they can't be listed, rather than searching nothing.

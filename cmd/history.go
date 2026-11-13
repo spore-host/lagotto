@@ -19,9 +19,10 @@ import (
 var historyWatchID string
 
 var historyCmd = &cobra.Command{
-	Use:   "history",
-	Short: "Show match history",
-	RunE:  runHistory,
+	Use:         "history",
+	Annotations: level(levelBasic),
+	Short:       "Show match history",
+	RunE:        runHistory,
 }
 
 func init() {

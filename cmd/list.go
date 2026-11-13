@@ -24,8 +24,9 @@ var (
 )
 
 var listCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List your watches",
+	Use:         "list",
+	Annotations: level(levelBasic),
+	Short:       "List your watches",
 	Long: `List your watches.
 
 Besides each watch's definition, the table shows its heartbeat:

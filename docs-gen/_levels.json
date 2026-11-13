@@ -1,0 +1,175 @@
+{
+  "$format": "spore.host/cli-levels/v1",
+  "lagotto": {
+    "level": "basic",
+    "flags": {
+      "--accessibility": "advanced",
+      "--account": "advanced",
+      "--history-table": "advanced",
+      "--lang": "advanced",
+      "--no-emoji": "advanced",
+      "--output": "advanced",
+      "--profile": "advanced",
+      "--region": "advanced",
+      "--verbose": "advanced",
+      "--watches-table": "advanced"
+    }
+  },
+  "lagotto ack": {
+    "level": "basic",
+    "flags": {}
+  },
+  "lagotto cancel": {
+    "level": "basic",
+    "flags": {
+      "--region": "advanced",
+      "--yes": "advanced"
+    }
+  },
+  "lagotto deploy": {
+    "level": "advanced",
+    "flags": {
+      "--environment": "advanced",
+      "--lambda-bucket": "advanced",
+      "--migrate-from-cloudformation": "advanced",
+      "--region": "advanced",
+      "--stack-name": "advanced",
+      "--teardown": "advanced",
+      "--version": "advanced",
+      "--yes": "advanced"
+    }
+  },
+  "lagotto doctor": {
+    "level": "advanced",
+    "flags": {
+      "--stack-name": "advanced"
+    }
+  },
+  "lagotto extend": {
+    "level": "advanced",
+    "flags": {
+      "--ttl": "advanced"
+    }
+  },
+  "lagotto history": {
+    "level": "basic",
+    "flags": {
+      "--watch-id": "advanced"
+    }
+  },
+  "lagotto launch": {
+    "level": "advanced",
+    "flags": {
+      "--after": "advanced",
+      "--at": "advanced",
+      "--at-reservation-start": "advanced",
+      "--az": "advanced",
+      "--cron": "advanced",
+      "--fire-early": "advanced",
+      "--if-exists": "advanced",
+      "--name": "advanced",
+      "--region": "advanced",
+      "--reservation-id": "advanced",
+      "--retry-interval": "advanced",
+      "--spawn-config": "advanced",
+      "--stack-name": "advanced"
+    }
+  },
+  "lagotto list": {
+    "level": "basic",
+    "flags": {
+      "--all": "advanced",
+      "--mine": "advanced",
+      "--project": "advanced"
+    }
+  },
+  "lagotto notify-gc": {
+    "level": "advanced",
+    "flags": {
+      "--resubscribe": "advanced"
+    }
+  },
+  "lagotto poll": {
+    "level": "advanced",
+    "flags": {
+      "--daemon": "advanced",
+      "--interval": "advanced",
+      "--mine": "advanced",
+      "--no-lease": "advanced",
+      "--project": "advanced",
+      "--watch": "advanced"
+    }
+  },
+  "lagotto setup": {
+    "level": "advanced",
+    "flags": {
+      "--config-bucket": "advanced",
+      "--instance-role": "advanced",
+      "--revoke-config-bucket": "advanced",
+      "--revoke-instance-role": "advanced",
+      "--revoke-sagemaker-role": "advanced",
+      "--sagemaker-role": "advanced"
+    }
+  },
+  "lagotto status": {
+    "level": "basic",
+    "flags": {}
+  },
+  "lagotto teardown": {
+    "level": "advanced",
+    "flags": {
+      "--force": "advanced",
+      "--iam-roles": "advanced"
+    }
+  },
+  "lagotto update": {
+    "level": "advanced",
+    "flags": {
+      "--add-notify": "advanced",
+      "--add-region": "advanced",
+      "--add-type": "advanced",
+      "--azs": "advanced",
+      "--dry-run": "advanced",
+      "--instance-type": "advanced",
+      "--max-price": "advanced",
+      "--no-spot": "advanced",
+      "--notify": "advanced",
+      "--project": "advanced",
+      "--reactivate": "advanced",
+      "--regions": "advanced",
+      "--remove-notify": "advanced",
+      "--remove-region": "advanced",
+      "--require-quota": "advanced",
+      "--spawn-config": "advanced",
+      "--spot": "advanced"
+    }
+  },
+  "lagotto version": {
+    "level": "advanced",
+    "flags": {}
+  },
+  "lagotto watch": {
+    "level": "basic",
+    "flags": {
+      "--action": "basic",
+      "--azs": "advanced",
+      "--group": "advanced",
+      "--group-on-extra": "advanced",
+      "--maintain": "advanced",
+      "--max-price": "advanced",
+      "--notify": "advanced",
+      "--project": "advanced",
+      "--regions": "advanced",
+      "--remind": "advanced",
+      "--require-quota": "advanced",
+      "--sagemaker-config": "advanced",
+      "--service": "advanced",
+      "--spawn-config": "advanced",
+      "--spot": "advanced",
+      "--ttl": "advanced",
+      "--until": "advanced",
+      "--until-landed": "advanced",
+      "--yes": "advanced"
+    }
+  }
+}

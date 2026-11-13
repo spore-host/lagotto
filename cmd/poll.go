@@ -29,8 +29,9 @@ var (
 )
 
 var pollCmd = &cobra.Command{
-	Use:   "poll",
-	Short: "Poll active watches (one cycle, or --daemon to loop)",
+	Use:         "poll",
+	Annotations: level(levelAdvanced),
+	Short:       "Poll active watches (one cycle, or --daemon to loop)",
 	Long: `Poll all active watches for available capacity and take their action
 (notify / hold / spawn).
 

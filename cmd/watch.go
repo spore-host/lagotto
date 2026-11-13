@@ -44,8 +44,9 @@ var (
 )
 
 var watchCmd = &cobra.Command{
-	Use:   "watch <instance-type-pattern>",
-	Short: "Create a capacity watch for an instance type",
+	Use:         "watch <instance-type-pattern>",
+	Annotations: level(levelBasic),
+	Short:       "Create a capacity watch for an instance type",
 	Long: `Watch for instance availability across regions and AZs.
 
 The pattern supports wildcards ("p5.*" matches all p5 sizes), exact types
@@ -100,6 +101,8 @@ func init() {
 	watchCmd.Flags().BoolVar(&watchSpot, "spot", false, "Watch for Spot capacity (default: On-Demand)")
 	watchCmd.Flags().Float64Var(&watchMaxPrice, "max-price", 0, "Maximum acceptable price per hour (0 = any)")
 	watchCmd.Flags().StringVar(&watchAction, "action", "notify", "Action on match: spawn (launch it), hold (reserve it), or notify (deprecated: offering only, not a capacity check). The notify default is deprecated too: pass --action explicitly")
+	// The portal's "new watch" offers hold and spawn (#297, spore-host#645).
+	markBasicFlags(watchCmd, "action")
 	watchCmd.Flags().StringVar(&watchTTL, "ttl", "24h", "How long to keep watching (e.g., 24h, 7d)")
 	watchCmd.Flags().StringSliceVar(&watchNotify, "notify", nil, "Notification channels (e.g., email:user@example.com, webhook:https://..., sns:<topic-arn>). An email address is subscribed to the alerts topic and must confirm by clicking the link in the AWS Notification email before anything is delivered.")
 	watchCmd.Flags().StringVar(&watchSpawnConfig, "spawn-config", "", "lagotto spawn-config YAML (required for --action spawn; not spawn launch --config, see README for its keys — unknown keys are rejected): a local path, an s3://bucket/key URI, or '-' for stdin. Any user_data_file / iam_policy_file it references is read now and stored inline, so a hosted poller can launch it with no access to this machine.")

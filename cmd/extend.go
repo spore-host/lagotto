@@ -19,8 +19,9 @@ import (
 var extendTTL string
 
 var extendCmd = &cobra.Command{
-	Use:   "extend <watch-id>",
-	Short: "Extend a watch's TTL",
+	Use:         "extend <watch-id>",
+	Annotations: level(levelAdvanced),
+	Short:       "Extend a watch's TTL",
 	Long: `Extend a watch's TTL to --ttl from now. An expired watch is reactivated.
 
 For an --until-landed watch, which has no TTL, extend is the same as
