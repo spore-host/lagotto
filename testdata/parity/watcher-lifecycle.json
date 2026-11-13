@@ -1,0 +1,673 @@
+{
+  "$format": "lagotto/parity-vectors/v1",
+  "area": "watch lifetime, until-landed, acknowledgement, deprecation",
+  "vectors": {
+    "ackDeadline": {
+      "go": "Watch.AckWindow, Watch.AckDeadline, Watch.AckWindowStart, Watch.Paused",
+      "note": "ack_window in seconds; deadline null when there is nothing to acknowledge; now is fixed",
+      "cases": [
+        {
+          "name": "ttl watch",
+          "input": {
+            "now": "2026-01-02T03:04:05Z",
+            "watch": {
+              "watch_id": "",
+              "user_id": "",
+              "status": "active",
+              "instance_type_pattern": "",
+              "regions": null,
+              "spot": false,
+              "action": "",
+              "created_at": "0001-01-01T00:00:00Z",
+              "updated_at": "0001-01-01T00:00:00Z",
+              "expires_at": "2026-01-02T04:04:05Z",
+              "ttl_timestamp": 0,
+              "last_polled_at": "0001-01-01T00:00:00Z",
+              "match_count": 0,
+              "quota_capped_at": "0001-01-01T00:00:00Z",
+              "lease_expires_at": "0001-01-01T00:00:00Z"
+            }
+          },
+          "output": {
+            "ack_deadline": null,
+            "ack_window": 0,
+            "ack_window_start": null,
+            "paused": false
+          }
+        },
+        {
+          "name": "until-landed 7d pause 2",
+          "input": {
+            "now": "2026-01-02T03:04:05Z",
+            "watch": {
+              "watch_id": "",
+              "user_id": "",
+              "status": "active",
+              "instance_type_pattern": "",
+              "regions": null,
+              "spot": false,
+              "action": "",
+              "created_at": "0001-01-01T00:00:00Z",
+              "updated_at": "0001-01-01T00:00:00Z",
+              "expires_at": "2026-01-23T03:04:05Z",
+              "ttl_timestamp": 0,
+              "last_polled_at": "0001-01-01T00:00:00Z",
+              "match_count": 0,
+              "quota_capped_at": "0001-01-01T00:00:00Z",
+              "until_landed": true,
+              "remind_every_seconds": 604800,
+              "remind_pause_after": 2,
+              "lease_expires_at": "0001-01-01T00:00:00Z"
+            }
+          },
+          "output": {
+            "ack_deadline": "2026-01-23T03:04:05Z",
+            "ack_window": 1814400,
+            "ack_window_start": "2026-01-02T03:04:05Z",
+            "paused": false
+          }
+        },
+        {
+          "name": "until-landed 1d pause 0",
+          "input": {
+            "now": "2026-01-02T03:04:05Z",
+            "watch": {
+              "watch_id": "",
+              "user_id": "",
+              "status": "active",
+              "instance_type_pattern": "",
+              "regions": null,
+              "spot": false,
+              "action": "",
+              "created_at": "0001-01-01T00:00:00Z",
+              "updated_at": "0001-01-01T00:00:00Z",
+              "expires_at": "2026-01-03T03:04:05Z",
+              "ttl_timestamp": 0,
+              "last_polled_at": "0001-01-01T00:00:00Z",
+              "match_count": 0,
+              "quota_capped_at": "0001-01-01T00:00:00Z",
+              "until_landed": true,
+              "remind_every_seconds": 86400,
+              "lease_expires_at": "0001-01-01T00:00:00Z"
+            }
+          },
+          "output": {
+            "ack_deadline": "2026-01-03T03:04:05Z",
+            "ack_window": 86400,
+            "ack_window_start": "2026-01-02T03:04:05Z",
+            "paused": false
+          }
+        },
+        {
+          "name": "until-landed no interval",
+          "input": {
+            "now": "2026-01-02T03:04:05Z",
+            "watch": {
+              "watch_id": "",
+              "user_id": "",
+              "status": "active",
+              "instance_type_pattern": "",
+              "regions": null,
+              "spot": false,
+              "action": "",
+              "created_at": "0001-01-01T00:00:00Z",
+              "updated_at": "0001-01-01T00:00:00Z",
+              "expires_at": "0001-01-01T00:00:00Z",
+              "ttl_timestamp": 0,
+              "last_polled_at": "0001-01-01T00:00:00Z",
+              "match_count": 0,
+              "quota_capped_at": "0001-01-01T00:00:00Z",
+              "until_landed": true,
+              "lease_expires_at": "0001-01-01T00:00:00Z"
+            }
+          },
+          "output": {
+            "ack_deadline": null,
+            "ack_window": 0,
+            "ack_window_start": null,
+            "paused": false
+          }
+        },
+        {
+          "name": "paused",
+          "input": {
+            "now": "2026-01-02T03:04:05Z",
+            "watch": {
+              "watch_id": "",
+              "user_id": "",
+              "status": "expired",
+              "instance_type_pattern": "",
+              "regions": null,
+              "spot": false,
+              "action": "",
+              "created_at": "0001-01-01T00:00:00Z",
+              "updated_at": "0001-01-01T00:00:00Z",
+              "expires_at": "2026-01-02T03:04:05Z",
+              "ttl_timestamp": 0,
+              "last_polled_at": "0001-01-01T00:00:00Z",
+              "match_count": 0,
+              "quota_capped_at": "0001-01-01T00:00:00Z",
+              "until_landed": true,
+              "remind_every_seconds": 86400,
+              "expired_reason": "unacknowledged",
+              "lease_expires_at": "0001-01-01T00:00:00Z"
+            }
+          },
+          "output": {
+            "ack_deadline": "2026-01-03T03:04:05Z",
+            "ack_window": 86400,
+            "ack_window_start": "2026-01-01T03:04:05Z",
+            "paused": true
+          }
+        },
+        {
+          "name": "expired by ttl",
+          "input": {
+            "now": "2026-01-02T03:04:05Z",
+            "watch": {
+              "watch_id": "",
+              "user_id": "",
+              "status": "expired",
+              "instance_type_pattern": "",
+              "regions": null,
+              "spot": false,
+              "action": "",
+              "created_at": "0001-01-01T00:00:00Z",
+              "updated_at": "0001-01-01T00:00:00Z",
+              "expires_at": "2026-01-02T03:04:05Z",
+              "ttl_timestamp": 0,
+              "last_polled_at": "0001-01-01T00:00:00Z",
+              "match_count": 0,
+              "quota_capped_at": "0001-01-01T00:00:00Z",
+              "lease_expires_at": "0001-01-01T00:00:00Z"
+            }
+          },
+          "output": {
+            "ack_deadline": null,
+            "ack_window": 0,
+            "ack_window_start": null,
+            "paused": false
+          }
+        }
+      ]
+    },
+    "actionDeprecations": {
+      "go": "watcher.ActionDeprecations",
+      "cases": [
+        {
+          "name": "notify given=true",
+          "input": {
+            "action": "notify",
+            "action_given": true
+          },
+          "output": [
+            {
+              "id": "action-notify",
+              "message": "--action notify is deprecated and will be removed in a later release. A notify watch only checks that the instance type is offered in the region at or under your max price, not a capacity check: it launches and reserves nothing, and for a scarce type it can fire while a real launch fails with InsufficientInstanceCapacity.\nUse instead:\n  --action hold   reserves the capacity when it is found: a targeted On-Demand Capacity Reservation for 30 minutes, billed at the On-Demand rate from the moment it is held, even if unused.\n  --action spawn  launches the instance when it is found (needs --spawn-config): the launch is the capacity test, and the instance bills until its TTL."
+            }
+          ]
+        },
+        {
+          "name": "notify given=false",
+          "input": {
+            "action": "notify",
+            "action_given": false
+          },
+          "output": [
+            {
+              "id": "action-notify",
+              "message": "no --action given, so this is a notify watch (deprecated); pass --action explicitly.\n--action notify is deprecated and will be removed in a later release. A notify watch only checks that the instance type is offered in the region at or under your max price, not a capacity check: it launches and reserves nothing, and for a scarce type it can fire while a real launch fails with InsufficientInstanceCapacity.\nUse instead:\n  --action hold   reserves the capacity when it is found: a targeted On-Demand Capacity Reservation for 30 minutes, billed at the On-Demand rate from the moment it is held, even if unused.\n  --action spawn  launches the instance when it is found (needs --spawn-config): the launch is the capacity test, and the instance bills until its TTL."
+            }
+          ]
+        },
+        {
+          "name": "spawn given=true",
+          "input": {
+            "action": "spawn",
+            "action_given": true
+          },
+          "output": []
+        },
+        {
+          "name": "spawn given=false",
+          "input": {
+            "action": "spawn",
+            "action_given": false
+          },
+          "output": []
+        },
+        {
+          "name": "hold given=true",
+          "input": {
+            "action": "hold",
+            "action_given": true
+          },
+          "output": []
+        },
+        {
+          "name": "hold given=false",
+          "input": {
+            "action": "hold",
+            "action_given": false
+          },
+          "output": []
+        }
+      ]
+    },
+    "newWatch": {
+      "go": "watcher.NewWatch",
+      "note": "input durations in seconds; now is fixed. watch_id is random and omitted. ttl_timestamp is RetentionTTL(expires_at), never expires_at itself (#266)",
+      "cases": [
+        {
+          "name": "ttl 24h",
+          "input": {
+            "now": "2026-01-02T03:04:05Z",
+            "remind_every": 0,
+            "remind_pause_after": 0,
+            "ttl": 86400,
+            "until_landed": false
+          },
+          "output": {
+            "created_at": "2026-01-02T03:04:05Z",
+            "expires_at": "2026-01-03T03:04:05Z",
+            "remind_every_seconds": 0,
+            "remind_pause_after": 0,
+            "status": "active",
+            "ttl_timestamp": 1775185445,
+            "until_landed": false,
+            "updated_at": "2026-01-02T03:04:05Z"
+          }
+        },
+        {
+          "name": "ttl 30m",
+          "input": {
+            "now": "2026-01-02T03:04:05Z",
+            "remind_every": 0,
+            "remind_pause_after": 0,
+            "ttl": 1800,
+            "until_landed": false
+          },
+          "output": {
+            "created_at": "2026-01-02T03:04:05Z",
+            "expires_at": "2026-01-02T03:34:05Z",
+            "remind_every_seconds": 0,
+            "remind_pause_after": 0,
+            "status": "active",
+            "ttl_timestamp": 1775100845,
+            "until_landed": false,
+            "updated_at": "2026-01-02T03:04:05Z"
+          }
+        },
+        {
+          "name": "ttl zero",
+          "input": {
+            "now": "2026-01-02T03:04:05Z",
+            "remind_every": 0,
+            "remind_pause_after": 0,
+            "ttl": 0,
+            "until_landed": false
+          },
+          "output": null,
+          "error": "invalid TTL 0s: it must be greater than zero"
+        },
+        {
+          "name": "ttl negative",
+          "input": {
+            "now": "2026-01-02T03:04:05Z",
+            "remind_every": 0,
+            "remind_pause_after": 0,
+            "ttl": -3600,
+            "until_landed": false
+          },
+          "output": null,
+          "error": "invalid TTL -1h0m0s: it must be greater than zero"
+        },
+        {
+          "name": "until-landed default",
+          "input": {
+            "now": "2026-01-02T03:04:05Z",
+            "remind_every": 604800,
+            "remind_pause_after": 2,
+            "ttl": 0,
+            "until_landed": true
+          },
+          "output": {
+            "created_at": "2026-01-02T03:04:05Z",
+            "expires_at": "2026-01-23T03:04:05Z",
+            "remind_every_seconds": 604800,
+            "remind_pause_after": 2,
+            "status": "active",
+            "ttl_timestamp": 1776913445,
+            "until_landed": true,
+            "updated_at": "2026-01-02T03:04:05Z"
+          }
+        },
+        {
+          "name": "until-landed 1d pause 0",
+          "input": {
+            "now": "2026-01-02T03:04:05Z",
+            "remind_every": 86400,
+            "remind_pause_after": 0,
+            "ttl": 0,
+            "until_landed": true
+          },
+          "output": {
+            "created_at": "2026-01-02T03:04:05Z",
+            "expires_at": "2026-01-03T03:04:05Z",
+            "remind_every_seconds": 86400,
+            "remind_pause_after": 0,
+            "status": "active",
+            "ttl_timestamp": 1775185445,
+            "until_landed": true,
+            "updated_at": "2026-01-02T03:04:05Z"
+          }
+        },
+        {
+          "name": "until-landed with a ttl",
+          "input": {
+            "now": "2026-01-02T03:04:05Z",
+            "remind_every": 604800,
+            "remind_pause_after": 0,
+            "ttl": 3600,
+            "until_landed": true
+          },
+          "output": null,
+          "error": "an until-landed watch has no TTL"
+        },
+        {
+          "name": "until-landed remind too short",
+          "input": {
+            "now": "2026-01-02T03:04:05Z",
+            "remind_every": 60,
+            "remind_pause_after": 0,
+            "ttl": 0,
+            "until_landed": true
+          },
+          "output": null,
+          "error": "--remind must be at least 1h (got 1m0s)"
+        },
+        {
+          "name": "until-landed remind too long",
+          "input": {
+            "now": "2026-01-02T03:04:05Z",
+            "remind_every": 2678400,
+            "remind_pause_after": 0,
+            "ttl": 0,
+            "until_landed": true
+          },
+          "output": null,
+          "error": "--remind is capped at 30d (got 31d): an until-landed watch must be acknowledged at least that often"
+        },
+        {
+          "name": "until-landed negative pause",
+          "input": {
+            "now": "2026-01-02T03:04:05Z",
+            "remind_every": 604800,
+            "remind_pause_after": -1,
+            "ttl": 0,
+            "until_landed": true
+          },
+          "output": null,
+          "error": "until-landed pause-after must not be negative (got -1)"
+        }
+      ]
+    },
+    "retentionTTL": {
+      "go": "watcher.RetentionTTL",
+      "note": "output is a Unix time in seconds",
+      "cases": [
+        {
+          "name": "2026-01-02T03:04:05Z",
+          "input": "2026-01-02T03:04:05Z",
+          "output": 1775099045
+        },
+        {
+          "name": "2026-01-03T03:04:05Z",
+          "input": "2026-01-03T03:04:05Z",
+          "output": 1775185445
+        },
+        {
+          "name": "0001-01-01T00:00:00Z",
+          "input": "0001-01-01T00:00:00Z",
+          "output": -62127820800
+        }
+      ]
+    },
+    "validateRemindEvery": {
+      "go": "watcher.ValidateRemindEvery",
+      "note": "input in seconds",
+      "cases": [
+        {
+          "name": "59m59s",
+          "input": 3599,
+          "output": null,
+          "error": "--remind must be at least 1h (got 59m59s)"
+        },
+        {
+          "name": "1h0m0s",
+          "input": 3600,
+          "output": null
+        },
+        {
+          "name": "168h0m0s",
+          "input": 604800,
+          "output": null
+        },
+        {
+          "name": "720h0m0s",
+          "input": 2592000,
+          "output": null
+        },
+        {
+          "name": "720h0m1s",
+          "input": 2592001,
+          "output": null,
+          "error": "--remind is capped at 30d (got 720h0m1s): an until-landed watch must be acknowledged at least that often"
+        },
+        {
+          "name": "0s",
+          "input": 0,
+          "output": null,
+          "error": "--remind must be at least 1h (got 0s)"
+        }
+      ]
+    },
+    "validateServiceAction": {
+      "go": "watcher.ValidateServiceAction",
+      "cases": [
+        {
+          "name": " notify",
+          "input": {
+            "action": "notify",
+            "service": ""
+          },
+          "output": null
+        },
+        {
+          "name": " spawn",
+          "input": {
+            "action": "spawn",
+            "service": ""
+          },
+          "output": null
+        },
+        {
+          "name": " hold",
+          "input": {
+            "action": "hold",
+            "service": ""
+          },
+          "output": null
+        },
+        {
+          "name": "ec2 notify",
+          "input": {
+            "action": "notify",
+            "service": "ec2"
+          },
+          "output": null
+        },
+        {
+          "name": "ec2 spawn",
+          "input": {
+            "action": "spawn",
+            "service": "ec2"
+          },
+          "output": null
+        },
+        {
+          "name": "ec2 hold",
+          "input": {
+            "action": "hold",
+            "service": "ec2"
+          },
+          "output": null
+        },
+        {
+          "name": "sagemaker notify",
+          "input": {
+            "action": "notify",
+            "service": "sagemaker"
+          },
+          "output": null,
+          "error": "--action notify is not supported for --service sagemaker: SageMaker has no capacity signal short of submitting a job, so a notify-only watch has nothing to notify on and could never fire (#195). Use --action spawn --sagemaker-config <job.yaml> to submit your job and retry it until SageMaker provisions it; add --notify to be told when it does"
+        },
+        {
+          "name": "sagemaker spawn",
+          "input": {
+            "action": "spawn",
+            "service": "sagemaker"
+          },
+          "output": null
+        },
+        {
+          "name": "sagemaker hold",
+          "input": {
+            "action": "hold",
+            "service": "sagemaker"
+          },
+          "output": null,
+          "error": "--action hold is not supported for --service sagemaker (no capacity-reservation equivalent)"
+        }
+      ]
+    },
+    "validateUntilLanded": {
+      "go": "watcher.ValidateUntilLanded",
+      "note": "remind_every in seconds",
+      "cases": [
+        {
+          "name": "spawn ok",
+          "input": {
+            "action": "spawn",
+            "desired_count": 0,
+            "notify_channels": [
+              {
+                "type": "email",
+                "target": "a@example.com"
+              }
+            ],
+            "remind_every": 604800,
+            "remind_pause_after": 2
+          },
+          "output": null
+        },
+        {
+          "name": "hold ok",
+          "input": {
+            "action": "hold",
+            "desired_count": 0,
+            "notify_channels": [
+              {
+                "type": "email",
+                "target": "a@example.com"
+              }
+            ],
+            "remind_every": 604800,
+            "remind_pause_after": 0
+          },
+          "output": null
+        },
+        {
+          "name": "notify refused",
+          "input": {
+            "action": "notify",
+            "desired_count": 0,
+            "notify_channels": [
+              {
+                "type": "email",
+                "target": "a@example.com"
+              }
+            ],
+            "remind_every": 604800,
+            "remind_pause_after": 0
+          },
+          "output": null,
+          "error": "--until-landed is not supported for --action notify yet: notify fires when the type is offered, which is not a sign a launch would succeed, so the watch would end on its first poll. Use --action spawn (the launch itself is the capacity test) or --action hold, or keep notify with a --ttl"
+        },
+        {
+          "name": "fleet refused",
+          "input": {
+            "action": "spawn",
+            "desired_count": 3,
+            "notify_channels": [
+              {
+                "type": "email",
+                "target": "a@example.com"
+              }
+            ],
+            "remind_every": 604800,
+            "remind_pause_after": 0
+          },
+          "output": null,
+          "error": "--until-landed cannot be combined with --maintain: a fleet ends on its --until condition"
+        },
+        {
+          "name": "no channel",
+          "input": {
+            "action": "spawn",
+            "desired_count": 0,
+            "notify_channels": null,
+            "remind_every": 604800,
+            "remind_pause_after": 0
+          },
+          "output": null,
+          "error": "--until-landed --action spawn needs a --notify channel (email:, webhook: or sns:): the watch has no TTL, so a channel is how you hear that it landed, paused itself, or needs acknowledging"
+        },
+        {
+          "name": "remind too short",
+          "input": {
+            "action": "spawn",
+            "desired_count": 0,
+            "notify_channels": [
+              {
+                "type": "email",
+                "target": "a@example.com"
+              }
+            ],
+            "remind_every": 60,
+            "remind_pause_after": 0
+          },
+          "output": null,
+          "error": "--remind must be at least 1h (got 1m0s)"
+        },
+        {
+          "name": "negative pause",
+          "input": {
+            "action": "spawn",
+            "desired_count": 0,
+            "notify_channels": [
+              {
+                "type": "email",
+                "target": "a@example.com"
+              }
+            ],
+            "remind_every": 604800,
+            "remind_pause_after": -1
+          },
+          "output": null,
+          "error": "the reminder pause-after count must be >= 0"
+        }
+      ]
+    }
+  }
+}

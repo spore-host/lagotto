@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`docs-gen/_levels.json`: the disclosure level of every command and flag** (#297), for the spore.host portal's CLI⇄GUI parity gate. `lagotto gen-docs` writes it beside the markdown reference, which is unchanged. Each command's level comes from its `spore.host/level` cobra annotation, and each flag's from the same annotation on the flag (unannotated flags are `advanced`). Every command must set a level explicitly, and a test fails when one does not. The basic set is `watch` (with `--action`), `list`, `status`, `ack`, `cancel` and `history`. The format, `spore.host/cli-levels/v1`, is proposed for spawn and truffle too.
+- **Parity test vectors for lagotto-ts** in `testdata/parity/` (#289). Each JSON file records `{input, output or error}` cases that lagotto's own code produced, for instance-type patterns (including where Go RE2 and JavaScript `RegExp` differ, lagotto-ts#35), durations, TTL and `--until-landed`/`--remind` validation, notify channels, fleet and service rules, the spawn-config launch-privilege rules, AZ preference, cost exposure, the acknowledgement deadline, the notify deprecation, and the DynamoDB items for a watch, a match-history row and a group. `make parity-vectors` regenerates them, and `go test` fails when they are stale. They ship inside the Go module, so lagotto-ts fetches them for a release tag from the module proxy, the way spawn-ts fetches spawn's fixtures.
 
 ### Fixed
 

@@ -27,6 +27,15 @@ cli-iam-actions:
 	$(GOTEST) ./cmd -run TestCLIActionInventoryIsCurrent -count=1 -args -update-cli-iam
 	@echo "docs/reference/cli-iam-actions.md regenerated: review the diff before committing."
 
+## parity-vectors: Regenerate testdata/parity/, the test vectors lagotto-ts runs
+## against this release (internal/parity, #289). `go test` fails when they are
+## stale, so CI is the drift gate; lagotto-ts fetches them from the module proxy
+## at a release tag.
+.PHONY: parity-vectors
+parity-vectors:
+	$(GOTEST) ./pkg/watcher ./cmd -run TestParityVectors -count=1 -args -update-parity
+	@echo "testdata/parity/ regenerated: review the diff (lagotto-ts must match it) before committing."
+
 ## gen-docs: Regenerate the committed command/flag reference (docs-gen/) from the CLI.
 gen-docs:
 	$(GOCMD) run . gen-docs --out docs-gen

@@ -1,0 +1,596 @@
+{
+  "$format": "lagotto/parity-vectors/v1",
+  "area": "cost exposure",
+  "vectors": {
+    "computeExposure": {
+      "go": "watcher.ComputeExposure, Exposure.Column, Exposure.Lines",
+      "note": "input.rates maps \"<type> <region>\" to an hourly USD rate; a missing pair has no price. input.live: rates are live quotes, otherwise static (as of 2026-01-01, reason \"parity vector\")",
+      "cases": [
+        {
+          "name": "notify",
+          "input": {
+            "live": true,
+            "rates": {
+              "g6.2xlarge us-east-1": 0.9776,
+              "g6.4xlarge us-east-1": 1.3232,
+              "p5.48xlarge us-east-1": 98.32,
+              "p5.48xlarge us-west-2": 98.32
+            },
+            "watch": {
+              "watch_id": "",
+              "user_id": "",
+              "status": "",
+              "instance_type_pattern": "p5.48xlarge",
+              "regions": [
+                "us-east-1"
+              ],
+              "spot": false,
+              "action": "notify",
+              "created_at": "0001-01-01T00:00:00Z",
+              "updated_at": "0001-01-01T00:00:00Z",
+              "expires_at": "0001-01-01T00:00:00Z",
+              "ttl_timestamp": 0,
+              "last_polled_at": "0001-01-01T00:00:00Z",
+              "match_count": 0,
+              "quota_capped_at": "0001-01-01T00:00:00Z",
+              "lease_expires_at": "0001-01-01T00:00:00Z"
+            }
+          },
+          "output": {
+            "column": "none",
+            "exposure": {
+              "kind": "none",
+              "summary": "notify only: launches and reserves nothing"
+            },
+            "lines": [
+              "notify only: launches and reserves nothing"
+            ]
+          }
+        },
+        {
+          "name": "spawn one",
+          "input": {
+            "live": true,
+            "rates": {
+              "g6.2xlarge us-east-1": 0.9776,
+              "g6.4xlarge us-east-1": 1.3232,
+              "p5.48xlarge us-east-1": 98.32,
+              "p5.48xlarge us-west-2": 98.32
+            },
+            "watch": {
+              "watch_id": "",
+              "user_id": "",
+              "status": "",
+              "instance_type_pattern": "p5.48xlarge",
+              "regions": [
+                "us-east-1"
+              ],
+              "spot": false,
+              "action": "spawn",
+              "created_at": "0001-01-01T00:00:00Z",
+              "updated_at": "0001-01-01T00:00:00Z",
+              "expires_at": "0001-01-01T00:00:00Z",
+              "ttl_timestamp": 0,
+              "last_polled_at": "0001-01-01T00:00:00Z",
+              "match_count": 0,
+              "quota_capped_at": "0001-01-01T00:00:00Z",
+              "lease_expires_at": "0001-01-01T00:00:00Z"
+            }
+          },
+          "output": {
+            "column": "≤$98.32/hr",
+            "exposure": {
+              "kind": "spawn",
+              "basis": "on_demand",
+              "count": 1,
+              "per_instance_hourly_usd": 98.32,
+              "per_instance_hourly_min_usd": 98.32,
+              "hourly_usd": 98.32,
+              "daily_usd": 2359.68,
+              "priced_pairs": 1,
+              "price_source": "live",
+              "summary": "if this lands: up to $98.32/hr (≈$2359.68/day)",
+              "details": [
+                "price basis: on-demand rate",
+                "price source: live AWS Price List"
+              ]
+            },
+            "lines": [
+              "if this lands: up to $98.32/hr (≈$2359.68/day)",
+              "price basis: on-demand rate",
+              "price source: live AWS Price List"
+            ]
+          }
+        },
+        {
+          "name": "spawn two regions",
+          "input": {
+            "live": true,
+            "rates": {
+              "g6.2xlarge us-east-1": 0.9776,
+              "g6.4xlarge us-east-1": 1.3232,
+              "p5.48xlarge us-east-1": 98.32,
+              "p5.48xlarge us-west-2": 98.32
+            },
+            "watch": {
+              "watch_id": "",
+              "user_id": "",
+              "status": "",
+              "instance_type_pattern": "p5.48xlarge",
+              "regions": [
+                "us-east-1",
+                "us-west-2"
+              ],
+              "spot": false,
+              "action": "spawn",
+              "created_at": "0001-01-01T00:00:00Z",
+              "updated_at": "0001-01-01T00:00:00Z",
+              "expires_at": "0001-01-01T00:00:00Z",
+              "ttl_timestamp": 0,
+              "last_polled_at": "0001-01-01T00:00:00Z",
+              "match_count": 0,
+              "quota_capped_at": "0001-01-01T00:00:00Z",
+              "lease_expires_at": "0001-01-01T00:00:00Z"
+            }
+          },
+          "output": {
+            "column": "≤$98.32/hr",
+            "exposure": {
+              "kind": "spawn",
+              "basis": "on_demand",
+              "count": 1,
+              "per_instance_hourly_usd": 98.32,
+              "per_instance_hourly_min_usd": 98.32,
+              "hourly_usd": 98.32,
+              "daily_usd": 2359.68,
+              "range": true,
+              "priced_pairs": 2,
+              "price_source": "live",
+              "summary": "if this lands: up to $98.32/hr (≈$2359.68/day)",
+              "details": [
+                "price basis: the highest on-demand rate across 2 type/region combinations ($98.32–$98.32/hr)",
+                "price source: live AWS Price List"
+              ]
+            },
+            "lines": [
+              "if this lands: up to $98.32/hr (≈$2359.68/day)",
+              "price basis: the highest on-demand rate across 2 type/region combinations ($98.32–$98.32/hr)",
+              "price source: live AWS Price List"
+            ]
+          }
+        },
+        {
+          "name": "spawn fleet of 3",
+          "input": {
+            "live": true,
+            "rates": {
+              "g6.2xlarge us-east-1": 0.9776,
+              "g6.4xlarge us-east-1": 1.3232,
+              "p5.48xlarge us-east-1": 98.32,
+              "p5.48xlarge us-west-2": 98.32
+            },
+            "watch": {
+              "watch_id": "",
+              "user_id": "",
+              "status": "",
+              "instance_type_pattern": "g6.4xlarge",
+              "regions": [
+                "us-east-1"
+              ],
+              "spot": false,
+              "action": "spawn",
+              "desired_count": 3,
+              "created_at": "0001-01-01T00:00:00Z",
+              "updated_at": "0001-01-01T00:00:00Z",
+              "expires_at": "0001-01-01T00:00:00Z",
+              "ttl_timestamp": 0,
+              "last_polled_at": "0001-01-01T00:00:00Z",
+              "match_count": 0,
+              "quota_capped_at": "0001-01-01T00:00:00Z",
+              "lease_expires_at": "0001-01-01T00:00:00Z"
+            }
+          },
+          "output": {
+            "column": "≤$3.97/hr",
+            "exposure": {
+              "kind": "spawn",
+              "basis": "on_demand",
+              "count": 3,
+              "per_instance_hourly_usd": 1.3232,
+              "per_instance_hourly_min_usd": 1.3232,
+              "hourly_usd": 3.9696,
+              "daily_usd": 95.2704,
+              "priced_pairs": 1,
+              "price_source": "live",
+              "summary": "if this lands: up to $3.97/hr (≈$95.27/day) for 3 instances at up to $1.32/hr each",
+              "details": [
+                "price basis: on-demand rate",
+                "price source: live AWS Price List"
+              ]
+            },
+            "lines": [
+              "if this lands: up to $3.97/hr (≈$95.27/day) for 3 instances at up to $1.32/hr each",
+              "price basis: on-demand rate",
+              "price source: live AWS Price List"
+            ]
+          }
+        },
+        {
+          "name": "spawn range",
+          "input": {
+            "live": true,
+            "rates": {
+              "g6.2xlarge us-east-1": 0.9776,
+              "g6.4xlarge us-east-1": 1.3232,
+              "p5.48xlarge us-east-1": 98.32,
+              "p5.48xlarge us-west-2": 98.32
+            },
+            "watch": {
+              "watch_id": "",
+              "user_id": "",
+              "status": "",
+              "instance_type_pattern": "g6.4xlarge,g6.2xlarge",
+              "regions": [
+                "us-east-1"
+              ],
+              "spot": false,
+              "action": "spawn",
+              "created_at": "0001-01-01T00:00:00Z",
+              "updated_at": "0001-01-01T00:00:00Z",
+              "expires_at": "0001-01-01T00:00:00Z",
+              "ttl_timestamp": 0,
+              "last_polled_at": "0001-01-01T00:00:00Z",
+              "match_count": 0,
+              "quota_capped_at": "0001-01-01T00:00:00Z",
+              "lease_expires_at": "0001-01-01T00:00:00Z"
+            }
+          },
+          "output": {
+            "column": "≤$1.32/hr",
+            "exposure": {
+              "kind": "spawn",
+              "basis": "on_demand",
+              "count": 1,
+              "per_instance_hourly_usd": 1.3232,
+              "per_instance_hourly_min_usd": 0.9776,
+              "hourly_usd": 1.3232,
+              "daily_usd": 31.7568,
+              "range": true,
+              "priced_pairs": 2,
+              "price_source": "live",
+              "summary": "if this lands: up to $1.32/hr (≈$31.76/day)",
+              "details": [
+                "price basis: the highest on-demand rate across 2 type/region combinations ($0.9776–$1.32/hr)",
+                "price source: live AWS Price List"
+              ]
+            },
+            "lines": [
+              "if this lands: up to $1.32/hr (≈$31.76/day)",
+              "price basis: the highest on-demand rate across 2 type/region combinations ($0.9776–$1.32/hr)",
+              "price source: live AWS Price List"
+            ]
+          }
+        },
+        {
+          "name": "spawn static rate",
+          "input": {
+            "live": false,
+            "rates": {
+              "g6.2xlarge us-east-1": 0.9776,
+              "g6.4xlarge us-east-1": 1.3232,
+              "p5.48xlarge us-east-1": 98.32,
+              "p5.48xlarge us-west-2": 98.32
+            },
+            "watch": {
+              "watch_id": "",
+              "user_id": "",
+              "status": "",
+              "instance_type_pattern": "g6.2xlarge",
+              "regions": [
+                "us-east-1"
+              ],
+              "spot": false,
+              "action": "spawn",
+              "created_at": "0001-01-01T00:00:00Z",
+              "updated_at": "0001-01-01T00:00:00Z",
+              "expires_at": "0001-01-01T00:00:00Z",
+              "ttl_timestamp": 0,
+              "last_polled_at": "0001-01-01T00:00:00Z",
+              "match_count": 0,
+              "quota_capped_at": "0001-01-01T00:00:00Z",
+              "lease_expires_at": "0001-01-01T00:00:00Z"
+            }
+          },
+          "output": {
+            "column": "≤$0.9776/hr*",
+            "exposure": {
+              "kind": "spawn",
+              "basis": "on_demand",
+              "count": 1,
+              "per_instance_hourly_usd": 0.9776,
+              "per_instance_hourly_min_usd": 0.9776,
+              "hourly_usd": 0.9776,
+              "daily_usd": 23.462400000000002,
+              "priced_pairs": 1,
+              "price_source": "static",
+              "static_notes": [
+                "static, collected 2026-01-01: parity vector"
+              ],
+              "summary": "if this lands: up to $0.9776/hr (≈$23.46/day)",
+              "details": [
+                "price basis: on-demand rate",
+                "price source: static, collected 2026-01-01: parity vector"
+              ]
+            },
+            "lines": [
+              "if this lands: up to $0.9776/hr (≈$23.46/day)",
+              "price basis: on-demand rate",
+              "price source: static, collected 2026-01-01: parity vector"
+            ]
+          }
+        },
+        {
+          "name": "spawn partly unpriced",
+          "input": {
+            "live": true,
+            "rates": {
+              "g6.2xlarge us-east-1": 0.9776,
+              "g6.4xlarge us-east-1": 1.3232,
+              "p5.48xlarge us-east-1": 98.32,
+              "p5.48xlarge us-west-2": 98.32
+            },
+            "watch": {
+              "watch_id": "",
+              "user_id": "",
+              "status": "",
+              "instance_type_pattern": "p5.48xlarge",
+              "regions": [
+                "us-east-1",
+                "eu-west-1"
+              ],
+              "spot": false,
+              "action": "spawn",
+              "created_at": "0001-01-01T00:00:00Z",
+              "updated_at": "0001-01-01T00:00:00Z",
+              "expires_at": "0001-01-01T00:00:00Z",
+              "ttl_timestamp": 0,
+              "last_polled_at": "0001-01-01T00:00:00Z",
+              "match_count": 0,
+              "quota_capped_at": "0001-01-01T00:00:00Z",
+              "lease_expires_at": "0001-01-01T00:00:00Z"
+            }
+          },
+          "output": {
+            "column": "≤$98.32/hr?",
+            "exposure": {
+              "kind": "spawn",
+              "basis": "on_demand",
+              "count": 1,
+              "per_instance_hourly_usd": 98.32,
+              "per_instance_hourly_min_usd": 98.32,
+              "hourly_usd": 98.32,
+              "daily_usd": 2359.68,
+              "priced_pairs": 1,
+              "unpriced": [
+                "p5.48xlarge in eu-west-1"
+              ],
+              "price_source": "live",
+              "summary": "if this lands: up to $98.32/hr (≈$2359.68/day)",
+              "details": [
+                "price basis: on-demand rate",
+                "price source: live AWS Price List",
+                "not priced: p5.48xlarge in eu-west-1; the real maximum may be higher"
+              ]
+            },
+            "lines": [
+              "if this lands: up to $98.32/hr (≈$2359.68/day)",
+              "price basis: on-demand rate",
+              "price source: live AWS Price List",
+              "not priced: p5.48xlarge in eu-west-1; the real maximum may be higher"
+            ]
+          }
+        },
+        {
+          "name": "spawn unpriced",
+          "input": {
+            "live": true,
+            "rates": {
+              "g6.2xlarge us-east-1": 0.9776,
+              "g6.4xlarge us-east-1": 1.3232,
+              "p5.48xlarge us-east-1": 98.32,
+              "p5.48xlarge us-west-2": 98.32
+            },
+            "watch": {
+              "watch_id": "",
+              "user_id": "",
+              "status": "",
+              "instance_type_pattern": "x9.huge",
+              "regions": [
+                "us-east-1"
+              ],
+              "spot": false,
+              "action": "spawn",
+              "created_at": "0001-01-01T00:00:00Z",
+              "updated_at": "0001-01-01T00:00:00Z",
+              "expires_at": "0001-01-01T00:00:00Z",
+              "ttl_timestamp": 0,
+              "last_polled_at": "0001-01-01T00:00:00Z",
+              "match_count": 0,
+              "quota_capped_at": "0001-01-01T00:00:00Z",
+              "lease_expires_at": "0001-01-01T00:00:00Z"
+            }
+          },
+          "output": {
+            "column": "unknown",
+            "exposure": {
+              "kind": "unknown",
+              "count": 1,
+              "unpriced": [
+                "x9.huge in us-east-1"
+              ],
+              "summary": "if this lands: cost unknown: no on-demand price for x9.huge in us-east-1, so lagotto cannot say what the instance would cost",
+              "details": [
+                "price source: neither the live AWS Price List nor its static fallback had a rate"
+              ]
+            },
+            "lines": [
+              "if this lands: cost unknown: no on-demand price for x9.huge in us-east-1, so lagotto cannot say what the instance would cost",
+              "price source: neither the live AWS Price List nor its static fallback had a rate"
+            ]
+          }
+        },
+        {
+          "name": "spawn max-price cap",
+          "input": {
+            "live": true,
+            "rates": {
+              "g6.2xlarge us-east-1": 0.9776,
+              "g6.4xlarge us-east-1": 1.3232,
+              "p5.48xlarge us-east-1": 98.32,
+              "p5.48xlarge us-west-2": 98.32
+            },
+            "watch": {
+              "watch_id": "",
+              "user_id": "",
+              "status": "",
+              "instance_type_pattern": "p5.48xlarge",
+              "regions": [
+                "us-east-1"
+              ],
+              "spot": false,
+              "max_price": 5,
+              "action": "spawn",
+              "created_at": "0001-01-01T00:00:00Z",
+              "updated_at": "0001-01-01T00:00:00Z",
+              "expires_at": "0001-01-01T00:00:00Z",
+              "ttl_timestamp": 0,
+              "last_polled_at": "0001-01-01T00:00:00Z",
+              "match_count": 0,
+              "quota_capped_at": "0001-01-01T00:00:00Z",
+              "lease_expires_at": "0001-01-01T00:00:00Z"
+            }
+          },
+          "output": {
+            "column": "≤$5.00/hr cap",
+            "exposure": {
+              "kind": "spawn",
+              "basis": "max_price",
+              "count": 1,
+              "per_instance_hourly_usd": 5,
+              "per_instance_hourly_min_usd": 5,
+              "hourly_usd": 5,
+              "daily_usd": 120,
+              "price_source": "max_price",
+              "summary": "if this lands: up to $5.00/hr (≈$120.00/day)",
+              "details": [
+                "price basis: your --max-price cap of $5.00/hr per instance, not a price quote; the actual rate can be lower"
+              ]
+            },
+            "lines": [
+              "if this lands: up to $5.00/hr (≈$120.00/day)",
+              "price basis: your --max-price cap of $5.00/hr per instance, not a price quote; the actual rate can be lower"
+            ]
+          }
+        },
+        {
+          "name": "hold",
+          "input": {
+            "live": true,
+            "rates": {
+              "g6.2xlarge us-east-1": 0.9776,
+              "g6.4xlarge us-east-1": 1.3232,
+              "p5.48xlarge us-east-1": 98.32,
+              "p5.48xlarge us-west-2": 98.32
+            },
+            "watch": {
+              "watch_id": "",
+              "user_id": "",
+              "status": "",
+              "instance_type_pattern": "p5.48xlarge",
+              "regions": [
+                "us-east-1"
+              ],
+              "spot": false,
+              "action": "hold",
+              "created_at": "0001-01-01T00:00:00Z",
+              "updated_at": "0001-01-01T00:00:00Z",
+              "expires_at": "0001-01-01T00:00:00Z",
+              "ttl_timestamp": 0,
+              "last_polled_at": "0001-01-01T00:00:00Z",
+              "match_count": 0,
+              "quota_capped_at": "0001-01-01T00:00:00Z",
+              "lease_expires_at": "0001-01-01T00:00:00Z"
+            }
+          },
+          "output": {
+            "column": "30m@$98.32/hr",
+            "exposure": {
+              "kind": "hold",
+              "basis": "on_demand",
+              "count": 1,
+              "per_instance_hourly_usd": 98.32,
+              "per_instance_hourly_min_usd": 98.32,
+              "hourly_usd": 98.32,
+              "hold_minutes": 30,
+              "hold_usd": 49.16,
+              "priced_pairs": 1,
+              "price_source": "live",
+              "summary": "if this lands: 30 min reserved at up to $98.32/hr (≈$49.16), billed even if unused",
+              "details": [
+                "price basis: on-demand rate",
+                "price source: live AWS Price List"
+              ]
+            },
+            "lines": [
+              "if this lands: 30 min reserved at up to $98.32/hr (≈$49.16), billed even if unused",
+              "price basis: on-demand rate",
+              "price source: live AWS Price List"
+            ]
+          }
+        },
+        {
+          "name": "sagemaker",
+          "input": {
+            "live": true,
+            "rates": {
+              "g6.2xlarge us-east-1": 0.9776,
+              "g6.4xlarge us-east-1": 1.3232,
+              "p5.48xlarge us-east-1": 98.32,
+              "p5.48xlarge us-west-2": 98.32
+            },
+            "watch": {
+              "watch_id": "",
+              "user_id": "",
+              "status": "",
+              "service": "sagemaker",
+              "instance_type_pattern": "ml.g5.2xlarge",
+              "regions": [
+                "us-east-1"
+              ],
+              "spot": false,
+              "action": "spawn",
+              "created_at": "0001-01-01T00:00:00Z",
+              "updated_at": "0001-01-01T00:00:00Z",
+              "expires_at": "0001-01-01T00:00:00Z",
+              "ttl_timestamp": 0,
+              "last_polled_at": "0001-01-01T00:00:00Z",
+              "match_count": 0,
+              "quota_capped_at": "0001-01-01T00:00:00Z",
+              "lease_expires_at": "0001-01-01T00:00:00Z"
+            }
+          },
+          "output": {
+            "column": "unknown",
+            "exposure": {
+              "kind": "unknown",
+              "summary": "if this lands: cost unknown: a SageMaker job is billed by SageMaker, and lagotto does not price it"
+            },
+            "lines": [
+              "if this lands: cost unknown: a SageMaker job is billed by SageMaker, and lagotto does not price it"
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

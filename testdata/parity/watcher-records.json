@@ -1,0 +1,564 @@
+{
+  "$format": "lagotto/parity-vectors/v1",
+  "area": "DynamoDB record shapes and keys",
+  "vectors": {
+    "groupItem": {
+      "go": "attributevalue.MarshalMap(WatchGroup)",
+      "note": "the group item lives in the watches table; group_members is a string set (SS)",
+      "cases": [
+        {
+          "name": "hunting group",
+          "input": {
+            "group": {
+              "name": "h100",
+              "owner": "AROAEXAMPLEID:alice",
+              "state": "hunting",
+              "members": [
+                "AROAEXAMPLEID:alice/w-5e6f7a8b",
+                "AROAEXAMPLEID:alice/w-1a2b3c4d"
+              ],
+              "created_at": "2026-01-02T03:04:05Z",
+              "updated_at": "2026-01-02T03:04:05Z"
+            },
+            "key": "AROAEXAMPLEID:alice/g-h100"
+          },
+          "output": {
+            "item": {
+              "created_at": {
+                "S": "2026-01-02T03:04:05Z"
+              },
+              "group_members": {
+                "SS": [
+                  "AROAEXAMPLEID:alice/w-1a2b3c4d",
+                  "AROAEXAMPLEID:alice/w-5e6f7a8b"
+                ]
+              },
+              "group_name": {
+                "S": "h100"
+              },
+              "group_owner": {
+                "S": "AROAEXAMPLEID:alice"
+              },
+              "group_state": {
+                "S": "hunting"
+              },
+              "ttl_timestamp": {
+                "N": "1776913445"
+              },
+              "updated_at": {
+                "S": "2026-01-02T03:04:05Z"
+              },
+              "watch_id": {
+                "S": "AROAEXAMPLEID:alice/g-h100"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "historyItem": {
+      "go": "attributevalue.MarshalMap(MatchResult) (Store.RecordHistory)",
+      "cases": [
+        {
+          "name": "spawned",
+          "input": {
+            "watch_id": "AROAEXAMPLEID:alice/w-1a2b3c4d",
+            "user_id": "arn:aws:sts::123456789012:assumed-role/dev/alice",
+            "region": "us-east-1",
+            "availability_zone": "us-east-1b",
+            "instance_type": "p5.48xlarge",
+            "price": 98.32,
+            "is_spot": false,
+            "matched_at": "2026-01-02T05:04:05Z",
+            "action_taken": "spawned",
+            "instance_id": "i-0123456789abcdef0",
+            "ttl_timestamp": 0
+          },
+          "output": {
+            "item": {
+              "action_taken": {
+                "S": "spawned"
+              },
+              "availability_zone": {
+                "S": "us-east-1b"
+              },
+              "instance_id": {
+                "S": "i-0123456789abcdef0"
+              },
+              "instance_type": {
+                "S": "p5.48xlarge"
+              },
+              "is_spot": {
+                "BOOL": false
+              },
+              "landed_at": {
+                "S": "0001-01-01T00:00:00Z"
+              },
+              "matched_at": {
+                "S": "2026-01-02T05:04:05Z"
+              },
+              "price": {
+                "N": "98.32"
+              },
+              "region": {
+                "S": "us-east-1"
+              },
+              "ttl_timestamp": {
+                "N": "0"
+              },
+              "user_id": {
+                "S": "arn:aws:sts::123456789012:assumed-role/dev/alice"
+              },
+              "watch_id": {
+                "S": "AROAEXAMPLEID:alice/w-1a2b3c4d"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "keys": {
+      "go": "watcher.OwnerKey, SplitKey, ShortID, IsLegacyKey, GroupKey, ScopedName",
+      "cases": [
+        {
+          "name": "AROAEXAMPLEID:alice/w-1a2b3c4d",
+          "input": {
+            "id": "w-1a2b3c4d",
+            "owner": "AROAEXAMPLEID:alice"
+          },
+          "output": {
+            "group_key_h100": "AROAEXAMPLEID:alice/g-h100",
+            "key": "AROAEXAMPLEID:alice/w-1a2b3c4d",
+            "legacy": false,
+            "short_id": "w-1a2b3c4d",
+            "split_id": "w-1a2b3c4d",
+            "split_owner": "AROAEXAMPLEID:alice"
+          }
+        },
+        {
+          "name": "w-1a2b3c4d",
+          "input": {
+            "id": "w-1a2b3c4d",
+            "owner": ""
+          },
+          "output": {
+            "group_key_h100": "g-h100",
+            "key": "w-1a2b3c4d",
+            "legacy": true,
+            "short_id": "w-1a2b3c4d",
+            "split_id": "w-1a2b3c4d",
+            "split_owner": ""
+          }
+        },
+        {
+          "name": "AIDAEXAMPLE/sl-0011aabb",
+          "input": {
+            "id": "sl-0011aabb",
+            "owner": "AIDAEXAMPLE"
+          },
+          "output": {
+            "group_key_h100": "AIDAEXAMPLE/g-h100",
+            "key": "AIDAEXAMPLE/sl-0011aabb",
+            "legacy": false,
+            "short_id": "sl-0011aabb",
+            "split_id": "sl-0011aabb",
+            "split_owner": "AIDAEXAMPLE"
+          }
+        }
+      ]
+    },
+    "watchItem": {
+      "go": "attributevalue.MarshalMap(Watch) (Store.PutWatch)",
+      "note": "input is the watch as lagotto's JSON (-o json); item is the DynamoDB item. []byte fields are B (base64)",
+      "cases": [
+        {
+          "name": "hold watch, ttl",
+          "input": {
+            "watch_id": "AROAEXAMPLEID:alice/w-1a2b3c4d",
+            "user_id": "arn:aws:sts::123456789012:assumed-role/dev/alice",
+            "owner_id": "AROAEXAMPLEID:alice",
+            "status": "active",
+            "instance_type_pattern": "p5.48xlarge",
+            "regions": [
+              "us-east-1",
+              "us-west-2"
+            ],
+            "spot": false,
+            "action": "hold",
+            "created_at": "2026-01-02T03:04:05Z",
+            "updated_at": "2026-01-02T03:04:05Z",
+            "expires_at": "2026-01-03T03:04:05Z",
+            "ttl_timestamp": 1775185445,
+            "last_polled_at": "0001-01-01T00:00:00Z",
+            "match_count": 0,
+            "quota_capped_at": "0001-01-01T00:00:00Z",
+            "lease_expires_at": "0001-01-01T00:00:00Z"
+          },
+          "output": {
+            "item": {
+              "action": {
+                "S": "hold"
+              },
+              "created_at": {
+                "S": "2026-01-02T03:04:05Z"
+              },
+              "expires_at": {
+                "S": "2026-01-03T03:04:05Z"
+              },
+              "instance_type_pattern": {
+                "S": "p5.48xlarge"
+              },
+              "last_attempt_at": {
+                "S": "0001-01-01T00:00:00Z"
+              },
+              "last_error_at": {
+                "S": "0001-01-01T00:00:00Z"
+              },
+              "last_poll_error_at": {
+                "S": "0001-01-01T00:00:00Z"
+              },
+              "last_polled_at": {
+                "S": "0001-01-01T00:00:00Z"
+              },
+              "lease_expires_at": {
+                "S": "0001-01-01T00:00:00Z"
+              },
+              "match_count": {
+                "N": "0"
+              },
+              "owner_id": {
+                "S": "AROAEXAMPLEID:alice"
+              },
+              "quota_capped_at": {
+                "S": "0001-01-01T00:00:00Z"
+              },
+              "regions": {
+                "L": [
+                  {
+                    "S": "us-east-1"
+                  },
+                  {
+                    "S": "us-west-2"
+                  }
+                ]
+              },
+              "spot": {
+                "BOOL": false
+              },
+              "status": {
+                "S": "active"
+              },
+              "ttl_timestamp": {
+                "N": "1775185445"
+              },
+              "updated_at": {
+                "S": "2026-01-02T03:04:05Z"
+              },
+              "user_id": {
+                "S": "arn:aws:sts::123456789012:assumed-role/dev/alice"
+              },
+              "watch_id": {
+                "S": "AROAEXAMPLEID:alice/w-1a2b3c4d"
+              }
+            }
+          }
+        },
+        {
+          "name": "spawn watch, until-landed, matched",
+          "input": {
+            "watch_id": "AROAEXAMPLEID:alice/w-5e6f7a8b",
+            "user_id": "arn:aws:sts::123456789012:assumed-role/dev/alice",
+            "owner_id": "AROAEXAMPLEID:alice",
+            "status": "matched",
+            "service": "ec2",
+            "instance_type_pattern": "p5.*,p4d.24xlarge",
+            "regions": [
+              "us-east-1"
+            ],
+            "availability_zones": [
+              "us-east-1b",
+              "us-east-1a"
+            ],
+            "spot": false,
+            "action": "spawn",
+            "notify_channels": [
+              {
+                "type": "email",
+                "target": "alice@example.com"
+              }
+            ],
+            "launch_config_json": "eyJpYW1fcm9sZSI6InJlc2VhcmNoLXJvbGUiLCJpbnN0YW5jZV90eXBlIjoicDUuNDh4bGFyZ2UiLCJ0dGwiOiI4aCJ9",
+            "created_at": "2026-01-02T03:04:05Z",
+            "updated_at": "2026-01-02T05:04:05Z",
+            "expires_at": "2026-01-23T03:04:05Z",
+            "ttl_timestamp": 1776913445,
+            "last_polled_at": "0001-01-01T00:00:00Z",
+            "match_count": 1,
+            "last_match": {
+              "watch_id": "AROAEXAMPLEID:alice/w-1a2b3c4d",
+              "user_id": "arn:aws:sts::123456789012:assumed-role/dev/alice",
+              "region": "us-east-1",
+              "availability_zone": "us-east-1b",
+              "instance_type": "p5.48xlarge",
+              "price": 98.32,
+              "is_spot": false,
+              "matched_at": "2026-01-02T05:04:05Z",
+              "action_taken": "spawned",
+              "instance_id": "i-0123456789abcdef0",
+              "ttl_timestamp": 0
+            },
+            "quota_capped_at": "0001-01-01T00:00:00Z",
+            "until_landed": true,
+            "remind_every_seconds": 604800,
+            "remind_pause_after": 2,
+            "group": "h100",
+            "lease_expires_at": "0001-01-01T00:00:00Z"
+          },
+          "output": {
+            "item": {
+              "action": {
+                "S": "spawn"
+              },
+              "availability_zones": {
+                "L": [
+                  {
+                    "S": "us-east-1b"
+                  },
+                  {
+                    "S": "us-east-1a"
+                  }
+                ]
+              },
+              "created_at": {
+                "S": "2026-01-02T03:04:05Z"
+              },
+              "expires_at": {
+                "S": "2026-01-23T03:04:05Z"
+              },
+              "group_name": {
+                "S": "h100"
+              },
+              "instance_type_pattern": {
+                "S": "p5.*,p4d.24xlarge"
+              },
+              "last_attempt_at": {
+                "S": "0001-01-01T00:00:00Z"
+              },
+              "last_error_at": {
+                "S": "0001-01-01T00:00:00Z"
+              },
+              "last_match": {
+                "M": {
+                  "action_taken": {
+                    "S": "spawned"
+                  },
+                  "availability_zone": {
+                    "S": "us-east-1b"
+                  },
+                  "instance_id": {
+                    "S": "i-0123456789abcdef0"
+                  },
+                  "instance_type": {
+                    "S": "p5.48xlarge"
+                  },
+                  "is_spot": {
+                    "BOOL": false
+                  },
+                  "landed_at": {
+                    "S": "0001-01-01T00:00:00Z"
+                  },
+                  "matched_at": {
+                    "S": "2026-01-02T05:04:05Z"
+                  },
+                  "price": {
+                    "N": "98.32"
+                  },
+                  "region": {
+                    "S": "us-east-1"
+                  },
+                  "ttl_timestamp": {
+                    "N": "0"
+                  },
+                  "user_id": {
+                    "S": "arn:aws:sts::123456789012:assumed-role/dev/alice"
+                  },
+                  "watch_id": {
+                    "S": "AROAEXAMPLEID:alice/w-1a2b3c4d"
+                  }
+                }
+              },
+              "last_poll_error_at": {
+                "S": "0001-01-01T00:00:00Z"
+              },
+              "last_polled_at": {
+                "S": "0001-01-01T00:00:00Z"
+              },
+              "launch_config_json": {
+                "B": "eyJpYW1fcm9sZSI6InJlc2VhcmNoLXJvbGUiLCJpbnN0YW5jZV90eXBlIjoicDUuNDh4bGFyZ2UiLCJ0dGwiOiI4aCJ9"
+              },
+              "lease_expires_at": {
+                "S": "0001-01-01T00:00:00Z"
+              },
+              "match_count": {
+                "N": "1"
+              },
+              "notify_channels": {
+                "L": [
+                  {
+                    "M": {
+                      "target": {
+                        "S": "alice@example.com"
+                      },
+                      "type": {
+                        "S": "email"
+                      }
+                    }
+                  }
+                ]
+              },
+              "owner_id": {
+                "S": "AROAEXAMPLEID:alice"
+              },
+              "quota_capped_at": {
+                "S": "0001-01-01T00:00:00Z"
+              },
+              "regions": {
+                "L": [
+                  {
+                    "S": "us-east-1"
+                  }
+                ]
+              },
+              "remind_every_seconds": {
+                "N": "604800"
+              },
+              "remind_pause_after": {
+                "N": "2"
+              },
+              "service": {
+                "S": "ec2"
+              },
+              "spot": {
+                "BOOL": false
+              },
+              "status": {
+                "S": "matched"
+              },
+              "ttl_timestamp": {
+                "N": "1776913445"
+              },
+              "until_landed": {
+                "BOOL": true
+              },
+              "updated_at": {
+                "S": "2026-01-02T05:04:05Z"
+              },
+              "user_id": {
+                "S": "arn:aws:sts::123456789012:assumed-role/dev/alice"
+              },
+              "watch_id": {
+                "S": "AROAEXAMPLEID:alice/w-5e6f7a8b"
+              }
+            }
+          }
+        },
+        {
+          "name": "sagemaker watch",
+          "input": {
+            "watch_id": "AROAEXAMPLEID:alice/w-9c0d1e2f",
+            "user_id": "arn:aws:iam::123456789012:user/bob",
+            "status": "active",
+            "service": "sagemaker",
+            "instance_type_pattern": "ml.g5.2xlarge",
+            "regions": [
+              "us-west-2"
+            ],
+            "spot": false,
+            "max_price": 2.5,
+            "action": "spawn",
+            "sagemaker_job_json": "eyJSb2xlQXJuIjoiYXJuOmF3czppYW06OjEyMzQ1Njc4OTAxMjpyb2xlL3NtLWV4ZWMifQ==",
+            "created_at": "2026-01-02T03:04:05Z",
+            "updated_at": "2026-01-02T03:04:05Z",
+            "expires_at": "2026-01-02T09:04:05Z",
+            "ttl_timestamp": 1775120645,
+            "last_polled_at": "0001-01-01T00:00:00Z",
+            "match_count": 0,
+            "quota_capped_at": "0001-01-01T00:00:00Z",
+            "lease_expires_at": "0001-01-01T00:00:00Z"
+          },
+          "output": {
+            "item": {
+              "action": {
+                "S": "spawn"
+              },
+              "created_at": {
+                "S": "2026-01-02T03:04:05Z"
+              },
+              "expires_at": {
+                "S": "2026-01-02T09:04:05Z"
+              },
+              "instance_type_pattern": {
+                "S": "ml.g5.2xlarge"
+              },
+              "last_attempt_at": {
+                "S": "0001-01-01T00:00:00Z"
+              },
+              "last_error_at": {
+                "S": "0001-01-01T00:00:00Z"
+              },
+              "last_poll_error_at": {
+                "S": "0001-01-01T00:00:00Z"
+              },
+              "last_polled_at": {
+                "S": "0001-01-01T00:00:00Z"
+              },
+              "lease_expires_at": {
+                "S": "0001-01-01T00:00:00Z"
+              },
+              "match_count": {
+                "N": "0"
+              },
+              "max_price": {
+                "N": "2.5"
+              },
+              "quota_capped_at": {
+                "S": "0001-01-01T00:00:00Z"
+              },
+              "regions": {
+                "L": [
+                  {
+                    "S": "us-west-2"
+                  }
+                ]
+              },
+              "sagemaker_job_json": {
+                "B": "eyJSb2xlQXJuIjoiYXJuOmF3czppYW06OjEyMzQ1Njc4OTAxMjpyb2xlL3NtLWV4ZWMifQ=="
+              },
+              "service": {
+                "S": "sagemaker"
+              },
+              "spot": {
+                "BOOL": false
+              },
+              "status": {
+                "S": "active"
+              },
+              "ttl_timestamp": {
+                "N": "1775120645"
+              },
+              "updated_at": {
+                "S": "2026-01-02T03:04:05Z"
+              },
+              "user_id": {
+                "S": "arn:aws:iam::123456789012:user/bob"
+              },
+              "watch_id": {
+                "S": "AROAEXAMPLEID:alice/w-9c0d1e2f"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

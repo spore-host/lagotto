@@ -1,0 +1,703 @@
+{
+  "$format": "lagotto/parity-vectors/v1",
+  "area": "instance-type patterns",
+  "vectors": {
+    "compileAndMatch": {
+      "go": "watcher.patternToRegex + regexp.Compile + MatchString",
+      "note": "the error is Go regexp's text for a pattern RE2 refuses; the watch then never matches. Cases marked re2 in their name are where JS RegExp differs (lagotto-ts#35)",
+      "cases": [
+        {
+          "name": "glob",
+          "input": {
+            "candidates": [
+              "p5.48xlarge",
+              "p5e.48xlarge",
+              "P5.48XLARGE",
+              ".48xlarge",
+              "p.48xlarge",
+              "g5.xlarge",
+              "g5.2xlarge",
+              "xg5.xlarge",
+              "g6.4xlarge",
+              "g6.2xlarge",
+              "trn1.32xlarge",
+              "ml.g5.2xlarge",
+              "a",
+              "aa",
+              "c7g.large",
+              "c7g.4xlarge"
+            ],
+            "pattern": "p5.*"
+          },
+          "output": {
+            "matches": [
+              "p5.48xlarge"
+            ],
+            "regex": "^p5\\..*$"
+          }
+        },
+        {
+          "name": "exact",
+          "input": {
+            "candidates": [
+              "p5.48xlarge",
+              "p5e.48xlarge",
+              "P5.48XLARGE",
+              ".48xlarge",
+              "p.48xlarge",
+              "g5.xlarge",
+              "g5.2xlarge",
+              "xg5.xlarge",
+              "g6.4xlarge",
+              "g6.2xlarge",
+              "trn1.32xlarge",
+              "ml.g5.2xlarge",
+              "a",
+              "aa",
+              "c7g.large",
+              "c7g.4xlarge"
+            ],
+            "pattern": "g5.xlarge"
+          },
+          "output": {
+            "matches": [
+              "g5.xlarge"
+            ],
+            "regex": "^g5\\.xlarge$"
+          }
+        },
+        {
+          "name": "comma list",
+          "input": {
+            "candidates": [
+              "p5.48xlarge",
+              "p5e.48xlarge",
+              "P5.48XLARGE",
+              ".48xlarge",
+              "p.48xlarge",
+              "g5.xlarge",
+              "g5.2xlarge",
+              "xg5.xlarge",
+              "g6.4xlarge",
+              "g6.2xlarge",
+              "trn1.32xlarge",
+              "ml.g5.2xlarge",
+              "a",
+              "aa",
+              "c7g.large",
+              "c7g.4xlarge"
+            ],
+            "pattern": "g6.4xlarge,g6.2xlarge"
+          },
+          "output": {
+            "matches": [
+              "g6.4xlarge",
+              "g6.2xlarge"
+            ],
+            "regex": "^g6\\.4xlarge$|^g6\\.2xlarge$"
+          }
+        },
+        {
+          "name": "glob ? is a regex quantifier",
+          "input": {
+            "candidates": [
+              "p5.48xlarge",
+              "p5e.48xlarge",
+              "P5.48XLARGE",
+              ".48xlarge",
+              "p.48xlarge",
+              "g5.xlarge",
+              "g5.2xlarge",
+              "xg5.xlarge",
+              "g6.4xlarge",
+              "g6.2xlarge",
+              "trn1.32xlarge",
+              "ml.g5.2xlarge",
+              "a",
+              "aa",
+              "c7g.large",
+              "c7g.4xlarge"
+            ],
+            "pattern": "p?.48xlarge"
+          },
+          "output": {
+            "matches": [
+              ".48xlarge",
+              "p.48xlarge"
+            ],
+            "regex": "^p?\\.48xlarge$"
+          }
+        },
+        {
+          "name": "raw regex is unanchored",
+          "input": {
+            "candidates": [
+              "p5.48xlarge",
+              "p5e.48xlarge",
+              "P5.48XLARGE",
+              ".48xlarge",
+              "p.48xlarge",
+              "g5.xlarge",
+              "g5.2xlarge",
+              "xg5.xlarge",
+              "g6.4xlarge",
+              "g6.2xlarge",
+              "trn1.32xlarge",
+              "ml.g5.2xlarge",
+              "a",
+              "aa",
+              "c7g.large",
+              "c7g.4xlarge"
+            ],
+            "pattern": "\\d"
+          },
+          "output": {
+            "matches": [
+              "p5.48xlarge",
+              "p5e.48xlarge",
+              "P5.48XLARGE",
+              ".48xlarge",
+              "p.48xlarge",
+              "g5.xlarge",
+              "g5.2xlarge",
+              "xg5.xlarge",
+              "g6.4xlarge",
+              "g6.2xlarge",
+              "trn1.32xlarge",
+              "ml.g5.2xlarge",
+              "c7g.large",
+              "c7g.4xlarge"
+            ],
+            "regex": "\\d"
+          }
+        },
+        {
+          "name": "raw regex alternation",
+          "input": {
+            "candidates": [
+              "p5.48xlarge",
+              "p5e.48xlarge",
+              "P5.48XLARGE",
+              ".48xlarge",
+              "p.48xlarge",
+              "g5.xlarge",
+              "g5.2xlarge",
+              "xg5.xlarge",
+              "g6.4xlarge",
+              "g6.2xlarge",
+              "trn1.32xlarge",
+              "ml.g5.2xlarge",
+              "a",
+              "aa",
+              "c7g.large",
+              "c7g.4xlarge"
+            ],
+            "pattern": "^(trn1|p5)\\."
+          },
+          "output": {
+            "matches": [
+              "p5.48xlarge",
+              "trn1.32xlarge"
+            ],
+            "regex": "^(trn1|p5)\\."
+          }
+        },
+        {
+          "name": "re2 inline case-insensitive flag",
+          "input": {
+            "candidates": [
+              "p5.48xlarge",
+              "p5e.48xlarge",
+              "P5.48XLARGE",
+              ".48xlarge",
+              "p.48xlarge",
+              "g5.xlarge",
+              "g5.2xlarge",
+              "xg5.xlarge",
+              "g6.4xlarge",
+              "g6.2xlarge",
+              "trn1.32xlarge",
+              "ml.g5.2xlarge",
+              "a",
+              "aa",
+              "c7g.large",
+              "c7g.4xlarge"
+            ],
+            "pattern": "(?i)^P5\\..*$"
+          },
+          "output": {
+            "matches": [
+              "p5.48xlarge",
+              "P5.48XLARGE"
+            ],
+            "regex": "(?i)^P5\\..*$"
+          }
+        },
+        {
+          "name": "re2 refuses lookahead",
+          "input": {
+            "candidates": [
+              "p5.48xlarge",
+              "p5e.48xlarge",
+              "P5.48XLARGE",
+              ".48xlarge",
+              "p.48xlarge",
+              "g5.xlarge",
+              "g5.2xlarge",
+              "xg5.xlarge",
+              "g6.4xlarge",
+              "g6.2xlarge",
+              "trn1.32xlarge",
+              "ml.g5.2xlarge",
+              "a",
+              "aa",
+              "c7g.large",
+              "c7g.4xlarge"
+            ],
+            "pattern": "^g5\\.(?=x)"
+          },
+          "output": {
+            "regex": "^g5\\.(?=x)"
+          },
+          "error": "error parsing regexp: invalid or unsupported Perl syntax: `(?=`"
+        },
+        {
+          "name": "re2 refuses backreference",
+          "input": {
+            "candidates": [
+              "p5.48xlarge",
+              "p5e.48xlarge",
+              "P5.48XLARGE",
+              ".48xlarge",
+              "p.48xlarge",
+              "g5.xlarge",
+              "g5.2xlarge",
+              "xg5.xlarge",
+              "g6.4xlarge",
+              "g6.2xlarge",
+              "trn1.32xlarge",
+              "ml.g5.2xlarge",
+              "a",
+              "aa",
+              "c7g.large",
+              "c7g.4xlarge"
+            ],
+            "pattern": "^(a)\\1$"
+          },
+          "output": {
+            "regex": "^(a)\\1$"
+          },
+          "error": "error parsing regexp: invalid escape sequence: `\\1`"
+        },
+        {
+          "name": "re2 POSIX class",
+          "input": {
+            "candidates": [
+              "p5.48xlarge",
+              "p5e.48xlarge",
+              "P5.48XLARGE",
+              ".48xlarge",
+              "p.48xlarge",
+              "g5.xlarge",
+              "g5.2xlarge",
+              "xg5.xlarge",
+              "g6.4xlarge",
+              "g6.2xlarge",
+              "trn1.32xlarge",
+              "ml.g5.2xlarge",
+              "a",
+              "aa",
+              "c7g.large",
+              "c7g.4xlarge"
+            ],
+            "pattern": "^[[:alpha:]]+$"
+          },
+          "output": {
+            "matches": [
+              "a",
+              "aa"
+            ],
+            "regex": "^[[:alpha:]]+$"
+          }
+        },
+        {
+          "name": "re2 unicode class",
+          "input": {
+            "candidates": [
+              "p5.48xlarge",
+              "p5e.48xlarge",
+              "P5.48XLARGE",
+              ".48xlarge",
+              "p.48xlarge",
+              "g5.xlarge",
+              "g5.2xlarge",
+              "xg5.xlarge",
+              "g6.4xlarge",
+              "g6.2xlarge",
+              "trn1.32xlarge",
+              "ml.g5.2xlarge",
+              "a",
+              "aa",
+              "c7g.large",
+              "c7g.4xlarge"
+            ],
+            "pattern": "^\\pL+$"
+          },
+          "output": {
+            "matches": [
+              "a",
+              "aa"
+            ],
+            "regex": "^\\pL+$"
+          }
+        },
+        {
+          "name": "re2 \\z end of text",
+          "input": {
+            "candidates": [
+              "p5.48xlarge",
+              "p5e.48xlarge",
+              "P5.48XLARGE",
+              ".48xlarge",
+              "p.48xlarge",
+              "g5.xlarge",
+              "g5.2xlarge",
+              "xg5.xlarge",
+              "g6.4xlarge",
+              "g6.2xlarge",
+              "trn1.32xlarge",
+              "ml.g5.2xlarge",
+              "a",
+              "aa",
+              "c7g.large",
+              "c7g.4xlarge"
+            ],
+            "pattern": "^aa\\z"
+          },
+          "output": {
+            "matches": [
+              "aa"
+            ],
+            "regex": "^aa\\z"
+          }
+        },
+        {
+          "name": "counted repetition",
+          "input": {
+            "candidates": [
+              "p5.48xlarge",
+              "p5e.48xlarge",
+              "P5.48XLARGE",
+              ".48xlarge",
+              "p.48xlarge",
+              "g5.xlarge",
+              "g5.2xlarge",
+              "xg5.xlarge",
+              "g6.4xlarge",
+              "g6.2xlarge",
+              "trn1.32xlarge",
+              "ml.g5.2xlarge",
+              "a",
+              "aa",
+              "c7g.large",
+              "c7g.4xlarge"
+            ],
+            "pattern": "^a{2}$"
+          },
+          "output": {
+            "matches": [
+              "aa"
+            ],
+            "regex": "^a{2}$"
+          }
+        },
+        {
+          "name": "invalid regex",
+          "input": {
+            "candidates": [
+              "p5.48xlarge",
+              "p5e.48xlarge",
+              "P5.48XLARGE",
+              ".48xlarge",
+              "p.48xlarge",
+              "g5.xlarge",
+              "g5.2xlarge",
+              "xg5.xlarge",
+              "g6.4xlarge",
+              "g6.2xlarge",
+              "trn1.32xlarge",
+              "ml.g5.2xlarge",
+              "a",
+              "aa",
+              "c7g.large",
+              "c7g.4xlarge"
+            ],
+            "pattern": "^p5\\.(.*$"
+          },
+          "output": {
+            "regex": "^p5\\.(.*$"
+          },
+          "error": "error parsing regexp: missing closing ): `^p5\\.(.*$`"
+        }
+      ]
+    },
+    "patternToRegex": {
+      "go": "watcher.patternToRegex",
+      "cases": [
+        {
+          "name": "\"p5.*\"",
+          "input": "p5.*",
+          "output": "^p5\\..*$"
+        },
+        {
+          "name": "\"g5.xlarge\"",
+          "input": "g5.xlarge",
+          "output": "^g5\\.xlarge$"
+        },
+        {
+          "name": "\"c7g.*large\"",
+          "input": "c7g.*large",
+          "output": "^c7g\\..*large$"
+        },
+        {
+          "name": "\"^g5\\\\..*$\"",
+          "input": "^g5\\..*$",
+          "output": "^g5\\..*$"
+        },
+        {
+          "name": "\"a+b\"",
+          "input": "a+b",
+          "output": "a+b"
+        },
+        {
+          "name": "\"p?.48xlarge\"",
+          "input": "p?.48xlarge",
+          "output": "^p?\\.48xlarge$"
+        },
+        {
+          "name": "\"ml.g5.*\"",
+          "input": "ml.g5.*",
+          "output": "^ml\\.g5\\..*$"
+        },
+        {
+          "name": "\"\"",
+          "input": "",
+          "output": "^$"
+        },
+        {
+          "name": "\" \"",
+          "input": " ",
+          "output": "^ $"
+        },
+        {
+          "name": "\"g6.4xlarge,g6.2xlarge\"",
+          "input": "g6.4xlarge,g6.2xlarge",
+          "output": "^g6\\.4xlarge$|^g6\\.2xlarge$"
+        },
+        {
+          "name": "\"p5.*, ^g5\\\\.x\"",
+          "input": "p5.*, ^g5\\.x",
+          "output": "^p5\\..*$|^g5\\.x"
+        },
+        {
+          "name": "\"trn1.*|p5.*\"",
+          "input": "trn1.*|p5.*",
+          "output": "^trn1\\..*|p5\\..*$"
+        }
+      ]
+    },
+    "splitInstanceTypePatterns": {
+      "go": "watcher.splitInstanceTypePatterns",
+      "cases": [
+        {
+          "name": "\"p5.48xlarge\"",
+          "input": "p5.48xlarge",
+          "output": [
+            "p5.48xlarge"
+          ]
+        },
+        {
+          "name": "\"g6.4xlarge,g6.2xlarge\"",
+          "input": "g6.4xlarge,g6.2xlarge",
+          "output": [
+            "g6.4xlarge",
+            "g6.2xlarge"
+          ]
+        },
+        {
+          "name": "\" a , ,b \"",
+          "input": " a , ,b ",
+          "output": [
+            "a",
+            "b"
+          ]
+        },
+        {
+          "name": "\"\"",
+          "input": "",
+          "output": []
+        },
+        {
+          "name": "\" , \"",
+          "input": " , ",
+          "output": []
+        },
+        {
+          "name": "\"p5.*,\"",
+          "input": "p5.*,",
+          "output": [
+            "p5.*"
+          ]
+        }
+      ]
+    },
+    "validateWatchPattern": {
+      "go": "watcher.ValidateWatchPattern",
+      "cases": [
+        {
+          "name": " \"p5.48xlarge\"",
+          "input": {
+            "pattern": "p5.48xlarge",
+            "service": ""
+          },
+          "output": null
+        },
+        {
+          "name": "ec2 \"p5.*\"",
+          "input": {
+            "pattern": "p5.*",
+            "service": "ec2"
+          },
+          "output": null
+        },
+        {
+          "name": "ec2 \"ml.g5.2xlarge\"",
+          "input": {
+            "pattern": "ml.g5.2xlarge",
+            "service": "ec2"
+          },
+          "output": null,
+          "error": "EC2 pattern \"ml.g5.2xlarge\" must not start with \"ml.\"; use --service sagemaker for SageMaker types"
+        },
+        {
+          "name": "sagemaker \"ml.g5.2xlarge\"",
+          "input": {
+            "pattern": "ml.g5.2xlarge",
+            "service": "sagemaker"
+          },
+          "output": null
+        },
+        {
+          "name": "sagemaker \"g5.2xlarge\"",
+          "input": {
+            "pattern": "g5.2xlarge",
+            "service": "sagemaker"
+          },
+          "output": null,
+          "error": "SageMaker pattern \"g5.2xlarge\" must start with \"ml.\" (e.g. ml.g5.2xlarge)"
+        },
+        {
+          "name": "sagemaker \"ml.g5.*,ml.p4d.24xlarge\"",
+          "input": {
+            "pattern": "ml.g5.*,ml.p4d.24xlarge",
+            "service": "sagemaker"
+          },
+          "output": null
+        },
+        {
+          "name": "sagemaker \"ml.g5.*,p4d.24xlarge\"",
+          "input": {
+            "pattern": "ml.g5.*,p4d.24xlarge",
+            "service": "sagemaker"
+          },
+          "output": null,
+          "error": "SageMaker pattern \"p4d.24xlarge\" must start with \"ml.\" (e.g. ml.g5.2xlarge)"
+        },
+        {
+          "name": "ec2 \"\"",
+          "input": {
+            "pattern": "",
+            "service": "ec2"
+          },
+          "output": null,
+          "error": "instance type pattern must not be empty"
+        },
+        {
+          "name": "ec2 \" , \"",
+          "input": {
+            "pattern": " , ",
+            "service": "ec2"
+          },
+          "output": null,
+          "error": "instance type pattern must not be empty"
+        }
+      ]
+    },
+    "wildcardToRegex": {
+      "go": "watcher.wildcardToRegex",
+      "note": "a sub-pattern containing any of ^ $ ( ) [ ] { } + \\ is a raw regex, used as-is; otherwise . is escaped, * becomes .*, and the result is anchored. ? and | are NOT regex markers",
+      "cases": [
+        {
+          "name": "\"p5.*\"",
+          "input": "p5.*",
+          "output": "^p5\\..*$"
+        },
+        {
+          "name": "\"g5.xlarge\"",
+          "input": "g5.xlarge",
+          "output": "^g5\\.xlarge$"
+        },
+        {
+          "name": "\"c7g.*large\"",
+          "input": "c7g.*large",
+          "output": "^c7g\\..*large$"
+        },
+        {
+          "name": "\"^g5\\\\..*$\"",
+          "input": "^g5\\..*$",
+          "output": "^g5\\..*$"
+        },
+        {
+          "name": "\"a+b\"",
+          "input": "a+b",
+          "output": "a+b"
+        },
+        {
+          "name": "\"p?.48xlarge\"",
+          "input": "p?.48xlarge",
+          "output": "^p?\\.48xlarge$"
+        },
+        {
+          "name": "\"ml.g5.*\"",
+          "input": "ml.g5.*",
+          "output": "^ml\\.g5\\..*$"
+        },
+        {
+          "name": "\"\"",
+          "input": "",
+          "output": "^$"
+        },
+        {
+          "name": "\" \"",
+          "input": " ",
+          "output": "^ $"
+        },
+        {
+          "name": "\"g6.4xlarge,g6.2xlarge\"",
+          "input": "g6.4xlarge,g6.2xlarge",
+          "output": "^g6\\.4xlarge,g6\\.2xlarge$"
+        },
+        {
+          "name": "\"p5.*, ^g5\\\\.x\"",
+          "input": "p5.*, ^g5\\.x",
+          "output": "p5.*, ^g5\\.x"
+        },
+        {
+          "name": "\"trn1.*|p5.*\"",
+          "input": "trn1.*|p5.*",
+          "output": "^trn1\\..*|p5\\..*$"
+        }
+      ]
+    }
+  }
+}

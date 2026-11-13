@@ -1,0 +1,1023 @@
+{
+  "$format": "lagotto/parity-vectors/v1",
+  "area": "CLI flag and watch validation",
+  "vectors": {
+    "ackExpiry": {
+      "go": "cmd.ackExpiry",
+      "note": "now is fixed; output is the new expires_at",
+      "cases": [
+        {
+          "name": "until-landed 7d pause 2",
+          "input": {
+            "now": "2026-01-02T03:04:05Z",
+            "watch": {
+              "watch_id": "w-1a2b3c4d",
+              "user_id": "",
+              "status": "",
+              "instance_type_pattern": "",
+              "regions": null,
+              "spot": false,
+              "action": "",
+              "created_at": "0001-01-01T00:00:00Z",
+              "updated_at": "0001-01-01T00:00:00Z",
+              "expires_at": "0001-01-01T00:00:00Z",
+              "ttl_timestamp": 0,
+              "last_polled_at": "0001-01-01T00:00:00Z",
+              "match_count": 0,
+              "quota_capped_at": "0001-01-01T00:00:00Z",
+              "until_landed": true,
+              "remind_every_seconds": 604800,
+              "remind_pause_after": 2,
+              "lease_expires_at": "0001-01-01T00:00:00Z"
+            }
+          },
+          "output": "2026-01-23T03:04:05Z"
+        },
+        {
+          "name": "until-landed 1d pause 0",
+          "input": {
+            "now": "2026-01-02T03:04:05Z",
+            "watch": {
+              "watch_id": "w-1a2b3c4d",
+              "user_id": "",
+              "status": "",
+              "instance_type_pattern": "",
+              "regions": null,
+              "spot": false,
+              "action": "",
+              "created_at": "0001-01-01T00:00:00Z",
+              "updated_at": "0001-01-01T00:00:00Z",
+              "expires_at": "0001-01-01T00:00:00Z",
+              "ttl_timestamp": 0,
+              "last_polled_at": "0001-01-01T00:00:00Z",
+              "match_count": 0,
+              "quota_capped_at": "0001-01-01T00:00:00Z",
+              "until_landed": true,
+              "remind_every_seconds": 86400,
+              "lease_expires_at": "0001-01-01T00:00:00Z"
+            }
+          },
+          "output": "2026-01-03T03:04:05Z"
+        },
+        {
+          "name": "ttl watch",
+          "input": {
+            "now": "2026-01-02T03:04:05Z",
+            "watch": {
+              "watch_id": "w-1a2b3c4d",
+              "user_id": "",
+              "status": "",
+              "instance_type_pattern": "",
+              "regions": null,
+              "spot": false,
+              "action": "",
+              "created_at": "0001-01-01T00:00:00Z",
+              "updated_at": "0001-01-01T00:00:00Z",
+              "expires_at": "2026-01-02T04:04:05Z",
+              "ttl_timestamp": 0,
+              "last_polled_at": "0001-01-01T00:00:00Z",
+              "match_count": 0,
+              "quota_capped_at": "0001-01-01T00:00:00Z",
+              "lease_expires_at": "0001-01-01T00:00:00Z"
+            }
+          },
+          "output": null,
+          "error": "watch w-1a2b3c4d is not an --until-landed watch, so there is nothing to acknowledge; use 'lagotto extend w-1a2b3c4d --ttl <duration>' to move its expiry"
+        }
+      ]
+    },
+    "parseNotifyChannels": {
+      "go": "cmd.parseNotifyChannels",
+      "note": "an email is stored normalized. A webhook host is resolved (DNS) and must not be private, so a resolvable public host is not a fixed vector",
+      "cases": [
+        {
+          "name": "[email:Alice@Example.COM]",
+          "input": [
+            "email:Alice@Example.COM"
+          ],
+          "output": [
+            {
+              "type": "email",
+              "target": "alice@example.com"
+            }
+          ]
+        },
+        {
+          "name": "[webhook:https://127.0.0.1/x]",
+          "input": [
+            "webhook:https://127.0.0.1/x"
+          ],
+          "output": null,
+          "error": "invalid webhook URL: webhook must not target loopback addresses"
+        },
+        {
+          "name": "[webhook:http://hooks.example.com/x]",
+          "input": [
+            "webhook:http://hooks.example.com/x"
+          ],
+          "output": null,
+          "error": "invalid webhook URL: webhook URL must use HTTPS (got \"http\")"
+        },
+        {
+          "name": "[sns:arn:aws:sns:us-east-1:123456789012:t]",
+          "input": [
+            "sns:arn:aws:sns:us-east-1:123456789012:t"
+          ],
+          "output": [
+            {
+              "type": "sns",
+              "target": "arn:aws:sns:us-east-1:123456789012:t"
+            }
+          ]
+        },
+        {
+          "name": "[slack:#ops]",
+          "input": [
+            "slack:#ops"
+          ],
+          "output": null,
+          "error": "invalid notify type \"slack\": must be email, webhook, or sns"
+        },
+        {
+          "name": "[alice@example.com]",
+          "input": [
+            "alice@example.com"
+          ],
+          "output": null,
+          "error": "invalid notify format \"alice@example.com\": expected type:target (e.g., email:user@example.com)"
+        },
+        {
+          "name": "[email:not-an-address]",
+          "input": [
+            "email:not-an-address"
+          ],
+          "output": null,
+          "error": "invalid email address \"not-an-address\""
+        },
+        {
+          "name": "[email:a@example.com sns:arn:aws:sns:us-west-2:123456789012:t]",
+          "input": [
+            "email:a@example.com",
+            "sns:arn:aws:sns:us-west-2:123456789012:t"
+          ],
+          "output": [
+            {
+              "type": "email",
+              "target": "a@example.com"
+            },
+            {
+              "type": "sns",
+              "target": "arn:aws:sns:us-west-2:123456789012:t"
+            }
+          ]
+        },
+        {
+          "name": "[]",
+          "input": [],
+          "output": []
+        }
+      ]
+    },
+    "parseTTLFlag": {
+      "go": "cmd.parseTTLFlag",
+      "note": "output is seconds; tries time.ParseDuration, then lagotto's d/w form",
+      "cases": [
+        {
+          "name": "\"24h\"",
+          "input": "24h",
+          "output": 86400
+        },
+        {
+          "name": "\"30m\"",
+          "input": "30m",
+          "output": 1800
+        },
+        {
+          "name": "\"7d\"",
+          "input": "7d",
+          "output": 604800
+        },
+        {
+          "name": "\"1.5d\"",
+          "input": "1.5d",
+          "output": 129600
+        },
+        {
+          "name": "\"2d12h\"",
+          "input": "2d12h",
+          "output": 216000
+        },
+        {
+          "name": "\"0\"",
+          "input": "0",
+          "output": null,
+          "error": "invalid TTL \"0\": it must be greater than zero (to keep hunting until a launch lands, use --until-landed instead of --ttl)"
+        },
+        {
+          "name": "\"-1h\"",
+          "input": "-1h",
+          "output": null,
+          "error": "invalid TTL \"-1h\": it must be greater than zero (to keep hunting until a launch lands, use --until-landed instead of --ttl)"
+        },
+        {
+          "name": "\"0s\"",
+          "input": "0s",
+          "output": null,
+          "error": "invalid TTL \"0s\": it must be greater than zero (to keep hunting until a launch lands, use --until-landed instead of --ttl)"
+        },
+        {
+          "name": "\"abc\"",
+          "input": "abc",
+          "output": null,
+          "error": "invalid TTL \"abc\": invalid duration \"abc\": expected a number at \"abc\"; expected <number><unit>[<number><unit>…] with unit w, d, h, m or s (e.g. 1w, 7d, 1.5d, 24h, 1h30m)"
+        },
+        {
+          "name": "\"\"",
+          "input": "",
+          "output": null,
+          "error": "invalid TTL \"\": invalid duration \"\": expected <number><unit>[<number><unit>…] with unit w, d, h, m or s (e.g. 1w, 7d, 1.5d, 24h, 1h30m)"
+        }
+      ]
+    },
+    "parseUntilLandedFlags": {
+      "go": "cmd.parseUntilLandedFlags",
+      "note": "the *_set inputs say whether the flag was given; output remind_every in seconds",
+      "cases": [
+        {
+          "name": "off",
+          "input": {
+            "until_landed": false,
+            "remind": "7d",
+            "ttl_set": false,
+            "remind_set": false,
+            "maintain_set": false,
+            "until_set": false
+          },
+          "output": {
+            "ack_window": 0,
+            "enabled": false,
+            "remind_every": 0,
+            "remind_pause_after": 0
+          }
+        },
+        {
+          "name": "remind without until-landed",
+          "input": {
+            "until_landed": false,
+            "remind": "1d",
+            "ttl_set": false,
+            "remind_set": true,
+            "maintain_set": false,
+            "until_set": false
+          },
+          "output": null,
+          "error": "--remind only applies to --until-landed watches"
+        },
+        {
+          "name": "default remind",
+          "input": {
+            "until_landed": true,
+            "remind": "7d",
+            "ttl_set": false,
+            "remind_set": false,
+            "maintain_set": false,
+            "until_set": false
+          },
+          "output": {
+            "ack_window": 1814400,
+            "enabled": true,
+            "remind_every": 604800,
+            "remind_pause_after": 2
+          }
+        },
+        {
+          "name": "remind 36h",
+          "input": {
+            "until_landed": true,
+            "remind": "36h",
+            "ttl_set": false,
+            "remind_set": true,
+            "maintain_set": false,
+            "until_set": false
+          },
+          "output": {
+            "ack_window": 388800,
+            "enabled": true,
+            "remind_every": 129600,
+            "remind_pause_after": 2
+          }
+        },
+        {
+          "name": "remind 1.5d",
+          "input": {
+            "until_landed": true,
+            "remind": "1.5d",
+            "ttl_set": false,
+            "remind_set": true,
+            "maintain_set": false,
+            "until_set": false
+          },
+          "output": {
+            "ack_window": 388800,
+            "enabled": true,
+            "remind_every": 129600,
+            "remind_pause_after": 2
+          }
+        },
+        {
+          "name": "with ttl",
+          "input": {
+            "until_landed": true,
+            "remind": "7d",
+            "ttl_set": true,
+            "remind_set": false,
+            "maintain_set": false,
+            "until_set": false
+          },
+          "output": null,
+          "error": "--until-landed and --ttl are mutually exclusive: an until-landed watch has no TTL, it pauses unless acknowledged (see --remind)"
+        },
+        {
+          "name": "with maintain",
+          "input": {
+            "until_landed": true,
+            "remind": "7d",
+            "ttl_set": false,
+            "remind_set": false,
+            "maintain_set": true,
+            "until_set": false
+          },
+          "output": null,
+          "error": "--until-landed and --maintain are mutually exclusive: a fleet ends on its --until condition"
+        },
+        {
+          "name": "with until",
+          "input": {
+            "until_landed": true,
+            "remind": "7d",
+            "ttl_set": false,
+            "remind_set": false,
+            "maintain_set": false,
+            "until_set": true
+          },
+          "output": null,
+          "error": "--until-landed and --until are mutually exclusive"
+        },
+        {
+          "name": "remind too short",
+          "input": {
+            "until_landed": true,
+            "remind": "5m",
+            "ttl_set": false,
+            "remind_set": true,
+            "maintain_set": false,
+            "until_set": false
+          },
+          "output": null,
+          "error": "--remind must be at least 1h (got 5m0s)"
+        },
+        {
+          "name": "remind too long",
+          "input": {
+            "until_landed": true,
+            "remind": "31d",
+            "ttl_set": false,
+            "remind_set": true,
+            "maintain_set": false,
+            "until_set": false
+          },
+          "output": null,
+          "error": "--remind is capped at 30d (got 31d): an until-landed watch must be acknowledged at least that often"
+        },
+        {
+          "name": "remind invalid",
+          "input": {
+            "until_landed": true,
+            "remind": "soon",
+            "ttl_set": false,
+            "remind_set": true,
+            "maintain_set": false,
+            "until_set": false
+          },
+          "output": null,
+          "error": "invalid --remind \"soon\": invalid duration \"soon\": expected a number at \"soon\"; expected <number><unit>[<number><unit>…] with unit w, d, h, m or s (e.g. 1w, 7d, 1.5d, 24h, 1h30m)"
+        }
+      ]
+    },
+    "spawnConfigLaunchPrivileges": {
+      "go": "watcher.ParseSpawnConfigYAML + SpawnConfigFile.ValidateLaunchPrivileges + InstanceProfileName",
+      "note": "the spawn-config rules a stored watch or scheduled launch must pass, at creation and again by the poller before every launch",
+      "cases": [
+        {
+          "name": "plain",
+          "input": "instance_type: p5.48xlarge\nttl: 8h\n",
+          "output": {
+            "instance_profile": "lagotto-instance-role"
+          }
+        },
+        {
+          "name": "authorized role",
+          "input": "iam_role: research-role\n",
+          "output": {
+            "instance_profile": "research-role"
+          }
+        },
+        {
+          "name": "inline policy document",
+          "input": "iam_policy_document: '{\"Version\":\"2012-10-17\"}'\n",
+          "output": null,
+          "error": "spawn config sets iam_policy_document: the hosted poller never creates or changes IAM roles. Ask an administrator to create a role with the permissions the workload needs and authorize it with 'lagotto setup --instance-role NAME', then set iam_role: NAME"
+        },
+        {
+          "name": "policy file",
+          "input": "iam_policy_file: ./policy.json\n",
+          "output": null,
+          "error": "spawn config sets iam_policy_file: the hosted poller never creates or changes IAM roles. Ask an administrator to create a role with the permissions the workload needs and authorize it with 'lagotto setup --instance-role NAME', then set iam_role: NAME"
+        },
+        {
+          "name": "managed policies",
+          "input": "iam_policy: [AmazonS3ReadOnlyAccess]\n",
+          "output": null,
+          "error": "spawn config sets iam_policy: the hosted poller never creates or changes IAM roles. Ask an administrator to create a role with the permissions the workload needs and authorize it with 'lagotto setup --instance-role NAME', then set iam_role: NAME"
+        },
+        {
+          "name": "spored role",
+          "input": "iam_role: spored-instance-role\n",
+          "output": null,
+          "error": "iam_role \"spored-instance-role\" is not allowed: it is spawn's shared default instance role (spored*), which every 'spawn launch' in the account uses"
+        },
+        {
+          "name": "poller role",
+          "input": "iam_role: lagotto-capacity-poller-role\n",
+          "output": null,
+          "error": "iam_role \"lagotto-capacity-poller-role\" is not allowed: it is one of lagotto's own poller roles"
+        },
+        {
+          "name": "role ARN",
+          "input": "iam_role: arn:aws:iam::123456789012:role/x\n",
+          "output": null,
+          "error": "\"arn:aws:iam::123456789012:role/x\" looks like an ARN or path; pass just the role name"
+        },
+        {
+          "name": "wildcard role",
+          "input": "iam_role: research-*\n",
+          "output": null,
+          "error": "instance role name \"research-*\" contains a wildcard; name the role exactly"
+        },
+        {
+          "name": "user data file",
+          "input": "user_data_file: ./boot.sh\n",
+          "output": null,
+          "error": "spawn config references a user-data file; a stored watch must carry its user data inline (lagotto reads the file when the watch is created, on your machine), and the poller never reads its own filesystem"
+        },
+        {
+          "name": "user data @path",
+          "input": "user_data: '@/etc/passwd'\n",
+          "output": null,
+          "error": "spawn config references a user-data file; a stored watch must carry its user data inline (lagotto reads the file when the watch is created, on your machine), and the poller never reads its own filesystem"
+        },
+        {
+          "name": "bad key name",
+          "input": "key_name: \"bad\\nname\"\n",
+          "output": null,
+          "error": "key_name \"bad\\nname\" is not a valid EC2 key pair name"
+        },
+        {
+          "name": "unknown key",
+          "input": "instance_typo: p5.48xlarge\n",
+          "output": null,
+          "error": "unknown spawn config key: \"instance_typo\" (did you mean instance_type?). Accepted keys: name, instance_type, region, ami, spot, ttl, idle_timeout, on_complete, pre_stop, pre_stop_timeout, command, iam_policy, iam_role, iam_policy_file, iam_policy_document, efs_id, fsx_id, fsx_create, fsx_lifecycle, fsx_s3_bucket, fsx_import_path, fsx_export_path, fsx_mount_point, fsx_storage_capacity, cost_limit, key_name, session_timeout, reservation_id, capacity_block, user_data, user_data_file, tags, volume_size, spot_max_price, completion_file. Note: this is lagotto's own schema, not `spawn launch --config` (which takes only plugins:)"
+        }
+      ]
+    },
+    "validateFleetFlags": {
+      "go": "cmd.validateFleetFlags",
+      "cases": [
+        {
+          "name": "spawn maintain=0 until=\"\"",
+          "input": {
+            "action": "spawn",
+            "maintain": 0,
+            "until": ""
+          },
+          "output": null
+        },
+        {
+          "name": "spawn maintain=3 until=\"\"",
+          "input": {
+            "action": "spawn",
+            "maintain": 3,
+            "until": ""
+          },
+          "output": null
+        },
+        {
+          "name": "hold maintain=3 until=\"\"",
+          "input": {
+            "action": "hold",
+            "maintain": 3,
+            "until": ""
+          },
+          "output": null,
+          "error": "--maintain requires --action spawn (a fleet maintains launched workers)"
+        },
+        {
+          "name": "spawn maintain=-1 until=\"\"",
+          "input": {
+            "action": "spawn",
+            "maintain": -1,
+            "until": ""
+          },
+          "output": null,
+          "error": "--maintain must be >= 0"
+        },
+        {
+          "name": "spawn maintain=0 until=\"s3-empty:s3://b/k/\"",
+          "input": {
+            "action": "spawn",
+            "maintain": 0,
+            "until": "s3-empty:s3://b/k/"
+          },
+          "output": null,
+          "error": "--until requires --maintain (it's the fleet's completion condition)"
+        },
+        {
+          "name": "spawn maintain=3 until=\"s3-empty:s3://b/k/\"",
+          "input": {
+            "action": "spawn",
+            "maintain": 3,
+            "until": "s3-empty:s3://b/k/"
+          },
+          "output": null,
+          "error": "invalid --until: invalid s3-empty spec \"s3-empty:s3://b/k/\": want 's3://…/wanted minus s3://…/done'"
+        },
+        {
+          "name": "spawn maintain=3 until=\"bogus:x\"",
+          "input": {
+            "action": "spawn",
+            "maintain": 3,
+            "until": "bogus:x"
+          },
+          "output": null,
+          "error": "invalid --until: invalid --until \"bogus:x\": unknown kind \"bogus\" (want s3-empty, http-200, or shell)"
+        }
+      ]
+    },
+    "validateFleetRegions": {
+      "go": "cmd.validateFleetRegions",
+      "cases": [
+        {
+          "name": "maintain=0 regions=[]",
+          "input": {
+            "maintain": 0,
+            "regions": null
+          },
+          "output": null
+        },
+        {
+          "name": "maintain=3 regions=[]",
+          "input": {
+            "maintain": 3,
+            "regions": null
+          },
+          "output": null,
+          "error": "--maintain needs --regions: a fleet counts its running workers in each region it names, so it can't be maintained across every enabled region; name the region(s) to launch in with --regions"
+        },
+        {
+          "name": "maintain=3 regions=[\" \"]",
+          "input": {
+            "maintain": 3,
+            "regions": [
+              " "
+            ]
+          },
+          "output": null,
+          "error": "--maintain needs --regions: a fleet counts its running workers in each region it names, so it can't be maintained across every enabled region; name the region(s) to launch in with --regions"
+        },
+        {
+          "name": "maintain=3 regions=[\"us-east-1\"]",
+          "input": {
+            "maintain": 3,
+            "regions": [
+              "us-east-1"
+            ]
+          },
+          "output": null
+        }
+      ]
+    },
+    "validateServiceFlags": {
+      "go": "cmd.validateServiceFlags",
+      "note": "action_given is whether --action was passed (notify is the default)",
+      "cases": [
+        {
+          "name": "ec2 spawn given=true config=\"\"",
+          "input": {
+            "action": "spawn",
+            "action_given": true,
+            "sagemaker_config": "",
+            "service": "ec2"
+          },
+          "output": null
+        },
+        {
+          "name": "sagemaker spawn given=true config=\"job.yaml\"",
+          "input": {
+            "action": "spawn",
+            "action_given": true,
+            "sagemaker_config": "job.yaml",
+            "service": "sagemaker"
+          },
+          "output": null
+        },
+        {
+          "name": "sagemaker spawn given=true config=\"\"",
+          "input": {
+            "action": "spawn",
+            "action_given": true,
+            "sagemaker_config": "",
+            "service": "sagemaker"
+          },
+          "output": null,
+          "error": "--sagemaker-config is required for --service sagemaker: it is the job lagotto submits and retries until SageMaker provisions it (add --notify to be told when it does)"
+        },
+        {
+          "name": "sagemaker notify given=false config=\"job.yaml\"",
+          "input": {
+            "action": "notify",
+            "action_given": false,
+            "sagemaker_config": "job.yaml",
+            "service": "sagemaker"
+          },
+          "output": null,
+          "error": "--action notify is not supported for --service sagemaker: SageMaker has no capacity signal short of submitting a job, so a notify-only watch has nothing to notify on and could never fire (#195). Use --action spawn --sagemaker-config <job.yaml> to submit your job and retry it until SageMaker provisions it; add --notify to be told when it does (notify is the default --action)"
+        },
+        {
+          "name": "sagemaker notify given=true config=\"job.yaml\"",
+          "input": {
+            "action": "notify",
+            "action_given": true,
+            "sagemaker_config": "job.yaml",
+            "service": "sagemaker"
+          },
+          "output": null,
+          "error": "--action notify is not supported for --service sagemaker: SageMaker has no capacity signal short of submitting a job, so a notify-only watch has nothing to notify on and could never fire (#195). Use --action spawn --sagemaker-config <job.yaml> to submit your job and retry it until SageMaker provisions it; add --notify to be told when it does"
+        },
+        {
+          "name": "sagemaker hold given=true config=\"job.yaml\"",
+          "input": {
+            "action": "hold",
+            "action_given": true,
+            "sagemaker_config": "job.yaml",
+            "service": "sagemaker"
+          },
+          "output": null,
+          "error": "--action hold is not supported for --service sagemaker (no capacity-reservation equivalent)"
+        }
+      ]
+    },
+    "validateWatchSearch": {
+      "go": "cmd.validateWatchSearch",
+      "note": "input is a stored watch (lagotto's JSON); the check every create and update runs before any AWS call",
+      "cases": [
+        {
+          "name": "hold",
+          "input": {
+            "watch_id": "",
+            "user_id": "",
+            "status": "",
+            "instance_type_pattern": "p5.48xlarge",
+            "regions": [
+              "us-east-1"
+            ],
+            "spot": false,
+            "action": "hold",
+            "created_at": "0001-01-01T00:00:00Z",
+            "updated_at": "0001-01-01T00:00:00Z",
+            "expires_at": "0001-01-01T00:00:00Z",
+            "ttl_timestamp": 0,
+            "last_polled_at": "0001-01-01T00:00:00Z",
+            "match_count": 0,
+            "quota_capped_at": "0001-01-01T00:00:00Z",
+            "lease_expires_at": "0001-01-01T00:00:00Z"
+          },
+          "output": null
+        },
+        {
+          "name": "spawn with config",
+          "input": {
+            "watch_id": "",
+            "user_id": "",
+            "status": "",
+            "instance_type_pattern": "p5.*",
+            "regions": null,
+            "spot": false,
+            "action": "spawn",
+            "launch_config_json": "eyJpbnN0YW5jZV90eXBlIjoicDUuNDh4bGFyZ2UifQ==",
+            "created_at": "0001-01-01T00:00:00Z",
+            "updated_at": "0001-01-01T00:00:00Z",
+            "expires_at": "0001-01-01T00:00:00Z",
+            "ttl_timestamp": 0,
+            "last_polled_at": "0001-01-01T00:00:00Z",
+            "match_count": 0,
+            "quota_capped_at": "0001-01-01T00:00:00Z",
+            "lease_expires_at": "0001-01-01T00:00:00Z"
+          },
+          "output": null
+        },
+        {
+          "name": "spawn without config",
+          "input": {
+            "watch_id": "",
+            "user_id": "",
+            "status": "",
+            "instance_type_pattern": "p5.*",
+            "regions": null,
+            "spot": false,
+            "action": "spawn",
+            "created_at": "0001-01-01T00:00:00Z",
+            "updated_at": "0001-01-01T00:00:00Z",
+            "expires_at": "0001-01-01T00:00:00Z",
+            "ttl_timestamp": 0,
+            "last_polled_at": "0001-01-01T00:00:00Z",
+            "match_count": 0,
+            "quota_capped_at": "0001-01-01T00:00:00Z",
+            "lease_expires_at": "0001-01-01T00:00:00Z"
+          },
+          "output": null,
+          "error": "--spawn-config is required when --action=spawn"
+        },
+        {
+          "name": "sagemaker spawn without spawn config",
+          "input": {
+            "watch_id": "",
+            "user_id": "",
+            "status": "",
+            "service": "sagemaker",
+            "instance_type_pattern": "ml.g5.2xlarge",
+            "regions": null,
+            "spot": false,
+            "action": "spawn",
+            "created_at": "0001-01-01T00:00:00Z",
+            "updated_at": "0001-01-01T00:00:00Z",
+            "expires_at": "0001-01-01T00:00:00Z",
+            "ttl_timestamp": 0,
+            "last_polled_at": "0001-01-01T00:00:00Z",
+            "match_count": 0,
+            "quota_capped_at": "0001-01-01T00:00:00Z",
+            "lease_expires_at": "0001-01-01T00:00:00Z"
+          },
+          "output": null
+        },
+        {
+          "name": "ec2 ml pattern",
+          "input": {
+            "watch_id": "",
+            "user_id": "",
+            "status": "",
+            "instance_type_pattern": "ml.g5.2xlarge",
+            "regions": null,
+            "spot": false,
+            "action": "hold",
+            "created_at": "0001-01-01T00:00:00Z",
+            "updated_at": "0001-01-01T00:00:00Z",
+            "expires_at": "0001-01-01T00:00:00Z",
+            "ttl_timestamp": 0,
+            "last_polled_at": "0001-01-01T00:00:00Z",
+            "match_count": 0,
+            "quota_capped_at": "0001-01-01T00:00:00Z",
+            "lease_expires_at": "0001-01-01T00:00:00Z"
+          },
+          "output": null,
+          "error": "EC2 pattern \"ml.g5.2xlarge\" must not start with \"ml.\"; use --service sagemaker for SageMaker types"
+        },
+        {
+          "name": "sagemaker hold",
+          "input": {
+            "watch_id": "",
+            "user_id": "",
+            "status": "",
+            "service": "sagemaker",
+            "instance_type_pattern": "ml.g5.2xlarge",
+            "regions": null,
+            "spot": false,
+            "action": "hold",
+            "created_at": "0001-01-01T00:00:00Z",
+            "updated_at": "0001-01-01T00:00:00Z",
+            "expires_at": "0001-01-01T00:00:00Z",
+            "ttl_timestamp": 0,
+            "last_polled_at": "0001-01-01T00:00:00Z",
+            "match_count": 0,
+            "quota_capped_at": "0001-01-01T00:00:00Z",
+            "lease_expires_at": "0001-01-01T00:00:00Z"
+          },
+          "output": null,
+          "error": "--action hold is not supported for --service sagemaker (no capacity-reservation equivalent)"
+        },
+        {
+          "name": "negative max price",
+          "input": {
+            "watch_id": "",
+            "user_id": "",
+            "status": "",
+            "instance_type_pattern": "p5.48xlarge",
+            "regions": null,
+            "spot": false,
+            "max_price": -1,
+            "action": "hold",
+            "created_at": "0001-01-01T00:00:00Z",
+            "updated_at": "0001-01-01T00:00:00Z",
+            "expires_at": "0001-01-01T00:00:00Z",
+            "ttl_timestamp": 0,
+            "last_polled_at": "0001-01-01T00:00:00Z",
+            "match_count": 0,
+            "quota_capped_at": "0001-01-01T00:00:00Z",
+            "lease_expires_at": "0001-01-01T00:00:00Z"
+          },
+          "output": null,
+          "error": "--max-price must be >= 0 (0 = any)"
+        },
+        {
+          "name": "fleet without regions",
+          "input": {
+            "watch_id": "",
+            "user_id": "",
+            "status": "",
+            "instance_type_pattern": "g6.4xlarge",
+            "regions": null,
+            "spot": false,
+            "action": "spawn",
+            "launch_config_json": "eyJpbnN0YW5jZV90eXBlIjoicDUuNDh4bGFyZ2UifQ==",
+            "desired_count": 3,
+            "created_at": "0001-01-01T00:00:00Z",
+            "updated_at": "0001-01-01T00:00:00Z",
+            "expires_at": "0001-01-01T00:00:00Z",
+            "ttl_timestamp": 0,
+            "last_polled_at": "0001-01-01T00:00:00Z",
+            "match_count": 0,
+            "quota_capped_at": "0001-01-01T00:00:00Z",
+            "lease_expires_at": "0001-01-01T00:00:00Z"
+          },
+          "output": null,
+          "error": "--maintain needs --regions: a fleet counts its running workers in each region it names, so it can't be maintained across every enabled region; name the region(s) to launch in with --regions"
+        },
+        {
+          "name": "fleet with regions",
+          "input": {
+            "watch_id": "",
+            "user_id": "",
+            "status": "",
+            "instance_type_pattern": "g6.4xlarge",
+            "regions": [
+              "us-east-1"
+            ],
+            "spot": false,
+            "action": "spawn",
+            "launch_config_json": "eyJpbnN0YW5jZV90eXBlIjoicDUuNDh4bGFyZ2UifQ==",
+            "desired_count": 3,
+            "created_at": "0001-01-01T00:00:00Z",
+            "updated_at": "0001-01-01T00:00:00Z",
+            "expires_at": "0001-01-01T00:00:00Z",
+            "ttl_timestamp": 0,
+            "last_polled_at": "0001-01-01T00:00:00Z",
+            "match_count": 0,
+            "quota_capped_at": "0001-01-01T00:00:00Z",
+            "lease_expires_at": "0001-01-01T00:00:00Z"
+          },
+          "output": null
+        },
+        {
+          "name": "hold fleet",
+          "input": {
+            "watch_id": "",
+            "user_id": "",
+            "status": "",
+            "instance_type_pattern": "g6.4xlarge",
+            "regions": [
+              "us-east-1"
+            ],
+            "spot": false,
+            "action": "hold",
+            "desired_count": 3,
+            "created_at": "0001-01-01T00:00:00Z",
+            "updated_at": "0001-01-01T00:00:00Z",
+            "expires_at": "0001-01-01T00:00:00Z",
+            "ttl_timestamp": 0,
+            "last_polled_at": "0001-01-01T00:00:00Z",
+            "match_count": 0,
+            "quota_capped_at": "0001-01-01T00:00:00Z",
+            "lease_expires_at": "0001-01-01T00:00:00Z"
+          },
+          "output": null,
+          "error": "--maintain requires --action spawn (a fleet maintains launched workers)"
+        },
+        {
+          "name": "until-landed hold with email",
+          "input": {
+            "watch_id": "",
+            "user_id": "",
+            "status": "",
+            "instance_type_pattern": "p5.48xlarge",
+            "regions": null,
+            "spot": false,
+            "action": "hold",
+            "notify_channels": [
+              {
+                "type": "email",
+                "target": "a@example.com"
+              }
+            ],
+            "created_at": "0001-01-01T00:00:00Z",
+            "updated_at": "0001-01-01T00:00:00Z",
+            "expires_at": "0001-01-01T00:00:00Z",
+            "ttl_timestamp": 0,
+            "last_polled_at": "0001-01-01T00:00:00Z",
+            "match_count": 0,
+            "quota_capped_at": "0001-01-01T00:00:00Z",
+            "until_landed": true,
+            "remind_every_seconds": 604800,
+            "remind_pause_after": 2,
+            "lease_expires_at": "0001-01-01T00:00:00Z"
+          },
+          "output": null
+        },
+        {
+          "name": "until-landed hold without a channel",
+          "input": {
+            "watch_id": "",
+            "user_id": "",
+            "status": "",
+            "instance_type_pattern": "p5.48xlarge",
+            "regions": null,
+            "spot": false,
+            "action": "hold",
+            "created_at": "0001-01-01T00:00:00Z",
+            "updated_at": "0001-01-01T00:00:00Z",
+            "expires_at": "0001-01-01T00:00:00Z",
+            "ttl_timestamp": 0,
+            "last_polled_at": "0001-01-01T00:00:00Z",
+            "match_count": 0,
+            "quota_capped_at": "0001-01-01T00:00:00Z",
+            "until_landed": true,
+            "remind_every_seconds": 604800,
+            "lease_expires_at": "0001-01-01T00:00:00Z"
+          },
+          "output": null,
+          "error": "--until-landed --action hold needs a --notify channel (email:, webhook: or sns:): the watch has no TTL, so a channel is how you hear that it landed, paused itself, or needs acknowledging"
+        },
+        {
+          "name": "until-landed notify",
+          "input": {
+            "watch_id": "",
+            "user_id": "",
+            "status": "",
+            "instance_type_pattern": "p5.48xlarge",
+            "regions": null,
+            "spot": false,
+            "action": "notify",
+            "notify_channels": [
+              {
+                "type": "email",
+                "target": "a@example.com"
+              }
+            ],
+            "created_at": "0001-01-01T00:00:00Z",
+            "updated_at": "0001-01-01T00:00:00Z",
+            "expires_at": "0001-01-01T00:00:00Z",
+            "ttl_timestamp": 0,
+            "last_polled_at": "0001-01-01T00:00:00Z",
+            "match_count": 0,
+            "quota_capped_at": "0001-01-01T00:00:00Z",
+            "until_landed": true,
+            "remind_every_seconds": 604800,
+            "lease_expires_at": "0001-01-01T00:00:00Z"
+          },
+          "output": null,
+          "error": "--until-landed is not supported for --action notify yet: notify fires when the type is offered, which is not a sign a launch would succeed, so the watch would end on its first poll. Use --action spawn (the launch itself is the capacity test) or --action hold, or keep notify with a --ttl"
+        },
+        {
+          "name": "empty pattern",
+          "input": {
+            "watch_id": "",
+            "user_id": "",
+            "status": "",
+            "instance_type_pattern": "",
+            "regions": null,
+            "spot": false,
+            "action": "hold",
+            "created_at": "0001-01-01T00:00:00Z",
+            "updated_at": "0001-01-01T00:00:00Z",
+            "expires_at": "0001-01-01T00:00:00Z",
+            "ttl_timestamp": 0,
+            "last_polled_at": "0001-01-01T00:00:00Z",
+            "match_count": 0,
+            "quota_capped_at": "0001-01-01T00:00:00Z",
+            "lease_expires_at": "0001-01-01T00:00:00Z"
+          },
+          "output": null,
+          "error": "instance type pattern must not be empty"
+        }
+      ]
+    }
+  }
+}

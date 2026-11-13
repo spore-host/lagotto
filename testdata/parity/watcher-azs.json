@@ -1,0 +1,149 @@
+{
+  "$format": "lagotto/parity-vectors/v1",
+  "area": "availability-zone preference",
+  "vectors": {
+    "azAllowed": {
+      "go": "watcher.azAllowed",
+      "cases": [
+        {
+          "name": "no preference",
+          "input": {
+            "az": "us-east-1a",
+            "pref": null
+          },
+          "output": true
+        },
+        {
+          "name": "in preference",
+          "input": {
+            "az": "us-east-1b",
+            "pref": [
+              "us-east-1b"
+            ]
+          },
+          "output": true
+        },
+        {
+          "name": "not in preference",
+          "input": {
+            "az": "us-east-1a",
+            "pref": [
+              "us-east-1b"
+            ]
+          },
+          "output": false
+        },
+        {
+          "name": "empty az",
+          "input": {
+            "az": "",
+            "pref": [
+              "us-east-1b"
+            ]
+          },
+          "output": true
+        },
+        {
+          "name": "prioritized",
+          "input": {
+            "az": "us-east-1c",
+            "pref": [
+              "us-east-1c",
+              "us-east-1a",
+              "us-east-1z"
+            ]
+          },
+          "output": true
+        }
+      ]
+    },
+    "orderAZs": {
+      "go": "watcher.orderAZs",
+      "cases": [
+        {
+          "name": "no preference",
+          "input": {
+            "offered": [
+              "us-east-1a",
+              "us-east-1b",
+              "us-east-1c"
+            ],
+            "pref": null
+          },
+          "output": [
+            "us-east-1a",
+            "us-east-1b",
+            "us-east-1c"
+          ]
+        },
+        {
+          "name": "in preference",
+          "input": {
+            "offered": [
+              "us-east-1a",
+              "us-east-1b",
+              "us-east-1c"
+            ],
+            "pref": [
+              "us-east-1b"
+            ]
+          },
+          "output": [
+            "us-east-1b"
+          ]
+        },
+        {
+          "name": "not in preference",
+          "input": {
+            "offered": [
+              "us-east-1a",
+              "us-east-1b",
+              "us-east-1c"
+            ],
+            "pref": [
+              "us-east-1b"
+            ]
+          },
+          "output": [
+            "us-east-1b"
+          ]
+        },
+        {
+          "name": "empty az",
+          "input": {
+            "offered": [
+              "us-east-1a",
+              "us-east-1b",
+              "us-east-1c"
+            ],
+            "pref": [
+              "us-east-1b"
+            ]
+          },
+          "output": [
+            "us-east-1b"
+          ]
+        },
+        {
+          "name": "prioritized",
+          "input": {
+            "offered": [
+              "us-east-1a",
+              "us-east-1b",
+              "us-east-1c"
+            ],
+            "pref": [
+              "us-east-1c",
+              "us-east-1a",
+              "us-east-1z"
+            ]
+          },
+          "output": [
+            "us-east-1c",
+            "us-east-1a"
+          ]
+        }
+      ]
+    }
+  }
+}
