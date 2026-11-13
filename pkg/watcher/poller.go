@@ -100,6 +100,53 @@ type Poller struct {
 	// test seam pattern.
 	notifyGroupLanded func(ctx context.Context, w *Watch, g *WatchGroup, m *MatchResult, cancelled []string) error
 	notifyGroupExtra  func(ctx context.Context, w *Watch, g *WatchGroup, m *MatchResult) error
+	// enabledRegions caches the account's enabled regions for a watch that names
+	// none (#306): an empty Regions means "all enabled regions", resolved here at
+	// poll time. Filled on first use and kept for enabledRegionsTTL, so one cycle
+	// costs at most one DescribeRegions.
+	enabledRegions   []string
+	enabledRegionsAt time.Time
+}
+
+// regionLister is the optional slice of truffle that lists the account's enabled
+// regions. *truffleaws.Client satisfies it; a test fake may not, and then a watch
+// with no regions is reported as a poll error rather than silently searching none.
+type regionLister interface {
+	GetEnabledRegions(ctx context.Context) ([]string, error)
+}
+
+// enabledRegionsTTL bounds how long the enabled-region list is reused. Enabling or
+// disabling a region is rare and takes minutes to settle, so a few minutes is safe.
+const enabledRegionsTTL = 10 * time.Minute
+
+// resolveRegions returns regions, or the account's enabled regions when regions
+// is empty (#306: "all enabled regions" at poll time). An error means the list
+// could not be resolved; the caller records it on the watches instead of
+// searching zero regions, which used to look like a typo'd pattern (#135).
+func (p *Poller) resolveRegions(ctx context.Context, regions []string) ([]string, error) {
+	if len(regions) > 0 {
+		return regions, nil
+	}
+	now := time.Now()
+	if p.now != nil {
+		now = p.now()
+	}
+	if len(p.enabledRegions) > 0 && now.Sub(p.enabledRegionsAt) < enabledRegionsTTL {
+		return p.enabledRegions, nil
+	}
+	lister, ok := p.truffle.(regionLister)
+	if !ok {
+		return nil, fmt.Errorf("watch names no regions and the capacity searcher cannot list the account's enabled regions; set --regions")
+	}
+	enabled, err := lister.GetEnabledRegions(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list enabled regions for a watch with no --regions: %w", err)
+	}
+	if len(enabled) == 0 {
+		return nil, fmt.Errorf("the account reports no enabled regions; set --regions")
+	}
+	p.enabledRegions, p.enabledRegionsAt = enabled, now
+	return enabled, nil
 }
 
 // WatchFilter scopes a poll sweep to a subset of watches (#47). A zero-value
@@ -1271,6 +1318,14 @@ func (p *Poller) pollGroup(ctx context.Context, regions []string, pattern string
 	matcher, err := regexp.Compile(regexPattern)
 	if err != nil {
 		return fmt.Errorf("compile pattern %q: %w", pattern, err)
+	}
+
+	// An empty region list means every enabled region (#306). Resolve it here so
+	// the search never runs across zero regions.
+	regions, err = p.resolveRegions(ctx, regions)
+	if err != nil {
+		p.recordPollError(ctx, watches, err)
+		return err
 	}
 
 	if p.verbose {
