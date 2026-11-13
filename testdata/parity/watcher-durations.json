@@ -1,0 +1,323 @@
+{
+  "$format": "lagotto/parity-vectors/v1",
+  "area": "durations",
+  "vectors": {
+    "formatSpan": {
+      "go": "watcher.FormatSpan",
+      "note": "input is seconds",
+      "cases": [
+        {
+          "name": "0s",
+          "input": 0,
+          "output": "0s"
+        },
+        {
+          "name": "1h30m0s",
+          "input": 5400,
+          "output": "1h30m0s"
+        },
+        {
+          "name": "36h0m0s",
+          "input": 129600,
+          "output": "36h"
+        },
+        {
+          "name": "24h0m0s",
+          "input": 86400,
+          "output": "1d"
+        },
+        {
+          "name": "504h0m0s",
+          "input": 1814400,
+          "output": "21d"
+        },
+        {
+          "name": "720h0m0s",
+          "input": 2592000,
+          "output": "30d"
+        },
+        {
+          "name": "45s",
+          "input": 45,
+          "output": "45s"
+        }
+      ]
+    },
+    "goParseDuration": {
+      "go": "time.ParseDuration",
+      "note": "output is seconds; Go's own parser, which lagotto-ts has as parseGoDuration",
+      "cases": [
+        {
+          "name": "\"30m\"",
+          "input": "30m",
+          "output": 1800
+        },
+        {
+          "name": "\"1h\"",
+          "input": "1h",
+          "output": 3600
+        },
+        {
+          "name": "\"90m\"",
+          "input": "90m",
+          "output": 5400
+        },
+        {
+          "name": "\"1.5h\"",
+          "input": "1.5h",
+          "output": 5400
+        },
+        {
+          "name": "\"1d\"",
+          "input": "1d",
+          "output": null,
+          "error": "time: unknown unit \"d\" in duration \"1d\""
+        },
+        {
+          "name": "\"1.5d\"",
+          "input": "1.5d",
+          "output": null,
+          "error": "time: unknown unit \"d\" in duration \"1.5d\""
+        },
+        {
+          "name": "\"2d12h\"",
+          "input": "2d12h",
+          "output": null,
+          "error": "time: unknown unit \"d\" in duration \"2d12h\""
+        },
+        {
+          "name": "\"1w\"",
+          "input": "1w",
+          "output": null,
+          "error": "time: unknown unit \"w\" in duration \"1w\""
+        },
+        {
+          "name": "\"2w3d\"",
+          "input": "2w3d",
+          "output": null,
+          "error": "time: unknown unit \"w\" in duration \"2w3d\""
+        },
+        {
+          "name": "\"36h\"",
+          "input": "36h",
+          "output": 129600
+        },
+        {
+          "name": "\"0\"",
+          "input": "0",
+          "output": 0
+        },
+        {
+          "name": "\"0s\"",
+          "input": "0s",
+          "output": 0
+        },
+        {
+          "name": "\"-1h\"",
+          "input": "-1h",
+          "output": -3600
+        },
+        {
+          "name": "\"5abcd\"",
+          "input": "5abcd",
+          "output": null,
+          "error": "time: unknown unit \"abcd\" in duration \"5abcd\""
+        },
+        {
+          "name": "\"d\"",
+          "input": "d",
+          "output": null,
+          "error": "time: invalid duration \"d\""
+        },
+        {
+          "name": "\"\"",
+          "input": "",
+          "output": null,
+          "error": "time: invalid duration \"\""
+        },
+        {
+          "name": "\"1x\"",
+          "input": "1x",
+          "output": null,
+          "error": "time: unknown unit \"x\" in duration \"1x\""
+        },
+        {
+          "name": "\"10\"",
+          "input": "10",
+          "output": null,
+          "error": "time: missing unit in duration \"10\""
+        },
+        {
+          "name": "\"1h30m\"",
+          "input": "1h30m",
+          "output": 5400
+        },
+        {
+          "name": "\"300ms\"",
+          "input": "300ms",
+          "output": 0.3
+        },
+        {
+          "name": "\"1.5.5h\"",
+          "input": "1.5.5h",
+          "output": null,
+          "error": "time: missing unit in duration \"1.5.5h\""
+        },
+        {
+          "name": "\"100000w\"",
+          "input": "100000w",
+          "output": null,
+          "error": "time: unknown unit \"w\" in duration \"100000w\""
+        },
+        {
+          "name": "\".5d\"",
+          "input": ".5d",
+          "output": null,
+          "error": "time: unknown unit \"d\" in duration \".5d\""
+        },
+        {
+          "name": "\"1e3s\"",
+          "input": "1e3s",
+          "output": null,
+          "error": "time: unknown unit \"e\" in duration \"1e3s\""
+        }
+      ]
+    },
+    "parseDuration": {
+      "go": "watcher.ParseDuration",
+      "note": "output is seconds",
+      "cases": [
+        {
+          "name": "\"30m\"",
+          "input": "30m",
+          "output": 1800
+        },
+        {
+          "name": "\"1h\"",
+          "input": "1h",
+          "output": 3600
+        },
+        {
+          "name": "\"90m\"",
+          "input": "90m",
+          "output": 5400
+        },
+        {
+          "name": "\"1.5h\"",
+          "input": "1.5h",
+          "output": 5400
+        },
+        {
+          "name": "\"1d\"",
+          "input": "1d",
+          "output": 86400
+        },
+        {
+          "name": "\"1.5d\"",
+          "input": "1.5d",
+          "output": 129600
+        },
+        {
+          "name": "\"2d12h\"",
+          "input": "2d12h",
+          "output": 216000
+        },
+        {
+          "name": "\"1w\"",
+          "input": "1w",
+          "output": 604800
+        },
+        {
+          "name": "\"2w3d\"",
+          "input": "2w3d",
+          "output": 1468800
+        },
+        {
+          "name": "\"36h\"",
+          "input": "36h",
+          "output": 129600
+        },
+        {
+          "name": "\"0\"",
+          "input": "0",
+          "output": null,
+          "error": "invalid duration \"0\": \"0\" has no unit; expected <number><unit>[<number><unit>…] with unit w, d, h, m or s (e.g. 1w, 7d, 1.5d, 24h, 1h30m)"
+        },
+        {
+          "name": "\"0s\"",
+          "input": "0s",
+          "output": 0
+        },
+        {
+          "name": "\"-1h\"",
+          "input": "-1h",
+          "output": null,
+          "error": "invalid duration \"-1h\": expected a number at \"-1h\"; expected <number><unit>[<number><unit>…] with unit w, d, h, m or s (e.g. 1w, 7d, 1.5d, 24h, 1h30m)"
+        },
+        {
+          "name": "\"5abcd\"",
+          "input": "5abcd",
+          "output": null,
+          "error": "invalid duration \"5abcd\": unknown unit at \"abcd\"; expected <number><unit>[<number><unit>…] with unit w, d, h, m or s (e.g. 1w, 7d, 1.5d, 24h, 1h30m)"
+        },
+        {
+          "name": "\"d\"",
+          "input": "d",
+          "output": null,
+          "error": "invalid duration \"d\": expected a number at \"d\"; expected <number><unit>[<number><unit>…] with unit w, d, h, m or s (e.g. 1w, 7d, 1.5d, 24h, 1h30m)"
+        },
+        {
+          "name": "\"\"",
+          "input": "",
+          "output": null,
+          "error": "invalid duration \"\": expected <number><unit>[<number><unit>…] with unit w, d, h, m or s (e.g. 1w, 7d, 1.5d, 24h, 1h30m)"
+        },
+        {
+          "name": "\"1x\"",
+          "input": "1x",
+          "output": null,
+          "error": "invalid duration \"1x\": unknown unit at \"x\"; expected <number><unit>[<number><unit>…] with unit w, d, h, m or s (e.g. 1w, 7d, 1.5d, 24h, 1h30m)"
+        },
+        {
+          "name": "\"10\"",
+          "input": "10",
+          "output": null,
+          "error": "invalid duration \"10\": \"10\" has no unit; expected <number><unit>[<number><unit>…] with unit w, d, h, m or s (e.g. 1w, 7d, 1.5d, 24h, 1h30m)"
+        },
+        {
+          "name": "\"1h30m\"",
+          "input": "1h30m",
+          "output": 5400
+        },
+        {
+          "name": "\"300ms\"",
+          "input": "300ms",
+          "output": 0.3
+        },
+        {
+          "name": "\"1.5.5h\"",
+          "input": "1.5.5h",
+          "output": null,
+          "error": "invalid duration \"1.5.5h\": time: missing unit in duration \"1.5.5h\""
+        },
+        {
+          "name": "\"100000w\"",
+          "input": "100000w",
+          "output": null,
+          "error": "invalid duration \"100000w\": too large"
+        },
+        {
+          "name": "\".5d\"",
+          "input": ".5d",
+          "output": 43200
+        },
+        {
+          "name": "\"1e3s\"",
+          "input": "1e3s",
+          "output": null,
+          "error": "invalid duration \"1e3s\": unknown unit at \"e3s\"; expected <number><unit>[<number><unit>…] with unit w, d, h, m or s (e.g. 1w, 7d, 1.5d, 24h, 1h30m)"
+        }
+      ]
+    }
+  }
+}
