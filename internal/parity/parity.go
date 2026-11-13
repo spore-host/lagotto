@@ -25,6 +25,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -71,48 +72,71 @@ func ErrText(err error) string {
 // otherwise fails t when the committed file differs.
 func Check(t *testing.T, name string, f File) {
 	t.Helper()
+	root, err := moduleRoot()
+	if err == nil {
+		err = sync(filepath.Join(root, "testdata", "parity", name), f, *update)
+	}
+	if err != nil {
+		t.Error(err)
+	}
+}
+
+// Encode is the canonical bytes of a vector file: indented, keys sorted,
+// HTML not escaped, a trailing newline.
+func Encode(f File) ([]byte, error) {
 	f.Format = Format
 	var b bytes.Buffer
 	enc := json.NewEncoder(&b)
 	enc.SetEscapeHTML(false)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(f); err != nil {
-		t.Fatalf("encode %s: %v", name, err)
+		return nil, err
 	}
-	path := filepath.Join(moduleRoot(t), "testdata", "parity", name)
-	if *update {
+	return b.Bytes(), nil
+}
+
+// sync writes f to path when write is set, and otherwise reports whether the
+// file at path is f.
+func sync(path string, f File, write bool) error {
+	b, err := Encode(f)
+	if err != nil {
+		return fmt.Errorf("encode %s: %w", filepath.Base(path), err)
+	}
+	if write {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatal(err)
+			return err
 		}
-		if err := os.WriteFile(path, b.Bytes(), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		return
+		return os.WriteFile(path, b, 0o644)
 	}
 	got, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read %s: %v (run 'make parity-vectors')", path, err)
+		return fmt.Errorf("read %s: %w (run 'make parity-vectors')", path, err)
 	}
-	if !bytes.Equal(got, b.Bytes()) {
-		t.Errorf("testdata/parity/%s is stale: the code now produces different vectors. "+
-			"Run 'make parity-vectors', review the diff (lagotto-ts must match it), and commit", name)
+	if !bytes.Equal(got, b) {
+		return fmt.Errorf("testdata/parity/%s is stale: the code now produces different vectors. "+
+			"Run 'make parity-vectors', review the diff (lagotto-ts must match it), and commit", filepath.Base(path))
 	}
+	return nil
 }
 
-// moduleRoot is the directory of the lagotto module's go.mod.
-func moduleRoot(t *testing.T) string {
-	t.Helper()
+// moduleRoot is the directory of the lagotto module's go.mod, at or above
+// the working directory.
+func moduleRoot() (string, error) {
 	dir, err := os.Getwd()
 	if err != nil {
-		t.Fatal(err)
+		return "", err
 	}
+	return findModuleRoot(dir)
+}
+
+func findModuleRoot(dir string) (string, error) {
 	for {
 		if b, err := os.ReadFile(filepath.Join(dir, "go.mod")); err == nil && bytes.Contains(b, []byte("module github.com/spore-host/lagotto\n")) {
-			return dir
+			return dir, nil
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			t.Fatal("no lagotto go.mod above the working directory")
+			return "", fmt.Errorf("no lagotto go.mod above %s", dir)
 		}
 		dir = parent
 	}
