@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -173,13 +174,18 @@ func TestWaitOwnerIndexAndResolver(t *testing.T) {
 	ownerIndexPoll = time.Millisecond
 	t.Cleanup(func() { ownerIndexPoll = old })
 	f := &flipIndex{}
-	if err := waitOwnerIndex(context.Background(), f, "t"); err != nil || f.calls < 3 {
+	var progress strings.Builder
+	if err := waitOwnerIndex(context.Background(), f, "t", &progress); err != nil || f.calls < 3 {
 		t.Errorf("waitOwnerIndex = %v after %d calls", err, f.calls)
+	}
+	// #309: the wait says what it is waiting on, every poll, and when it ends.
+	if got := progress.String(); !strings.Contains(got, watcher.OwnerIndexName+": CREATING") || !strings.Contains(got, "is ACTIVE") {
+		t.Errorf("progress = %q, want a CREATING line and the ACTIVE line", got)
 	}
 	oldWait := ownerIndexWait
 	ownerIndexWait = 5 * time.Millisecond
 	t.Cleanup(func() { ownerIndexWait = oldWait })
-	if err := waitOwnerIndex(context.Background(), &flipIndex{calls: -1 << 30}, "t"); err == nil || !strings.Contains(err.Error(), "re-run") {
+	if err := waitOwnerIndex(context.Background(), &flipIndex{calls: -1 << 30}, "t", io.Discard); err == nil || !strings.Contains(err.Error(), "re-run") {
 		t.Errorf("timeout: %v", err)
 	}
 	r := resolverFor(fakePrincipals{})
@@ -332,5 +338,20 @@ func TestDeleteInstanceRoles_Errors(t *testing.T) {
 	}
 	if err := deleteInstanceRoles(context.Background(), failingInstanceRoleTeardown{}, &bytes.Buffer{}); err != nil {
 		t.Errorf("nothing to delete: %v", err)
+	}
+}
+
+type unreadableIndex struct{ ownerKeysDynamo }
+
+func (unreadableIndex) DescribeTable(context.Context, *dynamodb.DescribeTableInput, ...func(*dynamodb.Options)) (*dynamodb.DescribeTableOutput, error) {
+	return nil, errors.New("AccessDenied")
+}
+
+func TestOwnerIndexProgressLine(t *testing.T) {
+	if got := ownerIndexProgressLine(context.Background(), unreadableIndex{}, "t", 3*time.Second); !strings.Contains(got, "status unreadable") {
+		t.Errorf("unreadable: %q", got)
+	}
+	if got := ownerIndexProgressLine(context.Background(), &flipIndex{}, "t", 12*time.Second); !strings.Contains(got, "CREATING, building, 12s elapsed") {
+		t.Errorf("building: %q", got)
 	}
 }

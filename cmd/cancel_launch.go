@@ -42,25 +42,7 @@ func runCancelScheduledLaunch(ctx context.Context, out, errOut io.Writer, cfg aw
 	if err != nil {
 		return fmt.Errorf("get caller identity: %w", err)
 	}
-	// The caller's own key first, then a legacy one (see watchKeys).
-	var sl *watcher.ScheduledLaunch
-	for _, key := range watchKeys(id, aws.ToString(identity.UserId)) {
-		got, err := store.GetScheduledLaunch(ctx, key)
-		if err != nil {
-			// No scheduled-launches table in this region: nothing was ever
-			// launched here. A denial is a key outside the caller's prefix.
-			var noTable *types.ResourceNotFoundException
-			if errors.As(err, &noTable) || isAccessDenied(err) {
-				continue
-			}
-			return err
-		}
-		if got != nil {
-			sl = got
-			break
-		}
-	}
-	sl, err = authorizeLaunchOwner(ctx, stsClient, id, cfg.Region, sl)
+	sl, err := findOwnedScheduledLaunch(ctx, store, stsClient, aws.ToString(identity.UserId), id, cfg.Region)
 	if err != nil {
 		return err
 	}
@@ -75,6 +57,30 @@ func runCancelScheduledLaunch(ctx context.Context, out, errOut io.Writer, cfg aw
 		},
 		confirm: func(prompt string) bool { return cancelYes || confirmCancel(prompt) },
 	})
+}
+
+// findOwnedScheduledLaunch reads the caller's scheduled launch id in region:
+// the caller's own key first, then a legacy one (see watchKeys). Anything not
+// the caller's is "not found" (authorizeLaunchOwner).
+func findOwnedScheduledLaunch(ctx context.Context, store *watcher.Store, stsClient stsIdentityAPI, callerID, id, region string) (*watcher.ScheduledLaunch, error) {
+	var sl *watcher.ScheduledLaunch
+	for _, key := range watchKeys(id, callerID) {
+		got, err := store.GetScheduledLaunch(ctx, key)
+		if err != nil {
+			// No scheduled-launches table in this region: nothing was ever
+			// launched here. A denial is a key outside the caller's prefix.
+			var noTable *types.ResourceNotFoundException
+			if errors.As(err, &noTable) || isAccessDenied(err) {
+				continue
+			}
+			return nil, err
+		}
+		if got != nil {
+			sl = got
+			break
+		}
+	}
+	return authorizeLaunchOwner(ctx, stsClient, id, region, sl)
 }
 
 // authorizeLaunchOwner returns sl if the caller owns it, else the same "not
@@ -163,6 +169,9 @@ func cancelScheduledLaunch(ctx context.Context, out, errOut io.Writer, sl *watch
 	if what != "" {
 		prompt += ", " + what
 	}
+	// Cancel-then-relaunch is how a config change used to be made, and a
+	// relaunch that is refused leaves nothing armed (#309).
+	prompt += "?\n  (To change only its spawn config, keeping the schedule: lagotto update " + watcher.ShortID(sl.ScheduleID) + " --spawn-config <file>.)\nCancel it"
 	if !c.confirm(prompt + "?") {
 		_, _ = fmt.Fprintln(out, "Aborted.")
 		return nil

@@ -242,7 +242,7 @@ func statements(accountID string, configBuckets []string) []statement {
 			Resource:  runtimeiam.SchedulerInvokeRoleARN(accountID),
 			Condition: stringEquals("iam:PassedToService", "scheduler.amazonaws.com")},
 
-		// watch/update read the poller's runtime policy to check that a watch's
+		// watch/update/list read the poller's runtime policy to check that a watch's
 		// iam_role is authorized (#170); doctor reads both roles and both
 		// policies for drift.
 		{Sid: "ReadLagottoRoles", Action: []string{"iam:GetRole", "iam:GetRolePolicy"},

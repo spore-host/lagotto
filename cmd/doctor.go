@@ -56,6 +56,16 @@ so an AZ that offers the watch's type but has no default subnet is skipped, and
 the watch can never land there. Each such AZ is a warning, with the
 'aws ec2 create-default-subnet' command that fixes it.
 
+It checks every active spawn watch and armed scheduled launch (lagotto#309)
+against the rules the poller applies before it launches, and FAILS for each
+one it will refuse when it fires: a spawn config armed with iam_policy,
+iam_policy_file or iam_policy_document (refused since 0.70.0), an iam_role no
+rule allows, or one the deployed poller is not authorized to use. Each comes
+with the fix: authorize a role ('lagotto setup --instance-role'), name it as
+iam_role, then 'lagotto update <id> --spawn-config <file>'. Scheduled launches
+are listed with a Scan, so administrator credentials; without them the check
+is a warning.
+
 It lists every active --action notify watch as a warning (lagotto#283): notify
 is deprecated and will be removed in a later release, because it reports that a
 type is offered at or under the max price, not that there is capacity. Use
@@ -157,6 +167,8 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	report := doctor.Evaluate(state)
 	appendLaunchScheduleCheck(ctx, report, cfg.Region, deploy.New(cfg), store.ScheduledLaunchScheduleNames)
 	appendNotifyWatchCheck(ctx, report, store.ListActiveWatches)
+	appendLaunchConfigCheck(ctx, report, store.ListActiveWatches, store.ListScheduledLaunches,
+		newRoleCheck(ctx, iam.NewFromConfig(cfg), *acct.Account))
 	appendArtifactBucketCheck(ctx, report, *acct.Account, deploy.New(cfg), regionalArtifactProbe{cfg})
 	appendCallerCheck(ctx, report, iam.NewFromConfig(cfg), aws.ToString(acct.Arn), *acct.Account, cfg.Region)
 
@@ -177,6 +189,36 @@ func appendNotifyWatchCheck(ctx context.Context, report *doctor.Report, list fun
 	if c, ok := doctor.EvalNotifyWatches(watches); ok {
 		report.Checks = append(report.Checks, c)
 	}
+}
+
+// appendLaunchConfigCheck adds doctor's stored-launch-config check (#309):
+// every active spawn watch and armed scheduled launch in the region whose
+// config the poller will refuse when it fires.
+func appendLaunchConfigCheck(ctx context.Context, report *doctor.Report, listWatches func(context.Context) ([]watcher.Watch, error),
+	listLaunches func(context.Context) ([]watcher.ScheduledLaunch, error), roles roleCheck) {
+	watches, werr := listWatches(ctx)
+	launches, lerr := listLaunches(ctx)
+	checked := 0
+	for i := range watches {
+		if watchLaunchesConfig(&watches[i]) {
+			checked++
+		}
+	}
+	for i := range launches {
+		if launches[i].Armed() {
+			checked++
+		}
+	}
+	var listErr error
+	switch {
+	case werr != nil && lerr != nil:
+		listErr = fmt.Errorf("list watches: %v; list scheduled launches: %v", werr, lerr)
+	case werr != nil:
+		listErr = fmt.Errorf("list watches: %w", werr)
+	case lerr != nil:
+		listErr = fmt.Errorf("list scheduled launches: %w", lerr)
+	}
+	report.Checks = append(report.Checks, doctor.EvalLaunchConfigs(launchConfigFindings(watches, launches, roles), checked, listErr))
 }
 
 // activeSubnetCoverage checks each spawn/hold watch's default-subnet coverage

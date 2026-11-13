@@ -68,13 +68,19 @@ func resolverFor(ids principalIDs) watcher.OwnerResolver {
 func ensureOwnerKeys(ctx context.Context, db ownerKeysDynamo, ids principalIDs, tables watcher.MigrateTables, out io.Writer) (watcher.MigrateReport, error) {
 	created, err := watcher.EnsureOwnerIndex(ctx, db, tables.Watches)
 	if created || errors.Is(err, watcher.ErrOwnerIndexNotReady) {
-		_, _ = fmt.Fprintf(out, "Building %s on %s (lagotto list reads it)...\n", watcher.OwnerIndexName, tables.Watches)
-		err = waitOwnerIndex(ctx, db, tables.Watches)
+		// Say up front that this is slow (#309): a silent setup for minutes
+		// looks hung, and an interrupted one has to be re-run.
+		_, _ = fmt.Fprintf(out, "Building %s on %s (lagotto list reads it). DynamoDB builds it from every existing record, "+
+			"which can take several minutes; progress every %s. Interrupting is safe: re-run 'lagotto setup' to continue.\n",
+			watcher.OwnerIndexName, tables.Watches, ownerIndexPoll)
+		err = waitOwnerIndex(ctx, db, tables.Watches, out)
 	}
 	if err != nil {
 		return watcher.MigrateReport{}, err
 	}
-	rep, err := watcher.MigrateOwnerKeys(ctx, db, tables, resolverFor(ids), time.Now())
+	rep, err := watcher.MigrateOwnerKeysWithProgress(ctx, db, tables, resolverFor(ids), time.Now(), func(line string) {
+		_, _ = fmt.Fprintln(out, line)
+	})
 	if err != nil {
 		return rep, fmt.Errorf("move records under their owners' keys: %w", err)
 	}
@@ -93,20 +99,45 @@ func ensureOwnerKeys(ctx context.Context, db ownerKeysDynamo, ids principalIDs, 
 	return rep, nil
 }
 
-func waitOwnerIndex(ctx context.Context, db ownerKeysDynamo, table string) error {
+// waitOwnerIndex waits for the owner index to be ACTIVE, printing its state
+// on every poll so the wait is never silent (#309).
+func waitOwnerIndex(ctx context.Context, db ownerKeysDynamo, table string, out io.Writer) error {
 	ctx, cancel := context.WithTimeout(ctx, ownerIndexWait)
 	defer cancel()
 	t := time.NewTicker(ownerIndexPoll)
 	defer t.Stop()
+	start := time.Now()
 	for {
 		_, err := watcher.EnsureOwnerIndex(ctx, db, table)
 		if !errors.Is(err, watcher.ErrOwnerIndexNotReady) {
+			if err == nil {
+				_, _ = fmt.Fprintf(out, "  %s is ACTIVE (%s).\n", watcher.OwnerIndexName, time.Since(start).Round(time.Second))
+			}
 			return err
 		}
+		_, _ = fmt.Fprintf(out, "  %s\n", ownerIndexProgressLine(ctx, db, table, time.Since(start)))
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf("%w; re-run 'lagotto setup' once it is ACTIVE", err)
 		case <-t.C:
 		}
 	}
+}
+
+// ownerIndexProgressLine is one wait line: the index's status, whether it is
+// still backfilling, and the elapsed time.
+func ownerIndexProgressLine(ctx context.Context, db ownerKeysDynamo, table string, elapsed time.Duration) string {
+	st, err := watcher.DescribeOwnerIndex(ctx, db, table)
+	if err != nil {
+		return fmt.Sprintf("%s: still building, %s elapsed (status unreadable: %v)", watcher.OwnerIndexName, elapsed.Round(time.Second), err)
+	}
+	what := "building"
+	if st.Backfilling {
+		what = "backfilling existing records"
+	}
+	line := fmt.Sprintf("%s: %s, %s, %s elapsed (up to %s)", watcher.OwnerIndexName, st.Status, what, elapsed.Round(time.Second), ownerIndexWait)
+	if st.ItemCount > 0 {
+		line += fmt.Sprintf(", %d item(s) indexed", st.ItemCount)
+	}
+	return line
 }

@@ -1290,6 +1290,12 @@ func (p *Poller) recordOutcome(ctx context.Context, w *Watch, m *MatchResult, fa
 	if groupWon {
 		// The group's one notification replaces the member's own (#287).
 		defer p.finishGroup(ctx, w, m, group, now, summary)
+	} else if p.notifier != nil && failure == FailureTerminal && IsConfigRefused(err) && normalizeService(w.Service) == ServiceEC2 {
+		// Refused on lagotto's own rules before anything launched (#309): say
+		// so, with the fix, instead of a match notice.
+		if nerr := p.notifier.NotifyConfigRefused(ctx, w, m, err); nerr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: refusal notification failed for %s: %v\n", w.WatchID, nerr)
+		}
 	} else if p.notifier != nil {
 		if err := p.notifier.Notify(ctx, w, m); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: notification failed for %s: %v\n", w.WatchID, err)
