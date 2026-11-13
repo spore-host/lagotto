@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spf13/cobra"
 	"github.com/spore-host/lagotto/pkg/awscfg"
@@ -47,6 +48,12 @@ fleet's total), "30m@$X/hr" for a hold's reservation (billed even if unused),
 --max-price, "*" a rate from the static price list (the note under the table
 says when it was collected and why), "?" that some types or regions have no
 price. The CLI never calls the live Price List.
+
+Below the table, it lists every active spawn watch whose stored spawn config
+the hosted poller will refuse when the watch matches, with the fix: one armed
+with iam_policy, iam_policy_file or iam_policy_document (refused since 0.70.0),
+or one whose iam_role the deployed poller is not authorized to use. -o json
+carries it as launch_config_problem.
 
 Use -o wide for the full latest error, or -o json for every field.
 "lagotto status <watch-id>" shows the full errors and when they happened.`,
@@ -115,6 +122,10 @@ func runList(cmd *cobra.Command, args []string) error {
 	for _, w := range ptrs {
 		cliExposure(w)
 	}
+	// Stored launch configs the poller will refuse when they match (#309): an
+	// inline IAM policy armed before 0.70.0, or an iam_role the deployed
+	// poller may not pass. The poller policy is read only if one names a role.
+	annotateLaunchConfigProblems(watches, newRoleCheck(ctx, iam.NewFromConfig(cfg), aws.ToString(identity.Account)))
 
 	if getOutputFormat() == "json" {
 		enc := json.NewEncoder(cmd.OutOrStdout())
@@ -129,6 +140,7 @@ func runList(cmd *cobra.Command, args []string) error {
 
 	writeWatchTable(cmd.OutOrStdout(), watches, time.Now().UTC(), getOutputFormat() == "wide")
 	writeListEmailStates(cmd.OutOrStdout(), watches)
+	writeLaunchConfigProblems(cmd.OutOrStdout(), watches)
 	return nil
 }
 

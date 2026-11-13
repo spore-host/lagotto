@@ -100,6 +100,104 @@ type ScheduledLaunch struct {
 	RetryIntervalSeconds int `json:"retry_interval_seconds,omitempty" dynamodbav:"retry_interval_seconds,omitempty"`
 	// Attempts counts boundary-retry firings, for observability.
 	Attempts int `json:"attempts,omitempty" dynamodbav:"attempts,omitempty"`
+	// LastError is why the poller refused or failed the launch when it fired
+	// (#309), so the owner can read it without the poller's logs.
+	LastError string `json:"last_error,omitempty" dynamodbav:"last_error,omitempty"`
+}
+
+// Armed reports whether the launch can still fire: pending, retrying, or a
+// --cron launch that has fired before (it stays armed until cancelled).
+func (sl *ScheduledLaunch) Armed() bool {
+	if sl.MovedTo != "" {
+		return false // a marker at a moved record's old key; the record itself is elsewhere
+	}
+	switch sl.Status {
+	case ScheduledPending, ScheduledRetrying:
+		return true
+	case ScheduledLaunched, ScheduledFailed:
+		return sl.CronExpr != ""
+	}
+	return false
+}
+
+// ErrScheduledLaunchConfigChanged is UpdateScheduledLaunchConfig finding the
+// record no longer as the caller read it: it fired, was cancelled, or its
+// config was changed in between. Nothing was written.
+var ErrScheduledLaunchConfigChanged = errors.New("scheduled launch changed since it was read")
+
+// UpdateScheduledLaunchConfig replaces a scheduled launch's stored config in
+// one conditional write (#309): only while its status and config are still
+// the ones the caller read and validated against. The EventBridge schedule is
+// not touched, so it fires the new config; a refused update changes nothing.
+func (s *Store) UpdateScheduledLaunchConfig(ctx context.Context, sl *ScheduledLaunch, newConfig []byte) error {
+	_, err := s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName:           &s.scheduledTable,
+		Key:                 map[string]types.AttributeValue{"schedule_id": &types.AttributeValueMemberS{Value: sl.ScheduleID}},
+		UpdateExpression:    aws.String("SET launch_config_json = :n, updated_at = :u REMOVE last_error"),
+		ConditionExpression: aws.String("#s = :s AND launch_config_json = :o"),
+		ExpressionAttributeNames: map[string]string{
+			"#s": "status",
+		},
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":n": &types.AttributeValueMemberB{Value: newConfig},
+			":o": &types.AttributeValueMemberB{Value: sl.LaunchConfigJSON},
+			":s": &types.AttributeValueMemberS{Value: string(sl.Status)},
+			":u": &types.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)},
+		},
+	})
+	if err != nil {
+		var ccf *types.ConditionalCheckFailedException
+		if errors.As(err, &ccf) {
+			return fmt.Errorf("update scheduled launch %s: %w", sl.ScheduleID, ErrScheduledLaunchConfigChanged)
+		}
+		return fmt.Errorf("update scheduled launch %s: %w", sl.ScheduleID, err)
+	}
+	return nil
+}
+
+// FailScheduledLaunch marks a launch failed and records why (#309).
+func (s *Store) FailScheduledLaunch(ctx context.Context, id, reason string) error {
+	_, err := s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName:                &s.scheduledTable,
+		Key:                      map[string]types.AttributeValue{"schedule_id": &types.AttributeValueMemberS{Value: id}},
+		UpdateExpression:         aws.String("SET #s = :s, updated_at = :u, last_error = :e"),
+		ExpressionAttributeNames: map[string]string{"#s": "status"},
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":s": &types.AttributeValueMemberS{Value: string(ScheduledFailed)},
+			":u": &types.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)},
+			":e": &types.AttributeValueMemberS{Value: reason},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("mark scheduled launch %s failed: %w", id, err)
+	}
+	return nil
+}
+
+// ListScheduledLaunches returns every scheduled-launch record, reading every
+// page; a missing table returns none. A Scan, so administrator credentials:
+// `lagotto doctor` uses it.
+func (s *Store) ListScheduledLaunches(ctx context.Context) ([]ScheduledLaunch, error) {
+	p := dynamodb.NewScanPaginator(s.client, &dynamodb.ScanInput{TableName: aws.String(s.scheduledTable)})
+	var out []ScheduledLaunch
+	for p.HasMorePages() {
+		page, err := p.NextPage(ctx)
+		if err != nil {
+			var notFound *types.ResourceNotFoundException
+			if errors.As(err, &notFound) {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("scan %q: %w", s.scheduledTable, err)
+		}
+		for _, item := range page.Items {
+			var sl ScheduledLaunch
+			if err := attributevalue.UnmarshalMap(item, &sl); err != nil {
+				return nil, fmt.Errorf("unmarshal scheduled launch: %w", err)
+			}
+			out = append(out, sl)
+		}
+	}
+	return out, nil
 }
 
 // ErrScheduledLaunchCancelled is PutScheduledLaunch refusing to overwrite a

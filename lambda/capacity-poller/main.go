@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-lambda-go/lambda"
@@ -165,11 +166,31 @@ func handleScheduledLaunch(ctx context.Context, id string) error {
 		return nil
 
 	default: // OutcomeFailed
-		if uerr := store.UpdateScheduledLaunchStatus(ctx, id, watcher.ScheduledFailed, ""); uerr != nil {
+		// The reason is kept on the record (#309), so the owner can read it with
+		// 'lagotto update'/'cancel' or an administrator with 'lagotto doctor',
+		// rather than only in this log. A scheduled launch has no notify channel.
+		reason := scheduledFailureReason(sl, lerr)
+		if uerr := store.FailScheduledLaunch(ctx, id, reason); uerr != nil {
 			log.Printf("warning: could not mark scheduled launch %s failed: %v", id, uerr)
 		}
 		return fmt.Errorf("scheduled launch %s: %w", id, lerr)
 	}
+}
+
+// scheduledFailureReason is the last_error a failed scheduled launch records:
+// the error, and for a config the poller refused on its own rules, the fix
+// (watcher.CheckStoredLaunchConfig), since nothing else will tell the owner.
+func scheduledFailureReason(sl *watcher.ScheduledLaunch, err error) string {
+	if err == nil {
+		return "the launch failed"
+	}
+	reason := err.Error()
+	if watcher.IsConfigRefused(err) {
+		if f := watcher.CheckStoredLaunchConfig(sl.ScheduleID, sl.LaunchConfigJSON); f != nil {
+			reason += ". Fix: " + strings.Join(f.Fix, "; then ")
+		}
+	}
+	return reason
 }
 
 // rearmBoundaryRetry re-arms a tight-interval EventBridge schedule for a #62

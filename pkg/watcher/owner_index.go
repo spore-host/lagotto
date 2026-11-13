@@ -121,6 +121,27 @@ type ownerIndexAPI interface {
 // built; re-run once DynamoDB reports it ACTIVE.
 var ErrOwnerIndexNotReady = errors.New("owner index is still being built")
 
+// OwnerIndexState is the owner index's build state, for progress lines.
+type OwnerIndexState struct {
+	Status      string // CREATING, ACTIVE, ...; "" when absent
+	Backfilling bool   // DynamoDB is still copying existing items into it
+	ItemCount   int64  // items indexed so far (DynamoDB updates it about every 6 hours, so often 0 while building)
+}
+
+// DescribeOwnerIndex reports the owner index's build state on table.
+func DescribeOwnerIndex(ctx context.Context, api ownerIndexAPI, table string) (OwnerIndexState, error) {
+	out, err := api.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: aws.String(table)})
+	if err != nil {
+		return OwnerIndexState{}, fmt.Errorf("describe %s: %w", table, err)
+	}
+	for _, g := range out.Table.GlobalSecondaryIndexes {
+		if aws.ToString(g.IndexName) == OwnerIndexName {
+			return OwnerIndexState{Status: string(g.IndexStatus), Backfilling: aws.ToBool(g.Backfilling), ItemCount: aws.ToInt64(g.ItemCount)}, nil
+		}
+	}
+	return OwnerIndexState{}, nil
+}
+
 // EnsureOwnerIndex adds [OwnerIndexName] to an existing watches table that
 // predates it (`lagotto setup`; a table the CLI creates has it already) and
 // reports whether it is ACTIVE. created is true when this call started the

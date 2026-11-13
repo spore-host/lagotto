@@ -56,9 +56,9 @@ type updateOpts struct {
 var updateFlags updateOpts
 
 var updateCmd = &cobra.Command{
-	Use:         "update <watch-id>",
+	Use:         "update <watch-id | sl-id>",
 	Annotations: level(levelAdvanced),
-	Short:       "Change an existing watch's search in place",
+	Short:       "Change an existing watch's search, or a scheduled launch's spawn config, in place",
 	Long: `Change what an existing watch hunts for (its instance types, regions, AZs,
 Spot, maximum price), who it tells (--notify), its spawn config, or its project,
 without cancelling it. The watch keeps its ID, its attempt count, last error,
@@ -88,7 +88,16 @@ deadline (run 'lagotto extend' first if not).
 search: the update is refused (exit status 3) only when the quota was read in
 every region and provably can't hold the fleet.
 
---dry-run shows the change, after every check, without writing anything.`,
+--dry-run shows the change, after every check, without writing anything.
+
+A scheduled launch (sl-…, from 'lagotto launch') takes only --spawn-config
+(#309): the new config is checked exactly as 'lagotto launch' checks one (its
+reservation re-applied, its iam_role checked against the deployed poller), and
+only then swapped in with one conditional write. Its EventBridge schedule is
+not touched, so a refused config leaves the launch armed with the old one, and
+the update fails, writing nothing, if the launch fired, was cancelled or was
+updated since it was read. Use it instead of cancelling and re-launching: a
+re-launch that is refused leaves nothing armed.`,
 	Args:         cobra.ExactArgs(1),
 	SilenceUsage: true,
 	RunE:         runUpdate,
@@ -126,6 +135,10 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 	o.maxPriceSet = fl.Changed("max-price")
 	o.notifySet = fl.Changed("notify")
 	o.projectSet = fl.Changed("project")
+	// A scheduled launch (#309): only its spawn config can change.
+	if isScheduledLaunchID(args[0]) {
+		return runUpdateScheduledLaunch(cmd, o, args[0])
+	}
 	if err := o.validate(); err != nil {
 		return err
 	}

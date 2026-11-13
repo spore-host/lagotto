@@ -46,16 +46,29 @@ import (
 // stays where it is and is reported: the poller still services it, and only
 // an administrator can change it once the scoped policy is in place.
 func MigrateOwnerKeys(ctx context.Context, api MigrateAPI, t MigrateTables, resolve OwnerResolver, now time.Time) (MigrateReport, error) {
-	m := &migrator{api: api, t: t, resolve: resolve, now: now.UTC(), owners: map[string]ownerResult{}}
+	return MigrateOwnerKeysWithProgress(ctx, api, t, resolve, now, nil)
+}
+
+// MigrateProgressEvery is how many moved records pass between progress lines.
+const MigrateProgressEvery = 25
+
+// MigrateOwnerKeysWithProgress is [MigrateOwnerKeys] reporting as it goes
+// (#309): progress, when not nil, gets a line as each table's scan starts and
+// every [MigrateProgressEvery] records moved, so a long run is never silent.
+func MigrateOwnerKeysWithProgress(ctx context.Context, api MigrateAPI, t MigrateTables, resolve OwnerResolver, now time.Time, progress func(string)) (MigrateReport, error) {
+	m := &migrator{api: api, t: t, resolve: resolve, now: now.UTC(), owners: map[string]ownerResult{}, progress: progress}
+	m.say("Scanning %s for records to move under their owners' keys...", t.Watches)
 	if err := m.watches(ctx); err != nil {
 		return m.rep, err
 	}
 	if t.History != "" {
+		m.say("Scanning %s...", t.History)
 		if err := m.history(ctx); err != nil {
 			return m.rep, err
 		}
 	}
 	if t.Scheduled != "" {
+		m.say("Scanning %s...", t.Scheduled)
 		if err := m.scheduled(ctx); err != nil {
 			return m.rep, err
 		}
@@ -106,6 +119,23 @@ type migrator struct {
 	// runs (legacy_watch_id on a moved record) and this one.
 	moved map[string]string
 	rep   MigrateReport
+	// progress, when set, receives progress lines (#309); ticks counts moves.
+	progress func(string)
+	ticks    int
+}
+
+func (m *migrator) say(format string, a ...any) {
+	if m.progress != nil {
+		m.progress(fmt.Sprintf(format, a...))
+	}
+}
+
+// tick counts one moved record and reports every MigrateProgressEvery.
+func (m *migrator) tick() {
+	m.ticks++
+	if m.ticks%MigrateProgressEvery == 0 {
+		m.say("  moved %d record(s) so far...", m.ticks)
+	}
 }
 
 func (m *migrator) skip(format string, a ...any) {
@@ -321,6 +351,7 @@ func (m *migrator) watches(ctx context.Context) error {
 			continue
 		}
 		m.rep.Watches++
+		m.tick()
 	}
 	for _, p := range groups {
 		k := str(p.item, "watch_id")
@@ -355,6 +386,7 @@ func (m *migrator) watches(ctx context.Context) error {
 			continue
 		}
 		m.rep.Groups++
+		m.tick()
 	}
 	return nil
 }
@@ -420,6 +452,7 @@ func (m *migrator) history(ctx context.Context) error {
 			continue
 		}
 		m.rep.History++
+		m.tick()
 	}
 	return nil
 }
@@ -458,6 +491,7 @@ func (m *migrator) scheduled(ctx context.Context) error {
 			continue
 		}
 		m.rep.Scheduled++
+		m.tick()
 	}
 	return nil
 }

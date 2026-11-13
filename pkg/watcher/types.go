@@ -301,6 +301,10 @@ type Watch struct {
 	// exposure.go): what the watch can cost if it lands. Filled by list, status,
 	// watch and the reminder path; never persisted (dynamodbav "-").
 	Exposure *Exposure `json:"exposure,omitempty" dynamodbav:"-"`
+	// LaunchConfigProblem is why the poller will refuse this watch's stored
+	// launch config when it matches (#309), filled in by `lagotto list` for
+	// display. Never stored.
+	LaunchConfigProblem *LaunchConfigFinding `json:"launch_config_problem,omitempty" dynamodbav:"-"`
 }
 
 // IsQuotaCapped reports whether a fleet watch carries quota-cap state (#153,
