@@ -24,8 +24,13 @@ const launchScheduleGroup = "default"
 const LaunchSchedulePrefix = "lagotto-launch-sl-"
 
 // LaunchScheduleName is the schedule `lagotto launch` creates for the
-// scheduled launch with this id ("sl-…"), and stores as its ScheduleName.
+// scheduled launch with this id ("sl-…"), and stores as its ScheduleName. An
+// owner-scoped key ("<owner>/sl-…") names its schedule by the short id alone:
+// schedule names allow only [0-9A-Za-z-_.].
 func LaunchScheduleName(scheduleID string) string {
+	if i := strings.Index(scheduleID, "/"); i >= 0 {
+		scheduleID = scheduleID[i+1:]
+	}
 	return "lagotto-launch-" + scheduleID
 }
 

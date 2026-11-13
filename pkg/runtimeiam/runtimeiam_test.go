@@ -80,18 +80,17 @@ func TestPolicyDocument_ValidAndScoped(t *testing.T) {
 	if !strings.Contains(doc, "iam:PassedToService") {
 		t.Error("iam:PassRole is not scoped by PassedToService condition")
 	}
-	// Wide describe reads are Resource "*", but the instance role-setup must be
-	// scoped (not "*") — guard against an over-broad regression.
-	if strings.Contains(doc, `"iam:CreateRole"`) && !strings.Contains(doc, ":role/spored*") {
-		t.Error("iam:CreateRole is present but not scoped to spored*")
-	}
-	// #148: spawn's launcher creates "spawn-instance-<hash>" roles/profiles, so the
-	// poller must be authorized on spawn-instance* too — else auto-spawn dies at
-	// "set up IAM instance profile" (AccessDenied → terminal) and no watch retries.
-	for _, want := range []string{":role/spawn-instance*", ":instance-profile/spawn-instance*"} {
-		if !strings.Contains(doc, want) {
-			t.Errorf("policy missing %q (poller can't set up spawn's instance profile — lagotto#148)", want)
+	// The poller writes no IAM (the confused-deputy fix): no role or profile
+	// setup action at all, and PassRole only on lagotto's own instance role
+	// here (no authorizations), never on spawn-instance* or spored*.
+	for _, banned := range []string{`"iam:CreateRole"`, `"iam:PutRolePolicy"`, `"iam:AttachRolePolicy"`,
+		":role/spawn-instance*", ":role/spored*", ":instance-profile/"} {
+		if strings.Contains(doc, banned) {
+			t.Errorf("policy contains %s", banned)
 		}
+	}
+	if !strings.Contains(doc, ":role/"+InstanceRoleName+`"`) {
+		t.Errorf("policy does not let the poller pass %s", InstanceRoleName)
 	}
 }
 
@@ -227,7 +226,7 @@ func TestEnsureRoles_RequiresRegionAndAccount(t *testing.T) {
 
 func TestEnsureRuntimeRole(t *testing.T) {
 	f := &fakeIAM{}
-	if err := EnsureRuntimeRole(context.Background(), f, "us-east-1", "123456789012", nil); err != nil {
+	if err := EnsureRuntimeRole(context.Background(), f, "us-east-1", "123456789012", Authorizations{}); err != nil {
 		t.Fatalf("EnsureRuntimeRole: %v", err)
 	}
 	if f.calls != 1 {
@@ -246,10 +245,10 @@ func TestEnsureRuntimeRole(t *testing.T) {
 
 func TestEnsureRuntimeRole_RequiresRegionAndAccount(t *testing.T) {
 	f := &fakeIAM{}
-	if err := EnsureRuntimeRole(context.Background(), f, "", "123456789012", nil); err == nil {
+	if err := EnsureRuntimeRole(context.Background(), f, "", "123456789012", Authorizations{}); err == nil {
 		t.Error("want error for empty region")
 	}
-	if err := EnsureRuntimeRole(context.Background(), f, "us-east-1", "", nil); err == nil {
+	if err := EnsureRuntimeRole(context.Background(), f, "us-east-1", "", Authorizations{}); err == nil {
 		t.Error("want error for empty account ID")
 	}
 	if f.calls != 0 {

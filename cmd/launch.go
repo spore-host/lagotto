@@ -192,12 +192,13 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 			launchReservationID, cr.State, cr.StartDate, cr.EndDate, expr, retryUntil.UTC().Format(time.RFC3339))
 	}
 
-	userID := ""
+	userID, ownerID := "", ""
 	acctID := ""
 	if id, ierr := sts.NewFromConfig(cfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{}); ierr == nil {
 		if id.Arn != nil {
 			userID = *id.Arn
 		}
+		ownerID = aws.ToString(id.UserId)
 		if id.Account != nil {
 			acctID = *id.Account
 		}
@@ -220,7 +221,8 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 
 	// Persist the scheduled launch, then arm the schedule. Store first so the
 	// Lambda can always resolve the id the schedule will send.
-	scheduleID := "sl-" + uuid.New().String()[:8]
+	// Keyed under the caller's principal id, as a watch is (watcher.OwnerKey).
+	scheduleID := watcher.OwnerKey(ownerID, "sl-"+uuid.New().String()[:8])
 	scheduleName := deploy.LaunchScheduleName(scheduleID)
 	store := watcher.NewStore(cfg, watchesTable, historyTable)
 	if _, err := store.EnsureScheduledTable(ctx); err != nil {
@@ -230,6 +232,7 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 	sl := &watcher.ScheduledLaunch{
 		ScheduleID:       scheduleID,
 		UserID:           userID,
+		OwnerID:          ownerID,
 		Status:           watcher.ScheduledPending,
 		Region:           region,
 		AvailabilityZone: launchAZ,
@@ -275,7 +278,7 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("create EventBridge schedule: %w", err)
 	}
 
-	_, _ = fmt.Fprintf(out, "Scheduled launch %s armed (%s) in %s.\n", scheduleID, expr, region)
+	_, _ = fmt.Fprintf(out, "Scheduled launch %s armed (%s) in %s.\n", watcher.ShortID(scheduleID), expr, region)
 	if launchAZ != "" {
 		_, _ = fmt.Fprintf(out, "  AZ: %s\n", launchAZ)
 	}
@@ -285,7 +288,7 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 	// The lagotto command, not a raw DeleteSchedule: it also cancels the record
 	// (which otherwise keeps the poller armed) and any boundary retries, and the
 	// lagotto-cli-user policy grants it (#279).
-	_, _ = fmt.Fprintf(out, "  Cancel with: %s\n", cancelLaunchCmd(scheduleID, region))
+	_, _ = fmt.Fprintf(out, "  Cancel with: %s\n", cancelLaunchCmd(watcher.ShortID(scheduleID), region))
 	return nil
 }
 

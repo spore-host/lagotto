@@ -230,7 +230,11 @@ func DiffRuntimePolicy(deployed, region, accountID string) (*PolicyDiff, error) 
 	if err != nil {
 		return nil, fmt.Errorf("read authorized instance roles: %w", err)
 	}
-	expected, err := PolicyDocument(accountID, authorized)
+	smRoles, err := AuthorizedSageMakerRoles(deployed)
+	if err != nil {
+		return nil, fmt.Errorf("read authorized sagemaker roles: %w", err)
+	}
+	expected, err := PolicyDocumentFor(accountID, Authorizations{InstanceRoles: authorized, SageMakerRoles: smRoles})
 	if err != nil {
 		return nil, fmt.Errorf("build expected policy: %w", err)
 	}
@@ -350,11 +354,12 @@ func subsumedByAnyRegionGrant(expected []Grant, d Grant) bool {
 // authorizations across a re-run rather than silently dropping them (the policy is
 // written with a wholesale PutRolePolicy).
 //
-// A role is "authorized" when the policy grants [InstanceRolePassAction] on a
-// concrete role ARN that is not one of the built-in spawn-instance*/spored*
-// patterns. PassRole is the discriminator because it is the one action granted per
-// role and never on "*" for ec2 — the SageMaker statement grants PassRole on "*",
-// which is skipped here precisely because a wildcard names no role.
+// A role is "authorized" when the policy grants [InstanceRolePassAction] to
+// ec2.amazonaws.com on a concrete role ARN that is not lagotto's own
+// [InstanceRoleName] or a built-in pattern of an older policy
+// (spawn-instance*/spored*). PassRole is the discriminator because it is the one
+// action granted per role. SageMaker execution roles are PassRole grants too,
+// conditioned to sagemaker.amazonaws.com; they are [AuthorizedSageMakerRoles].
 func AuthorizedInstanceRoles(deployed string) ([]string, error) {
 	grants, err := ParsePolicy(deployed)
 	if err != nil {
@@ -365,6 +370,11 @@ func AuthorizedInstanceRoles(deployed string) ([]string, error) {
 	var names []string
 	for _, g := range grants {
 		if !strings.EqualFold(g.Effect, "Allow") || !strings.EqualFold(g.Action, InstanceRolePassAction) {
+			continue
+		}
+		// A grant conditioned to another service (SageMaker) is not an EC2
+		// instance-role authorization.
+		if !conditionPermitsService(g.Condition, "ec2.amazonaws.com") {
 			continue
 		}
 		name, ok := roleNameFromARN(g.Resource)
@@ -382,6 +392,36 @@ func AuthorizedInstanceRoles(deployed string) ([]string, error) {
 	}
 	sort.Strings(names)
 	return names, nil
+}
+
+// AuthorizedSageMakerRoles returns the SageMaker execution-role ARNs a
+// deployed policy authorizes (`setup --sagemaker-role`): PassRole grants on a
+// concrete role ARN conditioned to sagemaker.amazonaws.com. A wildcard grant
+// (the old PassRole on "*") names no role and is not carried forward, so `setup`
+// drops it.
+func AuthorizedSageMakerRoles(deployed string) ([]string, error) {
+	grants, err := ParsePolicy(deployed)
+	if err != nil {
+		return nil, fmt.Errorf("parse deployed policy: %w", err)
+	}
+	seen := map[string]bool{}
+	var arns []string
+	for _, g := range grants {
+		if !strings.EqualFold(g.Effect, "Allow") || !strings.EqualFold(g.Action, InstanceRolePassAction) {
+			continue
+		}
+		if strings.TrimSpace(g.Condition) == "" || !conditionPermitsService(g.Condition, "sagemaker.amazonaws.com") ||
+			conditionPermitsService(g.Condition, "ec2.amazonaws.com") {
+			continue
+		}
+		if seen[g.Resource] || ValidateSageMakerRoleARN(g.Resource, "") != nil {
+			continue
+		}
+		seen[g.Resource] = true
+		arns = append(arns, g.Resource)
+	}
+	sort.Strings(arns)
+	return arns, nil
 }
 
 // roleNameFromARN pulls the role name out of an IAM role ARN, returning false for
@@ -402,7 +442,7 @@ func roleNameFromARN(resource string) (string, bool) {
 // isBuiltinInstanceRolePattern reports whether a role name from the policy is one
 // of the fixed patterns PolicyDocument always emits, rather than an authorization.
 func isBuiltinInstanceRolePattern(name string) bool {
-	return name == "spawn-instance*" || name == "spored*" || name == SchedulerInvokeRoleName
+	return name == "spawn-instance*" || name == "spored*" || name == SchedulerInvokeRoleName || name == InstanceRoleName
 }
 
 // --- grant criticality -------------------------------------------------------
@@ -480,34 +520,18 @@ func Allows(grants []Grant, action, resource string) bool {
 	return allowed
 }
 
-// MissingInstanceRoleGrants returns the actions from [InstanceRoleActions] plus
-// [InstanceRolePassAction] that grants do NOT permit for roleName, in the order
-// the launcher would attempt them. Empty means the role is fully usable.
+// MissingInstanceRoleGrants returns what grants do NOT permit the poller to do
+// with roleName: pass it to EC2. Empty means the role is usable. That is the
+// poller's only IAM action on an instance role; the instance profile it names
+// is created by `lagotto setup --instance-role`, not by the poller.
 func MissingInstanceRoleGrants(grants []Grant, accountID, roleName string) []string {
 	roleARN := fmt.Sprintf("arn:aws:iam::%s:role/%s", accountID, roleName)
-	profileARN := fmt.Sprintf("arn:aws:iam::%s:instance-profile/%s", accountID, roleName)
-
-	var missing []string
-	for _, action := range InstanceRoleActions {
-		// The profile-shaped actions are checked against the instance-profile ARN;
-		// the role-shaped ones against the role ARN. CreateOrGetInstanceProfile
-		// names the profile the same as the role, so both must be covered.
-		target := roleARN
-		if strings.Contains(action, "InstanceProfile") {
-			target = profileARN
-		}
-		if !Allows(grants, action, target) {
-			missing = append(missing, action)
-		}
-	}
-	// PassRole must be checked WITH its condition: the stock policy already grants
-	// PassRole on "*" for sagemaker.amazonaws.com, and counting that as coverage
-	// would declare an unauthorized role usable — the watch would still die at
-	// RunInstances, which is the failure this whole check exists to prevent.
+	// PassRole must be checked WITH its condition: a PassRole grant to
+	// sagemaker.amazonaws.com does not let the poller hand the role to EC2.
 	if !AllowsPassRoleTo(grants, roleARN, "ec2.amazonaws.com") {
-		missing = append(missing, InstanceRolePassAction)
+		return []string{InstanceRolePassAction}
 	}
-	return missing
+	return nil
 }
 
 // AllowsPassRoleTo reports whether grants permit iam:PassRole on roleARN for

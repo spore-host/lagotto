@@ -140,8 +140,27 @@ type WatchGroup struct {
 	TTLTimestamp int64     `json:"-" dynamodbav:"ttl_timestamp"`
 }
 
-// GroupKey is the watch_id of the group item for name.
-func GroupKey(name string) string { return GroupKeyPrefix + name }
+// GroupKey is the watch_id of the group item for ref, a group name scoped to
+// its owner ([Watch.GroupRef], [ScopedName]): "<owner>/g-<name>", or the
+// legacy "g-<name>" for an unscoped ref.
+func GroupKey(ref string) string {
+	owner, name := SplitKey(ref)
+	return OwnerKey(owner, GroupKeyPrefix+name)
+}
+
+// Ref is the owner-scoped reference of a group read from the table: its name
+// under the owner of its own key.
+func (g *WatchGroup) Ref() string { return ScopedName(g.Key, g.Name) }
+
+// GroupRef is the owner-scoped reference to the watch's group: the group name
+// under the owner of the watch's own key. A watch can only ever name a group
+// in its own owner's scope.
+func (w *Watch) GroupRef() string {
+	if w.Group == "" {
+		return ""
+	}
+	return ScopedName(w.WatchID, w.Group)
+}
 
 // LandedSummary is "w-… (i-…, type, AZ)" for a landed group, or "".
 func (g *WatchGroup) LandedSummary() string {
@@ -150,9 +169,9 @@ func (g *WatchGroup) LandedSummary() string {
 	}
 	parts := nonEmpty(g.WinnerInstanceID+g.WinnerReservationID, g.WinnerType, firstNonEmpty(g.WinnerAZ, g.WinnerRegion))
 	if len(parts) == 0 {
-		return g.WinnerWatch
+		return ShortID(g.WinnerWatch)
 	}
-	return g.WinnerWatch + " (" + strings.Join(parts, ", ") + ")"
+	return ShortID(g.WinnerWatch) + " (" + strings.Join(parts, ", ") + ")"
 }
 
 // CancelReason is the tombstone a sibling gets when the group ends.
@@ -326,7 +345,7 @@ func (st *Store) JoinGroup(ctx context.Context, name, owner, watchID string, ttl
 	}
 	now := time.Now().UTC()
 	values := map[string]types.AttributeValue{
-		":n":   avS(name),
+		":n":   avS(ShortID(name)),
 		":o":   avS(owner),
 		":h":   avS(string(GroupHunting)),
 		":now": avS(now.Format(time.RFC3339Nano)),
@@ -470,7 +489,7 @@ func (st *Store) CompleteGroup(ctx context.Context, w *Watch, m *MatchResult, no
 	sort.Strings(set)
 	_, err := st.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:                 &st.watchesTable,
-		Key:                       groupKeyAttr(w.Group),
+		Key:                       groupKeyAttr(w.GroupRef()),
 		ConditionExpression:       aws.String("group_state = :h"),
 		UpdateExpression:          aws.String("SET " + strings.Join(set, ", ") + " REMOVE slot_watch, slot_expires_at"),
 		ExpressionAttributeValues: values,
@@ -479,7 +498,7 @@ func (st *Store) CompleteGroup(ctx context.Context, w *Watch, m *MatchResult, no
 	if err != nil && !isConditionFailed(err) {
 		return nil, false, fmt.Errorf("complete group %s: %w", w.Group, err)
 	}
-	g, gerr := st.GetGroup(ctx, w.Group)
+	g, gerr := st.GetGroup(ctx, w.GroupRef())
 	if gerr != nil {
 		if won {
 			// The win is durable; the caller only lacks the member list.
@@ -570,6 +589,9 @@ func (st *Store) setCancelledReason(ctx context.Context, watchID, reason string)
 func (st *Store) GroupMembers(ctx context.Context, g *WatchGroup) ([]*Watch, error) {
 	var out []*Watch
 	for _, id := range g.Members {
+		if !SameScope(id, g.Key) {
+			continue // not in the group's owner scope (see finishGroup)
+		}
 		w, err := st.GetWatch(ctx, id)
 		if err != nil {
 			return out, err

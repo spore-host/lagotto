@@ -74,7 +74,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	out := cmd.OutOrStdout()
-	_, _ = fmt.Fprintf(out, "Watch:    %s\n", w.WatchID)
+	_, _ = fmt.Fprintf(out, "Watch:    %s\n", watcher.ShortID(w.WatchID))
 	_, _ = fmt.Fprintf(out, "Status:   %s\n", w.Status)
 	if w.CancelledReason != "" {
 		_, _ = fmt.Fprintf(out, "Cancelled: %s\n", w.CancelledReason)
@@ -180,7 +180,7 @@ func writeLastMatch(out io.Writer, w *watcher.Watch) {
 			_, _ = fmt.Fprintf(out, "  Reservation: %s (%s)\n", m.ReservationID, m.AvailabilityZone)
 			if w.Status == watcher.StatusMatched {
 				_, _ = fmt.Fprintf(out, "  Launch into it:  %s\n", watcher.HoldLaunchCommandFor(w, m))
-				_, _ = fmt.Fprintf(out, "  Release it early with: lagotto cancel %s\n", w.WatchID)
+				_, _ = fmt.Fprintf(out, "  Release it early with: lagotto cancel %s\n", watcher.ShortID(w.WatchID))
 			}
 		}
 	}

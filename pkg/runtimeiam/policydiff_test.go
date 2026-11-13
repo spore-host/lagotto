@@ -147,7 +147,7 @@ func TestDiffPolicy_MissingActionFails(t *testing.T) {
 // action-only comparison would have called that policy fine.
 func TestDiffPolicy_MissingResourceOnlyFails(t *testing.T) {
 	expected := mustPolicy(t)
-	target := fmt.Sprintf("arn:aws:iam::%s:role/spawn-instance*", testAccount)
+	target := fmt.Sprintf("arn:aws:iam::%s:role/%s", testAccount, InstanceRoleName)
 	deployed := reserialize(t, expected, func(statements []map[string]interface{}) []map[string]interface{} {
 		for _, st := range statements {
 			dropResource(st, target)
@@ -162,8 +162,8 @@ func TestDiffPolicy_MissingResourceOnlyFails(t *testing.T) {
 	if len(diff.Missing) == 0 {
 		t.Fatalf("dropping resource %s produced no missing grants", target)
 	}
-	if !contains(diff.MissingActions(), "iam:GetRole") {
-		t.Errorf("MissingActions() = %v, want iam:GetRole (granted, but not on %s)", diff.MissingActions(), target)
+	if !contains(diff.MissingActions(), "iam:PassRole") {
+		t.Errorf("MissingActions() = %v, want iam:PassRole (granted, but not on %s)", diff.MissingActions(), target)
 	}
 	for _, g := range diff.Missing {
 		if g.Resource != target {
@@ -329,7 +329,7 @@ func TestDiffRuntimePolicy_UsesThisBinarysPolicy(t *testing.T) {
 // what EnsureRuntimeRole put there, so doctor's PASS means something.
 func TestReadRuntimePolicy_RoundTripsWhatSetupWrote(t *testing.T) {
 	f := &fakeIAM{}
-	if err := EnsureRuntimeRole(context.Background(), f, testRegion, testAccount, nil); err != nil {
+	if err := EnsureRuntimeRole(context.Background(), f, testRegion, testAccount, Authorizations{}); err != nil {
 		t.Fatalf("EnsureRuntimeRole: %v", err)
 	}
 	doc, err := ReadRuntimePolicy(context.Background(), f)

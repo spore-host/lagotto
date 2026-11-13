@@ -195,6 +195,13 @@ func (s *Spawner) Spawn(ctx context.Context, w *Watch, m *MatchResult) error {
 		m.ActionTaken = "spawn_failed"
 		return fmt.Errorf("%w: %v", failure.ErrConfigRefused, err)
 	}
+	// The same "validate at create AND at use" rule for every setting that
+	// could grant privilege: the item may have been edited in DynamoDB after
+	// the CLI validated it. Refused before any AWS call, terminal.
+	if err := file.ValidateLaunchPrivileges(); err != nil {
+		m.ActionTaken = "spawn_failed"
+		return fmt.Errorf("%w: %v", failure.ErrConfigRefused, err)
+	}
 
 	cfg := file.ToLaunchConfig()
 
@@ -242,17 +249,11 @@ func (s *Spawner) Spawn(ctx context.Context, w *Watch, m *MatchResult) error {
 		cfg.Tags[FleetTagKey] = w.WatchID
 	}
 
-	// Build a custom IAM instance profile from the config's iam_role/iam_policy/
-	// iam_policy_file settings before launching, mirroring `spawn launch
-	// --iam-role/--iam-policy/--iam-policy-file` (#129). When none are given,
-	// Provision sets up the default spored profile itself, so we leave
-	// IamInstanceProfile empty.
-	if profile, err := s.buildIAMProfile(ctx, &file); err != nil {
-		m.ActionTaken = "spawn_failed"
-		return err
-	} else if profile != "" {
-		cfg.IamInstanceProfile = profile
-	}
+	// The instance profile is always one an administrator provided: the
+	// config's iam_role (authorized with `lagotto setup --instance-role`) or
+	// lagotto's own instance role. Setting it means spawn's launcher runs no IAM
+	// setup of its own, so the poller creates and modifies no role.
+	cfg.IamInstanceProfile = file.InstanceProfileName()
 
 	// Resolve user_data / user_data_file (#129) once, up front, so a bad path
 	// fails before any launch attempt rather than deep inside the AZ retry loop.
@@ -287,13 +288,18 @@ func (s *Spawner) Spawn(ctx context.Context, w *Watch, m *MatchResult) error {
 	return nil
 }
 
-// buildIAMProfile creates a custom IAM instance profile from a spawn config's
-// iam_role / iam_policy / iam_policy_file settings (#129), mirroring `spawn
-// launch --iam-role/--iam-policy/--iam-policy-file`. Returns "" (no error) when
-// none of the three are set, so callers leave LaunchConfig.IamInstanceProfile
-// empty and let launcher.Provision set up the default spored profile itself —
-// the same behavior as the original iam_policy-only path.
-func (s *Spawner) buildIAMProfile(ctx context.Context, file *SpawnConfigFile) (string, error) {
+// buildCallerIAMProfile creates a custom IAM instance profile from a spawn
+// config's iam_role / iam_policy / iam_policy_file settings (#129), mirroring
+// `spawn launch --iam-role/--iam-policy/--iam-policy-file`. Returns "" (no
+// error) when none are set, so callers leave LaunchConfig.IamInstanceProfile
+// empty and let launcher.Provision set up the default spored profile itself.
+//
+// Only the [Spawner.Snipe] library path uses it, which runs with the CALLER's
+// own credentials and the caller's own config: whoever calls it could make
+// these IAM calls themselves. The poller's paths (Spawn, LaunchScheduled) never
+// do: they launch only with a role an administrator provided
+// ([SpawnConfigFile.InstanceProfileName]).
+func (s *Spawner) buildCallerIAMProfile(ctx context.Context, file *SpawnConfigFile) (string, error) {
 	if file.IAMRole == "" && len(file.IAMPolicies) == 0 && file.IAMPolicyFile == "" && file.IAMPolicyDocument == "" {
 		return "", nil
 	}
@@ -357,7 +363,7 @@ func (s *Spawner) countRunningFleet(ctx context.Context, w *Watch) (int, error) 
 			return 0, fmt.Errorf("list instances in %s: %w", region, err)
 		}
 		for _, in := range insts {
-			if in.Tags[FleetTagKey] != w.WatchID {
+			if tag := in.Tags[FleetTagKey]; tag != w.WatchID && (w.LegacyWatchID == "" || tag != w.LegacyWatchID) {
 				continue
 			}
 			if in.State != "running" && in.State != "pending" {
@@ -485,6 +491,9 @@ func (s *Spawner) LaunchScheduled(ctx context.Context, sl *ScheduledLaunch) (str
 	if err := file.ValidateFSxBucket(); err != nil { // #242, as in Spawn
 		return "", fmt.Errorf("%w: %v", failure.ErrConfigRefused, err)
 	}
+	if err := file.ValidateLaunchPrivileges(); err != nil { // as in Spawn
+		return "", fmt.Errorf("%w: %v", failure.ErrConfigRefused, err)
+	}
 	cfg := file.ToLaunchConfig()
 	var ttlWarning string
 	cfg.TTL, ttlWarning = storedLaunchTTL(cfg.TTL) // #38 hard floor, #201 tolerant re-read
@@ -511,11 +520,7 @@ func (s *Spawner) LaunchScheduled(ctx context.Context, sl *ScheduledLaunch) (str
 			}
 		}
 	}
-	if profile, err := s.buildIAMProfile(ctx, &file); err != nil {
-		return "", err
-	} else if profile != "" {
-		cfg.IamInstanceProfile = profile
-	}
+	cfg.IamInstanceProfile = file.InstanceProfileName() // as in Spawn
 	customUserData, err := file.ResolveUserData()
 	if err != nil {
 		return "", fmt.Errorf("resolve user data: %w", err)

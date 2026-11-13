@@ -31,48 +31,117 @@ func mustGrants(t *testing.T, doc string) []Grant {
 	return g
 }
 
-// TestStockPolicyDoesNotCoverANamedRole is lagotto#170 itself: without an explicit
-// authorization, the launcher's very first IAM call on a user-named role is denied,
-// after the watch has already matched capacity.
+// TestStockPolicyDoesNotCoverANamedRole is lagotto#170 itself: without an
+// explicit authorization the poller may not pass a user-named role to EC2.
 func TestStockPolicyDoesNotCoverANamedRole(t *testing.T) {
 	grants := mustGrants(t, irPolicy(t, nil))
 
-	if Allows(grants, "iam:GetRole", "arn:aws:iam::"+irAccount+":role/"+irRole) {
-		t.Error("stock policy should NOT cover a user-named role")
-	}
 	missing := MissingInstanceRoleGrants(grants, irAccount, irRole)
-	if len(missing) == 0 {
-		t.Fatal("expected the stock policy to be missing grants for a user-named role")
+	if len(missing) != 1 || missing[0] != InstanceRolePassAction {
+		t.Fatalf("stock policy: missing = %v, want [%s]", missing, InstanceRolePassAction)
 	}
-	// The whole set must be reported, not just the one that happened to fail
-	// first — granting only iam:GetRole moves the failure to the next call.
-	for _, want := range append(append([]string{}, InstanceRoleActions...), InstanceRolePassAction) {
-		if !containsStr(missing, want) {
-			t.Errorf("missing-grant report omits %s; it reported %v", want, missing)
-		}
-	}
-
-	// The built-in prefixes must still be covered, or the stock policy is broken.
-	if !Allows(grants, "iam:GetRole", "arn:aws:iam::"+irAccount+":role/spawn-instance-abc123") {
-		t.Error("stock policy must still cover spawn-instance* roles")
+	// lagotto's own instance role is always passable.
+	if missing := MissingInstanceRoleGrants(grants, irAccount, InstanceRoleName); len(missing) != 0 {
+		t.Errorf("stock policy must let the poller pass %s: missing %v", InstanceRoleName, missing)
 	}
 }
 
-// TestAuthorizedRoleIsFullyCovered is the fix: one authorization grants every
-// action the launcher performs, on both the role and its identically-named profile.
+// TestPollerAuthorsNoIAM is the confused-deputy fix: no grant in the poller's
+// policy lets it create, tag, write or attach a policy to any role or instance
+// profile, with or without authorized roles, and PassRole is never on a
+// wildcard role.
+func TestPollerAuthorsNoIAM(t *testing.T) {
+	doc, err := PolicyDocumentFor(irAccount, Authorizations{
+		InstanceRoles:  []string{irRole},
+		SageMakerRoles: []string{"arn:aws:iam::" + irAccount + ":role/service-role/sm-exec"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range mustGrants(t, doc) {
+		a := strings.ToLower(g.Action)
+		switch a {
+		case "iam:createrole", "iam:putrolepolicy", "iam:attachrolepolicy", "iam:tagrole",
+			"iam:createinstanceprofile", "iam:addroletoinstanceprofile", "iam:taginstanceprofile",
+			"iam:updateassumerolepolicy", "iam:deleterolepermissionsboundary", "iam:putrolepermissionsboundary":
+			t.Errorf("poller policy grants %s", g)
+		case "iam:passrole":
+			if strings.Contains(g.Resource, "*") {
+				t.Errorf("PassRole on a wildcard resource: %s", g)
+			}
+			if g.Condition == "" {
+				t.Errorf("PassRole without iam:PassedToService: %s", g)
+			}
+		}
+		if strings.HasPrefix(a, "iam:") && a != "iam:passrole" && a != "iam:createservicelinkedrole" {
+			t.Errorf("unexpected IAM grant on the poller: %s", g)
+		}
+	}
+}
+
+// TestAuthorizedRoleIsFullyCovered: one authorization lets the poller pass
+// exactly that role to EC2, and no other.
 func TestAuthorizedRoleIsFullyCovered(t *testing.T) {
 	grants := mustGrants(t, irPolicy(t, []string{irRole}))
 
 	if missing := MissingInstanceRoleGrants(grants, irAccount, irRole); len(missing) != 0 {
 		t.Errorf("authorized role still missing grants: %v", missing)
 	}
-	// Profile-shaped actions must land on the instance-profile ARN specifically.
-	if !Allows(grants, "iam:AddRoleToInstanceProfile", "arn:aws:iam::"+irAccount+":instance-profile/"+irRole) {
-		t.Error("authorization must cover the identically-named instance profile")
+	if AllowsPassRoleTo(grants, "arn:aws:iam::"+irAccount+":role/"+irRole, "sagemaker.amazonaws.com") {
+		t.Error("an EC2 instance-role authorization must not let the poller pass the role to SageMaker")
 	}
 	// Authorizing one role must not authorize another.
 	if missing := MissingInstanceRoleGrants(grants, irAccount, "some-other-role"); len(missing) == 0 {
 		t.Error("authorizing one role must not cover a different role")
+	}
+	for _, r := range []string{"spored-instance-role", "spawn-instance-abc123"} {
+		if AllowsPassRoleTo(grants, "arn:aws:iam::"+irAccount+":role/"+r, "ec2.amazonaws.com") {
+			t.Errorf("the poller may pass %s, a role spawn users create and change", r)
+		}
+	}
+}
+
+// TestSageMakerRolesRoundTrip: SageMaker authorizations are recovered from the
+// deployed policy separately from instance roles, and the old PassRole on "*"
+// is not carried forward.
+func TestSageMakerRolesRoundTrip(t *testing.T) {
+	sm := "arn:aws:iam::" + irAccount + ":role/service-role/sm-exec"
+	doc, err := PolicyDocumentFor(irAccount, Authorizations{InstanceRoles: []string{irRole}, SageMakerRoles: []string{sm}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := AuthorizedSageMakerRoles(doc)
+	if err != nil || len(got) != 1 || got[0] != sm {
+		t.Fatalf("AuthorizedSageMakerRoles = %v, %v; want [%s]", got, err, sm)
+	}
+	roles, err := AuthorizedInstanceRoles(doc)
+	if err != nil || len(roles) != 1 || roles[0] != irRole {
+		t.Fatalf("AuthorizedInstanceRoles = %v, %v; want [%s]", roles, err, irRole)
+	}
+	legacy := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"iam:PassRole","Resource":"*",` +
+		`"Condition":{"StringEquals":{"iam:PassedToService":"sagemaker.amazonaws.com"}}}]}`
+	if got, _ := AuthorizedSageMakerRoles(legacy); len(got) != 0 {
+		t.Errorf("legacy PassRole on * carried forward as %v", got)
+	}
+	for _, bad := range []string{"arn:aws:iam::" + irAccount + ":role/*", "arn:aws:iam::999999999999:role/x",
+		"arn:aws:iam::" + irAccount + ":role/spored-instance-role", "sm-exec"} {
+		if ValidateSageMakerRoleARN(bad, irAccount) == nil {
+			t.Errorf("ValidateSageMakerRoleARN(%q) accepted", bad)
+		}
+	}
+}
+
+// TestReservedInstanceRolesRefused: spawn's shared role, its nested-spawn
+// roles and lagotto's own roles can never be authorized.
+func TestReservedInstanceRolesRefused(t *testing.T) {
+	for _, name := range []string{"spored-instance-role", "Spored-Custom", "lagotto-capacity-poller-role", InstanceRoleName} {
+		if ValidateInstanceRoleName(name) == nil {
+			t.Errorf("ValidateInstanceRoleName(%q) accepted a reserved role", name)
+		}
+	}
+	doc := irPolicy(t, []string{"spored-instance-role", irRole})
+	if strings.Contains(doc, "role/spored-instance-role") {
+		t.Error("a reserved role reached the policy")
 	}
 }
 
@@ -147,17 +216,20 @@ func TestValidateInstanceRoleNameRefusesWildcards(t *testing.T) {
 }
 
 // TestPassRoleConditionIsNotIgnored is the trap this check would otherwise fall
-// into. The stock policy grants iam:PassRole on "*" conditioned to
-// sagemaker.amazonaws.com. A condition-blind match counts that as coverage, so an
-// unauthorized role is reported usable and the watch dies at RunInstances anyway —
-// the exact failure the create-time check exists to prevent.
+// into: a PassRole grant conditioned to sagemaker.amazonaws.com must not count
+// as permission to pass the same role to EC2, or an unauthorized role is
+// reported usable and the watch dies at RunInstances anyway.
 func TestPassRoleConditionIsNotIgnored(t *testing.T) {
-	grants := mustGrants(t, irPolicy(t, nil))
 	roleARN := "arn:aws:iam::" + irAccount + ":role/" + irRole
+	doc, err := PolicyDocumentFor(irAccount, Authorizations{SageMakerRoles: []string{roleARN}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grants := mustGrants(t, doc)
 
-	// Condition-blind: the sagemaker grant on "*" matches, which is the bug.
+	// Condition-blind: the sagemaker grant matches.
 	if !Allows(grants, InstanceRolePassAction, roleARN) {
-		t.Fatal("precondition: the stock policy does grant PassRole on * (for sagemaker)")
+		t.Fatal("precondition: the policy grants PassRole on the role (for sagemaker)")
 	}
 	// Condition-aware: it must NOT count as permission to pass a role to EC2.
 	if AllowsPassRoleTo(grants, roleARN, "ec2.amazonaws.com") {
@@ -165,6 +237,9 @@ func TestPassRoleConditionIsNotIgnored(t *testing.T) {
 	}
 	if !AllowsPassRoleTo(grants, roleARN, "sagemaker.amazonaws.com") {
 		t.Error("the sagemaker PassRole grant should still be recognised for sagemaker")
+	}
+	if roles, _ := AuthorizedInstanceRoles(doc); len(roles) != 0 {
+		t.Errorf("a SageMaker role was read back as an instance role: %v", roles)
 	}
 
 	// An authorized role gets an ec2-conditioned grant, which must count.
@@ -259,13 +334,4 @@ func TestGrantCriticality(t *testing.T) {
 	if len(rep) != 1 || rep[0].Action != "servicequotas:GetServiceQuota" {
 		t.Errorf("reporting-only = %v, want just servicequotas:GetServiceQuota", rep)
 	}
-}
-
-func containsStr(ss []string, s string) bool {
-	for _, v := range ss {
-		if v == s {
-			return true
-		}
-	}
-	return false
 }

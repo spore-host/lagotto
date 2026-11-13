@@ -44,7 +44,7 @@ func validateGroupFlags(group, onExtra string, onExtraSet bool, w *watcher.Watch
 
 // joinWatchGroup adds w to its group, creating it when new.
 func joinWatchGroup(ctx context.Context, store *watcher.Store, w *watcher.Watch) (*watcher.WatchGroup, error) {
-	g, err := store.JoinGroup(ctx, w.Group, w.UserID, w.WatchID, w.TTLTimestamp)
+	g, err := store.JoinGroup(ctx, w.GroupRef(), w.UserID, w.WatchID, w.TTLTimestamp)
 	if errors.Is(err, watcher.ErrGroupNotOwned) {
 		return nil, fmt.Errorf("group %s belongs to another caller in this account; choose another --group name", w.Group)
 	}
@@ -95,16 +95,26 @@ func groupName(arg string) string {
 // same "not found" a missing one gets (as getWatchOwned does for a watch).
 func getGroupOwned(ctx context.Context, store *watcher.Store, stsClient stsIdentityAPI, name string) (*watcher.WatchGroup, error) {
 	notFound := fmt.Errorf("no watch or group %q found (a watch id starts w-)", name)
-	g, err := store.GetGroup(ctx, name)
-	if err != nil {
-		return nil, err
-	}
-	if g == nil {
-		return nil, notFound
-	}
 	identity, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
 	if err != nil {
 		return nil, fmt.Errorf("get caller identity: %w", err)
+	}
+	callerID := aws.ToString(identity.UserId)
+	// The caller's own scope first; then, until `lagotto setup` has moved it,
+	// a legacy group of that name (an IAM denial there is "not found").
+	g, err := store.GetGroup(ctx, watcher.OwnerKey(callerID, name))
+	if err != nil {
+		return nil, err
+	}
+	if g != nil {
+		return g, nil
+	}
+	if callerID == "" {
+		return nil, notFound
+	}
+	g, err = store.GetGroup(ctx, name)
+	if err != nil || g == nil {
+		return nil, notFound
 	}
 	if g.Owner != aws.ToString(identity.Arn) {
 		return nil, notFound
@@ -179,7 +189,7 @@ func writeGroupStatus(out io.Writer, st groupStatus, now time.Time) {
 	}
 	for _, w := range st.Members {
 		if latest, at := w.LatestError(); latest != "" && w.Status == watcher.StatusActive {
-			_, _ = fmt.Fprintf(out, "  %s last error: %s (%s ago)\n", w.WatchID, latest, formatAge(now.Sub(at)))
+			_, _ = fmt.Fprintf(out, "  %s last error: %s (%s ago)\n", watcher.ShortID(w.WatchID), latest, formatAge(now.Sub(at)))
 		}
 	}
 }
@@ -255,7 +265,7 @@ func cancelGroup(ctx context.Context, out, errOut io.Writer, store groupMemberCa
 		_, _ = fmt.Fprintln(out, "Aborted.")
 		return nil, nil
 	}
-	if ng, ok, err := store.CloseGroup(ctx, g.Name, "cancelled by its owner (lagotto cancel "+g.Name+")"); err != nil {
+	if ng, ok, err := store.CloseGroup(ctx, g.Ref(), "cancelled by its owner (lagotto cancel "+g.Name+")"); err != nil {
 		return nil, err
 	} else if ok {
 		g = ng

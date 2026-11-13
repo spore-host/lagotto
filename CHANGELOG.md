@@ -10,6 +10,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `SECURITY.md`: report vulnerabilities privately through GitHub's private vulnerability reporting (the repository's Security tab), not public issues.
+- `lagotto setup --sagemaker-role ARN` / `--revoke-sagemaker-role ARN`: the SageMaker execution roles a `--service sagemaker` watch may name in its `RoleArn`.
+
+### Security
+
+- **The hosted poller no longer creates or modifies IAM roles.** Its runtime policy drops `iam:CreateRole`, `iam:PutRolePolicy`, `iam:AttachRolePolicy` and the other role and instance-profile writes on `spawn-instance*` and `spored*`. `iam:PassRole` is granted only on exact role ARNs: `lagotto-instance-role` and the roles authorized with `setup --instance-role` (to EC2), and the roles authorized with `setup --sagemaker-role` (to SageMaker, no longer on `*`). SageMaker job actions are scoped to `training-job/lagotto-*`.
+- **Watches are isolated per owner by IAM.** Every watch, group, match-history row and scheduled launch is keyed under its creator's principal id (`<id>/w-…`), and `lagotto-cli-user` allows DynamoDB item access only where `dynamodb:LeadingKeys` is under the caller's own id (`${aws:userid}`); it no longer grants `dynamodb:Scan` or queries on `status-index`/`user_id-index`. `lagotto list` reads a new keys-only `owner_id-index`. The poller resolves a watch's group, and a group's members, only within the same owner. `lagotto setup` adds the index and moves existing records under their owners, each in one transaction (idempotent, resumable); records whose creator cannot be resolved are left in place and listed.
+- **Launch settings that grant privilege are validated when a watch is created and again by the poller before every launch.** `iam_policy`, `iam_policy_file` and `iam_policy_document` are refused; `iam_role` may not name `spored-instance-role` (or any `spored*` role), a spawn nested-spawn role or a lagotto poller role; a user-data file reference is refused at launch (the stored watch carries its user data inline); a SageMaker job must name a plain, unreserved `RoleArn`. A stored watch that breaks these rules stops as failed without launching.
+
+### Changed
+
+- **Upgrade order:** deploy the new poller, then run `lagotto setup`, then upgrade the CLI everywhere. CLIs older than this release cannot read or create watches once `setup` has written the owner-scoped policy, and `watch` warns when the deployed poller predates owner keys. `lagotto notify-gc` and doctor's table checks now need administrator credentials (the poller still removes unused email subscriptions on each sweep).
+- **Watches and scheduled launches record their creator's principal id** (`owner_id`, the STS `UserId`) next to the ARN, and ownership is checked against it when present, so a role deleted and re-created under the same name does not inherit the old role's watches. A watch created before this records it on its next `lagotto update`.
+- **A watch with no `iam_role` now launches with `lagotto-instance-role`**, which `lagotto setup` creates with spawn's spored/SSM baseline, instead of spawn's shared `spored-instance-role`. `setup --instance-role NAME` now requires the role to exist, adds the same baseline to it and creates its instance profile; `--revoke-instance-role` deletes the profile setup created. `lagotto teardown --iam-roles` deletes `lagotto-instance-role` and those profiles. **After upgrading, run `lagotto setup`** (with the new poller deployed): until then hosted launches fail. A workload that needs more than the baseline (for example S3 access) needs a role an administrator authorizes with `setup --instance-role`, named by `iam_role`.
 
 ## [0.69.2] - 2026-11-11
 

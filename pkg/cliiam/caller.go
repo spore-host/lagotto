@@ -98,6 +98,21 @@ type simRequest struct {
 // probeName stands in for a `*` in a resource pattern.
 const probeName = "lagotto-doctor-probe"
 
+// probeOwnerID is the principal id the caller check simulates an
+// owner-scoped statement as. The question is whether the policy grants a
+// caller its own records, which does not depend on whose id it is.
+const probeOwnerID = "AIDALAGOTTODOCTORPROBE"
+
+// probeLeadingKey is the partition key the caller check simulates: one of the
+// probe owner's records for item actions, the probe owner id itself for the
+// owner index.
+func probeLeadingKey(sid string) string {
+	if sid == "OwnIndex" {
+		return probeOwnerID
+	}
+	return probeOwnerID + "/w-" + probeName
+}
+
 // concreteARN turns a policy resource pattern into an ARN the simulator can
 // evaluate: a `*` region becomes the caller's region, any other `*` a probe
 // name. (The simulator treats a `*` in a request resource literally.)
@@ -153,6 +168,15 @@ func simPlan(accountID, region string) ([]simRequest, []string) {
 			if p != "*" {
 				req.resources[concreteARN(p, region)] = p
 			}
+		}
+		if st.ownerScoped {
+			// The caller's own record: a probe principal id, and a key under it.
+			// The policy variable ${aws:userid} resolves from this context.
+			req.context = append(req.context,
+				iamtypes.ContextEntry{ContextKeyName: aws.String("aws:userid"), ContextKeyType: iamtypes.ContextKeyTypeEnumString,
+					ContextKeyValues: []string{probeOwnerID}},
+				iamtypes.ContextEntry{ContextKeyName: aws.String("dynamodb:LeadingKeys"), ContextKeyType: iamtypes.ContextKeyTypeEnumStringList,
+					ContextKeyValues: []string{probeLeadingKey(st.Sid)}})
 		}
 		if cond, ok := st.Condition.(map[string]map[string]string); ok {
 			keys := make([]string, 0, len(cond["StringEquals"]))

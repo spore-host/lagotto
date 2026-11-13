@@ -35,6 +35,10 @@ const (
 	FieldNotifyChannels      = "notify_channels"
 	FieldLaunchConfig        = "launch_config_json"
 	FieldProject             = "project"
+	// FieldOwnerID is written only to fill in the owner id of a watch created
+	// before it was recorded (the caller's own, after the ARN check passed);
+	// never to change one that is set.
+	FieldOwnerID = "owner_id"
 )
 
 // updatableFields is every attribute an update may write.
@@ -47,6 +51,7 @@ var updatableFields = map[string]bool{
 	FieldNotifyChannels:      true,
 	FieldLaunchConfig:        true,
 	FieldProject:             true,
+	FieldOwnerID:             true,
 }
 
 // IsSearchField reports whether changing field changes what the watch hunts

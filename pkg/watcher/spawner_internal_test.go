@@ -329,7 +329,7 @@ func TestSpawn_OmitsProjectTagWhenEmpty(t *testing.T) {
 	}
 }
 
-// TestBuildIAMProfile_NoClientSkipsAWSCall verifies buildIAMProfile returns ""
+// TestBuildIAMProfile_NoClientSkipsAWSCall verifies buildCallerIAMProfile returns ""
 // (no error) when the Spawner has no AWS client (unit-test spawners), even
 // when iam_role/iam_policy_file are set — mirroring the pre-#129 IAMPolicies
 // guard in buildSnipeConfig, so a config carrying these fields is still usable
@@ -337,23 +337,23 @@ func TestSpawn_OmitsProjectTagWhenEmpty(t *testing.T) {
 func TestBuildIAMProfile_NoClientSkipsAWSCall(t *testing.T) {
 	sp := &Spawner{}
 	file := &SpawnConfigFile{IAMRole: "some-role", IAMPolicyFile: "/some/policy.json"}
-	profile, err := sp.buildIAMProfile(context.Background(), file)
+	profile, err := sp.buildCallerIAMProfile(context.Background(), file)
 	if err != nil {
-		t.Fatalf("buildIAMProfile: %v", err)
+		t.Fatalf("buildCallerIAMProfile: %v", err)
 	}
 	if profile != "" {
 		t.Errorf("profile = %q, want empty (no AWS client to call)", profile)
 	}
 }
 
-// TestBuildIAMProfile_NoneSetReturnsEmpty verifies buildIAMProfile is a no-op
+// TestBuildIAMProfile_NoneSetReturnsEmpty verifies buildCallerIAMProfile is a no-op
 // when none of iam_role/iam_policy/iam_policy_file are set, leaving
 // LaunchConfig.IamInstanceProfile for Provision's own default spored profile.
 func TestBuildIAMProfile_NoneSetReturnsEmpty(t *testing.T) {
 	sp := &Spawner{}
-	profile, err := sp.buildIAMProfile(context.Background(), &SpawnConfigFile{})
+	profile, err := sp.buildCallerIAMProfile(context.Background(), &SpawnConfigFile{})
 	if err != nil {
-		t.Fatalf("buildIAMProfile: %v", err)
+		t.Fatalf("buildCallerIAMProfile: %v", err)
 	}
 	if profile != "" {
 		t.Errorf("profile = %q, want empty", profile)

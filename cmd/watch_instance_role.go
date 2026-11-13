@@ -42,7 +42,7 @@ type InstanceRoleCheck struct {
 // policy's resource ARNs are account-scoped, and guessing an account would be
 // worse than not checking.
 func checkInstanceRoleAuthorizedFromConfig(ctx context.Context, cfg aws.Config, out io.Writer, w *watcher.Watch) (*InstanceRoleCheck, error) {
-	if watchSpawnConfigIAMRole(w) == "" {
+	if watchSpawnConfigIAMRole(w) == "" && watchSageMakerRole(w) == "" {
 		return nil, nil // the overwhelmingly common case — don't call STS for nothing
 	}
 	accountID := ""
@@ -55,9 +55,9 @@ func checkInstanceRoleAuthorizedFromConfig(ctx context.Context, cfg aws.Config, 
 // watchSpawnConfigIAMRole returns the iam_role a watch's stored spawn config
 // names, or "" when it names none.
 //
-// An empty iam_role is the common case and needs no check: spawn's
-// CreateOrGetInstanceProfile then derives "spawn-instance-<hash>", which the
-// poller policy already covers by prefix.
+// An empty iam_role is the common case and needs no check: the watch then
+// launches with lagotto's own instance role (watcher.DefaultInstanceRoleName),
+// which the poller policy always covers.
 func watchSpawnConfigIAMRole(w *watcher.Watch) string {
 	if w == nil || len(w.LaunchConfigJSON) == 0 {
 		return ""
@@ -69,13 +69,25 @@ func watchSpawnConfigIAMRole(w *watcher.Watch) string {
 	return strings.TrimSpace(file.IAMRole)
 }
 
+// watchSageMakerRole returns the RoleArn of a SageMaker watch's job spec, or "".
+func watchSageMakerRole(w *watcher.Watch) string {
+	if w == nil || w.Service != watcher.ServiceSageMaker || len(w.SageMakerJobJSON) == 0 {
+		return ""
+	}
+	arn, err := watcher.SageMakerJobRoleARN(w.SageMakerJobJSON)
+	if err != nil {
+		return ""
+	}
+	return arn
+}
+
 // checkInstanceRoleAuthorized decides, at watch-creation time, whether the hosted
 // poller will be able to launch with a watch's named iam_role (#170).
 //
 // Why this exists: a watch whose spawn_config names a custom role waits for
 // capacity — potentially for hours, which is the entire point of the watch — then
 // dies at launch with `AccessDenied: iam:GetRole on resource: role <name>`,
-// because the poller's policy scopes those actions to spawn-instance*/spored*.
+// because the poller was not allowed to use that role.
 // Three real watches matched g6.8xlarge in under a minute and all three died that
 // way, and the failure reads as `spawn_failed` with a raw AWS error, which is not
 // recognisable as "an IAM grant is missing".
@@ -89,8 +101,12 @@ func watchSpawnConfigIAMRole(w *watcher.Watch) string {
 //	any other error (e.g. AccessDenied) -> nil + warning (nothing can be proven)
 func checkInstanceRoleAuthorized(ctx context.Context, client runtimeiam.IAMAPI, out io.Writer, w *watcher.Watch, accountID string) (*InstanceRoleCheck, error) {
 	roleName := watchSpawnConfigIAMRole(w)
-	if roleName == "" || client == nil || accountID == "" {
+	smRole := watchSageMakerRole(w)
+	if (roleName == "" && smRole == "") || client == nil || accountID == "" {
 		return nil, nil
+	}
+	if roleName == "" {
+		roleName = smRole // reported under the same field
 	}
 
 	res := &InstanceRoleCheck{RoleName: roleName}
@@ -118,6 +134,19 @@ func checkInstanceRoleAuthorized(ctx context.Context, client runtimeiam.IAMAPI, 
 	}
 
 	res.Checked = true
+	if smRole != "" {
+		if runtimeiam.AllowsPassRoleTo(grants, smRole, "sagemaker.amazonaws.com") {
+			res.Authorized = true
+			return res, nil
+		}
+		res.MissingActions = []string{runtimeiam.InstanceRolePassAction}
+		return res, fmt.Errorf("this watch's SageMaker job names RoleArn %q, but the hosted poller is not authorized to pass it to SageMaker.\n"+
+			"  The watch would wait, then fail at submit with AccessDenied.\n"+
+			"\n"+
+			"  An administrator authorizes it:  lagotto setup --sagemaker-role %s\n"+
+			"\n"+
+			"  Every lagotto user can then submit jobs with that role", smRole, smRole)
+	}
 	missing := runtimeiam.MissingInstanceRoleGrants(grants, accountID, roleName)
 	if len(missing) == 0 {
 		res.Authorized = true
@@ -130,10 +159,9 @@ func checkInstanceRoleAuthorized(ctx context.Context, client runtimeiam.IAMAPI, 
 		"  The watch would wait for capacity, match, and then die at launch with AccessDenied.\n"+
 		"  Missing: %s\n"+
 		"\n"+
-		"  Authorize it:  lagotto setup --instance-role %s\n"+
+		"  An administrator authorizes it:  lagotto setup --instance-role %s\n"+
 		"\n"+
-		"  That lets the poller read the role, write its inline policy, attach managed policies to it, and pass\n"+
-		"  it to EC2 — spawn adds its spored/SSM baseline to every role it launches with. If you only ever run a\n"+
-		"  local 'poll --daemon' under your own credentials, this check does not apply to you",
+		"  Setup creates the role's instance profile and adds spawn's spored/SSM baseline; the poller may then\n"+
+		"  only pass the role to EC2. Every lagotto user can launch with an authorized role",
 		roleName, strings.Join(missing, ", "), roleName)
 }

@@ -108,14 +108,14 @@ func extendOrAck(cmd *cobra.Command, watchID string, expiry func(w *watcher.Watc
 
 	// ExtendWatch moves ttl_timestamp with the expiry, so an acknowledged
 	// until-landed watch's record keeps a finite, later retention horizon (#239).
-	if err := store.ExtendWatch(ctx, watchID, newExpiry, reactivate); err != nil {
+	if err := store.ExtendWatch(ctx, w.WatchID, newExpiry, reactivate); err != nil {
 		return fmt.Errorf("extend watch: %w", err)
 	}
 
 	if reactivate {
 		if err := enablePollScheduleIfOff(ctx, sched, os.Stderr, pollSched); err != nil {
 			// Put it back as it was: paused if it was paused.
-			restore := store.ExpireWatch(ctx, watchID, w.ExpiredReason)
+			restore := store.ExpireWatch(ctx, w.WatchID, w.ExpiredReason)
 			return pollScheduleUpdateRefusal(armAction, "the watch is still expired", restore, err)
 		}
 		_, _ = fmt.Fprintln(cmd.OutOrStdout(), i18n.T("lagotto.extend.reactivated", map[string]interface{}{
@@ -168,7 +168,7 @@ func resubscribeOnReactivate(ctx context.Context, out, errOut io.Writer, subs em
 	}
 	w.Status = watcher.StatusActive
 	if err := subscribeWatchEmails(ctx, errOut, topic, subs, w); err != nil {
-		_, _ = fmt.Fprintf(errOut, "Warning: email notifications for %s will not be delivered: %v\n", w.WatchID,
+		_, _ = fmt.Fprintf(errOut, "Warning: email notifications for %s will not be delivered: %v\n", watcher.ShortID(w.WatchID),
 			strings.TrimSuffix(err.Error(), "; no watch was created"))
 		return
 	}

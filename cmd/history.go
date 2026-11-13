@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spf13/cobra"
 	"github.com/spore-host/lagotto/pkg/awscfg"
@@ -60,7 +62,7 @@ func runHistory(cmd *cobra.Command, args []string) error {
 		if gaveUpWithoutAcquiring(w) {
 			gaveUp = append(gaveUp, *w)
 		}
-		matches, err = store.ListMatchHistory(ctx, historyWatchID)
+		matches, err = store.ListMatchHistory(ctx, w.WatchID)
 	} else {
 		// Get user's history
 		stsClient := sts.NewFromConfig(cfg)
@@ -70,15 +72,17 @@ func runHistory(cmd *cobra.Command, args []string) error {
 		}
 		// Fetch the caller's watches (all statuses) to learn each watch's
 		// created_at for the wait-to-acquire join (#139).
-		if watches, werr := store.ListWatchesByUser(ctx, *identity.Arn, ""); werr == nil {
-			for i := range watches {
-				created[watches[i].WatchID] = watches[i].CreatedAt
-				if gaveUpWithoutAcquiring(&watches[i]) {
-					gaveUp = append(gaveUp, watches[i])
-				}
+		watches, werr := listCallerWatches(ctx, store, identity, "")
+		if werr != nil {
+			return fmt.Errorf("list watches: %w", werr)
+		}
+		for i := range watches {
+			created[watches[i].WatchID] = watches[i].CreatedAt
+			if gaveUpWithoutAcquiring(&watches[i]) {
+				gaveUp = append(gaveUp, watches[i])
 			}
 		}
-		matches, err = store.ListMatchHistoryByUser(ctx, *identity.Arn)
+		matches, err = callerHistory(ctx, store, identity, watches)
 	}
 	if err != nil {
 		return fmt.Errorf("list history: %w", err)
@@ -302,4 +306,36 @@ func lostDetail(m watcher.MatchResult) string {
 		d += " (seen " + m.LostAt.Format(time.RFC3339) + ")"
 	}
 	return d
+}
+
+// callerHistory is the caller's match history, newest first: each of the
+// caller's owner-scoped watches' rows (a Query on the history table under the
+// caller's own key prefix), plus legacy rows recorded under the caller's ARN
+// while any remain readable.
+func callerHistory(ctx context.Context, store *watcher.Store, identity *sts.GetCallerIdentityOutput, watches []watcher.Watch) ([]watcher.MatchResult, error) {
+	var out []watcher.MatchResult
+	for _, w := range watches {
+		if watcher.IsLegacyKey(w.WatchID) {
+			continue
+		}
+		rows, err := store.ListMatchHistory(ctx, w.WatchID)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, rows...)
+	}
+	legacy, err := store.ListMatchHistoryByUser(ctx, aws.ToString(identity.Arn))
+	switch {
+	case err == nil:
+		for _, m := range legacy {
+			if watcher.IsLegacyKey(m.WatchID) {
+				out = append(out, m)
+			}
+		}
+	case isAccessDenied(err) || isMissingIndex(err):
+	default:
+		return nil, err
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].MatchedAt.After(out[j].MatchedAt) })
+	return out, nil
 }

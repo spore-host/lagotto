@@ -114,6 +114,9 @@ func buildPoller(ctx context.Context) (*watcher.Poller, *watcher.WatchFilter, er
 	callerARN := callerIdentityARN(ctx, cfg)
 
 	filter, err := resolvePollFilter(callerARN)
+	if err == nil && filter.Owner != "" {
+		filter.OwnerID = callerIdentityUserID(ctx, cfg)
+	}
 	if err != nil {
 		return nil, nil, err
 	}
@@ -175,6 +178,16 @@ func callerIdentityARN(ctx context.Context, cfg aws.Config) string {
 		return ""
 	}
 	return *id.Arn
+}
+
+// callerIdentityUserID is the caller's principal id, or "" if it can't be
+// resolved (an owner-scoped watch then matches no --mine filter).
+func callerIdentityUserID(ctx context.Context, cfg aws.Config) string {
+	id, err := sts.NewFromConfig(cfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	if err != nil {
+		return ""
+	}
+	return aws.ToString(id.UserId)
 }
 
 // runPollDaemon polls on pollInterval in the foreground until no active watches

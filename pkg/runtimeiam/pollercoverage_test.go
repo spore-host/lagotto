@@ -36,6 +36,22 @@ import (
 // An entry here must still be in the inventory (else it is stale) and must not
 // be granted (else it is pointless); TestPollerPolicyCoversItsCalls checks both.
 var pollerNotGranted = map[string]string{
+	// spawn's own IAM setup. launcher.Provision runs SetupSporedIAMRole only
+	// when LaunchConfig.IamInstanceProfile is empty; the poller always sets it
+	// (SpawnConfigFile.InstanceProfileName: an authorized role or lagotto's own,
+	// both created by `lagotto setup`). Never granting these is the point: a
+	// poller that can write a role's policy and pass the role launches with
+	// any permissions a stored watch asks for.
+	"iam:GetRole":                  "spawn SetupSporedIAMRole only; the poller always names an instance profile setup created",
+	"iam:CreateRole":               "spawn SetupSporedIAMRole only; the poller authors no IAM",
+	"iam:TagRole":                  "spawn SetupSporedIAMRole only (tag-on-create); the poller authors no IAM",
+	"iam:PutRolePolicy":            "spawn SetupSporedIAMRole only; the poller authors no IAM",
+	"iam:AttachRolePolicy":         "spawn SetupSporedIAMRole only; the poller authors no IAM",
+	"iam:GetInstanceProfile":       "spawn SetupSporedIAMRole only; the poller always names an instance profile setup created",
+	"iam:CreateInstanceProfile":    "spawn SetupSporedIAMRole only; the poller authors no IAM",
+	"iam:TagInstanceProfile":       "spawn SetupSporedIAMRole only (tag-on-create); the poller authors no IAM",
+	"iam:AddRoleToInstanceProfile": "spawn SetupSporedIAMRole only; the poller authors no IAM",
+
 	// Multi-interface EFA launches (spawn#661): spawn's Client.Launch allocates
 	// and associates an Elastic IP only when the launch has more than one network
 	// interface, and Client.Terminate disassociates/releases one only when it is

@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/scheduler"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spf13/cobra"
+	"github.com/spore-host/lagotto/pkg/arm"
 	"github.com/spore-host/lagotto/pkg/awscfg"
 	"github.com/spore-host/lagotto/pkg/deploy"
 	"github.com/spore-host/lagotto/pkg/quotacheck"
@@ -247,6 +248,10 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	}
 
 	w.UserID = *identity.Arn
+	w.OwnerID = aws.ToString(identity.UserId)
+	// The record's key carries its owner (watcher.OwnerKey), which is what the
+	// lagotto-cli-user policy authorizes on: only the caller's own prefix.
+	w.WatchID = watcher.OwnerKey(w.OwnerID, w.WatchID)
 	w.Project = project
 	w.Service = service
 	w.InstanceTypePattern = pattern
@@ -322,6 +327,9 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		}
 		warnIfPollerPredatesGroups(ctx, cfg, os.Stderr, w)
 	}
+	if msg := arm.CheckOwnerKeyPoller(ctx, deploy.New(cfg), cfg.Region, w); msg != "" {
+		_, _ = fmt.Fprintln(os.Stderr, msg)
+	}
 	if err := store.PutWatch(ctx, w); err != nil {
 		return fmt.Errorf("create watch: %w", err)
 	}
@@ -337,7 +345,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		return encodeWatchJSON(cmd.OutOrStdout(), w, pre, deprecations)
 	}
 
-	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Created watch %s\n", w.WatchID)
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Created watch %s\n", watcher.ShortID(w.WatchID))
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Pattern:  %s\n", w.InstanceTypePattern)
 	if w.Service == watcher.ServiceSageMaker {
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Service:  sagemaker (submits your SageMaker job, retries on CapacityError)\n")
@@ -596,6 +604,12 @@ func loadEC2SpawnConfigFile(ctx context.Context, read watcher.ConfigReader, sour
 	if err := cfg.MakeSelfContained(ctx, read); err != nil {
 		return nil, fmt.Errorf("resolve spawn config references: %w", err)
 	}
+	// Refuse every setting that would have the poller author IAM or launch
+	// with a role an administrator did not provide. The poller checks again
+	// before each launch, since a stored watch can be edited directly.
+	if err := cfg.ValidateLaunchPrivileges(); err != nil {
+		return nil, err
+	}
 	return cfg, nil
 }
 
@@ -646,6 +660,12 @@ func loadSageMakerConfig(path string) ([]byte, error) {
 	jsonBytes, err := json.Marshal(configMap)
 	if err != nil {
 		return nil, fmt.Errorf("marshal to JSON: %w", err)
+	}
+	// The execution role must be a plain role ARN, not a reserved role; the
+	// poller re-checks before every submit, and IAM lets it pass only the
+	// roles an administrator authorized (`setup --sagemaker-role`).
+	if _, err := watcher.SageMakerJobRoleARN(jsonBytes); err != nil {
+		return nil, err
 	}
 	return jsonBytes, nil
 }

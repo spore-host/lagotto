@@ -49,8 +49,16 @@ const (
 // launch config is the same SpawnConfigFile JSON a watch stores, so it inherits
 // the #38 TTL guarantee and the reservation/capacity-block passthrough.
 type ScheduledLaunch struct {
-	ScheduleID       string                `json:"schedule_id" dynamodbav:"schedule_id"`
-	UserID           string                `json:"user_id" dynamodbav:"user_id"`
+	ScheduleID string `json:"schedule_id" dynamodbav:"schedule_id"`
+	UserID     string `json:"user_id" dynamodbav:"user_id"`
+	// OwnerID is the creator's unique principal id, as on [Watch.OwnerID].
+	// LegacyID / MovedTo: when `lagotto setup` moves a legacy record under its
+	// owner's prefix, the new record keeps the old id (LegacyID) and the old key
+	// keeps a marker naming the new one (MovedTo), because the EventBridge
+	// schedules already armed send the old id. GetScheduledLaunch follows it.
+	LegacyID         string                `json:"legacy_id,omitempty" dynamodbav:"legacy_id,omitempty"`
+	MovedTo          string                `json:"moved_to,omitempty" dynamodbav:"moved_to,omitempty"`
+	OwnerID          string                `json:"owner_id,omitempty" dynamodbav:"owner_id,omitempty"`
 	Status           ScheduledLaunchStatus `json:"status" dynamodbav:"status"`
 	Region           string                `json:"region" dynamodbav:"region"`
 	AvailabilityZone string                `json:"availability_zone,omitempty" dynamodbav:"availability_zone,omitempty"`
@@ -162,8 +170,29 @@ func (s *Store) CancelScheduledLaunch(ctx context.Context, id string, from Sched
 	return nil
 }
 
-// GetScheduledLaunch retrieves one by ID (nil, nil if absent).
+// GetScheduledLaunch retrieves one by ID (nil, nil if absent). A legacy id
+// whose record `lagotto setup` moved under its owner's prefix resolves to the
+// moved record, one hop, and only when that record names the legacy id as its
+// own (so a marker cannot redirect a schedule onto an unrelated launch).
 func (s *Store) GetScheduledLaunch(ctx context.Context, id string) (*ScheduledLaunch, error) {
+	sl, err := s.getScheduledLaunch(ctx, id)
+	if err != nil || sl == nil || sl.MovedTo == "" {
+		return sl, err
+	}
+	if !IsLegacyKey(id) || IsLegacyKey(sl.MovedTo) {
+		return nil, nil
+	}
+	moved, err := s.getScheduledLaunch(ctx, sl.MovedTo)
+	if err != nil || moved == nil {
+		return nil, err
+	}
+	if moved.LegacyID != id || moved.MovedTo != "" {
+		return nil, nil
+	}
+	return moved, nil
+}
+
+func (s *Store) getScheduledLaunch(ctx context.Context, id string) (*ScheduledLaunch, error) {
 	out, err := s.client.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName: &s.scheduledTable,
 		Key:       map[string]types.AttributeValue{"schedule_id": &types.AttributeValueMemberS{Value: id}},

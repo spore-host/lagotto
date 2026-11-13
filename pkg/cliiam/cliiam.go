@@ -27,6 +27,8 @@
 // every region. The account is always a literal: a policy variable such as
 // ${aws:PrincipalAccount} in a Resource passes Access Analyzer and the policy
 // simulator but fails a real CreatePolicy ("failed legacy parsing", spawn#1069).
+// The one variable used, ${aws:userid}, is in Condition values only (the
+// owner-scoped item access), where IAM resolves it per request.
 package cliiam
 
 import (
@@ -79,12 +81,10 @@ func PolicyARN(accountID string) string {
 //   - `setup`, `deploy`, `teardown`: administrator commands. They create and
 //     delete IAM roles and policies, Lambda functions, topics and tables.
 //   - `poll`: it runs the poller on the caller's machine, so it needs what the
-//     hosted poller's role has: ec2:RunInstances, and iam:CreateRole,
-//     iam:PutRolePolicy and iam:PassRole on the spawn-instance* roles it
-//     launches with. A principal that can write a role's policy and pass that
-//     role to EC2 can grant itself anything, so putting poll here would make
-//     every CLI user an administrator. A local `poll --daemon` is run by whoever
-//     already has those permissions.
+//     hosted poller's role has: ec2:RunInstances and iam:PassRole on the
+//     instance roles it launches with, which would let every CLI user launch
+//     instances directly. A local `poll --daemon` is run by whoever already has
+//     those permissions.
 //
 // `notify-gc` and `version` are included at no cost: notify-gc needs only SNS
 // actions on the alerts topic that `update` and `cancel` already need, and
@@ -148,6 +148,10 @@ type statement struct {
 	sim       []string
 	// noSimulate excludes the statement from the caller check.
 	noSimulate bool
+	// ownerScoped statements are conditioned on the caller's own key prefix;
+	// the caller check simulates them with the caller's principal id and a key
+	// under it as context.
+	ownerScoped bool
 	// simSkip are actions of this statement the caller check does not
 	// simulate, because the IAM policy simulator denies them for a principal
 	// that real IAM allows (see [SimulatorBlindSpot]). They are reported as
@@ -170,30 +174,57 @@ func stringEquals(key, value string) map[string]map[string]string {
 
 // statements builds the policy's statements for accountID. Every Resource of
 // "*" is an action IAM does not authorize at the resource level, and says so.
+// OwnKeyPattern is the dynamodb:LeadingKeys pattern of the caller's own
+// records ([watcher.OwnerKey]). A policy variable in a Condition value is
+// resolved per request; only a Resource cannot hold one (spawn#1069).
+const OwnKeyPattern = "${aws:userid}" + watcher.KeySeparator + "*"
+
+var (
+	ownKeys = map[string]interface{}{
+		"ForAllValues:StringLike": map[string][]string{"dynamodb:LeadingKeys": {OwnKeyPattern}},
+		"Null":                    map[string]string{"dynamodb:LeadingKeys": "false"},
+	}
+	ownIndexKey = map[string]interface{}{
+		"ForAllValues:StringEquals": map[string][]string{"dynamodb:LeadingKeys": {"${aws:userid}"}},
+	}
+)
+
 func statements(accountID string, configBuckets []string) []statement {
 	regional := func(service, resource string) string { return runtimeiam.RegionalARN(service, accountID, resource) }
 	iamARN := func(resource string) string { return fmt.Sprintf("arn:aws:iam::%s:%s", accountID, resource) }
 
-	var tableARNs, indexARNs []string
+	var tableARNs []string
 	for _, t := range Tables {
 		tableARNs = append(tableARNs, regional("dynamodb", "table/"+t))
-		indexARNs = append(indexARNs, regional("dynamodb", "table/"+t+"/index/*"))
 	}
 	topicARN := regional("sns", alertsTopicName)
 
 	sts := []statement{
-		// lagotto's own tables. watch and launch create a missing table (with its
-		// TTL and lagotto's tags) on first use in a region, so the create actions
-		// are here too, scoped to these three names. No DeleteTable or DeleteItem:
-		// no everyday command deletes.
+		// lagotto's own tables, table-level. watch and launch create a missing
+		// table (with its TTL and lagotto's tags, and the owner index) on first
+		// use in a region, scoped to these three names. No item access here.
 		{Sid: "LagottoTables", Action: []string{
 			"dynamodb:CreateTable", "dynamodb:DescribeTable", "dynamodb:DescribeTimeToLive",
-			"dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:Query", "dynamodb:Scan",
-			"dynamodb:TagResource", "dynamodb:UpdateItem", "dynamodb:UpdateTimeToLive",
+			"dynamodb:TagResource", "dynamodb:UpdateTimeToLive",
 		}, Resource: tableARNs},
-		// The tables' secondary indexes (user_id-index, status-index) are only
-		// queried.
-		{Sid: "LagottoTableIndexes", Action: []string{"dynamodb:Query"}, Resource: indexARNs},
+		// Item access, only to the caller's own records: every record a CLI
+		// user creates is keyed "<principal id>/<id>" (watcher.OwnerKey), and
+		// dynamodb:LeadingKeys is the partition key of every item a request
+		// touches. ${aws:userid} is the caller's principal id (AIDA… for an IAM
+		// user; AROA…:<session name> for a role session). The Null condition
+		// refuses a request with no partition key (a Scan), which ForAllValues
+		// alone would allow. No Scan, no DeleteItem.
+		{Sid: "OwnItems", Action: []string{
+			"dynamodb:BatchGetItem", "dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:Query", "dynamodb:UpdateItem",
+		}, Resource: tableARNs, Condition: ownKeys, ownerScoped: true},
+		// The owner index, through which `list` finds the caller's watch keys.
+		// When IAM evaluates dynamodb:LeadingKeys for an index Query it is the
+		// index's partition key, owner_id, which must be the caller's own. The
+		// index projects keys only, and every read of a watch itself goes
+		// through OwnItems.
+		{Sid: "OwnIndex", Action: []string{"dynamodb:Query"},
+			Resource:  regional("dynamodb", "table/"+Tables[0]+"/index/"+watcher.OwnerIndexName),
+			Condition: ownIndexKey, ownerScoped: true},
 
 		// The poller's schedule: watch, update, ack and extend re-enable a poller
 		// that disabled itself when it ran out of watches; doctor reads it.

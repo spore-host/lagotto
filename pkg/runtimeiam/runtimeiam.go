@@ -9,7 +9,9 @@
 // can't create an explicitly-named IAM role that already exists (CloudFormation
 // Early Validation ResourceExistenceCheck, #145). It also keeps the
 // privilege-escalation surface (iam:CreateRole/PutRolePolicy) with the human
-// admin running deploy/setup, never with the runtime Lambda, and makes "a new
+// admin running deploy/setup, never with the runtime Lambda: the poller may
+// create, tag or modify no IAM role at all, and may pass to EC2 and SageMaker
+// only the roles setup created or an administrator authorized. It also makes "a new
 // SDK call needs a new permission" a one-file code change instead of a template
 // edit.
 package runtimeiam
@@ -26,6 +28,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
+	"github.com/spore-host/lagotto/pkg/watcher"
 )
 
 const (
@@ -143,7 +146,7 @@ func EnsureRoles(ctx context.Context, client IAMAPI, region, accountID string) e
 // setup in any region writes the same bytes and cannot flip-flop another
 // region's grants. Idempotent: a re-run creates nothing and rewrites both
 // policies in place.
-func EnsureSetupRoles(ctx context.Context, client IAMAPI, region, accountID string, instanceRoles []string) ([]string, error) {
+func EnsureSetupRoles(ctx context.Context, client IAMAPI, region, accountID string, auth Authorizations) ([]string, error) {
 	if region == "" || accountID == "" {
 		return nil, fmt.Errorf("runtimeiam: region and accountID are required")
 	}
@@ -155,7 +158,7 @@ func EnsureSetupRoles(ctx context.Context, client IAMAPI, region, accountID stri
 	if made {
 		created = append(created, RoleName)
 	}
-	if err := putRuntimePolicy(ctx, client, accountID, instanceRoles); err != nil {
+	if err := putRuntimePolicy(ctx, client, accountID, auth); err != nil {
 		return created, err
 	}
 	made, err = ensureSchedulerInvokeRole(ctx, client, accountID)
@@ -281,20 +284,20 @@ func SchedulerInvokePolicyDocument(accountID string) (string, error) {
 // region is validated but does not shape what is written (#219): the role is
 // IAM-global and shared by every region's poller, so the policy covers lagotto's
 // resources in every region and `setup` in any one region serves all of them.
-func EnsureRuntimeRole(ctx context.Context, client IAMAPI, region, accountID string, instanceRoles []string) error {
+func EnsureRuntimeRole(ctx context.Context, client IAMAPI, region, accountID string, auth Authorizations) error {
 	if region == "" || accountID == "" {
 		return fmt.Errorf("runtimeiam: region and accountID are required")
 	}
 	if _, err := ensurePollerRole(ctx, client); err != nil {
 		return err
 	}
-	return putRuntimePolicy(ctx, client, accountID, instanceRoles)
+	return putRuntimePolicy(ctx, client, accountID, auth)
 }
 
 // putRuntimePolicy writes PolicyDocument onto RoleName (a wholesale,
 // idempotent PutRolePolicy).
-func putRuntimePolicy(ctx context.Context, client IAMAPI, accountID string, instanceRoles []string) error {
-	doc, err := PolicyDocument(accountID, instanceRoles)
+func putRuntimePolicy(ctx context.Context, client IAMAPI, accountID string, auth Authorizations) error {
+	doc, err := PolicyDocumentFor(accountID, auth)
 	if err != nil {
 		return fmt.Errorf("runtimeiam: build policy: %w", err)
 	}
@@ -309,34 +312,36 @@ func putRuntimePolicy(ctx context.Context, client IAMAPI, accountID string, inst
 	return nil
 }
 
-// InstanceRoleActions are the IAM actions spawn's launcher performs on an
-// instance role and its identically-named instance profile, in
-// CreateOrGetInstanceProfile (spawn pkg/aws/iam.go).
-//
-// It is exported and used both to BUILD the policy and to CHECK a named role at
-// watch-creation time, so the grant and the check cannot drift apart. The order
-// matters only for readable output.
-//
-// Why the whole set rather than just iam:GetRole, which is where #170's
-// AccessDenied surfaced: for a pre-existing role the launcher goes on to write
-// the spored baseline inline policy (PutRolePolicy, unconditional since spawn#502)
-// and attach the SSM managed policy (AttachRolePolicy), then reads/creates the
-// instance profile, then passes the role to EC2. Granting these one at a time just
-// moves the failure to the next call.
-//
-// iam:TagRole and iam:TagInstanceProfile (#242): spawn creates the role and the
-// profile WITH tags (spawn:managed=true, plus the launch's own tags on a
-// spawn-instance-<hash> role), and IAM authorizes tag-on-create as a separate
-// Tag* action. Without them the first CreateRole in an account (or every
-// per-watch iam_policy role) is AccessDenied.
-var InstanceRoleActions = []string{
-	"iam:GetRole", "iam:CreateRole", "iam:TagRole", "iam:PutRolePolicy", "iam:AttachRolePolicy",
-	"iam:GetInstanceProfile", "iam:CreateInstanceProfile", "iam:TagInstanceProfile", "iam:AddRoleToInstanceProfile",
-}
+// InstanceRoleName is lagotto's own instance role and its identically-named
+// instance profile: what a watch launches with when its spawn_config names no
+// iam_role. `lagotto setup` creates it ([EnsureInstanceRole]) with spawn's
+// spored/SSM baseline and nothing else; `lagotto teardown --iam-roles` deletes
+// it ([DeleteInstanceRole]). It equals watcher.DefaultInstanceRoleName.
+const InstanceRoleName = watcher.DefaultInstanceRoleName
 
-// InstanceRolePassAction is granted separately from [InstanceRoleActions] because
-// it carries a PassedToService condition, which is part of a grant's identity.
+// InstanceRolePassAction is the one IAM action the poller performs on an
+// instance role: passing it to EC2 at RunInstances. The poller creates, tags
+// and modifies no role or instance profile. The roles it may pass are lagotto's
+// own [InstanceRoleName] and the ones an administrator authorized with `setup
+// --instance-role`, each by exact ARN.
+//
+// Before, the poller held iam:CreateRole, iam:PutRolePolicy and
+// iam:AttachRolePolicy on spawn-instance* and spored* and wrote whatever policy
+// a stored watch carried. Anyone who could write a watch could therefore have
+// the poller build a role with any policy and launch an instance with it.
 const InstanceRolePassAction = "iam:PassRole"
+
+// Authorizations are the roles an administrator let the poller pass, carried
+// forward from the deployed policy by `setup`.
+type Authorizations struct {
+	// InstanceRoles are EC2 instance roles (plain names), passed to
+	// ec2.amazonaws.com. Each must already have an instance profile of the same
+	// name; `setup --instance-role` makes sure of that.
+	InstanceRoles []string
+	// SageMakerRoles are SageMaker execution-role ARNs (with path), passed to
+	// sagemaker.amazonaws.com.
+	SageMakerRoles []string
+}
 
 // instanceRoleNamePattern is the subset of IAM's role-name grammar we accept for
 // an authorized instance role.
@@ -349,7 +354,10 @@ const InstanceRolePassAction = "iam:PassRole"
 var instanceRoleNamePattern = regexp.MustCompile(`^[A-Za-z0-9+=,.@_-]{1,64}$`)
 
 // ValidateInstanceRoleName rejects anything that is not a plain IAM role name —
-// in particular a wildcard or a full ARN. Callers should surface the error as-is.
+// in particular a wildcard or a full ARN — and the reserved roles a watch may
+// never launch with (watcher.ReservedInstanceRole: spawn's shared spored*
+// role, its nested-spawn roles, lagotto's poller roles). Callers should surface
+// the error as-is.
 func ValidateInstanceRoleName(name string) error {
 	trimmed := strings.TrimSpace(name)
 	if trimmed == "" {
@@ -365,7 +373,47 @@ func ValidateInstanceRoleName(name string) error {
 	if !instanceRoleNamePattern.MatchString(trimmed) {
 		return fmt.Errorf("runtimeiam: %q is not a valid IAM role name", name)
 	}
+	if why := watcher.ReservedInstanceRole(trimmed); why != "" {
+		return fmt.Errorf("runtimeiam: instance role %q cannot be authorized: %s", trimmed, why)
+	}
+	if strings.EqualFold(trimmed, InstanceRoleName) {
+		return fmt.Errorf("runtimeiam: %q is lagotto's own instance role; it is always authorized", trimmed)
+	}
 	return nil
+}
+
+// ValidateSageMakerRoleARN rejects anything that is not a concrete IAM role
+// ARN in accountID, and the reserved roles. An authorized ARN is interpolated
+// into a Resource, so a wildcard would let the poller pass every matching role
+// to SageMaker.
+func ValidateSageMakerRoleARN(roleARN, accountID string) error {
+	acct, name, err := watcher.ParseRoleARN(roleARN)
+	if err != nil {
+		return fmt.Errorf("runtimeiam: --sagemaker-role: %w", err)
+	}
+	if accountID != "" && acct != accountID {
+		return fmt.Errorf("runtimeiam: --sagemaker-role %q is in account %s, not this account (%s)", roleARN, acct, accountID)
+	}
+	if why := watcher.ReservedInstanceRole(name); why != "" {
+		return fmt.Errorf("runtimeiam: --sagemaker-role %q cannot be authorized: %s", roleARN, why)
+	}
+	return nil
+}
+
+// normalizeSageMakerRoles trims, drops invalid ARNs, de-duplicates and sorts.
+func normalizeSageMakerRoles(arns []string, accountID string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, a := range arns {
+		t := strings.TrimSpace(a)
+		if t == "" || seen[t] || ValidateSageMakerRoleARN(t, accountID) != nil {
+			continue
+		}
+		seen[t] = true
+		out = append(out, t)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // normalizeInstanceRoles trims, drops empties and invalid names, de-duplicates
@@ -453,21 +501,23 @@ type statement struct {
 // lagotto's fixed resource names and the account exact, so every region's
 // `setup` writes the same document and one run serves them all.
 func PolicyDocument(accountID string, instanceRoles []string) (string, error) {
+	return PolicyDocumentFor(accountID, Authorizations{InstanceRoles: instanceRoles})
+}
+
+// PolicyDocumentFor is [PolicyDocument] with SageMaker execution roles too.
+func PolicyDocumentFor(accountID string, auth Authorizations) (string, error) {
 	arn := func(f string, a ...interface{}) string { return fmt.Sprintf(f, a...) }
 	schedulerARN := RegionalARN("scheduler", accountID, "schedule/default/lagotto-capacity-poller")
 	launchSchedARN := RegionalARN("scheduler", accountID, "schedule/default/lagotto-launch-*")
 	schedulerInvokeRoleARN := arn("arn:aws:iam::%s:role/lagotto-capacity-poller-scheduler-invoke", accountID)
-	sporedRoleARN := arn("arn:aws:iam::%s:role/spored*", accountID)
-	sporedProfileARN := arn("arn:aws:iam::%s:instance-profile/spored*", accountID)
-	// spawn's launcher names the per-launch instance role/profile it creates
-	// "spawn-instance-<hash>" (spawn pkg/aws iam.go generateRoleName), not
-	// "spored*". The hosted poller MUST be able to GetRole/CreateRole/…/PassRole
-	// on those, or every auto-spawn dies at "set up IAM instance profile" with
-	// AccessDenied — which classifies terminal, so the watch fails ~immediately
-	// instead of waiting out capacity (lagotto#148). Keep spored* too (spawn's
-	// fixed fallback name + older launches).
-	spawnRoleARN := arn("arn:aws:iam::%s:role/spawn-instance*", accountID)
-	spawnProfileARN := arn("arn:aws:iam::%s:instance-profile/spawn-instance*", accountID)
+	// The instance roles the poller may pass to EC2: lagotto's own, then each
+	// one an administrator authorized, by exact ARN. No prefix: spawn-instance*
+	// and spored* roles are created by spawn's own users, with policies they
+	// chose, so a prefix grant would let every lagotto user launch with them.
+	ec2PassRoles := []string{arn("arn:aws:iam::%s:role/%s", accountID, InstanceRoleName)}
+	for _, name := range normalizeInstanceRoles(auth.InstanceRoles) {
+		ec2PassRoles = append(ec2PassRoles, arn("arn:aws:iam::%s:role/%s", accountID, name))
+	}
 
 	passToService := func(svc string) interface{} {
 		return map[string]interface{}{"StringEquals": map[string]string{"iam:PassedToService": svc}}
@@ -551,13 +601,13 @@ func PolicyDocument(accountID string, instanceRoles []string) (string, error) {
 			Resource: launchSchedARN},
 		{Effect: "Allow", Action: []string{"iam:PassRole"}, Resource: schedulerInvokeRoleARN,
 			Condition: passToService("scheduler.amazonaws.com")},
-		// spawn launch set: RunInstances/tags/SG, spawn-instance*/spored* role/profile setup.
+		// spawn launch set: RunInstances/tags/SG. No IAM writes: the launch names
+		// an instance profile an administrator provided, so spawn's launcher does
+		// no IAM setup (watcher.SpawnConfigFile.InstanceProfileName).
 		{Effect: "Allow", Action: []string{
 			"ec2:RunInstances", "ec2:CreateTags", "ec2:CreateSecurityGroup", "ec2:AuthorizeSecurityGroupIngress",
 		}, Resource: "*"},
-		{Effect: "Allow", Action: InstanceRoleActions,
-			Resource: []string{spawnRoleARN, spawnProfileARN, sporedRoleARN, sporedProfileARN}},
-		{Effect: "Allow", Action: []string{InstanceRolePassAction}, Resource: []string{spawnRoleARN, sporedRoleARN},
+		{Effect: "Allow", Action: []string{InstanceRolePassAction}, Resource: ec2PassRoles,
 			Condition: passToService("ec2.amazonaws.com")},
 		// Terminating what spawn launched (#242): Provision's compensating
 		// teardown after a failed fsx_create setup (spawn pkg/launcher
@@ -610,34 +660,19 @@ func PolicyDocument(accountID string, instanceRoles []string) (string, error) {
 		{Effect: "Allow", Action: []string{
 			"ec2:CreateCapacityReservation", "ec2:CancelCapacityReservation", "ec2:DescribeCapacityReservations",
 		}, Resource: "*"},
-		// SageMaker submit + PassRole (the job spec carries its own execution role).
+		// SageMaker submit and track, only the jobs lagotto names
+		// (lagotto-<watch>-<n>, SageMakerLauncher.submit). SageMaker ARNs carry
+		// the job name in lower case; lagotto's names are lower case already.
 		{Effect: "Allow", Action: []string{
 			"sagemaker:CreateTrainingJob", "sagemaker:AddTags", "sagemaker:DescribeTrainingJob",
-		}, Resource: "*"},
-		{Effect: "Allow", Action: []string{"iam:PassRole"}, Resource: "*",
-			Condition: passToService("sagemaker.amazonaws.com")},
+		}, Resource: RegionalARN("sagemaker", accountID, "training-job/lagotto-*")},
 	}
-
-	// Operator-authorized instance roles (#170). A watch's spawn_config may name
-	// any iam_role, and spawn's launcher uses that name verbatim — so the fixed
-	// spawn-instance*/spored* prefixes above cannot cover it, and the watch dies at
-	// launch with AccessDenied on iam:GetRole *after* matching capacity.
-	//
-	// These get exactly the grant set above, on the named role and the
-	// identically-named instance profile (CreateOrGetInstanceProfile uses
-	// profileName := roleName). Granting the whole set at once is deliberate:
-	// granting only iam:GetRole moves the failure to PutRolePolicy, then
-	// AttachRolePolicy, then PassRole — the #149/#151/#153 sequence of
-	// rediscoveries, each costing a user a matched watch.
-	for _, name := range normalizeInstanceRoles(instanceRoles) {
-		roleARN := arn("arn:aws:iam::%s:role/%s", accountID, name)
-		profileARN := arn("arn:aws:iam::%s:instance-profile/%s", accountID, name)
-		statements = append(statements,
-			statement{Effect: "Allow", Action: InstanceRoleActions,
-				Resource: []string{roleARN, profileARN}},
-			statement{Effect: "Allow", Action: []string{InstanceRolePassAction},
-				Resource: []string{roleARN}, Condition: passToService("ec2.amazonaws.com")},
-		)
+	// SageMaker execution roles: only those an administrator authorized with
+	// `setup --sagemaker-role`, by exact ARN. With none, no SageMaker PassRole
+	// at all, so a SageMaker watch fails at submit until one is authorized.
+	if smRoles := normalizeSageMakerRoles(auth.SageMakerRoles, accountID); len(smRoles) > 0 {
+		statements = append(statements, statement{Effect: "Allow", Action: []string{InstanceRolePassAction},
+			Resource: smRoles, Condition: passToService("sagemaker.amazonaws.com")})
 	}
 
 	doc := map[string]interface{}{"Version": "2012-10-17", "Statement": statements}

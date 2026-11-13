@@ -70,3 +70,39 @@ func TestGroupPollerWarning(t *testing.T) {
 		t.Errorf("member: calls=%d", ci.calls)
 	}
 }
+
+func TestOwnerKeyPollerWarning(t *testing.T) {
+	if msg := OwnerKeyPollerWarning(deploy.PollerInfo{Exists: true, Version: "0.69.2"}, nil, "us-east-1"); !strings.Contains(msg, "predates v"+watcher.MinOwnerKeyPollerVersion) {
+		t.Errorf("old poller: %q", msg)
+	}
+	if msg := OwnerKeyPollerWarning(deploy.PollerInfo{Exists: true, Version: watcher.MinOwnerKeyPollerVersion}, nil, ""); msg != "" {
+		t.Errorf("current poller: %q", msg)
+	}
+	if msg := OwnerKeyPollerWarning(deploy.PollerInfo{Exists: true}, nil, ""); msg == "" {
+		t.Error("an untagged poller is not warned about")
+	}
+	if msg := OwnerKeyPollerWarning(deploy.PollerInfo{}, nil, ""); msg != "" {
+		t.Errorf("no poller: %q", msg)
+	}
+}
+
+type fixedInspector struct {
+	info deploy.PollerInfo
+	n    *int
+}
+
+func (f fixedInspector) InspectPoller(context.Context) (deploy.PollerInfo, error) {
+	*f.n++
+	return f.info, nil
+}
+
+func TestCheckOwnerKeyPoller(t *testing.T) {
+	n := 0
+	in := fixedInspector{deploy.PollerInfo{Exists: true, Version: "0.60.0"}, &n}
+	if msg := CheckOwnerKeyPoller(context.Background(), in, "", &watcher.Watch{WatchID: "w-legacy"}); msg != "" || n != 0 {
+		t.Errorf("legacy key: %q after %d inspections", msg, n)
+	}
+	if msg := CheckOwnerKeyPoller(context.Background(), in, "", &watcher.Watch{WatchID: "AIDAA/w-1"}); msg == "" || n != 1 {
+		t.Errorf("scoped key under an old poller: %q", msg)
+	}
+}

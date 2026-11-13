@@ -495,7 +495,7 @@ func (s *SpawnConfigFile) ToLaunchConfig() spawnaws.LaunchConfig {
 		// fields are deliberately NOT set here — like IAMPolicies above, they
 		// require extra work (file I/O / instance-profile creation) that the
 		// spawner performs separately after calling ToLaunchConfig (see
-		// SpawnConfigFile.ResolveUserData and Spawner.buildIAMProfile in
+		// SpawnConfigFile.ResolveUserData and SpawnConfigFile.InstanceProfileName in
 		// spawner.go).
 		Tags:              map[string]string(s.Tags),
 		RootVolumeSizeGiB: s.VolumeSize,

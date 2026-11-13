@@ -8,6 +8,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sagemaker"
 	smtypes "github.com/aws/aws-sdk-go-v2/service/sagemaker/types"
+	"github.com/spore-host/lagotto/pkg/failure"
 )
 
 // SageMakerLauncher submits the user's SageMaker job and tracks it across poll
@@ -80,12 +81,20 @@ func (l *SageMakerLauncher) submit(ctx context.Context, client *sagemaker.Client
 	if err := json.Unmarshal(w.SageMakerJobJSON, &input); err != nil {
 		return sageMakerOutcome{Kind: FailureTerminal}, fmt.Errorf("unmarshal sagemaker job: %w", err)
 	}
+	// Re-validated here, not only at watch creation: the stored item can be
+	// edited in DynamoDB directly. The role must be a plain, unreserved role
+	// ARN; IAM then lets the poller pass only the roles an administrator
+	// authorized with `lagotto setup --sagemaker-role`.
+	if _, err := SageMakerJobRoleARN(w.SageMakerJobJSON); err != nil {
+		m.ActionTaken = "sagemaker_submit_failed"
+		return sageMakerOutcome{Kind: FailureTerminal}, fmt.Errorf("%w: %v", failure.ErrConfigRefused, err)
+	}
 
 	// Generate a unique, traceable job name per attempt (SageMaker job names must
 	// be unique within an account+region; reusing one would collide).
-	jobName := fmt.Sprintf("lagotto-%s-%d", w.WatchID, w.MatchCount+1)
+	jobName := sageMakerJobName(w)
 	input.TrainingJobName = aws.String(jobName)
-	addLagottoTag(&input, w.WatchID)
+	addLagottoTag(&input, ShortID(w.WatchID))
 
 	out, err := client.CreateTrainingJob(ctx, &input)
 	if err != nil {
@@ -149,6 +158,19 @@ func (l *SageMakerLauncher) check(ctx context.Context, client *sagemaker.Client,
 
 // addLagottoTag stamps the job with the watch ID so lagotto-submitted probe/run
 // jobs are filterable (job records are immutable and can't be deleted).
+// sageMakerJobName is the job name for the watch's next attempt:
+// lagotto-[<owner tag>-]<short id>-<attempt>. Job names allow only
+// [A-Za-z0-9-] and must be unique in the account and region, so the owner is
+// carried as a short digest (OwnerTag), not verbatim. The runtime policy's
+// SageMaker grant covers training-job/lagotto-*.
+func sageMakerJobName(w *Watch) string {
+	prefix := "lagotto-"
+	if t := OwnerTag(KeyOwner(w.WatchID)); t != "" {
+		prefix += t + "-"
+	}
+	return fmt.Sprintf("%s%s-%d", prefix, ShortID(w.WatchID), w.MatchCount+1)
+}
+
 func addLagottoTag(input *sagemaker.CreateTrainingJobInput, watchID string) {
 	input.Tags = append(input.Tags, smTag("lagotto:watch-id", watchID), smTag("lagotto:managed", "true"))
 }

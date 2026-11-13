@@ -212,9 +212,9 @@ func (s *Spawner) buildSnipeConfig(ctx context.Context, target SnipeTarget) (spa
 
 	// When none of iam_role/iam_policy/iam_policy_file are given, Provision sets
 	// up the default spored profile itself, so we leave IamInstanceProfile empty.
-	// buildIAMProfile itself skips AWS calls when there's no spawn client (unit
+	// buildCallerIAMProfile itself skips AWS calls when there's no spawn client (unit
 	// tests inject a fake provision and no client).
-	profile, err := s.buildIAMProfile(ctx, &target.LaunchConfig)
+	profile, err := s.buildCallerIAMProfile(ctx, &target.LaunchConfig)
 	if err != nil {
 		return spawnaws.LaunchConfig{}, "", fmt.Errorf("snipe: %w", err)
 	}

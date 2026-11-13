@@ -105,8 +105,12 @@ type Poller struct {
 // WatchFilter scopes a poll sweep to a subset of watches (#47). A zero-value
 // filter (all fields empty) matches every watch — equivalent to no filter.
 type WatchFilter struct {
-	Project  string   // only watches with this Project label
-	Owner    string   // only watches whose UserID equals this (caller ARN)
+	Project string // only watches with this Project label
+	Owner   string // only watches whose UserID equals this (caller ARN)
+	// OwnerID is the caller's principal id. An owner-scoped watch is the
+	// caller's only when its key is under OwnerID; its user_id attribute, which
+	// its writer chose, is not consulted.
+	OwnerID  string
 	WatchIDs []string // only these specific watch IDs
 }
 
@@ -126,13 +130,19 @@ func (f *WatchFilter) matches(w *Watch) bool {
 	if f.Project != "" && w.Project != f.Project {
 		return false
 	}
-	if f.Owner != "" && w.UserID != f.Owner {
-		return false
+	if f.Owner != "" || f.OwnerID != "" {
+		if owner := KeyOwner(w.WatchID); owner != "" {
+			if owner != f.OwnerID {
+				return false
+			}
+		} else if w.UserID != f.Owner {
+			return false
+		}
 	}
 	if len(f.WatchIDs) > 0 {
 		found := false
 		for _, id := range f.WatchIDs {
-			if id == w.WatchID {
+			if id == w.WatchID || (IsLegacyKey(id) && ShortID(w.WatchID) == id) {
 				found = true
 				break
 			}
@@ -1210,7 +1220,7 @@ func (p *Poller) recordOutcome(ctx context.Context, w *Watch, m *MatchResult, fa
 			return
 		}
 		groupWon = won
-		group = p.groups[w.Group]
+		group = p.groups[w.GroupRef()]
 	}
 
 	// Success clears the streak so it persists via RecordMatch's PutWatch.

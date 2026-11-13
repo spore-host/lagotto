@@ -230,6 +230,11 @@ func notifyGC(ctx context.Context, out io.Writer, subs emailSubscriber, listActi
 	// list uses would be unsubscribed. A failed read stops here.
 	active, err := listActive(ctx)
 	if err != nil {
+		if isAccessDenied(err) {
+			return fmt.Errorf("list active watches (nothing was changed): notify-gc reads every owner's watches, which the "+
+				"owner-scoped lagotto-cli-user policy does not allow; the hosted poller removes unused subscriptions on each "+
+				"sweep, or run notify-gc with administrator credentials: %w", err)
+		}
 		return fmt.Errorf("list active watches (nothing was changed): %w", err)
 	}
 	res, rerr := subs.Reconcile(ctx, active, nil)

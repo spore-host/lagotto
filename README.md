@@ -71,16 +71,33 @@ on_complete: terminate
 completion_file: /tmp/JOB_DONE   # spored watches this path for the completion signal
 volume_size: 100                 # root EBS volume size, in GiB
 spot_max_price: "0.90"           # cap the Spot bid; omit for on-demand-price default
-iam_policy: s3:ReadWrite
+iam_role: my-workload-role       # a role an administrator authorized (see below)
 tags:                             # extra EC2 tags, alongside spawn's own spawn:* tags
   project: fieldwork
   owner: buckai
 ```
 
 `user_data` (inline, or `@path` to read a script from disk) / `user_data_file`
-add a custom bootstrap payload appended after spored installs; `iam_role` /
-`iam_policy_file` grant a pre-built role or a scoped custom policy document
-instead of (or alongside) `iam_policy`'s built-in shorthands.
+add a custom bootstrap payload appended after spored installs. The file is read
+when the watch is created, on your machine; the stored watch carries the text.
+
+**Instance permissions come from a role an administrator provides.** The hosted
+poller creates and changes no IAM role. A watch with no `iam_role` launches with
+`lagotto-instance-role`, which `lagotto setup` creates with spawn's spored/SSM
+baseline and nothing else. For more (an S3 bucket, say), an administrator creates
+a role and authorizes it once:
+
+```bash
+lagotto setup --instance-role my-workload-role                       # EC2 instance role (must exist)
+lagotto setup --sagemaker-role arn:aws:iam::<acct>:role/<path>/<name>  # SageMaker execution role
+```
+
+and the spawn config names it with `iam_role: my-workload-role` (a SageMaker job
+names it in its `RoleArn`). Every lagotto user in the account can then launch
+with it, so authorize only roles they may all have. `iam_policy`,
+`iam_policy_file` and `iam_policy_document` are refused, as is an `iam_role` of
+spawn's shared `spored-instance-role`: the poller re-checks every stored watch
+before it launches, and stops one that sets them.
 
 An unknown key is an error at `watch`/`launch` time, naming the key and the
 nearest accepted one: `az:` (use `--azs`), `s3_read:`, `instance_profile:` or a
@@ -375,6 +392,31 @@ Before acting on a match, a poller claims a short **processing lease** on the
 watch, so two daemons — or a local daemon racing the hosted Lambda — can't both
 launch the same watch. A crashed poller's lease ages out automatically. Disable
 with `--no-lease` (not recommended when more than one poller runs).
+
+### Who can see a watch
+
+Each watch, group, match-history row and scheduled launch is stored under its
+creator's AWS principal id (`<id>/w-1a2b3c4d`; the CLI shows and accepts the
+short `w-1a2b3c4d`). The `lagotto-cli-user` policy lets a caller read and write
+only the records under its own id, so IAM, not the CLI, keeps one user's watches
+from another's. What "one user" means is the principal id IAM reports
+(`${aws:userid}`):
+
+- an IAM user: that user;
+- IAM Identity Center or console federation: that person (the session name is
+  their user name, which they cannot choose);
+- a role assumed with `sts:AssumeRole`: the role **and the session name**. The
+  caller chooses the session name, so everyone who can assume the same role can
+  act as any of its sessions; they share ownership. Give each person their own
+  role, or pin the session name in the role's trust policy (for example
+  `sts:RoleSessionName` = `${aws:username}`). Keep it the same across logins:
+  a tool that makes up a new session name each time (the AWS CLI's default
+  `botocore-session-…`, for example) sees a new owner each time; set
+  `role_session_name` in the profile.
+
+`lagotto setup` moves watches created before this under their creators' ids. The
+hosted poller reads every watch; a watch can only refer to records under its own
+owner's id (its group, a group's members).
 
 ## Scheduled launches
 
