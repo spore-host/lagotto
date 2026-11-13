@@ -22,8 +22,9 @@ var (
 )
 
 var cancelCmd = &cobra.Command{
-	Use:   "cancel <watch-id | scheduled-launch-id | group>",
-	Short: "Cancel an active watch, a watch group or a scheduled launch, or release a fired hold's capacity reservation",
+	Use:         "cancel <watch-id | scheduled-launch-id | group>",
+	Annotations: level(levelBasic),
+	Short:       "Cancel an active watch, a watch group or a scheduled launch, or release a fired hold's capacity reservation",
 	Long: `Cancel an active watch (w-…), a watch group (its name, from 'lagotto watch
 --group'), or a scheduled launch (sl-…, from 'lagotto launch').
 

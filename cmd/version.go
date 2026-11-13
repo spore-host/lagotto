@@ -13,9 +13,10 @@ var (
 )
 
 var versionCmd = &cobra.Command{
-	Use:   "version",
-	Short: "Print version information",
-	Long:  `Display version, build date, and git commit information for lagotto.`,
+	Use:         "version",
+	Annotations: level(levelAdvanced),
+	Short:       "Print version information",
+	Long:        `Display version, build date, and git commit information for lagotto.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		fmt.Printf("🐕 Lagotto - EC2 Capacity Watcher\n\n")
 		fmt.Printf("Version:    %s\n", Version)

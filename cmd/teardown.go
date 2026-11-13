@@ -27,8 +27,9 @@ var (
 )
 
 var teardownCmd = &cobra.Command{
-	Use:   "teardown",
-	Short: "Delete lagotto's DynamoDB tables and per-launch schedules",
+	Use:         "teardown",
+	Annotations: level(levelAdvanced),
+	Short:       "Delete lagotto's DynamoDB tables and per-launch schedules",
 	Long: `Delete the DynamoDB tables lagotto uses: lagotto-watches,
 lagotto-match-history and lagotto-scheduled-launches (the last is created by
 'lagotto deploy' or the first 'lagotto launch').

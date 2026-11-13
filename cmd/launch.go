@@ -38,8 +38,9 @@ var (
 )
 
 var launchCmd = &cobra.Command{
-	Use:   "launch",
-	Short: "Schedule a future or recurring instance launch (--at / --after / --cron)",
+	Use:         "launch",
+	Annotations: level(levelAdvanced),
+	Short:       "Schedule a future or recurring instance launch (--at / --after / --cron)",
 	Long: `Schedule an instance launch to fire at a clock time (--at), after a delay
 (--after), or on a recurring cron (--cron) — as opposed to 'watch', which fires
 when capacity appears. The motivating case is launching into an EC2 Capacity

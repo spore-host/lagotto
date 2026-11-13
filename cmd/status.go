@@ -16,8 +16,9 @@ import (
 )
 
 var statusCmd = &cobra.Command{
-	Use:   "status <watch-id | group>",
-	Short: "Show details of a watch, or of a watch group and its members",
+	Use:         "status <watch-id | group>",
+	Annotations: level(levelBasic),
+	Short:       "Show details of a watch, or of a watch group and its members",
 	Long: `Show details of a watch (w-…).
 
 Given a watch group's name (lagotto watch --group), show the group's state

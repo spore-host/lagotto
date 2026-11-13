@@ -23,8 +23,9 @@ import (
 var doctorStackName string
 
 var doctorCmd = &cobra.Command{
-	Use:   "doctor",
-	Short: "Check the deployed hosted poller against what this lagotto expects",
+	Use:         "doctor",
+	Annotations: level(levelAdvanced),
+	Short:       "Check the deployed hosted poller against what this lagotto expects",
 	Long: `Report drift between the hosted capacity poller deployed in your AWS account and
 what THIS lagotto binary expects. Read-only: it makes no change of any kind, and
 there is no --fix.

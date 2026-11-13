@@ -29,8 +29,9 @@ var (
 )
 
 var deployCmd = &cobra.Command{
-	Use:   "deploy",
-	Short: "Deploy the hosted capacity poller into your own AWS account",
+	Use:         "deploy",
+	Annotations: level(levelAdvanced),
+	Short:       "Deploy the hosted capacity poller into your own AWS account",
 	Long: `Stand up lagotto's hosted capacity poller (DynamoDB, SNS, Lambda, EventBridge
 Scheduler) in your OWN AWS account, so watches are serviced server-side — armed
 once, then hands-off — instead of depending on a foreground 'poll --daemon' that

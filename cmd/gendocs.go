@@ -27,6 +27,14 @@ var gendocsCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("generate docs: %w", err)
 		}
+		// The machine-readable level of every command and flag (#297), for
+		// the portal's CLI⇄GUI parity gate. A sidecar, so the markdown is
+		// unchanged.
+		levels, err := generateLevels(rootCmd)
+		if err != nil {
+			return fmt.Errorf("generate docs: %w", err)
+		}
+		frags[levelsFile] = levels
 		if err := os.MkdirAll(gendocsOut, 0755); err != nil {
 			return fmt.Errorf("create out dir: %w", err)
 		}

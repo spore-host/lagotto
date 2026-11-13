@@ -9,8 +9,9 @@ import (
 )
 
 var ackCmd = &cobra.Command{
-	Use:   "ack <watch-id>",
-	Short: "Acknowledge an --until-landed watch so it keeps hunting",
+	Use:         "ack <watch-id>",
+	Annotations: level(levelBasic),
+	Short:       "Acknowledge an --until-landed watch so it keeps hunting",
 	Long: `Acknowledge an --until-landed watch.
 
 An --until-landed watch has no TTL. Instead it pauses itself unless you
