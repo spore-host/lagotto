@@ -2,6 +2,9 @@ package cmd
 
 import (
 	"encoding/json"
+	"io"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -170,4 +173,32 @@ func basicEntries(t *testing.T, doc map[string]json.RawMessage) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func TestGenerateLevelsRefusesABadFlagLevel(t *testing.T) {
+	root := &cobra.Command{Use: "x", Annotations: level(levelBasic)}
+	root.PersistentFlags().Bool("g", false, "")
+	_ = root.PersistentFlags().SetAnnotation("g", levelAnnotation, []string{"expert"})
+	if _, err := generateLevels(root); err == nil || !strings.Contains(err.Error(), `x --g: level "expert"`) {
+		t.Errorf("a bad flag level was accepted: %v", err)
+	}
+}
+
+// gen-docs writes the sidecar beside the markdown.
+func TestGenDocsWritesTheLevelsSidecar(t *testing.T) {
+	old := gendocsOut
+	gendocsOut = t.TempDir()
+	t.Cleanup(func() { gendocsOut = old })
+	gendocsCmd.SetOut(io.Discard)
+	if err := gendocsCmd.RunE(gendocsCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(gendocsOut, levelsFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := generateLevels(rootCmd)
+	if err != nil || string(b) != string(want) {
+		t.Errorf("%s differs from generateLevels (err %v)", levelsFile, err)
+	}
 }
