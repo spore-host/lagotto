@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **A watch created without `--regions` now matches** (#306). An empty region list means "all enabled regions" (and `lagotto list` shows it as `(all enabled)`), but the hosted poller passed the empty list straight to the capacity search, which then searched zero regions: the watch never matched, and the only sign was the "check for typos" warning. The poller now resolves an empty list to the account's enabled regions (`ec2:DescribeRegions`, already granted; cached for 10 minutes), and records a poll error on the watch if they can't be listed, rather than searching nothing.
+- **`lagotto deploy --teardown` deletes the poller's log group** `/aws/lambda/lagotto-capacity-poller` in the region it tears down, after the function (#305). Lambda used to create the group implicitly on the first invocation, so nothing owned it and every teardown left it behind. `lagotto deploy` now creates it before the function, with a 30-day retention and the `lagotto:managed=cli` tag; an existing group is tagged, and given the retention only if it has none. A re-run of `deploy --teardown` removes a group an earlier teardown left. `deploy` needs `logs:CreateLogGroup`, `logs:TagResource`, `logs:DescribeLogGroups` and `logs:PutRetentionPolicy`, and `deploy --teardown` needs `logs:DeleteLogGroup` (administrator commands; `lagotto-cli-user` is unchanged).
 
 ## [0.70.0] - 2026-11-12
 

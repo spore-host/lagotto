@@ -40,6 +40,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/cloudformation"
 	cfntypes "github.com/aws/aws-sdk-go-v2/service/cloudformation/types"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -136,6 +137,7 @@ type Deployer struct {
 	sns     snsAPI
 	sched   schedulerAPI
 	ddb     dynamoTableAPI
+	logs    logsAPI
 	httpGet func(url string) (*http.Response, error)
 	sleep   func(time.Duration)
 }
@@ -149,6 +151,7 @@ func New(cfg aws.Config) *Deployer {
 		sns:     sns.NewFromConfig(cfg),
 		sched:   scheduler.NewFromConfig(cfg),
 		ddb:     dynamodb.NewFromConfig(cfg),
+		logs:    cloudwatchlogs.NewFromConfig(cfg),
 		httpGet: http.Get,
 		sleep:   time.Sleep,
 	}
@@ -166,8 +169,11 @@ func New(cfg aws.Config) *Deployer {
 //     the topic must exist first. Using the ARN the topic call actually returned
 //     (rather than a separately constructed guess) is what keeps a mismatch from
 //     silently degrading the poller into a non-notifying one.
-//  3. EnsurePollerFunction — converged onto the shape the SAM template declared.
-//  4. EnsurePollerSchedule — targets the function and the CLI-owned Scheduler
+//  3. ensurePollerLogGroup — the function's log group, created tagged and with a
+//     retention BEFORE the function exists (#305). Created after, Lambda would
+//     already have made an untagged, never-expiring one on the first invocation.
+//  4. EnsurePollerFunction — converged onto the shape the SAM template declared.
+//  5. EnsurePollerSchedule — targets the function and the CLI-owned Scheduler
 //     invoke role. Created DISABLED; an existing schedule's state is passed
 //     through untouched, so a deploy can never switch off a running poller.
 //
@@ -214,6 +220,11 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) (*Result, error) {
 		return nil, err
 	}
 
+	logAction, err := d.ensurePollerLogGroup(ctx, opts.Region, opts.AccountID)
+	if err != nil {
+		return nil, err
+	}
+
 	fnARN, fnAction, err := d.EnsurePollerFunction(ctx, PollerFunctionInput{
 		RoleARN:    runtimeRoleARN(opts.AccountID),
 		Bucket:     bucket,
@@ -251,15 +262,16 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) (*Result, error) {
 		Actions: []string{
 			fmt.Sprintf("artifact bucket %s: %s", bucket, bucketAction),
 			fmt.Sprintf("SNS topic %s: ensured", AlertsTopicName),
+			fmt.Sprintf("log group %s: %s", PollerLogGroupName, logAction),
 			fmt.Sprintf("Lambda %s: %s", PollerFunctionName, fnAction),
 			fmt.Sprintf("schedule %s: %s", PollerScheduleName, schedAction),
 		},
 	}, nil
 }
 
-// Teardown deletes the three poller resources explicitly, in the order
-// schedule → function → topic, and returns a description of each one it actually
-// removed.
+// Teardown deletes the poller resources explicitly, in the order
+// schedule → function → log group → topic, and returns a description of each
+// one it actually removed.
 //
 // The order matters: the schedule goes FIRST so nothing can fire into a
 // half-deleted poller. Every step tolerates an already-absent resource, so a
@@ -309,7 +321,16 @@ func (d *Deployer) Teardown(ctx context.Context, region, accountID string) ([]st
 		deleted = append(deleted, "function "+PollerFunctionName)
 	}
 
-	// 3. The topic last: it's the only resource whose deletion loses something
+	// 3. The function's log group (#305), once nothing can write to it. Lambda
+	// recreates a missing group on the next invocation, so it must go after the
+	// function, never before.
+	if gone, err := d.deletePollerLogGroup(ctx, region); err != nil {
+		return deleted, err
+	} else if gone {
+		deleted = append(deleted, "log group "+PollerLogGroupName)
+	}
+
+	// 4. The topic last: it's the only resource whose deletion loses something
 	// (subscriptions), so it goes after the things that publish to it are gone.
 	if exists, err := d.alertsTopicExists(ctx, region, accountID); err != nil {
 		return deleted, err

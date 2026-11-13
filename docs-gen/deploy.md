@@ -21,8 +21,13 @@ older CloudFormation-deployed stack, this command adopts its resources
 automatically (they all have fixed names) and tells you how to detach the stack
 with --migrate-from-cloudformation.
 
-Use --teardown to delete the poller, topic and schedule, and then the default
-artifact bucket lagotto-lambda-&lt;account&gt;-&lt;region&gt; with every object version in
+Deploy also creates the poller's CloudWatch Logs log group
+/aws/lambda/lagotto-capacity-poller before the function, with a 30-day retention
+and the lagotto:managed=cli tag, so Lambda never creates an unowned one. A group
+that already exists is tagged, and given the retention only if it has none.
+
+Use --teardown to delete the poller's schedule, Lambda, log group and SNS topic
+in this region, and then the default artifact bucket lagotto-lambda-&lt;account&gt;-&lt;region&gt; with every object version in
 it. The bucket is deleted only when this account owns it and it carries the
 lagotto:managed=cli tag, which deploy writes when it creates the bucket and
 back-fills on an existing default-named bucket. A --lambda-bucket you supplied
@@ -41,7 +46,7 @@ lagotto deploy [flags]
 | `--migrate-from-cloudformation` |  | bool |  | Detach the legacy --stack-name stack from every resource it owns (retain-only change set, verify, delete) before deploying |
 | `--region` |  | string |  | AWS region (default: from your AWS config) |
 | `--stack-name` |  | string | `lagotto` | Legacy CloudFormation stack to detect/migrate from (the poller's own resources have fixed names) |
-| `--teardown` |  | bool |  | Delete the poller, SNS topic, schedule and lagotto-managed artifact bucket instead of deploying them |
+| `--teardown` |  | bool |  | Delete the poller, its log group, SNS topic, schedule and lagotto-managed artifact bucket instead of deploying them |
 | `--version` |  | string | `dev` | lagotto release version to pull the poller Lambda from |
 | `--yes` | `-y` | bool |  | Skip the confirmation prompt |
 

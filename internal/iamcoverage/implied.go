@@ -63,6 +63,11 @@ var impliedRules = concatRules(
 	tagOnCreate("lambda", "Tags", "lambda:TagResource", "CreateFunction"),
 	tagOnCreate("events", "Tags", "events:TagResource", "PutRule"),
 	tagOnCreate("sns", "Tags", "sns:TagResource", "CreateTopic"),
+	// CloudWatch Logs authorizes tags passed to CreateLogGroup as
+	// logs:TagResource (CloudWatch Logs API reference, CreateLogGroup: "To
+	// create a log group with tags, you must have the logs:CreateLogGroup and
+	// logs:TagResource permissions"). pkg/deploy always passes them (#305).
+	tagOnCreate("logs", "Tags", "logs:TagResource", "CreateLogGroup"),
 	tagOnCreate("sts", "Tags", "sts:TagSession", "AssumeRole"),
 	tagOnCreate("s3", "Tagging", "s3:PutObjectTagging", "PutObject", "CopyObject", "CreateMultipartUpload"),
 	tagOnCreate("sagemaker", "Tags", "sagemaker:AddTags", "CreateTrainingJob"),

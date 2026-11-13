@@ -17,6 +17,7 @@ There are two paths:
 | Resource | Name | Owner |
 |---|---|---|
 | Lambda | `lagotto-capacity-poller` (arm64, `provided.al2023`, 512 MB, 900 s) | `lagotto deploy` |
+| CloudWatch Logs log group | `/aws/lambda/lagotto-capacity-poller`, 30-day retention, tagged `lagotto:managed=cli`; created before the function so Lambda never creates an unowned one (an existing group is tagged, and given the retention only if it has none) | `lagotto deploy`; deleted by `lagotto deploy --teardown` (#305) |
 | SNS topic | `lagotto-capacity-alerts` (KMS encrypted with `alias/aws/sns`) | `lagotto deploy` |
 | SNS email subscriptions | one per `--notify email:` address, on `lagotto-capacity-alerts`, filtered on the `lagotto_email` message attribute so each address receives only its own watches' events (#240) | `lagotto watch`; removed by the poller (next sweep), `lagotto cancel` or `lagotto notify-gc` once no active watch names the address; deleted with the topic |
 | EventBridge schedule | `lagotto-capacity-poller` at `rate(5 minutes)`, starts **DISABLED** | `lagotto deploy` |
@@ -303,8 +304,13 @@ there are **neither** active watches **nor** pending scheduled launches, so a
 lagotto deploy --teardown
 ```
 
-This deletes the three poller resources, in the order schedule → function → topic
-so nothing can fire into a half-deleted poller. Deleting the topic deletes its
+This deletes the poller resources in that region, in the order schedule →
+function → log group → topic, so nothing can fire into a half-deleted poller and
+Lambda cannot recreate the log group once it is gone (#305). The log group
+`/aws/lambda/lagotto-capacity-poller` is deleted whether or not it carries the
+`lagotto:managed=cli` tag: its name belongs to the poller function, so an untagged
+one is the group Lambda created implicitly before #305. A teardown that finds
+only a leftover log group deletes it. Deleting the topic deletes its
 email subscriptions with it. It is idempotent: running it twice
 succeeds.
 
