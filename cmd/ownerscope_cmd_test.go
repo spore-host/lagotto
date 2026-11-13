@@ -340,3 +340,18 @@ func TestDeleteInstanceRoles_Errors(t *testing.T) {
 		t.Errorf("nothing to delete: %v", err)
 	}
 }
+
+type unreadableIndex struct{ ownerKeysDynamo }
+
+func (unreadableIndex) DescribeTable(context.Context, *dynamodb.DescribeTableInput, ...func(*dynamodb.Options)) (*dynamodb.DescribeTableOutput, error) {
+	return nil, errors.New("AccessDenied")
+}
+
+func TestOwnerIndexProgressLine(t *testing.T) {
+	if got := ownerIndexProgressLine(context.Background(), unreadableIndex{}, "t", 3*time.Second); !strings.Contains(got, "status unreadable") {
+		t.Errorf("unreadable: %q", got)
+	}
+	if got := ownerIndexProgressLine(context.Background(), &flipIndex{}, "t", 12*time.Second); !strings.Contains(got, "CREATING, building, 12s elapsed") {
+		t.Errorf("building: %q", got)
+	}
+}

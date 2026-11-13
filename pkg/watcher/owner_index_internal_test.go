@@ -57,3 +57,16 @@ func TestEnsureOwnerIndex(t *testing.T) {
 		t.Error("a new watches table has no owner index")
 	}
 }
+
+func TestDescribeOwnerIndex(t *testing.T) {
+	ctx := context.Background()
+	if st, err := DescribeOwnerIndex(ctx, &fakeIndexAPI{status: types.IndexStatusCreating}, "t"); err != nil || st.Status != "CREATING" {
+		t.Errorf("building: %+v, %v", st, err)
+	}
+	if st, err := DescribeOwnerIndex(ctx, &fakeIndexAPI{}, "t"); err != nil || st.Status != "" {
+		t.Errorf("no owner index: %+v, %v", st, err)
+	}
+	if _, err := DescribeOwnerIndex(ctx, &fakeIndexAPI{missing: true}, "t"); err == nil {
+		t.Error("a missing table was not an error")
+	}
+}

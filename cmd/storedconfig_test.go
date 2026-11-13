@@ -105,3 +105,24 @@ func TestDoctorLaunchConfigCheck(t *testing.T) {
 		}
 	}
 }
+
+// The role check reads the deployed policy once, and only when asked.
+func TestNewRoleCheck(t *testing.T) {
+	check := newRoleCheck(context.Background(), &fakeRoleIAM{policy: irAuthorizedPolicy(t, irTestRole)}, irTestAccount)
+	if missing, known := check(irTestRole); !known || len(missing) != 0 {
+		t.Errorf("authorized role: missing %v known %v", missing, known)
+	}
+	if missing, known := check("other-role"); !known || len(missing) == 0 {
+		t.Errorf("unauthorized role: missing %v known %v", missing, known)
+	}
+	for name, c := range map[string]roleCheck{
+		"no policy":  newRoleCheck(context.Background(), &fakeRoleIAM{}, irTestAccount),
+		"no account": newRoleCheck(context.Background(), &fakeRoleIAM{policy: irStockPolicy(t)}, ""),
+		"no client":  newRoleCheck(context.Background(), nil, irTestAccount),
+		"bad policy": newRoleCheck(context.Background(), &fakeRoleIAM{policy: "not json"}, irTestAccount),
+	} {
+		if _, known := c(irTestRole); known {
+			t.Errorf("%s: reported as known", name)
+		}
+	}
+}

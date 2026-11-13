@@ -141,3 +141,26 @@ func TestNotifyConfigRefused(t *testing.T) {
 		t.Errorf("no channels: %v", err)
 	}
 }
+
+func TestStoredConfigRole(t *testing.T) {
+	for in, want := range map[string]string{`{"iamrole":" r "}`: "r", `{}`: "", ``: "", `{`: ""} {
+		if got := StoredConfigRole([]byte(in)); got != want {
+			t.Errorf("StoredConfigRole(%s) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// The migration says what it is doing as it goes (#309).
+func TestMigratorProgress(t *testing.T) {
+	var lines []string
+	m := &migrator{progress: func(s string) { lines = append(lines, s) }}
+	m.say("Scanning %s", "t")
+	for i := 0; i < MigrateProgressEvery*2; i++ {
+		m.tick()
+	}
+	want := []string{"Scanning t", "  moved 25 record(s) so far...", "  moved 50 record(s) so far..."}
+	if strings.Join(lines, "|") != strings.Join(want, "|") {
+		t.Errorf("progress = %q, want %q", lines, want)
+	}
+	(&migrator{}).say("no sink") // must not panic
+}
