@@ -109,25 +109,30 @@ nfpms:
     rpm:
       summary: "Watch for EC2 instance capacity across regions"
 
-brews:
-  # No runtime `dependencies:` on truffle: lagotto imports truffle/pkg/aws as a
-  # COMPILED-IN Go library (linked into the lagotto binary), and never execs the
-  # `truffle` CLI at runtime — so a Homebrew runtime dependency on it was wrong
-  # and forced users to install a second binary they don't need.
+# A cask, not a formula (spore-host/spore-host#747): GoReleaser deprecated
+# `brews:` for prebuilt binaries in v2.10, and `goreleaser check` fails on it.
+# Casks install on Linux too. The binaries are not notarized, so the
+# post-install hook clears macOS's quarantine bit, without which Gatekeeper
+# blocks them. tap_migrations.json moves formula users here once this cask is
+# published.
+homebrew_casks:
   - name: lagotto
+    binaries: [lagotto]
     repository:
       owner: spore-host
       name: homebrew-tap
       branch: main
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-    directory: Formula
     homepage: https://github.com/spore-host/lagotto
     description: "Watch for EC2 instance capacity across regions"
     license: Apache-2.0
-    test: |
-      system "#{bin}/lagotto", "version"
-    install: |
-      bin.install "lagotto"
+    skip_upload: auto
+    hooks:
+      post:
+        install_steps: |
+          on_macos do
+            run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/lagotto"]
+          end
 
 scoops:
   - name: lagotto

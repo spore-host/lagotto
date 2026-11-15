@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Homebrew: releases now publish a cask, `spore-host/tap/lagotto`, instead of a
+  formula. GoReleaser deprecated formulas for prebuilt binaries, and casks
+  install on Linux too. The formula stays in the tap until a later tap change
+  moves existing installs to the cask (spore-host/spore-host#747).
 - **A watch the poller refuses at launch now tells its owner why** (#309). When the hosted poller refuses a watch's stored spawn config before launching (for example inline IAM), the owner's notify channels get the refusal, word for word, and the fix. Before, they got the ordinary match notice, which said capacity was found and `Action Taken: spawn_failed`. A refused or failed scheduled launch records the reason (with the fix, for a refusal) as `last_error` on its record. Scheduled launches have no notify channel.
 - **`lagotto setup` reports progress while it builds the owner index and moves records** (#309). It says up front that building the index can take several minutes and that interrupting is safe. While waiting, it prints the index's status every 10 seconds. While moving records, it prints a line as it starts scanning each table and another every 25 records moved.
 
