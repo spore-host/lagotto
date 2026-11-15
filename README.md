@@ -18,6 +18,7 @@ Some instance types — particularly high-demand GPU families — aren't always 
 
 **macOS / Linux (Homebrew)**
 ```bash
+brew tap spore-host/tap && brew trust spore-host/tap
 brew install spore-host/tap/lagotto
 ```
 
