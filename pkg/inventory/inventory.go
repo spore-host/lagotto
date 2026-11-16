@@ -74,7 +74,6 @@ package inventory
 import (
 	"fmt"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 
@@ -550,19 +549,5 @@ func Summary(rep *fp.Report) map[fp.Class]int {
 	for _, r := range rep.Resources {
 		out[r.Class]++
 	}
-	return out
-}
-
-// SortedRegions returns the distinct regions of rep's resources, global last.
-func SortedRegions(rep *fp.Report) []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, r := range rep.Resources {
-		if r.Region != Global && !seen[r.Region] {
-			seen[r.Region] = true
-			out = append(out, r.Region)
-		}
-	}
-	sort.Strings(out)
 	return out
 }

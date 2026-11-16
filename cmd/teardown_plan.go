@@ -154,6 +154,9 @@ func executePlan(ctx context.Context, out io.Writer, cfg aws.Config, acct string
 		_, _ = fmt.Fprintln(out, "The plan lists nothing; nothing to do.")
 		return nil
 	}
+	if planned.Account != "" && planned.Account != acct {
+		return fmt.Errorf("not deleting anything: the plan is for account %s, but these credentials are for %s", planned.Account, acct)
+	}
 	live, err := takeFootprint(ctx, cfg, acct, planScope(planned))
 	if err != nil {
 		return fmt.Errorf("not deleting anything: re-check the plan against the account: %w", err)

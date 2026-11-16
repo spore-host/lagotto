@@ -350,3 +350,130 @@ func TestScheduleOf(t *testing.T) {
 		}
 	}
 }
+
+// scriptedRegion answers every delete with what it is told: absent, or
+// lagotto's tag missing.
+type scriptedRegion struct {
+	table  watcher.TableOutcome
+	bucket deploy.BucketOutcome
+	found  bool
+	err    error
+}
+
+func (s scriptedRegion) DeleteTable(context.Context, string) (watcher.TableOutcome, error) {
+	return s.table, s.err
+}
+func (s scriptedRegion) DeleteArtifactBucket(context.Context, string, string) (deploy.BucketTeardown, error) {
+	return deploy.BucketTeardown{Outcome: s.bucket}, s.err
+}
+func (s scriptedRegion) DeleteAlertsTopic(context.Context, string, string) (bool, error) {
+	return s.found, s.err
+}
+func (s scriptedRegion) DeletePollerFunction(context.Context) (bool, error) { return s.found, s.err }
+func (s scriptedRegion) DeletePollerLogGroup(context.Context, string) (bool, error) {
+	return s.found, s.err
+}
+func (s scriptedRegion) DeleteSchedule(context.Context, string, string) (bool, error) {
+	return s.found, s.err
+}
+func (s scriptedRegion) DeleteScheduleGroup(context.Context, string) (bool, error) {
+	return s.found, s.err
+}
+
+type scriptedAccount struct {
+	found  bool
+	policy cliiam.Deletion
+	err    error
+}
+
+func (s scriptedAccount) DeleteRole(context.Context, string) (bool, error) { return s.found, s.err }
+func (s scriptedAccount) DeleteInstanceProfile(context.Context, string) (bool, error) {
+	return s.found, s.err
+}
+func (s scriptedAccount) DeletePolicy(context.Context) (cliiam.Deletion, error) {
+	return s.policy, s.err
+}
+
+// TestDeleterOutcomes: each type's deleter turns "it was not there" into
+// footprint.ErrNotFound (counted as gone) and "it lacks lagotto's own tag"
+// into an error (failed, so nothing it depends on is tried), and passes a
+// real failure through.
+func TestDeleterOutcomes(t *testing.T) {
+	ctx := context.Background()
+	east := deployed("us-east-1")
+	rep := Classify(Facts{AccountID: acct, AllRegions: true, Regions: []Region{east}, Account: account(0)}, Options{}, now)
+	res := map[string]fp.Resource{}
+	for _, r := range rep.Resources {
+		res[r.Type+" "+r.Name] = r
+	}
+	del := func(region RegionDeleter, account AccountDeleter) fp.ByType {
+		return NewDeleter(rep, Deleters{AccountID: acct, Region: func(string) RegionDeleter { return region }, Account: account})
+	}
+	gone := scriptedRegion{table: watcher.TableAbsent, bucket: deploy.BucketAbsent}
+	untagged := scriptedRegion{table: watcher.TableUnmanaged, bucket: deploy.BucketRetainedUntagged, found: true}
+	broken := scriptedRegion{err: errors.New("AccessDenied")}
+
+	regional := []string{TypeTable + " lagotto-watches", TypeBucket + " " + deploy.DefaultBucketName(acct, "us-east-1"),
+		TypeTopic + " " + deploy.AlertsTopicName, TypeFunction + " " + deploy.PollerFunctionName, TypeLogGroup + " " + deploy.PollerLogGroupName,
+		TypeSchedule + " " + deploy.PollerScheduleName, TypeScheduleGroup + " lagotto"}
+	for _, k := range regional {
+		r := res[k]
+		if err := del(gone, nil).Delete(ctx, r); !errors.Is(err, fp.ErrNotFound) {
+			t.Errorf("%s absent: %v, want ErrNotFound", k, err)
+		}
+		if err := del(broken, nil).Delete(ctx, r); err == nil || errors.Is(err, fp.ErrNotFound) {
+			t.Errorf("%s failure: %v", k, err)
+		}
+	}
+	for _, k := range []string{TypeTable + " lagotto-watches", TypeBucket + " " + deploy.DefaultBucketName(acct, "us-east-1")} {
+		if err := del(untagged, nil).Delete(ctx, res[k]); err == nil || !strings.Contains(err.Error(), "lagotto:managed") {
+			t.Errorf("%s without lagotto's tag: %v", k, err)
+		}
+	}
+	// A bucket that is not this account's artifact bucket for its region.
+	b := res[TypeBucket+" "+deploy.DefaultBucketName(acct, "us-east-1")]
+	b.Region = "eu-west-1"
+	if err := del(scriptedRegion{bucket: deploy.BucketDeleted}, nil).Delete(ctx, b); err == nil {
+		t.Error("deleted a bucket named for another region")
+	}
+	s := res[TypeSchedule+" "+deploy.PollerScheduleName]
+	s.ARN = "arn:aws:scheduler:us-east-1:" + acct + ":schedule/lagotto/something-else"
+	if err := del(scriptedRegion{found: true}, nil).Delete(ctx, s); err == nil {
+		t.Error("deleted a schedule whose ARN names another")
+	}
+
+	for _, k := range []string{TypeRole + " " + runtimeiam.RoleName, TypeInstanceProfile + " " + runtimeiam.InstanceRoleName} {
+		if err := del(nil, scriptedAccount{}).Delete(ctx, res[k]); !errors.Is(err, fp.ErrNotFound) {
+			t.Errorf("%s absent: %v", k, err)
+		}
+		if err := del(nil, scriptedAccount{err: errors.New("AccessDenied")}).Delete(ctx, res[k]); err == nil {
+			t.Errorf("%s failure swallowed", k)
+		}
+	}
+	// Another profile not deleted was there at the re-check: it lacks setup's tag.
+	if err := del(nil, scriptedAccount{}).Delete(ctx, res[TypeInstanceProfile+" team-gpu"]); err == nil || errors.Is(err, fp.ErrNotFound) {
+		t.Errorf("authorized profile left in place: %v", err)
+	}
+	pol := res[TypePolicy+" "+cliiam.PolicyName]
+	for _, c := range []struct {
+		d    cliiam.Deletion
+		err  error
+		want string
+	}{{cliiam.Deletion{Absent: true}, nil, "notfound"}, {cliiam.Deletion{Unmanaged: true}, nil, "tag"}, {cliiam.Deletion{}, errors.New("denied"), "denied"}, {cliiam.Deletion{Deleted: true}, nil, ""}} {
+		err := del(nil, scriptedAccount{policy: c.d, err: c.err}).Delete(ctx, pol)
+		switch c.want {
+		case "notfound":
+			if !errors.Is(err, fp.ErrNotFound) {
+				t.Errorf("absent policy: %v", err)
+			}
+		case "":
+			if err != nil {
+				t.Errorf("deleted policy: %v", err)
+			}
+		default:
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Errorf("policy %+v: %v", c.d, err)
+			}
+		}
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -137,6 +138,8 @@ func TestFootprintFlags(t *testing.T) {
 type recordingDeleters struct {
 	mu    sync.Mutex
 	calls []string
+	// failTable fails DeleteTable for this table.
+	failTable string
 }
 
 func (r *recordingDeleters) rec(s string) {
@@ -151,6 +154,9 @@ type recRegion struct {
 }
 
 func (d recRegion) DeleteTable(_ context.Context, n string) (watcher.TableOutcome, error) {
+	if n == d.r.failTable {
+		return "", errors.New("AccessDenied: dynamodb:DeleteTable")
+	}
 	d.r.rec(d.region + " table " + n)
 	return watcher.TableDeleted, nil
 }

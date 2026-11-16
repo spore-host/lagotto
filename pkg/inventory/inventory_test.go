@@ -351,3 +351,36 @@ func TestLaunchScheduleRecorded(t *testing.T) {
 		}
 	}
 }
+
+// TestClassifyRestOfRegion: a teardown job's schedule is active and keeps
+// its group; the schedule of a poller that is gone, and an unknown lagotto-*
+// schedule, are litter and depend on their target; running jobs are active;
+// the legacy stack is reported, never deleted.
+func TestClassifyRestOfRegion(t *testing.T) {
+	reg := "us-east-1"
+	r := Region{
+		Region: reg,
+		Groups: []Item{{ARN: ScheduleGroupARN(reg, acct, runtimeiam.TeardownScheduleGroup), Name: runtimeiam.TeardownScheduleGroup, Tags: lt(reg)}},
+		Schedules: []Schedule{
+			{Group: runtimeiam.TeardownScheduleGroup, Name: "lagotto-teardown-job"},
+			{Group: schedgroup.Name, Name: deploy.PollerScheduleName},
+			{Group: schedgroup.Name, Name: "lagotto-something", TargetARN: "arn:aws:lambda:us-east-1:" + acct + ":function:other"},
+		},
+		Jobs:  []Item{{ARN: "arn:job", Name: "lagotto-job", Tags: map[string]string{"lagotto:managed": "true"}}},
+		Stack: &Item{ARN: "arn:stack", Name: "lagotto"},
+	}
+	rep := Classify(Facts{AccountID: acct, AllRegions: true, Regions: []Region{r}}, Options{}, now)
+	wantClass(t, rep, TypeSchedule, reg, "lagotto-teardown-job", fp.ClassActive)
+	wantClass(t, rep, TypeScheduleGroup, reg, runtimeiam.TeardownScheduleGroup, fp.ClassActive)
+	wantClass(t, rep, TypeSchedule, reg, deploy.PollerScheduleName, fp.ClassLitter)
+	other := wantClass(t, rep, TypeSchedule, reg, "lagotto-something", fp.ClassLitter)
+	if !strings.Contains(strings.Join(other.DependsOn, " "), "function:other") {
+		t.Errorf("schedule does not depend on its target: %v", other.DependsOn)
+	}
+	if j := wantClass(t, rep, TypeTrainingJob, reg, "lagotto-job", fp.ClassActive); j.Deletable {
+		t.Error("a training job is deletable")
+	}
+	if st := find(t, rep, TypeStack, reg, "lagotto"); st.Ownership != fp.OwnershipLegacyName || st.Deletable {
+		t.Errorf("legacy stack: %s, deletable %v", st.Ownership, st.Deletable)
+	}
+}

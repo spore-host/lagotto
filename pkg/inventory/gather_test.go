@@ -227,3 +227,75 @@ func (p *countingProbe) BucketTags(ctx context.Context, region, accountID string
 	p.tagReads++
 	return p.factsProbe.BucketTags(ctx, region, accountID)
 }
+
+// TestGatherReadFailures: failing to list the regions, or being given none,
+// is an error; a failed bucket listing is a warning; a bucket whose tags
+// cannot be read makes its region active.
+func TestGatherReadFailures(t *testing.T) {
+	ctx := context.Background()
+	src := realAccount()
+	src.enabled = nil
+	if _, err := Gather(ctx, &regionsFail{src}, acct, Scope{AllRegions: true}, Options{}); err == nil {
+		t.Error("a failed region listing was not an error")
+	}
+	if _, err := Gather(ctx, realAccount(), acct, Scope{}, Options{}); err == nil {
+		t.Error("an empty scope was not an error")
+	}
+
+	src = realAccount()
+	src.bucketsErr = errors.New("AccessDenied: s3:ListAllMyBuckets")
+	f, err := Gather(ctx, src, acct, Scope{AllRegions: true}, Options{})
+	if err != nil || !strings.Contains(strings.Join(f.Warnings, "\n"), "s3:ListAllMyBuckets") {
+		t.Errorf("bucket listing failure: %v, warnings %v", err, f.Warnings)
+	}
+
+	src = realAccount()
+	src.errs = map[string]error{"us-west-2 BucketTags": errors.New("AccessDenied")}
+	f, err = Gather(ctx, src, acct, Scope{AllRegions: true}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep := Classify(f, Options{}, now)
+	wantClass(t, rep, TypeTable, "us-west-2", "lagotto-watches", fp.ClassActive)
+	if !strings.Contains(strings.Join(rep.Warnings, "\n"), "could not read artifact bucket") {
+		t.Errorf("warnings %v", rep.Warnings)
+	}
+}
+
+type regionsFail struct{ *fakeSource }
+
+func (regionsFail) EnabledRegions(context.Context) ([]string, error) {
+	return nil, errors.New("AccessDenied: ec2:DescribeRegions")
+}
+
+// recordingRegionSource records which tables Activity was asked to read.
+type recordingRegionSource struct {
+	fakeRegionSource
+	asked *[2]string
+}
+
+func (r *recordingRegionSource) Activity(ctx context.Context, w, s string) (Activity, error) {
+	r.asked[0], r.asked[1] = w, s
+	return r.fakeRegionSource.Activity(ctx, w, s)
+}
+
+// TestGatherRegionReadsOnlyPresentTables: activity is read only from the
+// tables that exist, and not at all where there are none.
+func TestGatherRegionReadsOnlyPresentTables(t *testing.T) {
+	reg := tablesOnly("us-east-1")
+	reg.Tables = reg.Tables[2:] // only the scheduled-launches table
+	var asked [2]string
+	rs := &recordingRegionSource{fakeRegionSource: fakeRegionSource{r: reg, err: func(string) error { return nil }}, asked: &asked}
+	if _, w := gatherRegion(context.Background(), rs, "us-east-1", Options{}.withDefaults()); len(w) != 0 {
+		t.Fatalf("warnings %v", w)
+	}
+	if asked != [2]string{"", "lagotto-scheduled-launches"} {
+		t.Errorf("Activity asked for %q", asked)
+	}
+	asked = [2]string{"unset", "unset"}
+	rs.r = Region{Region: "us-east-1"}
+	gatherRegion(context.Background(), rs, "us-east-1", Options{}.withDefaults())
+	if asked[0] != "unset" {
+		t.Errorf("Activity read in a region with no tables: %q", asked)
+	}
+}
