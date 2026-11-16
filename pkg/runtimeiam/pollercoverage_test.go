@@ -101,12 +101,10 @@ var pollerNotGranted = map[string]string{
 	// ask for.
 	"account:GetAccountInformation": "best-effort account-name DNS alias; denial falls back to base36 (spawn#121)",
 
-	// Reachable only with AUTO_DELETE_TABLES=true, an opt-in a human adds to the
-	// function by hand; deploy never sets it (pkg/deploy PollerEnvVars, #59). With
-	// it set and these denied, the poller logs a warning and keeps the tables.
-	// The runtime role is not meant to be able to delete lagotto's data tables.
-	"dynamodb:DeleteTable":        "AUTO_DELETE_TABLES opt-in only (unset by deploy, #59); the poller role must not delete tables",
-	"dynamodb:ListTagsOfResource": "AUTO_DELETE_TABLES opt-in only (unset by deploy, #59): the managed-tag check before DeleteTable",
+	// dynamodb:DeleteTable and dynamodb:ListTagsOfResource (AUTO_DELETE_TABLES,
+	// #59) used to be listed here as deliberately not granted, so the opt-in
+	// silently deleted nothing. They are granted now, on lagotto's three tables
+	// only, for idle teardown (#325, lagotto#326).
 }
 
 // pollerNotGrantedTripwires: the spawn_config keys whose existence would make an

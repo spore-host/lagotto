@@ -141,8 +141,9 @@ func (d *Deployer) RequirePollerDeployed(ctx context.Context, region, accountID 
 	}
 	var notFound *lambdatypes.ResourceNotFoundException
 	if errors.As(err, &notFound) {
-		return fmt.Errorf("the hosted poller isn't deployed in account %s / %s (no Lambda function %q) — run 'lagotto deploy' first",
-			accountID, region, PollerFunctionName)
+		return fmt.Errorf("the hosted poller isn't deployed in account %s / %s (no Lambda function %q); nothing was created. "+
+			"Run 'lagotto deploy --region %s' first",
+			accountID, region, PollerFunctionName, region)
 	}
 	return fmt.Errorf("check whether function %s exists: %w", PollerFunctionName, err)
 }

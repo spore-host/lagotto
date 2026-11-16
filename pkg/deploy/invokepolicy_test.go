@@ -75,3 +75,47 @@ func typeFromIAM(t reflect.Type) bool {
 	}
 	return strings.HasSuffix(t.PkgPath(), "/service/iam")
 }
+
+// TestTeardownGrantsNameDeploysResources (#325): runtimeiam names the artifact
+// bucket, the poller function and its log group in the idle-teardown grants
+// without importing this package (which imports it). Each must match what
+// deploy actually creates, in every region.
+func TestTeardownGrantsNameDeploysResources(t *testing.T) {
+	const account = "123456789012"
+	poller, err := runtimeiam.ParsePolicy(mustRuntimePolicy(t, account))
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, err := runtimeiam.SchedulerTeardownPolicyDocument(account)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := runtimeiam.ParsePolicy(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, region := range []string{"us-east-1", "eu-west-1", "ap-southeast-2"} {
+		bucket := "arn:aws:s3:::" + DefaultBucketName(account, region)
+		if !runtimeiam.Allows(poller, "s3:DeleteBucket", bucket) {
+			t.Errorf("the poller may not delete %s", bucket)
+		}
+		if !runtimeiam.Allows(poller, "s3:DeleteObjectVersion", bucket+"/"+"capacity-poller.zip") {
+			t.Errorf("the poller may not empty %s", bucket)
+		}
+		if !runtimeiam.Allows(jobs, "lambda:DeleteFunction", PollerFunctionARN(region, account)) {
+			t.Errorf("a teardown job may not delete %s", PollerFunctionARN(region, account))
+		}
+		if lg := PollerLogGroupARN(region, account); !runtimeiam.Allows(jobs, "logs:DeleteLogGroup", lg) {
+			t.Errorf("a teardown job may not delete %s", lg)
+		}
+	}
+}
+
+func mustRuntimePolicy(t *testing.T, account string) string {
+	t.Helper()
+	doc, err := runtimeiam.PolicyDocument(account, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return doc
+}

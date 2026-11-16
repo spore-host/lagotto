@@ -37,6 +37,10 @@ func TestEnsureSetupRoles_CreatesBothOnAFreshAccount(t *testing.T) {
 	if f.inline[SchedulerInvokeRoleName+"/"+SchedulerInvokePolicyName] != invokeDoc {
 		t.Error("the invoke policy was not written onto the Scheduler invoke role")
 	}
+	teardownDoc, _ := SchedulerTeardownPolicyDocument("123456789012")
+	if f.inline[SchedulerInvokeRoleName+"/"+SchedulerTeardownPolicyName] != teardownDoc {
+		t.Error("the teardown policy (#325) was not written onto the Scheduler invoke role")
+	}
 	if !contains(f.attached, RoleName) {
 		t.Error("basic execution was not attached to the poller role")
 	}
@@ -53,8 +57,10 @@ func TestEnsureSetupRoles_Idempotent(t *testing.T) {
 	if len(created) != 0 || len(f.created) != 0 {
 		t.Errorf("existing roles were re-created: reported %v, CreateRole %v", created, f.created)
 	}
-	if f.calls != 2 || !contains(f.puts, RoleName+"/"+PolicyName) || !contains(f.puts, SchedulerInvokeRoleName+"/"+SchedulerInvokePolicyName) {
-		t.Errorf("PutRolePolicy calls = %v, want both policies once", f.puts)
+	// The runtime policy, and the invoke role's two (#325).
+	if f.calls != 3 || !contains(f.puts, RoleName+"/"+PolicyName) || !contains(f.puts, SchedulerInvokeRoleName+"/"+SchedulerInvokePolicyName) ||
+		!contains(f.puts, SchedulerInvokeRoleName+"/"+SchedulerTeardownPolicyName) {
+		t.Errorf("PutRolePolicy calls = %v, want each of the three policies once", f.puts)
 	}
 	if !strings.Contains(f.inline[RoleName+"/"+PolicyName], ":role/my-role") {
 		t.Error("the authorized instance role was dropped from the runtime policy")

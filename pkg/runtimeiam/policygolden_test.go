@@ -187,14 +187,33 @@ func TestS3GrantsAreScopedToTheFSxPrefix(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := "arn:aws:s3:::" + FSxBucketPrefix + "*"
+	// The one exception: idle teardown (#325) empties and deletes the artifact
+	// bucket, so these actions, and only these, are granted on it instead.
+	artifact := map[string]string{
+		"s3:ListBucketVersions":  ArtifactBucketARN("123456789012"),
+		"s3:DeleteBucket":        ArtifactBucketARN("123456789012"),
+		"s3:DeleteObject":        ArtifactBucketARN("123456789012") + "/*",
+		"s3:DeleteObjectVersion": ArtifactBucketARN("123456789012") + "/*",
+	}
 	seen := map[string]bool{}
 	for _, g := range grants {
-		if !strings.HasPrefix(g.Action, "s3:") {
+		if !strings.HasPrefix(g.Action, "s3:") || !strings.EqualFold(g.Effect, "Allow") {
 			continue
 		}
 		seen[g.Action] = true
+		if a, ok := artifact[g.Action]; ok {
+			if g.Resource != a {
+				t.Errorf("%s is granted on %q; the teardown S3 grants must be on %q only", g.Action, g.Resource, a)
+			}
+			continue
+		}
 		if g.Resource != want {
 			t.Errorf("%s is granted on %q; S3 grants must be on %q only", g.Action, g.Resource, want)
+		}
+	}
+	for a := range artifact {
+		if !seen[a] {
+			t.Errorf("the artifact-bucket teardown action %s is not granted (#325)", a)
 		}
 	}
 	for _, a := range []string{"s3:CreateBucket", "s3:ListBucket", "s3:GetBucketTagging", "s3:PutBucketTagging"} {

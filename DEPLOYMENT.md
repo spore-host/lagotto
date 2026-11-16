@@ -24,7 +24,7 @@ There are two paths:
 | EventBridge schedule | `lagotto-capacity-poller` in schedule group `lagotto` at `rate(5 minutes)`, starts **DISABLED**; an idle poller slows it to `rate(1 hour)` (see [Idle poller](#idle-poller-slow-mode)) | `lagotto deploy` |
 | IAM role | `lagotto-capacity-poller-role` (execution role; its permissions policy is written by `setup`) | `pkg/runtimeiam`: created by `deploy` or `setup` |
 | IAM role | `lagotto-capacity-poller-scheduler-invoke` (assumed by EventBridge Scheduler) | `pkg/runtimeiam`: created by `deploy` **only** |
-| DynamoDB tables | `lagotto-watches`, `lagotto-match-history` | the CLI: `deploy`, `setup` or `watch`; deleted by `lagotto teardown` |
+| DynamoDB tables | `lagotto-watches`, `lagotto-match-history` | the CLI: `deploy`, or `watch --local` where no poller is deployed (`setup` creates none, #325); deleted by `lagotto teardown` |
 | DynamoDB table | `lagotto-scheduled-launches`, tagged `lagotto:managed=cli` | the CLI: `deploy` or the first `launch`; deleted by `lagotto teardown` (#250) |
 | EventBridge schedules | `lagotto-launch-sl-<id>` in schedule group `lagotto`, one per scheduled launch (and the poller's boundary-retry schedules) | `lagotto launch` and the poller; deleted by `lagotto cancel sl-<id>` (#279) or `lagotto teardown` (#260) |
 | S3 artifact bucket | `lagotto-lambda-<account>-<region>`, tagged `lagotto:managed=cli` | `lagotto deploy`; deleted by `lagotto deploy --teardown` (#264) |
@@ -156,8 +156,9 @@ lagotto setup
 
 `deploy` does, in order:
 
-1. Ensures the three DynamoDB tables exist (idempotent — the natural
-   "`watch` first, then `deploy`" flow works either way).
+1. Ensures the three DynamoDB tables exist (idempotent). `deploy` is where a
+   region's tables come from: `watch` refuses in a region with no poller (unless
+   `--local`, for a local `poll --daemon`), and `setup` creates no table (#325).
 2. Ensures the two IAM roles exist.
 3. Creates the artifact bucket if absent and uploads the release Lambda zip.
 4. Creates or converges the SNS topic, the poller Lambda and its schedule.
@@ -269,6 +270,25 @@ stored watch before launching. CI checks the
 policy against the poller Lambda's own AWS calls, discovered from the code. lagotto codifies that policy in Go
 (`pkg/runtimeiam`) as the single source of truth, the same way it owns its tables —
 so adding a permission is a code change, not a template edit.
+
+**Idle teardown (#325, for #326).** The policy also lets the poller remove its own
+region once nothing it manages is active, each grant on lagotto's exact,
+fixed-name resource (any region): delete and read the tags of the three tables;
+read, write, create and delete the shared lease table `spore-host-lifecycle`
+(libs#77); empty and delete the artifact bucket `lagotto-lambda-<account>-*`;
+delete the `lagotto-capacity-alerts` topic; delete every schedule in the
+`lagotto` group and the group; create and delete one-shot schedules in a
+`lagotto-teardown` group (passing only the invoke role, to the Scheduler only);
+and delete `lagotto-instance-role` and its instance profile. Never its own role
+or the invoke role. Those one-shot schedules run as the invoke role, whose
+second inline policy, `LagottoTeardown` (written by both `setup` and `deploy`),
+lets them delete the poller function, its log group and the poller's execution
+role, and nothing else.
+
+Both roles also carry two explicit Denies, which no Allow can outweigh: every
+action on a resource tagged `spore-host:role=service` (spore.host's own live
+service; lagotto never writes that tag), and every IAM write on the
+permissions boundary `spore-host/spawn-instance-boundary`.
 
 Three things to know:
 
@@ -457,9 +477,12 @@ To leave nothing behind in an account:
 1. `lagotto deploy --teardown --region <region>` in every region that runs a
    poller: the schedule, the Lambda, the topic (with its email subscriptions)
    and the lagotto-managed artifact bucket.
-2. `lagotto teardown` (add `--force` if the tables still hold records): the
-   per-launch `lagotto-launch-sl-*` schedules and the `lagotto` schedule group,
-   then the three DynamoDB tables.
+2. `lagotto teardown --region <region>` (add `--force` if the tables still hold
+   records) in every region that has lagotto's tables: the per-launch
+   `lagotto-launch-sl-*` schedules and the `lagotto` schedule group, then the
+   three DynamoDB tables. It works on one region at a time. Older lagotto
+   versions created tables in regions with no poller too (`watch` and `setup`,
+   before #325), so check regions you never deployed to.
    It stops before deleting any table if it cannot list or delete the
    schedules.
 3. `lagotto teardown --iam-roles`: the two IAM roles and their policies, and the
