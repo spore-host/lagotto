@@ -108,7 +108,8 @@ var EverydayCommands = []string{
 const (
 	alertsTopicName = "lagotto-capacity-alerts"
 	// pollerScheduleName is the poller's EventBridge Scheduler schedule, which
-	// watch/update/ack/extend re-enable after the poller disabled itself.
+	// watch/update/ack/extend set back to the normal cadence after an idle
+	// poller slowed it (#323).
 	pollerScheduleName = "schedule/default/lagotto-capacity-poller"
 	// pollerFunctionName is the poller Lambda (pkg/deploy.PollerFunctionName;
 	// TestNamesMatchTheirOwners asserts they agree).
@@ -152,6 +153,10 @@ type statement struct {
 	// the caller check simulates them with the caller's principal id and a key
 	// under it as context.
 	ownerScoped bool
+	// pinnedKey statements are conditioned on one exact partition key and a
+	// set of attributes ([pollerControl]); the caller check simulates them with
+	// that key and those attributes as context.
+	pinnedKey bool
 	// simSkip are actions of this statement the caller check does not
 	// simulate, because the IAM policy simulator denies them for a principal
 	// that real IAM allows (see [SimulatorBlindSpot]). They are reported as
@@ -187,7 +192,23 @@ var (
 	ownIndexKey = map[string]interface{}{
 		"ForAllValues:StringEquals": map[string][]string{"dynamodb:LeadingKeys": {"${aws:userid}"}},
 	}
+	// pollerControl is the poller-control item (#323) and nothing else: its
+	// exact key, and only its key and epoch attributes, so a CLI user can
+	// increment the epoch but cannot store anything else there (a status, say,
+	// which would put it in the status index the poller lists watches from).
+	pollerControl = map[string]interface{}{
+		"ForAllValues:StringEquals": map[string][]string{
+			"dynamodb:LeadingKeys": {watcher.PollerControlKey},
+			"dynamodb:Attributes":  PollerControlAttributes,
+		},
+		"Null": map[string]string{"dynamodb:LeadingKeys": "false"},
+	}
 )
+
+// PollerControlAttributes are the attributes the PollerControl statement lets
+// a CLI user write on the poller-control item: its key, and the epoch that
+// watch/extend/update increment (watcher.Store.BumpPollerEpoch).
+var PollerControlAttributes = []string{"watch_id", watcher.PollerEpochAttr}
 
 func statements(accountID string, configBuckets []string) []statement {
 	regional := func(service, resource string) string { return runtimeiam.RegionalARN(service, accountID, resource) }
@@ -226,8 +247,18 @@ func statements(accountID string, configBuckets []string) []statement {
 			Resource:  regional("dynamodb", "table/"+Tables[0]+"/index/"+watcher.OwnerIndexName),
 			Condition: ownIndexKey, ownerScoped: true},
 
-		// The poller's schedule: watch, update, ack and extend re-enable a poller
-		// that disabled itself when it ran out of watches; doctor reads it.
+		// The poller-control item (#323). watch, update, ack and extend
+		// increment its epoch after arming a watch, so an idle poller that is
+		// slowing its schedule sees the arming and undoes the slow-down. It is
+		// one fixed key outside every caller's prefix ("#" never occurs in an
+		// ${aws:userid}), so OwnItems cannot cover it: this grants UpdateItem on
+		// that key alone, writing only the epoch.
+		{Sid: "PollerControl", Action: []string{"dynamodb:UpdateItem"},
+			Resource: tableARNs[0], Condition: pollerControl, pinnedKey: true},
+
+		// The poller's schedule: watch, update, ack and extend set it back to
+		// every 5 minutes when an idle poller slowed it to hourly (or an older
+		// poller disabled it); doctor reads it.
 		{Sid: "PollerSchedule", Action: []string{"scheduler:GetSchedule", "scheduler:UpdateSchedule"},
 			Resource: regional("scheduler", pollerScheduleName)},
 		// `lagotto launch` creates one schedule per scheduled launch, and

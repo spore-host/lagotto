@@ -897,8 +897,8 @@ func (s *Store) enableTTL(ctx context.Context, name string) error {
 }
 
 // TablesEmpty reports whether the watches, history and scheduled-launches
-// tables all contain zero items. Used to decide when the account can be
-// auto-torn-down (no litter).
+// tables all contain zero items; the poller-control item (#323) does not
+// count. Used to decide when the account can be auto-torn-down (no litter).
 func (s *Store) TablesEmpty(ctx context.Context) (bool, error) {
 	nonEmpty, err := s.nonEmptyTables(ctx, true)
 	return len(nonEmpty) == 0 && err == nil, err
@@ -919,11 +919,18 @@ func (s *Store) nonEmptyTables(ctx context.Context, stopAtFirst bool) ([]string,
 		// Follow pages rather than trusting the first (#181): this answer
 		// decides whether the account is torn down, so "empty" must mean the
 		// whole table was read and nothing was found.
-		found, err := scanFindsAny(ctx, s.client, &dynamodb.ScanInput{
+		in := &dynamodb.ScanInput{
 			TableName: aws.String(name),
 			Limit:     aws.Int32(1),
 			Select:    types.SelectCount,
-		})
+		}
+		if name == s.watchesTable {
+			// The poller-control item (#323) is not a record: a table holding
+			// only it is empty.
+			in.FilterExpression = aws.String("watch_id <> :ctl")
+			in.ExpressionAttributeValues = map[string]types.AttributeValue{":ctl": avS(PollerControlKey)}
+		}
+		found, err := scanFindsAny(ctx, s.client, in)
 		if err != nil {
 			var notFound *types.ResourceNotFoundException
 			if errors.As(err, &notFound) {

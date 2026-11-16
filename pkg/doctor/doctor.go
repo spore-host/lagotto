@@ -51,6 +51,7 @@ import (
 	dynamodbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
 	"github.com/spore-host/lagotto/pkg/deploy"
+	"github.com/spore-host/lagotto/pkg/pollcadence"
 	"github.com/spore-host/lagotto/pkg/runtimeiam"
 	"github.com/spore-host/lagotto/pkg/watcher"
 )
@@ -993,17 +994,21 @@ func evalSchedule(st State) Check {
 
 // evalScheduleState is the silent-death check.
 //
-// The schedule's state is owned out of band: `lagotto watch`/`extend` enable it,
-// and the poller disables it when the last active watch goes away. So the
-// invariant is "ENABLED iff at least one watch is active", and the two ways to
-// break it are not equally serious:
+// The schedule's state and cadence are owned out of band: arming a watch
+// (`watch`/`extend`/`update`) sets it ENABLED every 5 minutes, and an idle
+// poller slows it to once an hour (#323; a poller older than that disabled it
+// instead). So the invariant is "ENABLED at the normal cadence iff work is
+// active", and the ways to break it are not equally serious:
 //
-//   - ENABLED with no active watches → WARN. Harmless: the poller wakes every
-//     five minutes, finds nothing, and disables itself. Costs a little billing and
-//     log noise.
+//   - ENABLED every 5 minutes with no active watches → WARN. Harmless: the
+//     poller's next run finds nothing and slows to hourly.
+//   - ENABLED hourly with active watches → WARN. The poller's next run, within
+//     the hour, restores 5 minutes; until then the watches are polled late.
 //   - DISABLED with active watches → FAIL. This is the silent death: watches
 //     exist, the user believes they're armed, and NOTHING IS POLLING THEM. No
 //     error is produced anywhere, ever — the watches simply expire unserviced.
+//     A poller from #323 on never disables the schedule; an older one, or a
+//     re-created schedule, still can.
 //
 // ok is false when there's no schedule to reason about (evalSchedule covers that)
 // or the active-watch count is unknown.
@@ -1018,20 +1023,35 @@ func evalScheduleState(st State) (Check, bool) {
 		return c, true
 	}
 	enabled := st.Schedule.Enabled()
+	idleCadence := st.Schedule.Expression == pollcadence.IdleExpression
 	switch {
+	case enabled && st.ActiveWatches > 0 && idleCadence:
+		c.Status = StatusWarn
+		c.Summary = fmt.Sprintf("%d watch(es) are active but the schedule is at the idle cadence (%s)", st.ActiveWatches, pollcadence.IdleExpression)
+		c.Detail = []string{
+			"the poller's next run, within the hour, finds the watches and sets the schedule back to every 5 minutes; until then they are polled late",
+			"a watch armed by a lagotto older than #323 does not set the schedule back itself",
+		}
+		c.Fix = []string{
+			"lagotto extend <watch-id> --ttl <duration>   # sets the schedule back to every 5 minutes",
+		}
 	case enabled && st.ActiveWatches > 0:
 		c.Status = StatusPass
 		c.Summary = fmt.Sprintf("schedule is ENABLED and %d watch(es) are active", st.ActiveWatches)
-	case enabled && st.ActiveWatches == 0:
+	case enabled && idleCadence:
+		c.Status = StatusPass
+		c.Summary = fmt.Sprintf("schedule is ENABLED at the idle cadence (%s) and no watches are active", pollcadence.IdleExpression)
+		c.Detail = []string{"an idle poller runs once an hour (about 720 invocations a month); arming a watch sets it back to every 5 minutes"}
+	case enabled:
 		c.Status = StatusWarn
 		c.Summary = "schedule is ENABLED but no watches are active"
-		c.Detail = []string{"harmless — the poller wakes every 5 minutes, finds nothing to do and disables itself; until then it's billing and log noise"}
-	case !enabled && st.ActiveWatches > 0:
+		c.Detail = []string{"harmless — the poller's next run finds nothing to do and slows the schedule to once an hour"}
+	case st.ActiveWatches > 0:
 		c.Status = StatusFail
 		c.Summary = fmt.Sprintf("%d watch(es) are ACTIVE but the schedule is DISABLED — nothing is polling them", st.ActiveWatches)
 		c.Detail = []string{
 			"this is the silent-death case: the watches look armed in 'lagotto list', no error is reported anywhere, and they will simply expire unserviced",
-			"a re-created schedule comes back DISABLED, so this is the state to check after a redeploy or a CloudFormation migration",
+			"a re-created schedule comes back DISABLED, and a poller older than #323 disabled it when idle, so this is the state to check after a redeploy, a CloudFormation migration, or with an old poller",
 		}
 		c.Fix = []string{
 			"lagotto extend <watch-id> --ttl <duration>   # re-enables the schedule",
@@ -1039,7 +1059,7 @@ func evalScheduleState(st State) (Check, bool) {
 		}
 	default:
 		c.Status = StatusPass
-		c.Summary = "schedule is DISABLED and no watches are active (the poller self-disables when idle)"
+		c.Summary = "schedule is DISABLED and no watches are active (freshly deployed, or a poller older than #323 disabled it when idle; the next watch enables it)"
 	}
 	return c, true
 }

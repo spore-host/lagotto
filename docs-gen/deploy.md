@@ -12,8 +12,10 @@ topic, the poller Lambda and its EventBridge schedule. Re-runs are incremental �
 a --version bump is a fast code-only update — and a deploy never changes the
 schedule's on/off state, so it can't switch off a running poller.
 
-The poller schedule is created DISABLED; the first 'lagotto watch' enables it
-(and the poller self-disables when no active watches remain).
+The poller schedule is created DISABLED; the first 'lagotto watch' enables it,
+every 5 minutes. When no active watches or pending scheduled launches remain,
+the poller slows it to once an hour (about 720 invocations a month) rather than
+disabling it, and arming a watch sets it back to every 5 minutes (lagotto#323).
 
 CloudFormation is no longer used. The template is still shipped as an optional
 declarative path for IaC/enterprise consumers — see DEPLOYMENT.md. If you have an

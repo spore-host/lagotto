@@ -8,11 +8,12 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/scheduler"
 	schedulertypes "github.com/aws/aws-sdk-go-v2/service/scheduler/types"
+	"github.com/spore-host/lagotto/pkg/pollcadence"
 )
 
 const (
 	// pollerScheduleExpression is the poll cadence, matching the template.
-	pollerScheduleExpression = "rate(5 minutes)"
+	pollerScheduleExpression = pollcadence.NormalExpression
 	// pollerScheduleDescription matches the template's Description.
 	pollerScheduleDescription = "Polls for EC2 capacity matching active lagotto watches"
 )
@@ -24,14 +25,18 @@ const (
 // THE CENTRAL GUARANTEE OF THIS FUNCTION: `lagotto deploy` must never be able to
 // turn off a running poller.
 //
-// The schedule's State is owned OUT OF BAND, not by deploy:
-// cmd/pollschedule.go's enablePollSchedule (also reached from cmd/extend.go) flips it
-// to ENABLED when a watch is armed, and the poller itself flips it back to
-// DISABLED when it goes idle. A CloudFormation stack that declares
-// `State: DISABLED` is therefore permanently drifted from reality, and any
-// deploy that reasserted the template value would silently stop an active
-// watch's poller. So: DISABLED is used ONLY on create (nothing is watching yet),
-// and every update path passes through the CURRENT state verbatim.
+// The schedule's State is owned OUT OF BAND, not by deploy: arming a watch
+// (pkg/arm, from watch/extend/update) sets it ENABLED, and a poller older
+// than #323 flipped it back to DISABLED when it went idle. A CloudFormation
+// stack that declares `State: DISABLED` is therefore permanently drifted from
+// reality, and any deploy that reasserted the template value would silently
+// stop an active watch's poller. So: DISABLED is used ONLY on create (nothing
+// is watching yet), and every update path passes through the CURRENT state
+// verbatim.
+//
+// The cadence is shared the same way (#323): an idle poller slows the
+// schedule to pollcadence.IdleExpression and arming a watch sets it back to
+// the normal one. Deploy treats either as current and keeps the one it finds.
 //
 // Convergence compares only the non-State fields; when they all match, it issues
 // no API call at all.
@@ -100,7 +105,7 @@ func (d *Deployer) createPollerSchedule(ctx context.Context, fnARN, roleARN stri
 // scheduleDiffers reports whether any field deploy owns differs from the desired
 // value. State is deliberately NOT compared — it is not deploy's to decide.
 func scheduleDiffers(cur *scheduler.GetScheduleOutput, fnARN, roleARN string) bool {
-	if aws.ToString(cur.ScheduleExpression) != pollerScheduleExpression {
+	if aws.ToString(cur.ScheduleExpression) != currentCadence(cur) {
 		return true
 	}
 	if aws.ToString(cur.Description) != pollerScheduleDescription {
@@ -115,9 +120,18 @@ func scheduleDiffers(cur *scheduler.GetScheduleOutput, fnARN, roleARN string) bo
 	return aws.ToString(cur.Target.Arn) != fnARN || aws.ToString(cur.Target.RoleArn) != roleARN
 }
 
+// currentCadence is the expression deploy converges cur to: the idle cadence
+// when the poller has slowed to it (#323), else the normal one.
+func currentCadence(cur *scheduler.GetScheduleOutput) string {
+	if pollcadence.IsIdle(cur) {
+		return pollcadence.IdleExpression
+	}
+	return pollerScheduleExpression
+}
+
 // updatePollerSchedule issues the UpdateSchedule. UpdateSchedule is a full PUT,
 // not a patch: every required field must be resupplied (the same reason
-// cmd/pollschedule.go's enablePollSchedule copies the current values across), and any
+// pollcadence.UpdateInput copies the current values across), and any
 // optional field omitted here is DROPPED. So a user's own tweaks — a target
 // Input, a retry policy, a DLQ, a timezone, a non-default group, a CMK, a
 // start/end date, an action-after-completion — are round-tripped from the current
@@ -135,7 +149,7 @@ func (d *Deployer) updatePollerSchedule(ctx context.Context, cur *scheduler.GetS
 	_, err := d.sched.UpdateSchedule(ctx, &scheduler.UpdateScheduleInput{
 		Name:               aws.String(PollerScheduleName),
 		Description:        aws.String(pollerScheduleDescription),
-		ScheduleExpression: aws.String(pollerScheduleExpression),
+		ScheduleExpression: aws.String(currentCadence(cur)),
 		FlexibleTimeWindow: &schedulertypes.FlexibleTimeWindow{Mode: schedulertypes.FlexibleTimeWindowModeOff},
 		Target:             target,
 		// NEVER a literal DISABLED here. See EnsurePollerSchedule's doc comment:

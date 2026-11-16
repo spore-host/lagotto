@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **An idle hosted poller slows its schedule to once an hour instead of disabling it** (#323). When no watch is active and no scheduled launch is pending, the poller sets its EventBridge schedule to `rate(1 hour)`, still ENABLED: about 720 invocations a month. Arming a watch (`watch`, `extend`, `ack`, `update`) sets it back to `rate(5 minutes)`, and so does the poller once it finds work. `lagotto doctor` reports the idle cadence, and warns when watches are active while the schedule is still hourly. `lagotto deploy` keeps whichever cadence it finds.
+- **`lagotto-cli-user` grants one more item write** (#323): `dynamodb:UpdateItem` on `lagotto-watches`, only for the poller-control key `#lagotto/poller-control` and only of its `epoch` attribute. Re-run `lagotto setup` to update the policy. Until then, `watch`, `extend` and `update` print a warning that an idle poller may take up to an hour to poll the watch, and still arm it.
+
+### Deprecated
+
+- `arm.EnablePollScheduleIfOff`, for Go callers such as spore-host-mcp: use `arm.BumpPollerEpoch` then `arm.ArmPollSchedule` after storing the watch (#323). Until then it also sets an hourly schedule back to every 5 minutes.
+
+### Fixed
+
+- **A watch armed while the poller was going idle could be left unpolled** (#323). The poller counted zero watches; `lagotto watch` then stored one and, finding the schedule still ENABLED, did nothing; the poller then disabled the schedule, and the new watch was never polled. Now nothing disables the schedule, and arming a watch increments an epoch in a control item of `lagotto-watches` before it sets the schedule to every 5 minutes. The poller reads the epoch before it counts, slows down only if a conditional write on that epoch succeeds, and re-reads it afterwards, restoring `rate(5 minutes)` if it moved. A schedule an older poller left DISABLED is re-enabled by the next `watch`. Tables holding only the control item still count as empty for `lagotto teardown`.
+- The poller's schedule update no longer drops the schedule's `Description`, timezone, group, KMS key, start and end dates or action after completion (#323). It used to re-send only five fields of what is a full replacement.
+- `lagotto teardown --help` no longer claims the tables are torn down automatically when idle. A deployed poller never deletes them; idle teardown is planned in #326.
+
 ## [0.71.0] - 2026-11-16
 
 ### Added

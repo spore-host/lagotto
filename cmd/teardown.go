@@ -34,9 +34,11 @@ var teardownCmd = &cobra.Command{
 lagotto-match-history and lagotto-scheduled-launches (the last is created by
 'lagotto deploy' or the first 'lagotto launch').
 
-lagotto already tears these down automatically once there are no active watches
-or pending scheduled launches and the tables have drained (records age out via
-DynamoDB TTL). Use this to remove them explicitly.
+Nothing deletes these tables automatically: a deployed poller never deletes
+them, and once no watch is active it only slows its schedule to once an hour.
+(A poller whose function has AUTO_DELETE_TABLES=true set by hand deletes them
+once they are empty; 'lagotto deploy' never sets it.) Run this to remove them.
+Automatic idle teardown, after a grace period, is planned in lagotto#326.
 
 By default it refuses to delete tables that still hold records, so you don't lose
 match history or a pending scheduled launch; pass --force to delete regardless.

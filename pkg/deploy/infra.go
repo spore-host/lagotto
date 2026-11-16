@@ -28,7 +28,8 @@ const (
 	AlertsTopicName = "lagotto-capacity-alerts"
 	// PollerScheduleName is the EventBridge Scheduler schedule that invokes the
 	// poller. Same string as the function name by design (the template does the
-	// same); the poller also receives it as SCHEDULE_NAME so it can self-disable.
+	// same); the poller also receives it as SCHEDULE_NAME so it can slow it to
+	// the idle cadence (#323).
 	PollerScheduleName = PollerFunctionName
 )
 

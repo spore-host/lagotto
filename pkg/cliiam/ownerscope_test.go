@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	substrate "github.com/scttfrdmn/substrate/emulator"
+	"github.com/spore-host/lagotto/pkg/watcher"
 )
 
 // TestOwnerScopedItemAccess evaluates the generated lagotto-cli-user policy
@@ -51,6 +52,14 @@ func TestOwnerScopedItemAccess(t *testing.T) {
 		{"owner index, own id", "dynamodb:Query", index, alice, []string{alice}, true},
 		{"owner index, another id", "dynamodb:Query", index, alice, []string{"AIDABOBEXAMPLE"}, false},
 		{"delete own", "dynamodb:DeleteItem", table, alice, []string{alice + "/w-1"}, false},
+		// The poller-control item (#323): UpdateItem of its epoch, nothing else.
+		{"bump the poller epoch", "dynamodb:UpdateItem", table, alice, []string{watcher.PollerControlKey}, true},
+		{"bump the poller epoch, role session", "dynamodb:UpdateItem", table, role, []string{watcher.PollerControlKey}, true},
+		{"read the control item", "dynamodb:GetItem", table, alice, []string{watcher.PollerControlKey}, false},
+		{"overwrite the control item", "dynamodb:PutItem", table, alice, []string{watcher.PollerControlKey}, false},
+		{"delete the control item", "dynamodb:DeleteItem", table, alice, []string{watcher.PollerControlKey}, false},
+		{"control key on another table", "dynamodb:UpdateItem", hist, alice, []string{watcher.PollerControlKey}, false},
+		{"control key batched with a foreign key", "dynamodb:UpdateItem", table, alice, []string{watcher.PollerControlKey, "AIDABOBEXAMPLE/w-1"}, false},
 	}
 	for _, c := range cases {
 		req := substrate.EvaluationRequest{
@@ -59,10 +68,52 @@ func TestOwnerScopedItemAccess(t *testing.T) {
 		}
 		if c.keys != nil {
 			req.MultiContext = map[string][]string{"dynamodb:LeadingKeys": c.keys}
+			if c.keys[0] == watcher.PollerControlKey {
+				req.MultiContext["dynamodb:Attributes"] = []string{"watch_id", watcher.PollerEpochAttr}
+			}
 		}
 		got := substrate.Evaluate([]substrate.PolicyDocument{pd}, req).Decision == substrate.DecisionAllow
 		if got != c.allow {
 			t.Errorf("%s: %s on %s as %s with keys %v: allowed = %v, want %v", c.name, c.action, c.resource, c.userid, c.keys, got, c.allow)
+		}
+	}
+}
+
+// TestPollerControlWritesOnlyTheEpoch: the PollerControl statement (#323) lets
+// a CLI user increment the poller epoch, and nothing else on that item. In
+// particular not a status, which would put the item in the status index the
+// poller lists active watches from.
+func TestPollerControlWritesOnlyTheEpoch(t *testing.T) {
+	doc, err := PolicyDocument(testAccount, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pd substrate.PolicyDocument
+	if err := json.Unmarshal([]byte(doc), &pd); err != nil {
+		t.Fatal(err)
+	}
+	table := "arn:aws:dynamodb:us-east-1:" + testAccount + ":table/lagotto-watches"
+	for _, c := range []struct {
+		name  string
+		attrs []string
+		allow bool
+	}{
+		{"the epoch", []string{"watch_id", watcher.PollerEpochAttr}, true},
+		{"the epoch alone", []string{watcher.PollerEpochAttr}, true},
+		{"a status", []string{"watch_id", watcher.PollerEpochAttr, "status"}, false},
+		{"the poller's mode", []string{"watch_id", "mode"}, false},
+	} {
+		req := substrate.EvaluationRequest{
+			Action: "dynamodb:UpdateItem", Resource: table,
+			Context: map[string]string{"aws:userid": "AIDAALICEEXAMPLE"},
+			MultiContext: map[string][]string{
+				"dynamodb:LeadingKeys": {watcher.PollerControlKey},
+				"dynamodb:Attributes":  c.attrs,
+			},
+		}
+		got := substrate.Evaluate([]substrate.PolicyDocument{pd}, req).Decision == substrate.DecisionAllow
+		if got != c.allow {
+			t.Errorf("UpdateItem of %s (%v) on the control item: allowed = %v, want %v", c.name, c.attrs, got, c.allow)
 		}
 	}
 }

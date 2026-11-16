@@ -9,6 +9,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/scheduler"
 	schedulertypes "github.com/aws/aws-sdk-go-v2/service/scheduler/types"
+	"github.com/spore-host/lagotto/pkg/pollcadence"
 )
 
 var (
@@ -142,7 +143,7 @@ func TestEnsurePollerSchedule_PreservesEnabledStateOnUpdate(t *testing.T) {
 // idle (self-disabled) poller must not be switched on by a deploy either.
 func TestEnsurePollerSchedule_PreservesDisabledStateOnUpdate(t *testing.T) {
 	cur := liveSchedule(schedulertypes.ScheduleStateDisabled)
-	cur.ScheduleExpression = strptr("rate(1 hour)")
+	cur.ScheduleExpression = strptr("rate(10 minutes)")
 	fsc := &fakeScheduler{getOut: cur}
 	d, _ := testDeployer(nil, nil, fsc)
 
@@ -291,7 +292,7 @@ func TestScheduleDiffers_IgnoresState(t *testing.T) {
 		}
 	}
 	cases := map[string]func(*scheduler.GetScheduleOutput){
-		"expression":  func(s *scheduler.GetScheduleOutput) { s.ScheduleExpression = strptr("rate(1 hour)") },
+		"expression":  func(s *scheduler.GetScheduleOutput) { s.ScheduleExpression = strptr("rate(10 minutes)") },
 		"description": func(s *scheduler.GetScheduleOutput) { s.Description = strptr("something else") },
 		"window mode": func(s *scheduler.GetScheduleOutput) {
 			s.FlexibleTimeWindow = &schedulertypes.FlexibleTimeWindow{Mode: schedulertypes.FlexibleTimeWindowModeFlexible}
@@ -309,6 +310,30 @@ func TestScheduleDiffers_IgnoresState(t *testing.T) {
 				t.Errorf("a drifted %s was not detected", name)
 			}
 		})
+	}
+}
+
+// TestEnsurePollerSchedule_KeepsIdleCadence (#323): an idle poller slowed its
+// schedule to the idle cadence. That is not drift: a deploy leaves it alone,
+// and an update for another reason keeps it rather than reasserting 5 minutes.
+func TestEnsurePollerSchedule_KeepsIdleCadence(t *testing.T) {
+	cur := liveSchedule(schedulertypes.ScheduleStateEnabled)
+	cur.ScheduleExpression = strptr(pollcadence.IdleExpression)
+	if scheduleDiffers(cur, testFnARN, testRoleARN) {
+		t.Error("the idle cadence was reported as drift")
+	}
+
+	cur.Target.Arn = strptr("arn:aws:lambda:us-east-1:123456789012:function:stale")
+	fsc := &fakeScheduler{getOut: cur}
+	d, _ := testDeployer(nil, nil, fsc)
+	if _, err := d.EnsurePollerSchedule(context.Background(), testFnARN, testRoleARN); err != nil {
+		t.Fatalf("EnsurePollerSchedule: %v", err)
+	}
+	if len(fsc.updateCalls) != 1 {
+		t.Fatalf("UpdateSchedule called %d times, want 1", len(fsc.updateCalls))
+	}
+	if got := aws.ToString(fsc.updateCalls[0].ScheduleExpression); got != pollcadence.IdleExpression {
+		t.Errorf("ScheduleExpression = %q, want the idle cadence kept", got)
 	}
 }
 

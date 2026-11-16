@@ -593,9 +593,10 @@ lists the IAM actions each command can call. It is generated from the code
   including launching instances.
 - The everyday commands need `dynamodb:*` on lagotto's three tables plus a few
   more actions, which the generated page lists per command. For example, `watch`
-  and `extend` re-enable the poller's schedule (`scheduler:UpdateSchedule`, plus
-  `iam:PassRole` on `lagotto-capacity-poller-scheduler-invoke`), `launch` creates
-  a schedule, and `cancel` of a fired hold releases its capacity reservation.
+  and `extend` set the poller's schedule back to every 5 minutes after an idle
+  poller slowed it to hourly (`scheduler:UpdateSchedule`, plus `iam:PassRole` on
+  `lagotto-capacity-poller-scheduler-invoke`), `launch` creates a schedule, and
+  `cancel` of a fired hold releases its capacity reservation.
 
 `lagotto setup` provisions those permissions for you (lagotto#232): it writes the
 customer-managed policy `lagotto-cli-user`, generated from the same inventory and
@@ -618,8 +619,9 @@ s3:// spawn configs are readable only from buckets named with
 `--revoke-config-bucket` removes one). `lagotto doctor` simulates your identity
 against the policy (`iam:SimulatePrincipalPolicy`) and lists what you lack.
 `lagotto teardown --iam-roles` detaches the policy from everyone and deletes it.
-Without the Scheduler permissions, a new watch can leave a self-disabled poller
-off without saying so (lagotto#231); `lagotto doctor` reports it.
+Without the Scheduler permissions a watch is refused rather than stored for a
+poller that may not run (lagotto#231); `lagotto doctor` reports a schedule left
+DISABLED (by a poller older than lagotto#323) while watches are active.
 
 ### Checking a deployment
 
@@ -661,8 +663,10 @@ A program that creates watches itself (as spore-host-mcp does) should not copy
   and `TTLTimestamp`, always with `TTLTimestamp` = `RetentionTTL(ExpiresAt)`
   and never the expiry itself. Fill in what to watch, then store it.
 - **`github.com/spore-host/lagotto/pkg/arm`** has the steps `lagotto watch` runs
-  around storing a watch: `PreflightPollSchedule`, `EnablePollScheduleIfOff`
-  and `PollScheduleUpdateRefusal` turn the hosted poller's schedule back on;
+  around storing a watch: `PreflightPollSchedule`, `BumpPollerEpoch`,
+  `ArmPollSchedule` and `PollScheduleUpdateRefusal` set the hosted poller's
+  schedule back to every 5 minutes without racing an idle poller (lagotto#323;
+  `EnablePollScheduleIfOff` is deprecated);
   `ResolveAlertsTopic` finds the alerts topic; `SubscribeWatchEmails`,
   `SetChannelStates` and `CleanupWatchEmails` subscribe and unsubscribe email
   channels. They return warnings and results instead of printing them. The

@@ -277,9 +277,9 @@ func applyWatchUpdate(ctx context.Context, cfg aws.Config, store *watcher.Store,
 		return err
 	}
 
-	if err := enablePollScheduleIfOff(ctx, sched, os.Stderr, pollSched); err != nil {
+	if err := armPollSchedule(ctx, sched, store, os.Stderr, pollSched); err != nil {
 		if !reactivate {
-			return pollScheduleUpdateRefusal(action, "the update was stored, but the poller's schedule is still off, so the watch is not being polled", nil, err)
+			return pollScheduleUpdateRefusal(action, "the update was stored, but the poller's schedule could not be set to every 5 minutes, so the watch may not be polled promptly, or at all if an older poller switched the schedule off", nil, err)
 		}
 		var restore error
 		if w.Status == watcher.StatusExpired {

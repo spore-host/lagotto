@@ -336,7 +336,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	if err := store.PutWatch(ctx, w); err != nil {
 		return fmt.Errorf("create watch: %w", err)
 	}
-	if err := enablePollScheduleIfOff(ctx, sched, os.Stderr, pollSched); err != nil {
+	if err := armPollSchedule(ctx, sched, store, os.Stderr, pollSched); err != nil {
 		// Roll back through PutWatch, the call (and dynamodb:PutItem permission)
 		// that just created it, so the rollback needs nothing the caller lacks.
 		w.Status = watcher.StatusCancelled

@@ -20,7 +20,7 @@ There are two paths:
 | CloudWatch Logs log group | `/aws/lambda/lagotto-capacity-poller`, 30-day retention, tagged `lagotto:managed=cli`; created before the function so Lambda never creates an unowned one (an existing group is tagged, and given the retention only if it has none) | `lagotto deploy`; deleted by `lagotto deploy --teardown` (#305) |
 | SNS topic | `lagotto-capacity-alerts` (KMS encrypted with `alias/aws/sns`) | `lagotto deploy` |
 | SNS email subscriptions | one per `--notify email:` address, on `lagotto-capacity-alerts`, filtered on the `lagotto_email` message attribute so each address receives only its own watches' events (#240) | `lagotto watch`; removed by the poller (next sweep), `lagotto cancel` or `lagotto notify-gc` once no active watch names the address; deleted with the topic |
-| EventBridge schedule | `lagotto-capacity-poller` at `rate(5 minutes)`, starts **DISABLED** | `lagotto deploy` |
+| EventBridge schedule | `lagotto-capacity-poller` at `rate(5 minutes)`, starts **DISABLED**; an idle poller slows it to `rate(1 hour)` (see [Idle poller](#idle-poller-slow-mode)) | `lagotto deploy` |
 | IAM role | `lagotto-capacity-poller-role` (execution role; its permissions policy is written by `setup`) | `pkg/runtimeiam`: created by `deploy` or `setup` |
 | IAM role | `lagotto-capacity-poller-scheduler-invoke` (assumed by EventBridge Scheduler) | `pkg/runtimeiam`: created by `deploy` **only** |
 | DynamoDB tables | `lagotto-watches`, `lagotto-match-history` | the CLI: `deploy`, `setup` or `watch`; deleted by `lagotto teardown` |
@@ -136,10 +136,33 @@ the work, so a new CLI alone is not enough. From v0.68.0:
 None of these needs a `lagotto setup`: the poller's runtime policy is unchanged
 in v0.68.0 (reminders' live Price List lookups use a grant it already has).
 
-**A deploy never changes the schedule's on/off state.** The schedule's state is
-owned out of band — `lagotto watch` enables it, the poller disables itself when no
-active watches or pending scheduled launches remain — so a re-deploy of a *running*
-poller leaves it running.
+**A deploy never changes the schedule's on/off state or its idle cadence.** Both
+are owned out of band — arming a watch (`watch`, `extend`, `update`) sets the
+schedule ENABLED every 5 minutes, and an idle poller slows it to hourly — so a
+re-deploy of a *running* poller leaves it running.
+
+### Idle poller (slow mode)
+
+When the poller finds no active watch and no pending scheduled launch it does
+**not** disable its schedule (lagotto#323). It slows it to `rate(1 hour)`, still
+ENABLED: about 720 invocations a month. Arming a watch sets the schedule back to
+`rate(5 minutes)`, and the poller restores it too as soon as it finds work.
+
+Earlier pollers disabled the schedule when idle, and that raced with arming: if
+the poller counted zero watches, then `lagotto watch` stored one and found the
+schedule still ENABLED, the poller then disabled it and the new watch was never
+polled. Now arming increments an epoch in a control item of `lagotto-watches`
+(key `#lagotto/poller-control`) before it sets the schedule; the poller reads the
+epoch before counting, slows down only if a conditional write on that epoch
+succeeds, and re-reads it afterwards, restoring `rate(5 minutes)` if it moved.
+Since nothing disables the schedule any more, a watch armed by any lagotto
+version is polled within the hour even in the worst case.
+
+Mixed versions: an older poller still disables its schedule when idle, and a
+current `lagotto watch` re-enables it (at `rate(5 minutes)`) whichever it finds;
+`lagotto doctor` reports a DISABLED schedule with active watches as a failure. An
+older `lagotto teardown` counts the control item as a record in `lagotto-watches`
+and asks for `--force`; the current one ignores it.
 
 ### Verify
 
@@ -249,6 +272,13 @@ aws iam attach-group-policy --group-name <group> \
   `DeleteItem`, and `Query` on `owner_id-index` only for the caller's own id. Run
   `lagotto setup` after upgrading: it moves older records under their owners'
   ids before it writes this policy.
+- **The poller-control item** (lagotto#323): `UpdateItem` on `lagotto-watches`
+  only for the exact key `#lagotto/poller-control`, and only of its `epoch`
+  attribute (`dynamodb:LeadingKeys` and `dynamodb:Attributes`). `watch`,
+  `extend` and `update` increment it so an idle poller that is slowing its
+  schedule sees the new watch. A policy written before this does not grant it:
+  those commands then warn and still arm the watch, which an idle poller may
+  take up to an hour to poll.
 - **Not covered:** `poll`, which needs the poller's own launch permissions
   (`ec2:RunInstances` and passing instance roles), and `setup`, `deploy` and `teardown`.
 - `s3://` spawn configs: name their buckets with `lagotto setup --config-bucket

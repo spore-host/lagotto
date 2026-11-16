@@ -487,15 +487,20 @@ func TestEvaluate_ScheduleStateMatrix(t *testing.T) {
 		active  int
 		want    Status
 		wantFix bool
+		expr    string
 	}{
-		{"enabled with active watches", "ENABLED", 3, StatusPass, false},
-		{"enabled with no watches", "ENABLED", 0, StatusWarn, false},
-		{"DISABLED with active watches (silent death)", "DISABLED", 2, StatusFail, true},
-		{"disabled with no watches", "DISABLED", 0, StatusPass, false},
+		{"enabled with active watches", "ENABLED", 3, StatusPass, false, "rate(5 minutes)"},
+		{"enabled with no watches", "ENABLED", 0, StatusWarn, false, "rate(5 minutes)"},
+		// #323: an idle poller slows to hourly instead of disabling.
+		{"idle cadence with no watches", "ENABLED", 0, StatusPass, false, "rate(1 hour)"},
+		{"idle cadence with active watches", "ENABLED", 1, StatusWarn, true, "rate(1 hour)"},
+		{"DISABLED with active watches (silent death)", "DISABLED", 2, StatusFail, true, "rate(5 minutes)"},
+		{"disabled with no watches", "DISABLED", 0, StatusPass, false, "rate(5 minutes)"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			st := healthyState(t)
 			st.Schedule.State = tc.state
+			st.Schedule.Expression = tc.expr
 			st.ActiveWatches = tc.active
 
 			r := Evaluate(st)

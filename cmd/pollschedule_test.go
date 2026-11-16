@@ -32,6 +32,12 @@ type fakeAWS struct {
 	// scheduleState is the poller schedule's State; "" means it does not exist
 	// (GetSchedule answers 404 ResourceNotFoundException).
 	scheduleState string
+	// scheduleExpr is its ScheduleExpression; "" means rate(5 minutes), the
+	// normal cadence (#323).
+	scheduleExpr string
+	// bumpErr, when set, makes the poller-epoch UpdateItem (#323) fail with
+	// that error code.
+	bumpErr string
 	// getErr / updateErr, when set, make GetSchedule / UpdateSchedule fail with
 	// that error code (403 for AccessDeniedException, 500 otherwise).
 	getErr, updateErr string
@@ -47,7 +53,8 @@ type fakeAWS struct {
 	mu        sync.Mutex
 	calls     []string
 	puts      []map[string]map[string]any // PutItem Items
-	updates   []string                    // UpdateItem UpdateExpression + values, raw
+	updates   []string                    // UpdateItem UpdateExpression + values, raw (not the epoch's)
+	bumps     int                         // poller-epoch UpdateItems (#323)
 	schedPuts []map[string]any            // UpdateSchedule bodies
 }
 
@@ -95,7 +102,11 @@ func (f *fakeAWS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case strings.HasPrefix(target, "DynamoDB_20120810."):
 		op := strings.TrimPrefix(target, "DynamoDB_20120810.")
-		f.record("dynamodb:" + op)
+		if op != "UpdateItem" || !strings.Contains(string(body), watcher.PollerControlKey) {
+			// The poller-epoch bump is recorded on its own, below, so the
+			// UpdateItem counts stay the watch's.
+			f.record("dynamodb:" + op)
+		}
 		w.Header().Set("Content-Type", "application/x-amz-json-1.0")
 		switch op {
 		case "DescribeTable":
@@ -112,6 +123,19 @@ func (f *fakeAWS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			f.mu.Unlock()
 			_, _ = io.WriteString(w, `{}`)
 		case "UpdateItem":
+			if strings.Contains(string(body), watcher.PollerControlKey) {
+				f.record("dynamodb:UpdateItem(poller-epoch)")
+				if f.bumpErr != "" {
+					w.WriteHeader(http.StatusBadRequest)
+					_, _ = io.WriteString(w, `{"__type":"com.amazonaws.dynamodb.v20120810#`+f.bumpErr+`","message":"fake"}`)
+					return
+				}
+				f.mu.Lock()
+				f.bumps++
+				f.mu.Unlock()
+				_, _ = io.WriteString(w, `{}`)
+				return
+			}
 			f.mu.Lock()
 			f.updates = append(f.updates, string(body))
 			f.mu.Unlock()
@@ -150,6 +174,10 @@ func (f *fakeAWS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				schedError(w, "ResourceNotFoundException")
 				return
 			}
+			expr := f.scheduleExpr
+			if expr == "" {
+				expr = "rate(5 minutes)"
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"Name":               name,
@@ -157,7 +185,7 @@ func (f *fakeAWS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				"GroupName":          "default",
 				"Description":        "lagotto capacity poller",
 				"State":              f.scheduleState,
-				"ScheduleExpression": "rate(1 minute)",
+				"ScheduleExpression": expr,
 				"FlexibleTimeWindow": map[string]any{"Mode": "OFF"},
 				"Target": map[string]any{
 					"Arn":     "arn:aws:lambda:us-east-1:123456789012:function:lagotto-capacity-poller",
@@ -177,6 +205,9 @@ func (f *fakeAWS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			if s, ok := in["State"].(string); ok {
 				f.scheduleState = s
+			}
+			if e, ok := in["ScheduleExpression"].(string); ok {
+				f.scheduleExpr = e
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"ScheduleArn":"arn:aws:scheduler:us-east-1:123456789012:schedule/default/`+name+`"}`)
@@ -320,8 +351,9 @@ func TestWatchNotDeployedStillCreates(t *testing.T) {
 	}
 }
 
-// TestWatchEnablesDisabledSchedule: the normal path switches the poller back on,
-// AFTER the watch is stored, round-tripping the schedule's other fields.
+// TestWatchEnablesDisabledSchedule: a schedule a poller older than #323
+// disabled is switched back on at the normal cadence, AFTER the watch is
+// stored, round-tripping the schedule's other fields.
 func TestWatchEnablesDisabledSchedule(t *testing.T) {
 	f := &fakeAWS{scheduleState: "DISABLED"}
 	if err := runWatchWithFake(t, f); err != nil {
@@ -329,6 +361,9 @@ func TestWatchEnablesDisabledSchedule(t *testing.T) {
 	}
 	if f.scheduleState != "ENABLED" {
 		t.Errorf("schedule state = %q, want ENABLED", f.scheduleState)
+	}
+	if f.scheduleExpr != "rate(5 minutes)" {
+		t.Errorf("schedule expression = %q, want rate(5 minutes)", f.scheduleExpr)
 	}
 	f.mu.Lock()
 	order := strings.Join(f.calls, ",")
@@ -344,7 +379,69 @@ func TestWatchEnablesDisabledSchedule(t *testing.T) {
 	}
 }
 
-// TestWatchEnabledScheduleNoUpdate: an already-enabled schedule is left alone.
+// TestWatchRestoresIdleCadence (#323): an idle poller slowed the schedule to
+// hourly; arming a watch bumps the poller epoch AFTER storing the watch, then
+// re-reads the schedule and sets it back to every 5 minutes, ENABLED,
+// round-tripping the rest.
+func TestWatchRestoresIdleCadence(t *testing.T) {
+	f := &fakeAWS{scheduleState: "ENABLED", scheduleExpr: "rate(1 hour)"}
+	if err := runWatchWithFake(t, f); err != nil {
+		t.Fatalf("watch: %v", err)
+	}
+	if f.scheduleState != "ENABLED" || f.scheduleExpr != "rate(5 minutes)" {
+		t.Errorf("schedule = %s %s, want ENABLED rate(5 minutes)", f.scheduleState, f.scheduleExpr)
+	}
+	if f.bumps != 1 {
+		t.Errorf("poller epoch bumped %d times, want 1", f.bumps)
+	}
+	f.mu.Lock()
+	order := strings.Join(f.calls, ",")
+	f.mu.Unlock()
+	put := strings.Index(order, "dynamodb:PutItem")
+	bump := strings.Index(order, "dynamodb:UpdateItem(poller-epoch)")
+	reread := strings.LastIndex(order, "scheduler:GetSchedule")
+	update := strings.Index(order, "scheduler:UpdateSchedule")
+	if put < 0 || bump < put || reread < bump || update < reread {
+		t.Errorf("calls %s: want store, then bump the epoch, then re-read and update the schedule", order)
+	}
+	if n := f.called("scheduler:GetSchedule"); n != 2 {
+		t.Errorf("GetSchedule called %d times, want 2 (preflight, and the re-read after the bump)", n)
+	}
+	if len(f.schedPuts) == 1 && f.schedPuts[0]["Description"] != "lagotto capacity poller" {
+		t.Errorf("UpdateSchedule dropped the Description: %v", f.schedPuts[0])
+	}
+}
+
+// TestWatchEpochDeniedStillArms: a lagotto-cli-user policy written before
+// #323 cannot bump the epoch. That is a warning, not a refusal: the schedule
+// is still set to every 5 minutes and the watch kept.
+func TestWatchEpochDeniedStillArms(t *testing.T) {
+	f := &fakeAWS{scheduleState: "ENABLED", scheduleExpr: "rate(1 hour)", bumpErr: "AccessDeniedException"}
+	if err := runWatchWithFake(t, f); err != nil {
+		t.Fatalf("watch refused over the poller epoch: %v", err)
+	}
+	if got := putStatuses(f); len(got) != 1 || got[0] != "active" {
+		t.Errorf("PutItem statuses = %v, want one active watch", got)
+	}
+	if f.scheduleExpr != "rate(5 minutes)" {
+		t.Errorf("schedule expression = %s, want rate(5 minutes)", f.scheduleExpr)
+	}
+}
+
+// TestWatchNotDeployedNoEpoch: with no hosted poller there is no one to tell,
+// so no control item is written.
+func TestWatchNotDeployedNoEpoch(t *testing.T) {
+	f := &fakeAWS{scheduleState: ""}
+	if err := runWatchWithFake(t, f); err != nil {
+		t.Fatalf("watch: %v", err)
+	}
+	if n := f.called("dynamodb:UpdateItem(poller-epoch)"); n != 0 {
+		t.Errorf("poller epoch written %d times with no poller deployed", n)
+	}
+}
+
+// TestWatchEnabledScheduleNoUpdate: a schedule already ENABLED at the normal
+// cadence is left alone (idempotent), though the epoch is still bumped.
 func TestWatchEnabledScheduleNoUpdate(t *testing.T) {
 	f := &fakeAWS{scheduleState: "ENABLED"}
 	if err := runWatchWithFake(t, f); err != nil {
@@ -352,6 +449,9 @@ func TestWatchEnabledScheduleNoUpdate(t *testing.T) {
 	}
 	if n := f.called("scheduler:UpdateSchedule"); n != 0 {
 		t.Errorf("UpdateSchedule called %d times on an enabled schedule", n)
+	}
+	if f.bumps != 1 {
+		t.Errorf("poller epoch bumped %d times, want 1", f.bumps)
 	}
 }
 

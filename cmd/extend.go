@@ -94,10 +94,11 @@ func extendOrAck(cmd *cobra.Command, watchID string, expiry func(w *watcher.Watc
 	}
 	reactivate := w.Status == watcher.StatusExpired
 
-	// A reactivated watch is only polled if the poller's schedule, which the
-	// poller switched off when it had nothing to poll, is switched back on
-	// (#231). If that cannot be done the watch is put back to expired rather than
-	// left active and unpolled. See pollschedule.go.
+	// A reactivated watch is only polled promptly if the poller's schedule,
+	// which an idle poller slowed to hourly (or an older poller switched off),
+	// is set back to every 5 minutes (#231, #323). If that cannot be done the
+	// watch is put back to expired rather than left active and unpolled. See
+	// pollschedule.go.
 	sched := scheduler.NewFromConfig(cfg)
 	armAction := "reactivate watch " + watchID
 	var pollSched *scheduler.GetScheduleOutput
@@ -114,7 +115,7 @@ func extendOrAck(cmd *cobra.Command, watchID string, expiry func(w *watcher.Watc
 	}
 
 	if reactivate {
-		if err := enablePollScheduleIfOff(ctx, sched, os.Stderr, pollSched); err != nil {
+		if err := armPollSchedule(ctx, sched, store, os.Stderr, pollSched); err != nil {
 			// Put it back as it was: paused if it was paused.
 			restore := store.ExpireWatch(ctx, w.WatchID, w.ExpiredReason)
 			return pollScheduleUpdateRefusal(armAction, "the watch is still expired", restore, err)

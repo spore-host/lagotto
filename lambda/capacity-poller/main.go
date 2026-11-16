@@ -15,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/scheduler"
 	schedulertypes "github.com/aws/aws-sdk-go-v2/service/scheduler/types"
+	"github.com/spore-host/lagotto/pkg/pollcadence"
 	"github.com/spore-host/lagotto/pkg/watcher"
 	truffleaws "github.com/spore-host/truffle/pkg/aws"
 	"github.com/spore-host/truffle/pkg/quotas"
@@ -259,12 +260,15 @@ func rearmBoundaryRetry(ctx context.Context, sl *watcher.ScheduledLaunch) error 
 	return nil
 }
 
-// handlePoll runs one account-wide poll cycle. The lambda is a stateless,
-// self-terminating singleton: one schedule per account drives it, every
-// invocation sweeps all active watches, and watches drop out of the active set
-// as they launch (matched), hit a terminal error (failed), or pass their TTL
-// (expired). When zero active watches remain, the lambda disables its own
-// schedule — no watches, no lambda. Creating a watch re-arms the schedule.
+// handlePoll runs one account-wide poll cycle. The lambda is a stateless
+// singleton: one schedule per account drives it, every invocation sweeps all
+// active watches, and watches drop out of the active set as they launch
+// (matched), hit a terminal error (failed), or pass their TTL (expired).
+//
+// When nothing is left to poll the lambda does NOT disable its schedule (#323):
+// it slows it to the idle cadence, hourly (about 720 invocations a month), and
+// arming a watch sets it back to every 5 minutes. Disabling raced with arming
+// and could leave a new watch unpolled; pkg/pollcadence has the protocol.
 func handlePoll(ctx context.Context) error {
 	log.Println("Starting capacity poll cycle")
 
@@ -276,80 +280,84 @@ func handlePoll(ctx context.Context) error {
 	log.Printf("Poll complete: watched=%d launched=%d notified=%d retrying=%d failed=%d expired=%d quotaCapped=%d reminded=%d",
 		s.Watched, s.Launched, s.Notified, s.Retrying, s.Failed, s.Expired, s.QuotaCapped, s.Reminded)
 
-	// Check if any active watches remain. Retrying watches are still active, so
-	// the schedule stays armed until every watch has launched, failed, or
-	// expired.
-	active, err := store.ListActiveWatches(ctx)
+	res, err := reconcileCadence(ctx, schedulerClient, scheduleName, store, idleCheck(store))
 	if err != nil {
-		log.Printf("Warning: failed to check active watches: %v", err)
+		log.Printf("Warning: %v", err)
+	}
+	if res.Outcome != pollcadence.Idle {
 		return nil
 	}
 
-	// Teardown refcount (#49): infra stays alive while EITHER an active watch OR a
-	// pending scheduled launch references it. A scheduled --at next week must not
-	// have its schedule disabled / tables deleted out from under it just because
-	// no watches are active.
-	pendingLaunches, perr := store.HasPendingScheduledLaunches(ctx)
-	if perr != nil {
-		log.Printf("Warning: could not check pending scheduled launches: %v — leaving infra in place", perr)
-		return nil
-	}
-
-	if len(active) == 0 && !pendingLaunches {
-		log.Println("No active watches or pending scheduled launches, disabling schedule")
-		if err := disableSchedule(ctx); err != nil {
-			log.Printf("Warning: failed to disable schedule: %v", err)
-		}
-
-		// Table auto-deletion is opt-in via AUTO_DELETE_TABLES (#59). A poller
-		// deployed by `lagotto deploy` is deliberate, persistent infra and now
-		// REFERENCES the CLI-owned tables by name — it must not delete them out from
-		// under itself when they idle to empty (the user tears down explicitly with
-		// `lagotto deploy --teardown` / `lagotto teardown`). The env var is left
-		// unset by the stack, so a deployed poller disables its schedule (no cost
-		// when idle) but never deletes data tables.
-		if getEnv("AUTO_DELETE_TABLES", "") == "true" {
-			empty, err := store.TablesEmpty(ctx)
+	// Table auto-deletion is opt-in via AUTO_DELETE_TABLES (#59). A poller
+	// deployed by `lagotto deploy` is deliberate, persistent infra and
+	// REFERENCES the CLI-owned tables by name — it must not delete them out from
+	// under itself when they idle to empty (the user tears down explicitly with
+	// `lagotto deploy --teardown` / `lagotto teardown`). The env var is left
+	// unset by the stack, so a deployed poller only slows its schedule when
+	// idle and never deletes data tables.
+	if getEnv("AUTO_DELETE_TABLES", "") == "true" {
+		empty, err := store.TablesEmpty(ctx)
+		if err != nil {
+			log.Printf("Warning: could not check whether tables are empty: %v", err)
+		} else if empty {
+			log.Println("Tables empty, deleting CLI-managed lagotto tables (no litter)")
+			deleted, err := store.DeleteManagedTables(ctx)
 			if err != nil {
-				log.Printf("Warning: could not check whether tables are empty: %v", err)
-			} else if empty {
-				log.Println("Tables empty, deleting CLI-managed lagotto tables (no litter)")
-				deleted, err := store.DeleteManagedTables(ctx)
-				if err != nil {
-					log.Printf("Warning: failed to delete tables: %v", err)
-				} else if len(deleted) > 0 {
-					log.Printf("Deleted tables: %v", deleted)
-				}
-			} else {
-				log.Println("Tables still hold records (history retained until TTL); not deleting")
+				log.Printf("Warning: failed to delete tables: %v", err)
+			} else if len(deleted) > 0 {
+				log.Printf("Deleted tables: %v", deleted)
 			}
+		} else {
+			log.Println("Tables still hold records (history retained until TTL); not deleting")
 		}
-	} else {
-		log.Printf("%d active watches, pendingScheduledLaunches=%v — leaving infra armed", len(active), pendingLaunches)
 	}
-
 	return nil
 }
 
-func disableSchedule(ctx context.Context) error {
-	current, err := schedulerClient.GetSchedule(ctx, &scheduler.GetScheduleInput{
-		Name: aws.String(scheduleName),
-	})
-	if err != nil {
-		return fmt.Errorf("get schedule: %w", err)
-	}
+// workCounter is what idleCheck reads. *watcher.Store satisfies it.
+type workCounter interface {
+	ListActiveWatches(ctx context.Context) ([]watcher.Watch, error)
+	HasPendingScheduledLaunches(ctx context.Context) (bool, error)
+}
 
-	_, err = schedulerClient.UpdateSchedule(ctx, &scheduler.UpdateScheduleInput{
-		Name:               current.Name,
-		ScheduleExpression: current.ScheduleExpression,
-		FlexibleTimeWindow: current.FlexibleTimeWindow,
-		Target:             current.Target,
-		State:              schedulertypes.ScheduleStateDisabled,
-	})
-	if err != nil {
-		return fmt.Errorf("disable schedule: %w", err)
+// idleCheck reports whether nothing is left to poll. Retrying watches are
+// still active. Teardown refcount (#49): the poller stays at the normal
+// cadence while EITHER an active watch OR a pending scheduled launch exists,
+// so a scheduled --at next week does not have its infra idled under it.
+func idleCheck(wc workCounter) func(context.Context) (bool, error) {
+	return func(ctx context.Context) (bool, error) {
+		active, err := wc.ListActiveWatches(ctx)
+		if err != nil {
+			return false, fmt.Errorf("could not check active watches, leaving the schedule as it is: %w", err)
+		}
+		pending, err := wc.HasPendingScheduledLaunches(ctx)
+		if err != nil {
+			return false, fmt.Errorf("could not check pending scheduled launches, leaving the schedule as it is: %w", err)
+		}
+		if len(active) > 0 || pending {
+			log.Printf("%d active watches, pendingScheduledLaunches=%v — polling every 5 minutes", len(active), pending)
+			return false, nil
+		}
+		return true, nil
 	}
-	return nil
+}
+
+// reconcileCadence runs pollcadence.Reconcile and logs what it decided.
+func reconcileCadence(ctx context.Context, sched pollcadence.ScheduleAPI, name string, ep pollcadence.Epoch, idle func(context.Context) (bool, error)) (pollcadence.Result, error) {
+	res, err := pollcadence.Reconcile(ctx, sched, name, ep, idle)
+	switch res.Outcome {
+	case pollcadence.Idle:
+		log.Printf("No active watches or pending scheduled launches: schedule %s at the idle cadence %s (%d update(s))", name, pollcadence.IdleExpression, res.Changed)
+	case pollcadence.Armed:
+		log.Printf("A watch was armed during the idle check: schedule %s kept at %s (%d update(s))", name, pollcadence.NormalExpression, res.Changed)
+	case pollcadence.Unguarded:
+		log.Printf("No active watches or pending scheduled launches, but the idle check could not be guarded: schedule %s left as it is", name)
+	case pollcadence.Active:
+		if res.Changed > 0 {
+			log.Printf("Restored schedule %s to the normal cadence %s", name, pollcadence.NormalExpression)
+		}
+	}
+	return res, err
 }
 
 func getEnv(key, fallback string) string {

@@ -58,6 +58,28 @@
       }
     },
     {
+      "Sid": "PollerControl",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:UpdateItem"
+      ],
+      "Resource": "arn:aws:dynamodb:*:123456789012:table/lagotto-watches",
+      "Condition": {
+        "ForAllValues:StringEquals": {
+          "dynamodb:Attributes": [
+            "watch_id",
+            "epoch"
+          ],
+          "dynamodb:LeadingKeys": [
+            "#lagotto/poller-control"
+          ]
+        },
+        "Null": {
+          "dynamodb:LeadingKeys": "false"
+        }
+      }
+    },
+    {
       "Sid": "PollerSchedule",
       "Effect": "Allow",
       "Action": [
