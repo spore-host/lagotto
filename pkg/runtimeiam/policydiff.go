@@ -314,7 +314,7 @@ func grantCovered(deployed []Grant, want Grant, resource string) bool {
 		if !wildcardMatchFold(d.Action, want.Action) || !wildcardMatch(d.Resource, resource) {
 			continue
 		}
-		if strings.EqualFold(d.Effect, "Deny") {
+		if strings.EqualFold(d.Effect, "Deny") && !isServiceGuard(d) {
 			return false
 		}
 		if strings.EqualFold(d.Effect, "Allow") && (d.Condition == "" || d.Condition == want.Condition) {
@@ -496,7 +496,9 @@ func PartitionByCriticality(grants []Grant) (required, reportingOnly []Grant) {
 //
 // This is a deliberately small subset of IAM evaluation, sufficient because it is
 // applied to a policy lagotto wrote: Allow/Deny with `*`/`?` wildcards in actions
-// and resources, case-insensitive actions, and an explicit Deny beating any Allow.
+// and resources, case-insensitive actions, and an explicit Deny beating any Allow
+// (except the spore-host:role=service guard, which never matches lagotto's
+// resources).
 //
 // It does NOT evaluate conditions, so for a conditioned action it answers "is this
 // permitted under SOME condition". That is wrong for iam:PassRole — the stock
@@ -510,7 +512,9 @@ func Allows(grants []Grant, action, resource string) bool {
 		if !wildcardMatchFold(g.Action, action) || !wildcardMatch(g.Resource, resource) {
 			continue
 		}
-		if strings.EqualFold(g.Effect, "Deny") {
+		// The spore-host:role=service guard (#325) denies only resources
+		// lagotto never tags, so it says nothing about lagotto's own.
+		if strings.EqualFold(g.Effect, "Deny") && !isServiceGuard(g) {
 			return false
 		}
 		if strings.EqualFold(g.Effect, "Allow") {

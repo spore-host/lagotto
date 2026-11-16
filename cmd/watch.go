@@ -42,6 +42,7 @@ var (
 	watchRequireQuota    bool
 	watchGroup           string
 	watchGroupOnExtra    string
+	watchLocal           bool
 )
 
 var watchCmd = &cobra.Command{
@@ -73,6 +74,13 @@ watch only checks that the type is offered in the region at or under
 --max-price, not a capacity check: it launches and reserves nothing. It still
 works, with a warning on stderr. Use --action hold (reserve the capacity) or
 --action spawn (launch it) to wait for real capacity.
+
+A watch needs something to poll it. Where 'lagotto deploy' has put the hosted
+poller, it polls the watch. In a region with no poller, watch refuses and
+creates nothing, not even lagotto's tables: deploy one with 'lagotto deploy
+--region <region>', or pass --local and keep 'lagotto poll --daemon' running
+yourself. --local creates lagotto's DynamoDB tables in the region if they are
+absent; 'lagotto teardown' removes them.
 
 If the pattern matches no instance type your region(s) offer, the first poll
 prints a warning (a likely typo) but keeps watching in case the type appears.
@@ -118,6 +126,7 @@ func init() {
 	watchCmd.Flags().StringVar(&watchGroup, "group", "", "Join (or create) a watch group: the first member to land wins and every other member is cancelled. Members may differ in pattern, regions, Spot and spawn config; --action spawn or hold only, not with --maintain, --until-landed or --service sagemaker. 'lagotto status <group>' and 'lagotto cancel <group>' act on the whole group.")
 	watchCmd.Flags().StringVar(&watchGroupOnExtra, "group-on-extra", "", "With --group: what happens to this member's launch if it lands after the group was already won: terminate (default; a hold's reservation is released) or keep")
 	watchCmd.Flags().StringVar(&watchUntil, "until", "", "Fleet completion condition, re-checked each poll: 's3-empty: s3://b/manifest minus s3://b/done/', 'http-200: https://…', or 'shell: <cmd>' (shell = local daemon only). When true the fleet retires.")
+	watchCmd.Flags().BoolVar(&watchLocal, "local", false, "Create the watch in a region with no hosted poller, for a local 'lagotto poll --daemon' to service; creates lagotto's DynamoDB tables in the region if they are absent. Without it, watch refuses where no poller is deployed (lagotto#325).")
 }
 
 func runWatch(cmd *cobra.Command, args []string) error {
@@ -289,27 +298,34 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	}
 	quotaReport := pre.Quota
 
+	// Make sure the hosted poller will poll the watch (#231): a caller who
+	// cannot read or switch on the poller's schedule is refused, and no active
+	// watch is left behind for nothing to poll. See pollschedule.go. This runs
+	// before any table is created (#325): a region with no poller and no
+	// --local gets no tables, no watch, nothing.
+	sched := scheduler.NewFromConfig(cfg)
+	armAction := "create watch " + w.WatchID
+	pollSched, err := pollSchedulePreflight(ctx, sched, armAction)
+	if err != nil {
+		return err
+	}
+	if err := requireHostedPoller(cfg.Region, pollSched != nil, watchLocal); err != nil {
+		return err
+	}
+
 	store := watcher.NewStore(cfg, watchesTable, historyTable)
 	// A table this creates is tagged with its creator as spore-host:owner (#324).
 	store.SetTagStamp(managedtags.Stamp{Owner: w.OwnerID})
 
-	// Auto-create the backing tables on first use so the tool is zero-setup (#12).
+	// The tables normally exist already: `lagotto deploy` creates them with the
+	// poller. Created here only where a poller is deployed (tables someone
+	// deleted) or for --local.
 	created, err := store.EnsureTables(ctx)
 	if err != nil {
 		return fmt.Errorf("ensure tables: %w", err)
 	}
 	for _, name := range created {
 		fmt.Fprintf(os.Stderr, "Created DynamoDB table %s\n", name)
-	}
-
-	// Store the watch and make sure the hosted poller will poll it (#231): a
-	// caller who cannot read or switch on the poller's schedule is refused, and
-	// no active watch is left behind for nothing to poll. See pollschedule.go.
-	sched := scheduler.NewFromConfig(cfg)
-	armAction := "create watch " + w.WatchID
-	pollSched, err := pollSchedulePreflight(ctx, sched, armAction)
-	if err != nil {
-		return err
 	}
 	// Subscribe each email address to the alerts topic (#240), before the watch
 	// is stored, so an address that cannot be subscribed refuses the watch
@@ -391,6 +407,25 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	}
 	writeEmailStates(cmd.OutOrStdout(), "  Notify:   ", w)
 	return nil
+}
+
+// requireHostedPoller is the #325 gate: a watch in a region with no hosted
+// poller is refused, before any table is created, unless --local says a local
+// 'lagotto poll --daemon' will service it. deployed is the preflight's answer
+// (the poller's schedule exists in region).
+//
+// Before #325 such a watch was stored silently, creating lagotto's tables in
+// whatever region the CLI resolved: one account had tables in 8 regions and
+// pollers in 2, and nothing polled, or ever removed, the other 6.
+func requireHostedPoller(region string, deployed, local bool) error {
+	if deployed || local {
+		return nil
+	}
+	return fmt.Errorf("no hosted poller is deployed in %s, so nothing would poll this watch; nothing was created (no table, no watch).\n"+
+		"  Deploy one first:    lagotto deploy --region %s\n"+
+		"  Or poll it yourself: re-run with --local and keep 'lagotto poll --daemon --region %s' running while it waits\n"+
+		"                       (--local creates lagotto's tables in %s if they are absent; 'lagotto teardown --region %s' removes them)",
+		region, region, region, region, region)
 }
 
 // encodeWatchJSON is `watch -o json`'s output: the watch, with the quota

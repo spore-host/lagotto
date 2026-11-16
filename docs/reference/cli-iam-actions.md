@@ -67,7 +67,7 @@ Not everyday use:
 
 - `lagotto deploy`: administrator: creates the poller's Lambda, topic, schedule, tables and IAM roles.
 - `lagotto poll`: runs the poller locally, so it needs what the hosted poller's role has, including writing and passing instance roles; lagotto-cli-user deliberately does not cover it.
-- `lagotto setup`: administrator: creates the tables and both IAM roles, writes their policies, and writes the lagotto-cli-user policy.
+- `lagotto setup`: administrator: creates both IAM roles, writes their policies, and writes the lagotto-cli-user policy (it creates no table, #325).
 - `lagotto teardown`: administrator: deletes lagotto's DynamoDB tables and, with --iam-roles, its IAM roles and the lagotto-cli-user policy.
 
 ## By command
@@ -84,7 +84,7 @@ Not everyday use:
 | `lagotto list` | `dynamodb:BatchGetItem`, `dynamodb:Query`, `iam:GetRole`, `iam:GetRolePolicy`, `sns:GetSubscriptionAttributes`, `sns:ListSubscriptionsByTopic` |
 | `lagotto notify-gc` | `dynamodb:Query`, `iam:PassRole`, `sns:GetSubscriptionAttributes`, `sns:GetTopicAttributes`, `sns:ListSubscriptionsByTopic`, `sns:Subscribe`, `sns:Unsubscribe` |
 | `lagotto poll` | `account:GetAccountInformation`, `dynamodb:GetItem`, `dynamodb:PutItem`, `dynamodb:Query`, `dynamodb:UpdateItem`, `ec2:AllocateAddress`, `ec2:AssociateAddress`, `ec2:AuthorizeSecurityGroupIngress`, `ec2:CancelCapacityReservation`, `ec2:CancelSpotInstanceRequests`, `ec2:CreateCapacityReservation`, `ec2:CreateTags`, `ec2:DescribeAddresses`, `ec2:DescribeCapacityReservations`, `ec2:DescribeImages`, `ec2:DescribeInstanceTypeOfferings`, `ec2:DescribeInstanceTypes`, `ec2:DescribeInstances`, `ec2:DescribeRegions`, `ec2:DescribeRouteTables`, `ec2:DescribeSnapshots`, `ec2:DescribeSpotPriceHistory`, `ec2:DescribeSubnets`, `ec2:DescribeVpcEndpoints`, `ec2:DescribeVpcs`, `ec2:DisassociateAddress`, `ec2:ReleaseAddress`, `ec2:RunInstances`, `ec2:TerminateInstances`, `fsx:CreateFileSystem`, `fsx:DeleteFileSystem`, `fsx:TagResource`, `iam:AddRoleToInstanceProfile`, `iam:AttachRolePolicy`, `iam:CreateInstanceProfile`, `iam:CreateRole`, `iam:GetInstanceProfile`, `iam:GetRole`, `iam:PassRole`, `iam:PutRolePolicy`, `iam:TagInstanceProfile`, `iam:TagRole`, `pricing:GetProducts`, `s3:CreateBucket`, `s3:GetBucketTagging`, `s3:GetLifecycleConfiguration`, `s3:ListBucket`, `s3:PutBucketOwnershipControls`, `s3:PutBucketPublicAccessBlock`, `s3:PutBucketTagging`, `s3:PutEncryptionConfiguration`, `s3:PutLifecycleConfiguration`, `s3:PutObject`, `s3:PutObjectTagging`, `s3:TagResource`, `sagemaker:AddTags`, `sagemaker:CreateTrainingJob`, `sagemaker:DescribeTrainingJob`, `servicequotas:GetServiceQuota`, `sns:GetSubscriptionAttributes`, `sns:GetTopicAttributes`, `sns:ListSubscriptionsByTopic`, `sns:Publish`, `sns:Unsubscribe`, `ssm:GetParameter` |
-| `lagotto setup` | `dynamodb:CreateTable`, `dynamodb:DeleteItem`, `dynamodb:DescribeTable`, `dynamodb:DescribeTimeToLive`, `dynamodb:GetItem`, `dynamodb:ListTagsOfResource`, `dynamodb:Scan`, `dynamodb:TagResource`, `dynamodb:TransactWriteItems`, `dynamodb:UpdateTable`, `dynamodb:UpdateTimeToLive`, `iam:AddRoleToInstanceProfile`, `iam:AttachRolePolicy`, `iam:CreateInstanceProfile`, `iam:CreatePolicy`, `iam:CreatePolicyVersion`, `iam:CreateRole`, `iam:DeleteInstanceProfile`, `iam:DeletePolicyVersion`, `iam:GetInstanceProfile`, `iam:GetPolicy`, `iam:GetPolicyVersion`, `iam:GetRole`, `iam:GetRolePolicy`, `iam:GetUser`, `iam:ListInstanceProfileTags`, `iam:ListPolicyVersions`, `iam:PassRole`, `iam:PutRolePolicy`, `iam:RemoveRoleFromInstanceProfile`, `iam:TagInstanceProfile`, `iam:TagPolicy`, `iam:TagRole` |
+| `lagotto setup` | `dynamodb:DeleteItem`, `dynamodb:DescribeTable`, `dynamodb:GetItem`, `dynamodb:ListTagsOfResource`, `dynamodb:Scan`, `dynamodb:TagResource`, `dynamodb:TransactWriteItems`, `dynamodb:UpdateTable`, `iam:AddRoleToInstanceProfile`, `iam:AttachRolePolicy`, `iam:CreateInstanceProfile`, `iam:CreatePolicy`, `iam:CreatePolicyVersion`, `iam:CreateRole`, `iam:DeleteInstanceProfile`, `iam:DeletePolicyVersion`, `iam:GetInstanceProfile`, `iam:GetPolicy`, `iam:GetPolicyVersion`, `iam:GetRole`, `iam:GetRolePolicy`, `iam:GetUser`, `iam:ListInstanceProfileTags`, `iam:ListPolicyVersions`, `iam:PassRole`, `iam:PutRolePolicy`, `iam:RemoveRoleFromInstanceProfile`, `iam:TagInstanceProfile`, `iam:TagPolicy`, `iam:TagRole` |
 | `lagotto status` | `dynamodb:GetItem`, `lambda:GetFunction`, `sns:GetSubscriptionAttributes`, `sns:ListSubscriptionsByTopic` |
 | `lagotto teardown` | `dynamodb:DeleteTable`, `dynamodb:DescribeTable`, `dynamodb:ListTagsOfResource`, `dynamodb:Scan`, `ec2:DescribeRegions`, `iam:DeleteInstanceProfile`, `iam:DeletePolicy`, `iam:DeletePolicyVersion`, `iam:DeleteRole`, `iam:DeleteRolePolicy`, `iam:DetachGroupPolicy`, `iam:DetachRolePolicy`, `iam:DetachUserPolicy`, `iam:GetInstanceProfile`, `iam:GetPolicy`, `iam:GetRole`, `iam:GetRolePolicy`, `iam:ListAttachedRolePolicies`, `iam:ListEntitiesForPolicy`, `iam:ListInstanceProfileTags`, `iam:ListPolicyVersions`, `iam:ListRolePolicies`, `iam:RemoveRoleFromInstanceProfile`, `lambda:GetFunction`, `scheduler:DeleteSchedule`, `scheduler:DeleteScheduleGroup`, `scheduler:ListSchedules` |
 | `lagotto update` | `dynamodb:GetItem`, `dynamodb:PutItem`, `dynamodb:Query`, `dynamodb:UpdateItem`, `ec2:DescribeCapacityReservations`, `ec2:DescribeInstanceTypeOfferings`, `ec2:DescribeInstances`, `ec2:DescribeRegions`, `ec2:DescribeSubnets`, `iam:GetRole`, `iam:GetRolePolicy`, `iam:PassRole`, `s3:GetObject`, `scheduler:GetSchedule`, `scheduler:UpdateSchedule`, `servicequotas:GetServiceQuota`, `sns:GetSubscriptionAttributes`, `sns:GetTopicAttributes`, `sns:ListSubscriptionsByTopic`, `sns:Subscribe`, `sns:Unsubscribe` |
@@ -109,11 +109,11 @@ Not everyday use:
 | `cloudformation:ListStackResources` | `lagotto deploy` |
 | `cloudwatch:GetMetricStatistics` | `lagotto doctor` |
 | `dynamodb:BatchGetItem` | `lagotto history`, `lagotto list` |
-| `dynamodb:CreateTable` | `lagotto deploy`, `lagotto launch`, `lagotto setup`, `lagotto watch` |
+| `dynamodb:CreateTable` | `lagotto deploy`, `lagotto launch`, `lagotto watch` |
 | `dynamodb:DeleteItem` | `lagotto setup` |
 | `dynamodb:DeleteTable` | `lagotto teardown` |
 | `dynamodb:DescribeTable` | `lagotto deploy`, `lagotto doctor`, `lagotto launch`, `lagotto setup`, `lagotto teardown`, `lagotto watch` |
-| `dynamodb:DescribeTimeToLive` | `lagotto deploy`, `lagotto launch`, `lagotto setup`, `lagotto watch` |
+| `dynamodb:DescribeTimeToLive` | `lagotto deploy`, `lagotto launch`, `lagotto watch` |
 | `dynamodb:GetItem` | `lagotto ack`, `lagotto cancel`, `lagotto extend`, `lagotto history`, `lagotto poll`, `lagotto setup`, `lagotto status`, `lagotto update`, `lagotto watch` |
 | `dynamodb:ListTagsOfResource` | `lagotto deploy`, `lagotto setup`, `lagotto teardown` |
 | `dynamodb:PutItem` | `lagotto launch`, `lagotto poll`, `lagotto update`, `lagotto watch` |
@@ -123,7 +123,7 @@ Not everyday use:
 | `dynamodb:TransactWriteItems` | `lagotto setup` |
 | `dynamodb:UpdateItem` | `lagotto ack`, `lagotto cancel`, `lagotto extend`, `lagotto launch`, `lagotto poll`, `lagotto update`, `lagotto watch` |
 | `dynamodb:UpdateTable` | `lagotto setup` |
-| `dynamodb:UpdateTimeToLive` | `lagotto deploy`, `lagotto launch`, `lagotto setup`, `lagotto watch` |
+| `dynamodb:UpdateTimeToLive` | `lagotto deploy`, `lagotto launch`, `lagotto watch` |
 | `ec2:AllocateAddress` | `lagotto poll` |
 | `ec2:AssociateAddress` | `lagotto poll` |
 | `ec2:AuthorizeSecurityGroupIngress` | `lagotto poll` |

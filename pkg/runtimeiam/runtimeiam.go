@@ -250,7 +250,8 @@ func ensurePollerRole(ctx context.Context, client IAMAPI, stamp managedtags.Stam
 
 // ensureSchedulerInvokeRole get-or-creates SchedulerInvokeRoleName with the
 // Scheduler trust relationship, tagged (roleTags; it was created untagged
-// before #324), and writes [SchedulerInvokePolicyDocument] onto it.
+// before #324), and writes [SchedulerInvokePolicyDocument] and
+// [SchedulerTeardownPolicyDocument] onto it.
 //
 // It deliberately takes no region (#218). IAM is global, so this one role is
 // shared by the poller schedule in EVERY region of the account and by every
@@ -267,6 +268,10 @@ func ensurePollerRole(ctx context.Context, client IAMAPI, stamp managedtags.Stam
 // created reports whether this call created the role.
 func ensureSchedulerInvokeRole(ctx context.Context, client IAMAPI, accountID string, stamp managedtags.Stamp) (created bool, err error) {
 	doc, err := SchedulerInvokePolicyDocument(accountID)
+	if err != nil {
+		return false, err
+	}
+	teardownDoc, err := SchedulerTeardownPolicyDocument(accountID)
 	if err != nil {
 		return false, err
 	}
@@ -292,6 +297,15 @@ func ensureSchedulerInvokeRole(ctx context.Context, client IAMAPI, accountID str
 		PolicyDocument: aws.String(doc),
 	}); err != nil {
 		return role == nil, fmt.Errorf("runtimeiam: put invoke policy on %s: %w", SchedulerInvokeRoleName, err)
+	}
+	// The teardown jobs' grants (#325), a policy of their own so InvokeLambda
+	// stays the one statement doctor evaluates.
+	if _, err := client.PutRolePolicy(ctx, &iam.PutRolePolicyInput{
+		RoleName:       aws.String(SchedulerInvokeRoleName),
+		PolicyName:     aws.String(SchedulerTeardownPolicyName),
+		PolicyDocument: aws.String(teardownDoc),
+	}); err != nil {
+		return role == nil, fmt.Errorf("runtimeiam: put teardown policy on %s: %w", SchedulerInvokeRoleName, err)
 	}
 	return role == nil, nil
 }
@@ -721,6 +735,59 @@ func PolicyDocumentFor(accountID string, auth Authorizations) (string, error) {
 		{Effect: "Allow", Action: []string{
 			"ec2:CreateCapacityReservation", "ec2:CancelCapacityReservation", "ec2:DescribeCapacityReservations",
 		}, Resource: "*"},
+		// Idle teardown (#325, for #326's self-removal): what the poller deletes
+		// in its own region once nothing it manages has been active for the
+		// grace period. Each is lagotto's fixed-name resource, by exact ARN.
+		// Before #325 the poller had none of these, so AUTO_DELETE_TABLES logged
+		// an AccessDenied warning and deleted nothing.
+		{Effect: "Allow", Action: []string{
+			"dynamodb:DeleteTable", "dynamodb:ListTagsOfResource", "dynamodb:DescribeTable",
+		}, Resource: []string{
+			RegionalARN("dynamodb", accountID, "table/lagotto-watches"),
+			RegionalARN("dynamodb", accountID, "table/lagotto-match-history"),
+			RegionalARN("dynamodb", accountID, "table/lagotto-scheduled-launches"),
+		}},
+		// The shared spore.host lease table (libs#77): the poller claims the
+		// teardown lease there, and creates the table when it is the first
+		// spore.host tool in the region to need it.
+		{Effect: "Allow", Action: []string{
+			"dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem",
+			"dynamodb:ConditionCheckItem", "dynamodb:Scan", "dynamodb:DescribeTable",
+			"dynamodb:CreateTable", "dynamodb:DeleteTable", "dynamodb:TagResource", "dynamodb:ListTagsOfResource",
+		}, Resource: RegionalARN("dynamodb", accountID, "table/"+LifecycleTableName)},
+		// The artifact bucket `lagotto deploy` creates (lagotto-lambda-<account>-<region>),
+		// emptied of every version and then deleted.
+		{Effect: "Allow", Action: []string{"s3:ListBucketVersions", "s3:DeleteBucket"},
+			Resource: ArtifactBucketARN(accountID)},
+		{Effect: "Allow", Action: []string{"s3:DeleteObject", "s3:DeleteObjectVersion"},
+			Resource: ArtifactBucketARN(accountID) + "/*"},
+		{Effect: "Allow", Action: []string{"sns:DeleteTopic"},
+			Resource: RegionalARN("sns", accountID, "lagotto-capacity-alerts")},
+		// Every schedule in lagotto's group, the poller's own included, then the
+		// group itself.
+		{Effect: "Allow", Action: []string{"scheduler:DeleteSchedule"},
+			Resource: RegionalARN("scheduler", accountID, "schedule/"+schedgroup.Name+"/*")},
+		{Effect: "Allow", Action: []string{"scheduler:DeleteScheduleGroup"},
+			Resource: RegionalARN("scheduler", accountID, "schedule-group/"+schedgroup.Name)},
+		// The one-shot teardown jobs (#326) that remove what the poller cannot
+		// remove from inside itself: its function, its log group and, in the last
+		// region, its role. They run as the Scheduler invoke role (iam:PassRole on
+		// it is the statement above, still conditioned on the Scheduler service)
+		// with [SchedulerTeardownPolicyDocument]'s grants.
+		{Effect: "Allow", Action: []string{"scheduler:CreateSchedule", "scheduler:DeleteSchedule"},
+			Resource: RegionalARN("scheduler", accountID, "schedule/"+TeardownScheduleGroup+"/*")},
+		{Effect: "Allow", Action: []string{"scheduler:CreateScheduleGroup", "scheduler:TagResource"},
+			Resource: RegionalARN("scheduler", accountID, "schedule-group/"+TeardownScheduleGroup)},
+		// lagotto's own instance role and its profile, deleted in the last region.
+		// Only those: never the poller's role (the invoke role's teardown job
+		// deletes it) and never the invoke role.
+		{Effect: "Allow", Action: []string{
+			"iam:DeleteRole", "iam:DeleteRolePolicy", "iam:DetachRolePolicy",
+			"iam:RemoveRoleFromInstanceProfile", "iam:DeleteInstanceProfile",
+		}, Resource: []string{
+			arn("arn:aws:iam::%s:role/%s", accountID, InstanceRoleName),
+			arn("arn:aws:iam::%s:instance-profile/%s", accountID, InstanceRoleName),
+		}},
 		// SageMaker submit and track, only the jobs lagotto names
 		// (lagotto-<watch>-<n>, SageMakerLauncher.submit). SageMaker ARNs carry
 		// the job name in lower case; lagotto's names are lower case already.
@@ -735,6 +802,8 @@ func PolicyDocumentFor(accountID string, auth Authorizations) (string, error) {
 		statements = append(statements, statement{Effect: "Allow", Action: []string{InstanceRolePassAction},
 			Resource: smRoles, Condition: passToService("sagemaker.amazonaws.com")})
 	}
+
+	statements = append(statements, guardStatements(accountID)...)
 
 	doc := map[string]interface{}{"Version": "2012-10-17", "Statement": statements}
 	b, err := json.Marshal(doc)

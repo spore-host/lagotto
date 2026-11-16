@@ -580,7 +580,7 @@ func TestRequirePollerDeployed_AbsentNamesWhereToLook(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error when the poller function is absent")
 	}
-	for _, want := range []string{PollerFunctionName, testAccount, testRegion, "lagotto deploy"} {
+	for _, want := range []string{PollerFunctionName, testAccount, testRegion, "lagotto deploy --region " + testRegion} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not mention %q", err, want)
 		}

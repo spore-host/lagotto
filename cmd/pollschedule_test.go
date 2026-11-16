@@ -49,8 +49,12 @@ type fakeAWS struct {
 	// 4); "" means no poller is deployed (GetFunction answers 404), and
 	// pollerUntagged means one is deployed with no Version tag.
 	pollerVersion string
+	// tablesAbsent makes lagotto's tables not exist (DescribeTable answers
+	// ResourceNotFoundException) until a CreateTable creates one (#325).
+	tablesAbsent bool
 
 	mu        sync.Mutex
+	created   map[string]bool // tables CreateTable made
 	calls     []string
 	puts      []map[string]map[string]any // PutItem Items
 	updates   []string                    // UpdateItem UpdateExpression + values, raw (not the epoch's)
@@ -108,9 +112,31 @@ func (f *fakeAWS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			f.record("dynamodb:" + op)
 		}
 		w.Header().Set("Content-Type", "application/x-amz-json-1.0")
+		var named struct{ TableName string }
+		_ = json.Unmarshal(body, &named)
 		switch op {
 		case "DescribeTable":
+			f.mu.Lock()
+			absent := f.tablesAbsent && !f.created[named.TableName]
+			f.mu.Unlock()
+			if absent {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, `{"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found"}`)
+				return
+			}
 			_, _ = io.WriteString(w, `{"Table":{"TableName":"t","TableStatus":"ACTIVE"}}`)
+		case "CreateTable":
+			f.mu.Lock()
+			if f.created == nil {
+				f.created = map[string]bool{}
+			}
+			f.created[named.TableName] = true
+			f.mu.Unlock()
+			_, _ = io.WriteString(w, `{"TableDescription":{"TableName":"`+named.TableName+`","TableStatus":"ACTIVE"}}`)
+		case "DescribeTimeToLive":
+			_, _ = io.WriteString(w, `{"TimeToLiveDescription":{"TimeToLiveStatus":"DISABLED"}}`)
+		case "UpdateTimeToLive":
+			_, _ = io.WriteString(w, `{"TimeToLiveSpecification":{"AttributeName":"ttl_timestamp","Enabled":true}}`)
 		case "PutItem":
 			var in struct {
 				Item map[string]map[string]any
@@ -334,8 +360,12 @@ func TestWatchRefusesWhenGetScheduleFails(t *testing.T) {
 
 // TestWatchNotDeployedStillCreates: ResourceNotFound really does mean the
 // hosted poller is not deployed (the watch is for 'lagotto poll --daemon'), and
-// that keeps working exactly as before — stored, no UpdateSchedule, no error.
+// with --local that keeps working as before: stored, no UpdateSchedule, no
+// error.
 func TestWatchNotDeployedStillCreates(t *testing.T) {
+	// With --local since #325: without it, no poller is a refusal
+	// (TestWatchRefusesWithNoPoller).
+	setFlagsForTest(t, watchCmd, map[string]string{"local": "true"})
 	f := &fakeAWS{scheduleState: ""}
 	if err := runWatchWithFake(t, f); err != nil {
 		t.Fatalf("watch failed with no poller deployed: %v", err)
@@ -432,6 +462,7 @@ func TestWatchEpochDeniedStillArms(t *testing.T) {
 // TestWatchNotDeployedNoEpoch: with no hosted poller there is no one to tell,
 // so no control item is written.
 func TestWatchNotDeployedNoEpoch(t *testing.T) {
+	setFlagsForTest(t, watchCmd, map[string]string{"local": "true"})
 	f := &fakeAWS{scheduleState: ""}
 	if err := runWatchWithFake(t, f); err != nil {
 		t.Fatalf("watch: %v", err)

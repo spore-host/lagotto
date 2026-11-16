@@ -155,6 +155,7 @@
       "--azs": "advanced",
       "--group": "advanced",
       "--group-on-extra": "advanced",
+      "--local": "advanced",
       "--maintain": "advanced",
       "--max-price": "advanced",
       "--notify": "advanced",

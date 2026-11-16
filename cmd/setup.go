@@ -24,23 +24,27 @@ import (
 var setupCmd = &cobra.Command{
 	Use:         "setup",
 	Annotations: level(levelAdvanced),
-	Short:       "Create lagotto's DynamoDB tables, the hosted poller's IAM roles, and the CLI-user policy",
-	Long: `Provision lagotto's backend: the DynamoDB tables it uses to store watches and
-match history (lagotto-watches and lagotto-match-history by default; override with
---watches-table / --history-table), and both CLI-owned IAM roles: the poller's
+	Short:       "Create the hosted poller's IAM roles and the CLI-user policy",
+	Long: `Provision lagotto's account-wide IAM: both CLI-owned IAM roles, the poller's
 execution role (lagotto-capacity-poller-role) with the runtime IAM policy that lets
-the poller spawn/hold/submit, and the role EventBridge Scheduler assumes to invoke
-the poller (lagotto-capacity-poller-scheduler-invoke). The roles are account-global,
-so one run in any region serves every region. Roles that already exist are reused;
-both policies are rewritten on every run. Setup prints each role it created.
+the poller spawn/hold/submit and, once idle, tear its own region down, and the role
+EventBridge Scheduler assumes to invoke the poller
+(lagotto-capacity-poller-scheduler-invoke) with its InvokeLambda and LagottoTeardown
+policies. The roles are account-global, so one run in any region serves every
+region. Roles that already exist are reused; their policies are rewritten on every
+run. Setup prints each role it created.
 
-The table creation is idempotent (existing tables are left untouched) and normally
-automatic: 'lagotto watch' creates the tables on first use. Run 'setup' explicitly
-to provision the backend ahead of time, or — importantly — after 'lagotto deploy'
-to grant the poller its permissions. 'deploy' creates only a minimal execution
-role (so the runtime Lambda can never self-escalate); 'setup', run by you, attaches
-the spawn/hold/SageMaker/scheduler policy. Until then the poller can only notify.
-'lagotto teardown --iam-roles' deletes both roles once no region runs a poller.
+Setup creates no DynamoDB table (lagotto#325). The tables are regional and only a
+poller uses them, so 'lagotto deploy --region <region>' creates them along with the
+poller there, and 'lagotto watch --local' creates them for a local 'lagotto poll
+--daemon' in a region with no poller. Setup still tags, and moves older records in,
+the tables that already exist in its region.
+
+Run 'setup' after 'lagotto deploy' to grant the poller its permissions. 'deploy'
+creates only a minimal execution role (so the runtime Lambda can never
+self-escalate); 'setup', run by you, attaches the spawn/hold/SageMaker/scheduler
+policy. Until then the poller can only notify. 'lagotto teardown --iam-roles'
+deletes both roles once no region runs a poller.
 
 The poller creates and changes no IAM role. Setup creates the one it launches
 with by default, lagotto-instance-role (with its instance profile and spawn's
@@ -120,25 +124,12 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	// with the administrator running it as the spore-host:owner.
 	setupStamp = managedtags.Stamp{Owner: setupCallerOwner(ctx, cfg)}
 
-	// 1. Tables (CLI-owned, #59).
+	// 1. Tables (CLI-owned, #59): tagged where they exist, created nowhere
+	// (#325).
 	store := watcher.NewStore(cfg, watchesTable, historyTable)
 	store.SetTagStamp(setupStamp)
-	created, err := store.EnsureTables(ctx)
-	if err != nil {
-		return fmt.Errorf("ensure tables: %w", err)
-	}
-	if len(created) == 0 {
-		_, _ = fmt.Fprintf(out, "Tables already exist (%s, %s).\n", watchesTable, historyTable)
-	}
-	for _, name := range created {
-		_, _ = fmt.Fprintf(out, "Created table %s\n", name)
-	}
-	retagged, err := store.EnsureTableTags(ctx)
-	if err != nil {
-		return fmt.Errorf("tag tables: %w", err)
-	}
-	for _, name := range retagged {
-		_, _ = fmt.Fprintf(out, "Tagged table %s %s=%s\n", name, tags.ManagedBy, tags.ToolLagotto)
+	if err := setupTables(ctx, store, cfg.Region, out); err != nil {
+		return err
 	}
 
 	// 2. The CLI-owned IAM roles and their policies (#16, #145, #229): lagotto
@@ -168,6 +159,31 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	}
 
 	_, _ = fmt.Fprintln(out, "Setup complete.")
+	return nil
+}
+
+// setupTableStore is the slice of the store setup's table step uses.
+// *watcher.Store satisfies it. It has no EnsureTables on purpose (#325).
+type setupTableStore interface {
+	EnsureTableTags(ctx context.Context) ([]string, error)
+}
+
+// setupTables is setup's table step. It creates no table (#325): before, setup
+// created lagotto's tables in whatever region it ran in, poller or not, and
+// nothing ever polled or removed them (one account had tables in 8 regions and
+// pollers in 2). The tables come from 'lagotto deploy', with the poller, or
+// 'lagotto watch --local'. Tables that already exist gain the spore.host tags
+// an older lagotto did not write (#324).
+func setupTables(ctx context.Context, store setupTableStore, region string, out io.Writer) error {
+	retagged, err := store.EnsureTableTags(ctx)
+	if err != nil {
+		return fmt.Errorf("tag tables: %w", err)
+	}
+	for _, name := range retagged {
+		_, _ = fmt.Fprintf(out, "Tagged table %s %s=%s\n", name, tags.ManagedBy, tags.ToolLagotto)
+	}
+	_, _ = fmt.Fprintf(out, "Tables: setup creates none. 'lagotto deploy --region %s' creates them with the poller "+
+		"(or 'lagotto watch --local' for a local 'lagotto poll --daemon').\n", region)
 	return nil
 }
 

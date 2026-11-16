@@ -1,0 +1,58 @@
+{
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "lambda:DeleteFunction"
+      ],
+      "Resource": "arn:aws:lambda:*:123456789012:function:lagotto-capacity-poller"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "logs:DeleteLogGroup"
+      ],
+      "Resource": [
+        "arn:aws:logs:*:123456789012:log-group:/aws/lambda/lagotto-capacity-poller",
+        "arn:aws:logs:*:123456789012:log-group:/aws/lambda/lagotto-capacity-poller:*"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "iam:DeleteRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:DeleteRole"
+      ],
+      "Resource": "arn:aws:iam::123456789012:role/lagotto-capacity-poller-role"
+    },
+    {
+      "Effect": "Deny",
+      "Action": [
+        "*"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/spore-host:role": "service"
+        }
+      }
+    },
+    {
+      "Effect": "Deny",
+      "Action": [
+        "iam:Create*",
+        "iam:Delete*",
+        "iam:Put*",
+        "iam:Set*",
+        "iam:Tag*",
+        "iam:Untag*",
+        "iam:Update*",
+        "iam:Attach*",
+        "iam:Detach*"
+      ],
+      "Resource": "arn:aws:iam::123456789012:policy/spore-host/spawn-instance-boundary"
+    }
+  ],
+  "Version": "2012-10-17"
+}

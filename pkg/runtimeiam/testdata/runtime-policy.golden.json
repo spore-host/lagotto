@@ -223,6 +223,103 @@
     {
       "Effect": "Allow",
       "Action": [
+        "dynamodb:DeleteTable",
+        "dynamodb:ListTagsOfResource",
+        "dynamodb:DescribeTable"
+      ],
+      "Resource": [
+        "arn:aws:dynamodb:*:123456789012:table/lagotto-watches",
+        "arn:aws:dynamodb:*:123456789012:table/lagotto-match-history",
+        "arn:aws:dynamodb:*:123456789012:table/lagotto-scheduled-launches"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:Scan",
+        "dynamodb:DescribeTable",
+        "dynamodb:CreateTable",
+        "dynamodb:DeleteTable",
+        "dynamodb:TagResource",
+        "dynamodb:ListTagsOfResource"
+      ],
+      "Resource": "arn:aws:dynamodb:*:123456789012:table/spore-host-lifecycle"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucketVersions",
+        "s3:DeleteBucket"
+      ],
+      "Resource": "arn:aws:s3:::lagotto-lambda-123456789012-*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:DeleteObject",
+        "s3:DeleteObjectVersion"
+      ],
+      "Resource": "arn:aws:s3:::lagotto-lambda-123456789012-*/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "sns:DeleteTopic"
+      ],
+      "Resource": "arn:aws:sns:*:123456789012:lagotto-capacity-alerts"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "scheduler:DeleteSchedule"
+      ],
+      "Resource": "arn:aws:scheduler:*:123456789012:schedule/lagotto/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "scheduler:DeleteScheduleGroup"
+      ],
+      "Resource": "arn:aws:scheduler:*:123456789012:schedule-group/lagotto"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "scheduler:CreateSchedule",
+        "scheduler:DeleteSchedule"
+      ],
+      "Resource": "arn:aws:scheduler:*:123456789012:schedule/lagotto-teardown/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "scheduler:CreateScheduleGroup",
+        "scheduler:TagResource"
+      ],
+      "Resource": "arn:aws:scheduler:*:123456789012:schedule-group/lagotto-teardown"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "iam:DeleteRole",
+        "iam:DeleteRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:RemoveRoleFromInstanceProfile",
+        "iam:DeleteInstanceProfile"
+      ],
+      "Resource": [
+        "arn:aws:iam::123456789012:role/lagotto-instance-role",
+        "arn:aws:iam::123456789012:instance-profile/lagotto-instance-role"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
         "sagemaker:CreateTrainingJob",
         "sagemaker:AddTags",
         "sagemaker:DescribeTrainingJob"
@@ -242,6 +339,33 @@
           "iam:PassedToService": "sagemaker.amazonaws.com"
         }
       }
+    },
+    {
+      "Effect": "Deny",
+      "Action": [
+        "*"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/spore-host:role": "service"
+        }
+      }
+    },
+    {
+      "Effect": "Deny",
+      "Action": [
+        "iam:Create*",
+        "iam:Delete*",
+        "iam:Put*",
+        "iam:Set*",
+        "iam:Tag*",
+        "iam:Untag*",
+        "iam:Update*",
+        "iam:Attach*",
+        "iam:Detach*"
+      ],
+      "Resource": "arn:aws:iam::123456789012:policy/spore-host/spawn-instance-boundary"
     }
   ],
   "Version": "2012-10-17"

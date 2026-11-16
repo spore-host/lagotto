@@ -32,6 +32,12 @@ scoop install lagotto
 
 ## Quick Start
 
+A watch needs something to poll it. Deploy the hosted poller once per region
+(`lagotto deploy --region us-east-1`, then `lagotto setup`), or poll from your
+own machine: `lagotto watch ... --local` and keep `lagotto poll --daemon`
+running ([Polling](#polling)). In a region with neither, `lagotto watch`
+refuses and creates nothing.
+
 ```bash
 # Watch and auto-launch when capacity appears (the launch is the capacity test)
 lagotto watch "g5.xlarge" --action spawn --spawn-config my-job.yaml
@@ -300,8 +306,11 @@ still get spored's TTL/idle lifecycle.
 A watch only fires when something polls it. Two ways:
 
 ```bash
-# Infra-free: poll in the foreground until the watch fires/expires (no Lambda
-# at all). Keep it running — or under your own supervisor/cron.
+# Infra-free: no Lambda at all. --local lets watch store the watch in a region
+# with no hosted poller (creating lagotto's tables there if absent); then poll
+# in the foreground until it fires/expires. Keep it running, or under your own
+# supervisor/cron.
+lagotto watch "g5.xlarge" --action spawn --spawn-config my-job.yaml --local
 lagotto poll --daemon --interval 5m
 
 # One-off cycle (testing/debugging)
@@ -309,8 +318,9 @@ lagotto poll
 ```
 
 `--daemon` runs the same poll loop the hosted Lambda does, so
-`lagotto watch --action spawn` works hands-off in your own account with zero
-extra infrastructure. The hosted Lambda poller (`lagotto deploy`) remains the
+`lagotto watch --local --action spawn` works hands-off in your own account with zero
+extra infrastructure. Without `--local`, `watch` refuses in a region with no
+hosted poller rather than store a watch nothing will poll (#325). The hosted Lambda poller (`lagotto deploy`) remains the
 option for teams — see [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ### Notifications from a local poller
@@ -380,7 +390,7 @@ account shared across projects/people, scope it to your own watches so it doesn'
 drive (and launch) someone else's (#47):
 
 ```bash
-lagotto watch "g5.12xlarge" --action spawn --spawn-config job.yaml --project fieldwork
+lagotto watch "g5.12xlarge" --action spawn --spawn-config job.yaml --project fieldwork --local
 lagotto poll --daemon --project fieldwork   # only fieldwork's watches
 lagotto poll --daemon --mine                # only watches you created
 lagotto poll --daemon --watch w-aaa,w-bbb   # only these watch IDs
@@ -644,7 +654,7 @@ including the exact missing or extra IAM grants.
 
 `lagotto deploy --teardown` removes one region's poller (schedule, Lambda,
 its log group, topic) and its lagotto-managed artifact bucket. `lagotto teardown` removes the
-three DynamoDB tables and the per-launch `lagotto-launch-sl-*` schedules, and
+region's three DynamoDB tables and the per-launch `lagotto-launch-sl-*` schedules, and
 `lagotto teardown --iam-roles` the two account-wide IAM roles once no region
 runs a poller. [DEPLOYMENT.md](DEPLOYMENT.md#teardown) has what each one deletes
 and what it leaves.

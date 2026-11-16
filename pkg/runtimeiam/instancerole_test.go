@@ -58,8 +58,25 @@ func TestPollerAuthorsNoIAM(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Idle teardown (#325) deletes lagotto's own instance role and profile, and
+	// nothing else in IAM.
+	teardown := map[string]bool{"iam:deleterole": true, "iam:deleterolepolicy": true, "iam:detachrolepolicy": true,
+		"iam:removerolefrominstanceprofile": true, "iam:deleteinstanceprofile": true}
+	own := map[string]bool{
+		"arn:aws:iam::" + irAccount + ":role/" + InstanceRoleName:             true,
+		"arn:aws:iam::" + irAccount + ":instance-profile/" + InstanceRoleName: true,
+	}
 	for _, g := range mustGrants(t, doc) {
+		if strings.EqualFold(g.Effect, "Deny") {
+			continue // the #325 guards restrict; they grant nothing
+		}
 		a := strings.ToLower(g.Action)
+		if teardown[a] {
+			if !own[g.Resource] {
+				t.Errorf("teardown IAM grant beyond lagotto's own instance role: %s", g)
+			}
+			continue
+		}
 		switch a {
 		case "iam:createrole", "iam:putrolepolicy", "iam:attachrolepolicy", "iam:tagrole",
 			"iam:createinstanceprofile", "iam:addroletoinstanceprofile", "iam:taginstanceprofile",

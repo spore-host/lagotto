@@ -36,11 +36,16 @@ func TestPolicyDocument_ValidAndScoped(t *testing.T) {
 		t.Fatal("policy has no statements")
 	}
 
-	// Every statement Allows and names at least one action.
+	// Every statement Allows and names at least one action, apart from the
+	// two guard Denies (#325), which are the last two statements.
 	actions := map[string]bool{}
 	for i, s := range parsed.Statement {
-		if s.Effect != "Allow" {
+		guard := i >= len(parsed.Statement)-2
+		if !guard && s.Effect != "Allow" {
 			t.Errorf("statement %d Effect = %q, want Allow", i, s.Effect)
+		}
+		if guard && s.Effect != "Deny" {
+			t.Errorf("statement %d Effect = %q, want the guard Deny", i, s.Effect)
 		}
 		if len(s.Action) == 0 {
 			t.Errorf("statement %d has no actions", i)
@@ -84,10 +89,14 @@ func TestPolicyDocument_ValidAndScoped(t *testing.T) {
 	// setup action at all, and PassRole only on lagotto's own instance role
 	// here (no authorizations), never on spawn-instance* or spored*.
 	for _, banned := range []string{`"iam:CreateRole"`, `"iam:PutRolePolicy"`, `"iam:AttachRolePolicy"`,
-		":role/spawn-instance*", ":role/spored*", ":instance-profile/"} {
+		":role/spawn-instance*", ":role/spored*", ":instance-profile/*"} {
 		if strings.Contains(doc, banned) {
 			t.Errorf("policy contains %s", banned)
 		}
+	}
+	// The one instance profile it names is lagotto's own, for teardown (#325).
+	if n, own := strings.Count(doc, ":instance-profile/"), strings.Count(doc, ":instance-profile/"+InstanceRoleName+`"`); n != own || n != 1 {
+		t.Errorf("policy names %d instance profile(s), %d of them %s; want only lagotto's own, once", n, own, InstanceRoleName)
 	}
 	if !strings.Contains(doc, ":role/"+InstanceRoleName+`"`) {
 		t.Errorf("policy does not let the poller pass %s", InstanceRoleName)
@@ -225,6 +234,10 @@ func TestEnsureRoles_CreatesBothWhenAbsent(t *testing.T) {
 	}
 	if !contains(f.puts, SchedulerInvokeRoleName+"/InvokeLambda") {
 		t.Errorf("did not put InvokeLambda on %s (puts=%v)", SchedulerInvokeRoleName, f.puts)
+	}
+	// deploy writes the teardown jobs' policy too (#325), not only setup.
+	if !contains(f.puts, SchedulerInvokeRoleName+"/"+SchedulerTeardownPolicyName) {
+		t.Errorf("did not put %s on %s (puts=%v)", SchedulerTeardownPolicyName, SchedulerInvokeRoleName, f.puts)
 	}
 }
 
