@@ -303,3 +303,17 @@ func TestEnsureAlertsTopic_ProbeAndTagErrors(t *testing.T) {
 		t.Errorf("probe error: err %v, creates %d", err, len(fs.createCalls))
 	}
 }
+
+// InspectPollerSchedule reports the group, and a schedule in both groups.
+func TestInspectPollerSchedule_GroupAndDuplicate(t *testing.T) {
+	sc := &fakeScheduler{schedules: map[string]*scheduler.GetScheduleOutput{"lagotto": preGroupSchedule(), "default": preGroupSchedule()}}
+	d, _ := testDeployer(nil, nil, sc)
+	info, err := d.InspectPollerSchedule(context.Background())
+	if err != nil || info.Group != "lagotto" || !info.Duplicate {
+		t.Errorf("InspectPollerSchedule = %+v, %v; want group lagotto, duplicate", info, err)
+	}
+	delete(sc.schedules, "lagotto")
+	if info, err := d.InspectPollerSchedule(context.Background()); err != nil || info.Group != "default" || info.Duplicate {
+		t.Errorf("default-group schedule = %+v, %v", info, err)
+	}
+}

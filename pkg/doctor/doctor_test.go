@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -985,3 +986,25 @@ func dropAction(st map[string]interface{}, action string) {
 	}
 	st["Action"] = kept
 }
+
+// #324: the schedule check names a schedule still in the default group, and
+// warns when it is in both.
+func TestEvalSchedule_Groups(t *testing.T) {
+	st := State{Schedule: deploy.ScheduleInfo{Exists: true, State: "ENABLED", Expression: "rate(5 minutes)", Group: "default"}}
+	if c := evalSchedule(st); c.Status != StatusPass || len(c.Detail) != 1 || !strings.Contains(c.Detail[0], "schedule group default") {
+		t.Errorf("default group: %+v", c)
+	}
+	st.Schedule.Group = "lagotto"
+	if c := evalSchedule(st); c.Status != StatusPass || len(c.Detail) != 0 {
+		t.Errorf("lagotto group: %+v", c)
+	}
+	st.Schedule.Duplicate = true
+	if c := evalSchedule(st); c.Status != StatusWarn || len(c.Fix) == 0 {
+		t.Errorf("duplicate: %+v", c)
+	}
+	if q := SchedulerErrorsQuery(testNow(), "lagotto"); aws.ToString(q.Dimensions[0].Value) != "lagotto" {
+		t.Errorf("metrics dimension = %v", aws.ToString(q.Dimensions[0].Value))
+	}
+}
+
+func testNow() time.Time { return time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC) }
