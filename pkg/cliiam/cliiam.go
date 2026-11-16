@@ -39,6 +39,7 @@ import (
 	"strings"
 
 	"github.com/spore-host/lagotto/pkg/runtimeiam"
+	"github.com/spore-host/lagotto/pkg/schedgroup"
 	"github.com/spore-host/lagotto/pkg/watcher"
 )
 
@@ -109,8 +110,9 @@ const (
 	alertsTopicName = "lagotto-capacity-alerts"
 	// pollerScheduleName is the poller's EventBridge Scheduler schedule, which
 	// watch/update/ack/extend set back to the normal cadence after an idle
-	// poller slowed it (#323).
-	pollerScheduleName = "schedule/default/lagotto-capacity-poller"
+	// poller slowed it (#323). It is in lagotto's schedule group, or the
+	// default one before a #324 deploy moved it (schedgroupARNs).
+	pollerScheduleName = "lagotto-capacity-poller"
 	// pollerFunctionName is the poller Lambda (pkg/deploy.PollerFunctionName;
 	// TestNamesMatchTheirOwners asserts they agree).
 	pollerFunctionName = "lagotto-capacity-poller"
@@ -260,13 +262,13 @@ func statements(accountID string, configBuckets []string) []statement {
 		// every 5 minutes when an idle poller slowed it to hourly (or an older
 		// poller disabled it); doctor reads it.
 		{Sid: "PollerSchedule", Action: []string{"scheduler:GetSchedule", "scheduler:UpdateSchedule"},
-			Resource: regional("scheduler", pollerScheduleName)},
+			Resource: schedgroupARNs(regional, pollerScheduleName)},
 		// `lagotto launch` creates one schedule per scheduled launch, and
 		// `lagotto cancel sl-…` deletes it and the poller's -r<n> boundary
 		// retries of it (#279), which share the prefix. Listing them is
 		// scheduler:ListSchedules, below (no resource-level permissions).
 		{Sid: "LaunchSchedules", Action: []string{"scheduler:CreateSchedule", "scheduler:DeleteSchedule"},
-			Resource: regional("scheduler", "schedule/default/"+launchSchedulePrefix+"*")},
+			Resource: schedgroupARNs(regional, launchSchedulePrefix+"*")},
 		// Creating or updating a schedule passes the role it assumes. Only
 		// lagotto's invoke role, and only to EventBridge Scheduler.
 		{Sid: "PassSchedulerInvokeRole", Action: []string{"iam:PassRole"},
@@ -463,4 +465,15 @@ func GrantedActions(accountID string, configBuckets []string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// schedgroupARNs is the ARN of the schedule name in each group lagotto's
+// schedules may be in (#324): lagotto's own and the default one, where every
+// schedule created before #324 still is.
+func schedgroupARNs(regional func(service, resource string) string, name string) []string {
+	var arns []string
+	for _, g := range schedgroup.Groups {
+		arns = append(arns, regional("scheduler", "schedule/"+g+"/"+name))
+	}
+	return arns
 }

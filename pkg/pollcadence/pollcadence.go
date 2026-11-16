@@ -48,6 +48,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/scheduler"
 	schedulertypes "github.com/aws/aws-sdk-go-v2/service/scheduler/types"
+
+	"github.com/spore-host/lagotto/pkg/schedgroup"
 )
 
 const (
@@ -116,9 +118,11 @@ func SetFrom(ctx context.Context, api ScheduleAPI, cur *scheduler.GetScheduleOut
 
 // Set reads the schedule name afresh and makes it ENABLED at expr (SetFrom).
 // The read is part of the protocol: a read taken before the caller's record
-// was written may predate a cadence change it must see.
+// was written may predate a cadence change it must see. The schedule is found
+// in lagotto's schedule group or, before `lagotto deploy` has moved it there,
+// in the default one (schedgroup.Find); the update keeps the group it is in.
 func Set(ctx context.Context, api ScheduleAPI, name, expr string) (bool, error) {
-	cur, err := api.GetSchedule(ctx, &scheduler.GetScheduleInput{Name: aws.String(name)})
+	cur, err := schedgroup.Find(ctx, api, name)
 	if err != nil {
 		return false, fmt.Errorf("get schedule %s: %w", name, err)
 	}

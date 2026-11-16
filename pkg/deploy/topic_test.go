@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	snstypes "github.com/aws/aws-sdk-go-v2/service/sns/types"
+	sporetags "github.com/spore-host/libs/tags"
 )
 
 const testTopicARN = "arn:aws:sns:us-east-1:123456789012:lagotto-capacity-alerts"
@@ -17,10 +19,10 @@ const testTopicARN = "arn:aws:sns:us-east-1:123456789012:lagotto-capacity-alerts
 // convergence step then asserts them, which is what makes the behaviour
 // observable to anything that doesn't record create-time attributes.
 func TestEnsureAlertsTopic_CreatePathSetsAttributes(t *testing.T) {
-	fs := &fakeSNS{arn: testTopicARN} // no attributes yet — a brand-new topic
+	fs := &fakeSNS{arn: testTopicARN, absent: true} // no topic yet
 	d, _ := testDeployer(nil, fs, nil)
 
-	arn, err := d.EnsureAlertsTopic(context.Background(), "production")
+	arn, err := d.EnsureAlertsTopic(context.Background(), "production", testRegion, testAccount)
 	if err != nil {
 		t.Fatalf("EnsureAlertsTopic: %v", err)
 	}
@@ -47,12 +49,51 @@ func TestEnsureAlertsTopic_CreatePathSetsAttributes(t *testing.T) {
 	if tags["Environment"] != "production" || tags["Application"] != "lagotto" || tags["Component"] != "alerts" {
 		t.Errorf("create tags = %v", tags)
 	}
+	// The spore.host tags are on the create itself (#324): no window untagged.
+	if !sporetags.IsManagedBy(tags, sporetags.ToolLagotto) || (tags[sporetags.Role] != "" || tags[sporetags.Component] == "") ||
+		tags[sporetags.Scope] != testRegion || tags[sporetags.Component] != "alerts" {
+		t.Errorf("create tags = %v, want the spore.host infrastructure tags", tags)
+	}
 	// Convergence then sets both attributes, since the (new) topic reports neither.
 	if len(fs.setCalls) != 2 {
 		t.Fatalf("SetTopicAttributes called %d times, want 2 (DisplayName + KmsMasterKeyId)", len(fs.setCalls))
 	}
-	if len(fs.tagCalls) != 1 {
-		t.Errorf("TagResource called %d times, want 1", len(fs.tagCalls))
+	// The topic has every tag from the create, so no TagResource.
+	if len(fs.tagCalls) != 0 {
+		t.Errorf("TagResource called %d times, want 0", len(fs.tagCalls))
+	}
+}
+
+// TestEnsureAlertsTopic_ExistingTopicIsNotRecreatedAndGainsTheTags: an
+// existing topic (which an older lagotto left without the spore.host tags) is
+// never passed to CreateTopic, whose tag check would refuse it, and gains the
+// tags it lacks; a later deploy keeps the first spore-host:created.
+func TestEnsureAlertsTopic_ExistingTopicIsNotRecreatedAndGainsTheTags(t *testing.T) {
+	fs := &fakeSNS{arn: testTopicARN, attributes: map[string]string{
+		"DisplayName": "Lagotto Capacity Alerts", "KmsMasterKeyId": "alias/aws/sns",
+	}, tags: map[string]string{"Environment": "production", "Application": "lagotto", "Component": "alerts"}}
+	d, _ := testDeployer(nil, fs, nil)
+	d.now = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) }
+	if _, err := d.EnsureAlertsTopic(context.Background(), "production", testRegion, testAccount); err != nil {
+		t.Fatal(err)
+	}
+	if len(fs.createCalls) != 0 {
+		t.Errorf("CreateTopic called %d times on an existing topic", len(fs.createCalls))
+	}
+	if len(fs.tagCalls) != 1 || !sporetags.IsManagedBy(fs.tags, sporetags.ToolLagotto) || fs.tags[sporetags.Created] != "2026-01-01T00:00:00Z" {
+		t.Fatalf("tag calls %d, tags %v", len(fs.tagCalls), fs.tags)
+	}
+
+	d.now = func() time.Time { return time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC) }
+	if _, err := d.EnsureAlertsTopic(context.Background(), "staging", testRegion, testAccount); err != nil {
+		t.Fatal(err)
+	}
+	if fs.tags[sporetags.Created] != "2026-01-01T00:00:00Z" || fs.tags["Environment"] != "staging" {
+		t.Errorf("after a re-deploy: %v; want the first created kept and the new Environment", fs.tags)
+	}
+	last := fs.tagCalls[len(fs.tagCalls)-1]
+	if len(last.Tags) != 1 {
+		t.Errorf("re-deploy TagResource wrote %v, want only the changed Environment", last.Tags)
 	}
 }
 
@@ -66,7 +107,7 @@ func TestEnsureAlertsTopic_RepairsOnlyDifferingAttributes(t *testing.T) {
 			// KmsMasterKeyId absent entirely — an unencrypted topic
 		}}
 		d, _ := testDeployer(nil, fs, nil)
-		if _, err := d.EnsureAlertsTopic(context.Background(), "staging"); err != nil {
+		if _, err := d.EnsureAlertsTopic(context.Background(), "staging", testRegion, testAccount); err != nil {
 			t.Fatalf("EnsureAlertsTopic: %v", err)
 		}
 		if len(fs.setCalls) != 2 {
@@ -86,7 +127,7 @@ func TestEnsureAlertsTopic_RepairsOnlyDifferingAttributes(t *testing.T) {
 			"KmsMasterKeyId": "alias/some-other-key",
 		}}
 		d, _ := testDeployer(nil, fs, nil)
-		if _, err := d.EnsureAlertsTopic(context.Background(), "production"); err != nil {
+		if _, err := d.EnsureAlertsTopic(context.Background(), "production", testRegion, testAccount); err != nil {
 			t.Fatalf("EnsureAlertsTopic: %v", err)
 		}
 		if len(fs.setCalls) != 1 {
@@ -103,7 +144,7 @@ func TestEnsureAlertsTopic_RepairsOnlyDifferingAttributes(t *testing.T) {
 			"KmsMasterKeyId": "alias/aws/sns",
 		}}
 		d, _ := testDeployer(nil, fs, nil)
-		if _, err := d.EnsureAlertsTopic(context.Background(), "production"); err != nil {
+		if _, err := d.EnsureAlertsTopic(context.Background(), "production", testRegion, testAccount); err != nil {
 			t.Fatalf("EnsureAlertsTopic: %v", err)
 		}
 		if len(fs.setCalls) != 1 || aws.ToString(fs.setCalls[0].AttributeName) != "DisplayName" {
@@ -123,7 +164,7 @@ func TestEnsureAlertsTopic_SteadyStateIssuesNoWrites(t *testing.T) {
 	}}
 	d, _ := testDeployer(nil, fs, nil)
 
-	arn, err := d.EnsureAlertsTopic(context.Background(), "production")
+	arn, err := d.EnsureAlertsTopic(context.Background(), "production", testRegion, testAccount)
 	if err != nil {
 		t.Fatalf("EnsureAlertsTopic: %v", err)
 	}
@@ -141,9 +182,9 @@ func TestEnsureAlertsTopic_SteadyStateIssuesNoWrites(t *testing.T) {
 // TestEnsureAlertsTopic_DefaultsEnvironment: an empty --environment tags as
 // production, matching the template parameter's default.
 func TestEnsureAlertsTopic_DefaultsEnvironment(t *testing.T) {
-	fs := &fakeSNS{arn: testTopicARN}
+	fs := &fakeSNS{arn: testTopicARN, absent: true}
 	d, _ := testDeployer(nil, fs, nil)
-	if _, err := d.EnsureAlertsTopic(context.Background(), ""); err != nil {
+	if _, err := d.EnsureAlertsTopic(context.Background(), "", testRegion, testAccount); err != nil {
 		t.Fatalf("EnsureAlertsTopic: %v", err)
 	}
 	for _, tg := range fs.createCalls[0].Tags {
@@ -154,9 +195,9 @@ func TestEnsureAlertsTopic_DefaultsEnvironment(t *testing.T) {
 }
 
 func TestEnsureAlertsTopic_CreateErrorPropagates(t *testing.T) {
-	fs := &fakeSNS{arn: testTopicARN, createErr: errors.New("AuthorizationError")}
+	fs := &fakeSNS{arn: testTopicARN, absent: true, createErr: errors.New("AuthorizationError")}
 	d, _ := testDeployer(nil, fs, nil)
-	if _, err := d.EnsureAlertsTopic(context.Background(), "production"); err == nil {
+	if _, err := d.EnsureAlertsTopic(context.Background(), "production", testRegion, testAccount); err == nil {
 		t.Error("expected the CreateTopic failure to propagate")
 	}
 }

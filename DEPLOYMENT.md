@@ -20,16 +20,80 @@ There are two paths:
 | CloudWatch Logs log group | `/aws/lambda/lagotto-capacity-poller`, 30-day retention, tagged `lagotto:managed=cli`; created before the function so Lambda never creates an unowned one (an existing group is tagged, and given the retention only if it has none) | `lagotto deploy`; deleted by `lagotto deploy --teardown` (#305) |
 | SNS topic | `lagotto-capacity-alerts` (KMS encrypted with `alias/aws/sns`) | `lagotto deploy` |
 | SNS email subscriptions | one per `--notify email:` address, on `lagotto-capacity-alerts`, filtered on the `lagotto_email` message attribute so each address receives only its own watches' events (#240) | `lagotto watch`; removed by the poller (next sweep), `lagotto cancel` or `lagotto notify-gc` once no active watch names the address; deleted with the topic |
-| EventBridge schedule | `lagotto-capacity-poller` at `rate(5 minutes)`, starts **DISABLED**; an idle poller slows it to `rate(1 hour)` (see [Idle poller](#idle-poller-slow-mode)) | `lagotto deploy` |
+| EventBridge Scheduler schedule group | `lagotto`, tagged (schedules cannot be tagged, so lagotto's live in this group; see [Tags](#tags)) | `lagotto deploy`; deleted, once empty, by `lagotto deploy --teardown` or `lagotto teardown` (#324) |
+| EventBridge schedule | `lagotto-capacity-poller` in schedule group `lagotto` at `rate(5 minutes)`, starts **DISABLED**; an idle poller slows it to `rate(1 hour)` (see [Idle poller](#idle-poller-slow-mode)) | `lagotto deploy` |
 | IAM role | `lagotto-capacity-poller-role` (execution role; its permissions policy is written by `setup`) | `pkg/runtimeiam`: created by `deploy` or `setup` |
 | IAM role | `lagotto-capacity-poller-scheduler-invoke` (assumed by EventBridge Scheduler) | `pkg/runtimeiam`: created by `deploy` **only** |
 | DynamoDB tables | `lagotto-watches`, `lagotto-match-history` | the CLI: `deploy`, `setup` or `watch`; deleted by `lagotto teardown` |
 | DynamoDB table | `lagotto-scheduled-launches`, tagged `lagotto:managed=cli` | the CLI: `deploy` or the first `launch`; deleted by `lagotto teardown` (#250) |
-| EventBridge schedules | `lagotto-launch-sl-<id>`, one per scheduled launch (and the poller's boundary-retry schedules) | `lagotto launch` and the poller; deleted by `lagotto cancel sl-<id>` (#279) or `lagotto teardown` (#260) |
+| EventBridge schedules | `lagotto-launch-sl-<id>` in schedule group `lagotto`, one per scheduled launch (and the poller's boundary-retry schedules) | `lagotto launch` and the poller; deleted by `lagotto cancel sl-<id>` (#279) or `lagotto teardown` (#260) |
 | S3 artifact bucket | `lagotto-lambda-<account>-<region>`, tagged `lagotto:managed=cli` | `lagotto deploy`; deleted by `lagotto deploy --teardown` (#264) |
 
 Every one of these has a **fixed name**, which is what makes the deploy idempotent
 and the ARNs derivable without reading any stack outputs.
+
+### Tags
+
+Every resource lagotto creates carries the spore.host tags (lagotto#324), so
+leave-no-trace cleanup ([spore-host#752](https://github.com/spore-host/spore-host/issues/752))
+can find what lagotto made and nothing else:
+
+| Tag | Value |
+|---|---|
+| `spore-host:managed-by` | `lagotto`: the uniform key cleanup selects on |
+| `spore-host:scope` | the region; `global` for IAM roles, instance profiles and the policy |
+| `spore-host:created` | when lagotto created it, or first tagged it (RFC 3339, UTC) |
+| `spore-host:schema` | `1` |
+| `spore-host:owner` | the `aws:userid` of whoever created it, when known |
+| `spore-host:component` | on the deployment's infrastructure (everything in the table above, the instance role and the CLI-user policy), the part it belongs to: `capacity-poller`, `alerts`, `store`, `artifacts`, `instance-role`, `cli-policy` |
+
+What the poller creates for a watch (instances launched through spawn, capacity
+reservations, SageMaker training jobs) carries the first five and no component,
+next to its `lagotto:watch-id` tag.
+
+lagotto never sets `spore-host:role`. Its value `service` is reserved for
+spore.host's own live service in the spore.host infra account
+([spore-host#750](https://github.com/spore-host/spore-host/issues/750)): cleanup
+is denied on anything carrying it. A lagotto deployment is tool infrastructure
+in your account, which lagotto's own idle teardown
+([lagotto#326](https://github.com/spore-host/lagotto/issues/326)) must be able
+to remove.
+
+Resources are tagged when they are created. `lagotto setup` and `lagotto deploy`
+also add the tags to anything an older lagotto created without them, keeping
+tags already there; a `spore-host:created` or `spore-host:owner` once set is
+never changed. EventBridge Scheduler schedules cannot be tagged, so they live in
+the tagged schedule group `lagotto`.
+
+**`lagotto:managed`** is the older per-resource marker. Its values are matched on
+exactly and are kept as they are; it is not added to anything new:
+
+| Value | On | Read by |
+|---|---|---|
+| `cli` | the three tables, the artifact bucket, the poller log group, the `lagotto-cli-user` policy | `lagotto teardown`, `deploy --teardown`, the poller's opt-in `AUTO_DELETE_TABLES` |
+| `true` | capacity reservations and SageMaker jobs the poller creates | `lagotto cancel` releases only reservations carrying it |
+| `instance-profile` | `lagotto-instance-role` and the instance profiles `setup` creates | the instance-profile deleters |
+
+FSx filesystems and `lagotto-fsx-*` buckets created for an `fsx_create` launch
+are tagged by spawn, which creates them, not by lagotto.
+
+### Schedule groups (upgrading)
+
+Before lagotto#324 the poller schedule and the per-launch schedules lived in
+the `default` schedule group. `lagotto deploy` now creates the group `lagotto`
+and moves the poller schedule into it: it creates the schedule there (same
+state, cadence and settings) and only then deletes the one in `default`, so the
+poller is never without one. If the delete fails both exist for a moment and
+`deploy` says so; re-running it deletes the copy in `default`, and `lagotto
+doctor` warns while both exist. New per-launch schedules are created in
+`lagotto`; existing ones in `default` keep working, and every command looks in
+both groups.
+
+`deploy` leaves the schedule in `default` (and says why) while a legacy
+CloudFormation stack still owns it, or while the poller's runtime policy or the
+`lagotto-cli-user` policy predates the group, since the poller and CLI users
+could not then manage the moved schedule. **After upgrading, run `lagotto setup`
+and then `lagotto deploy`.**
 
 ### More than one region in an account
 
@@ -228,9 +292,14 @@ Three things to know:
   arn:aws:dynamodb:*:<account>:table/lagotto-match-history        (+ /index/*)
   arn:aws:dynamodb:*:<account>:table/lagotto-scheduled-launches   (+ /index/*)
   arn:aws:sns:*:<account>:lagotto-capacity-alerts                 (+ :* for its subscriptions)
+  arn:aws:scheduler:*:<account>:schedule/lagotto/lagotto-capacity-poller
+  arn:aws:scheduler:*:<account>:schedule/lagotto/lagotto-launch-*
   arn:aws:scheduler:*:<account>:schedule/default/lagotto-capacity-poller
   arn:aws:scheduler:*:<account>:schedule/default/lagotto-launch-*
   ```
+
+  Each schedule is granted in lagotto's schedule group and in `default`, where
+  everything created before lagotto#324 is (see [Schedule groups](#schedule-groups-upgrading)).
 
   The resource names and the account are still exact. Every `setup` writes this
   same document whichever region it runs in, so `setup` in region A and then
@@ -334,9 +403,11 @@ there are **neither** active watches **nor** pending scheduled launches, so a
 lagotto deploy --teardown
 ```
 
-This deletes the poller resources in that region, in the order schedule →
-function → log group → topic, so nothing can fire into a half-deleted poller and
-Lambda cannot recreate the log group once it is gone (#305). The log group
+This deletes the poller resources in that region, in the order schedule (in
+either schedule group) → function → log group → topic → schedule group `lagotto`,
+so nothing can fire into a half-deleted poller and Lambda cannot recreate the log
+group once it is gone (#305). The schedule group is deleted only when nothing is
+left in it: a pending per-launch schedule keeps it until `lagotto teardown`. The log group
 `/aws/lambda/lagotto-capacity-poller` is deleted whether or not it carries the
 `lagotto:managed=cli` tag: its name belongs to the poller function, so an untagged
 one is the group Lambda created implicitly before #305. A teardown that finds
@@ -374,8 +445,9 @@ region with no poller.
   launch recorded in the retained `lagotto-scheduled-launches` table, so it is
   kept with that table, and a redeployed poller fires it again. `lagotto
   teardown` deletes them together with the tables (#260): every schedule a
-  record names and every `lagotto-launch-sl-*` schedule in the default group,
-  before it deletes the table that records them. `lagotto doctor` warns about a
+  record names and every `lagotto-launch-sl-*` schedule in the `lagotto` and
+  `default` schedule groups, before it deletes the table that records them, and
+  then the `lagotto` group once nothing is left in it. `lagotto doctor` warns about a
   per-launch schedule with no record.
 
 ### Removing everything
@@ -386,7 +458,8 @@ To leave nothing behind in an account:
    poller: the schedule, the Lambda, the topic (with its email subscriptions)
    and the lagotto-managed artifact bucket.
 2. `lagotto teardown` (add `--force` if the tables still hold records): the
-   per-launch `lagotto-launch-sl-*` schedules, then the three DynamoDB tables.
+   per-launch `lagotto-launch-sl-*` schedules and the `lagotto` schedule group,
+   then the three DynamoDB tables.
    It stops before deleting any table if it cannot list or delete the
    schedules.
 3. `lagotto teardown --iam-roles`: the two IAM roles and their policies, and the
@@ -426,6 +499,10 @@ Lambda's `SCHEDULER_INVOKE_ROLE_ARN` names it. `setup` creates it (lagotto#229;
 before that only `deploy` did), and prints each role it created. Both roles are
 IAM-global, so one `setup` in any region serves every region; `lagotto doctor`'s
 `iam-roles` check confirms they exist.
+
+The template's `PollerSchedule` is in the `default` schedule group and the
+stack's resources carry the template's tags, not the spore.host ones
+([Tags](#tags)); every lagotto command still finds a schedule in `default`.
 
 ```bash
 # Set VERSION to the lagotto release you want, e.g. the one `lagotto version` prints.

@@ -106,6 +106,10 @@ func (f *setupIAM) GetRole(_ context.Context, in *iam.GetRoleInput, _ ...func(*i
 	return nil, &iamtypes.NoSuchEntityException{}
 }
 
+func (f *setupIAM) TagRole(context.Context, *iam.TagRoleInput, ...func(*iam.Options)) (*iam.TagRoleOutput, error) {
+	return &iam.TagRoleOutput{}, nil
+}
+
 func (f *setupIAM) GetRolePolicy(_ context.Context, in *iam.GetRolePolicyInput, _ ...func(*iam.Options)) (*iam.GetRolePolicyOutput, error) {
 	if f.readErr != nil {
 		return nil, f.readErr
@@ -549,7 +553,7 @@ func TestRunTeardown_ScheduleFailureKeepsTables(t *testing.T) {
 	stubTeardown(t, tables, &cmdRoleDeleter{}, false, false)
 	stubLaunchSchedules(t, sched)
 	out, err := runTeardownForTest(t)
-	if err == nil || !strings.Contains(err.Error(), "scheduler:ListSchedules and scheduler:DeleteSchedule") {
+	if err == nil || !strings.Contains(err.Error(), "scheduler:ListSchedules, scheduler:DeleteSchedule and scheduler:DeleteScheduleGroup") {
 		t.Errorf("err = %v, want it to name the scheduler permissions", err)
 	}
 	if tables.deleted {

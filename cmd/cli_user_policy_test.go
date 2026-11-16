@@ -165,6 +165,10 @@ type cmdPolicyFake struct {
 	getErr   error
 }
 
+func (f *cmdPolicyFake) TagPolicy(context.Context, *iam.TagPolicyInput, ...func(*iam.Options)) (*iam.TagPolicyOutput, error) {
+	return &iam.TagPolicyOutput{}, nil
+}
+
 func (f *cmdPolicyFake) GetPolicy(context.Context, *iam.GetPolicyInput, ...func(*iam.Options)) (*iam.GetPolicyOutput, error) {
 	if f.getErr != nil {
 		return nil, f.getErr

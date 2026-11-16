@@ -16,7 +16,9 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spore-host/lagotto/pkg/awscfg"
 	"github.com/spore-host/lagotto/pkg/deploy"
+	"github.com/spore-host/lagotto/pkg/managedtags"
 	"github.com/spore-host/lagotto/pkg/runtimeiam"
+	"github.com/spore-host/lagotto/pkg/schedgroup"
 	"github.com/spore-host/lagotto/pkg/watcher"
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
 )
@@ -226,6 +228,7 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 	scheduleID := watcher.OwnerKey(ownerID, "sl-"+uuid.New().String()[:8])
 	scheduleName := deploy.LaunchScheduleName(scheduleID)
 	store := watcher.NewStore(cfg, watchesTable, historyTable)
+	store.SetTagStamp(managedtags.Stamp{Owner: ownerID}) // spore-host:owner on a table this creates (#324)
 	if _, err := store.EnsureScheduledTable(ctx); err != nil {
 		return fmt.Errorf("ensure scheduled-launches table: %w", err)
 	}
@@ -272,7 +275,10 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 	if oneShot {
 		createIn.ActionAfterCompletion = schedulertypes.ActionAfterCompletionDelete
 	}
-	if _, err := scheduler.NewFromConfig(cfg).CreateSchedule(ctx, createIn); err != nil {
+	// In lagotto's tagged schedule group (#324), or the default one where the
+	// poller was deployed, or this caller's policy written, before that group
+	// existed (schedgroup.Create).
+	if _, err := schedgroup.Create(ctx, scheduler.NewFromConfig(cfg), createIn); err != nil {
 		// Roll back the stored record so we don't leave an orphan pending launch
 		// that nothing will ever fire.
 		_ = store.UpdateScheduledLaunchStatus(ctx, scheduleID, watcher.ScheduledFailed, "")

@@ -129,6 +129,19 @@ func (w worldSched) ListSchedules(context.Context, *scheduler.ListSchedulesInput
 	return nil, errors.New("unexpected ListSchedules")
 }
 
+func (w worldSched) CreateScheduleGroup(context.Context, *scheduler.CreateScheduleGroupInput, ...func(*scheduler.Options)) (*scheduler.CreateScheduleGroupOutput, error) {
+	return nil, errors.New("unexpected CreateScheduleGroup")
+}
+func (w worldSched) DeleteScheduleGroup(context.Context, *scheduler.DeleteScheduleGroupInput, ...func(*scheduler.Options)) (*scheduler.DeleteScheduleGroupOutput, error) {
+	return nil, errors.New("unexpected DeleteScheduleGroup")
+}
+func (w worldSched) ListTagsForResource(context.Context, *scheduler.ListTagsForResourceInput, ...func(*scheduler.Options)) (*scheduler.ListTagsForResourceOutput, error) {
+	return nil, errors.New("unexpected ListTagsForResource")
+}
+func (w worldSched) TagResource(context.Context, *scheduler.TagResourceInput, ...func(*scheduler.Options)) (*scheduler.TagResourceOutput, error) {
+	return nil, errors.New("unexpected TagResource")
+}
+
 type worldSNS struct{ *world }
 
 func (w worldSNS) GetTopicAttributes(_ context.Context, in *sns.GetTopicAttributesInput, _ ...func(*sns.Options)) (*sns.GetTopicAttributesOutput, error) {
@@ -145,6 +158,9 @@ func (w worldSNS) SetTopicAttributes(context.Context, *sns.SetTopicAttributesInp
 }
 func (w worldSNS) TagResource(context.Context, *sns.TagResourceInput, ...func(*sns.Options)) (*sns.TagResourceOutput, error) {
 	return nil, errors.New("unexpected TagResource")
+}
+func (w worldSNS) ListTagsForResource(context.Context, *sns.ListTagsForResourceInput, ...func(*sns.Options)) (*sns.ListTagsForResourceOutput, error) {
+	return nil, errors.New("unexpected ListTagsForResource")
 }
 func (w worldSNS) DeleteTopic(context.Context, *sns.DeleteTopicInput, ...func(*sns.Options)) (*sns.DeleteTopicOutput, error) {
 	return nil, errors.New("unexpected DeleteTopic")

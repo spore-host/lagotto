@@ -18,14 +18,16 @@ reported. A table that does not exist is skipped.
 
 Before deleting the tables it deletes the per-launch EventBridge Scheduler
 schedules 'lagotto launch' creates (lagotto-launch-sl-*): every one a
-scheduled-launch record names, and every one in the default schedule group with
-that prefix, including the poller's retry schedules and any whose record is
-gone. The scheduled-launches table is the only record of those schedules, and a
+scheduled-launch record names, and every one with that prefix in lagotto's
+schedule group "lagotto" and in the "default" group (where schedules created
+before lagotto#324 are), including the poller's retry schedules and any whose
+record is gone. Then it deletes the "lagotto" schedule group if nothing is left
+in it (a deployed poller's schedule keeps it). The scheduled-launches table is the only record of those schedules, and a
 cron schedule never removes itself, so deleting the table first would leave it
 firing indefinitely. A schedule that no longer exists is reported, not an error.
 With --force this cancels any pending scheduled launch. If the schedules cannot
-be listed or deleted (scheduler:ListSchedules, scheduler:DeleteSchedule),
-teardown stops before deleting any table.
+be listed or deleted (scheduler:ListSchedules, scheduler:DeleteSchedule,
+scheduler:DeleteScheduleGroup), teardown stops before deleting any table.
 
 --iam-roles also deletes the two IAM roles 'lagotto setup' and 'lagotto deploy'
 create (lagotto-capacity-poller-role and lagotto-capacity-poller-scheduler-invoke),

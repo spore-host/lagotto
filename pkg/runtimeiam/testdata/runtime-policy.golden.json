@@ -72,7 +72,10 @@
         "scheduler:UpdateSchedule",
         "scheduler:GetSchedule"
       ],
-      "Resource": "arn:aws:scheduler:*:123456789012:schedule/default/lagotto-capacity-poller"
+      "Resource": [
+        "arn:aws:scheduler:*:123456789012:schedule/lagotto/lagotto-capacity-poller",
+        "arn:aws:scheduler:*:123456789012:schedule/default/lagotto-capacity-poller"
+      ]
     },
     {
       "Effect": "Allow",
@@ -80,7 +83,10 @@
         "scheduler:CreateSchedule",
         "scheduler:DeleteSchedule"
       ],
-      "Resource": "arn:aws:scheduler:*:123456789012:schedule/default/lagotto-launch-*"
+      "Resource": [
+        "arn:aws:scheduler:*:123456789012:schedule/lagotto/lagotto-launch-*",
+        "arn:aws:scheduler:*:123456789012:schedule/default/lagotto-launch-*"
+      ]
     },
     {
       "Effect": "Allow",

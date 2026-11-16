@@ -12,6 +12,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"github.com/spore-host/libs/tags/dynamodbtags"
+
+	"github.com/spore-host/lagotto/pkg/managedtags"
 )
 
 // dynamoAPI is the subset of *dynamodb.Client the Store uses. It is an
@@ -30,6 +33,7 @@ type dynamoAPI interface {
 	Scan(context.Context, *dynamodb.ScanInput, ...func(*dynamodb.Options)) (*dynamodb.ScanOutput, error)
 	UpdateItem(context.Context, *dynamodb.UpdateItemInput, ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error)
 	UpdateTimeToLive(context.Context, *dynamodb.UpdateTimeToLiveInput, ...func(*dynamodb.Options)) (*dynamodb.UpdateTimeToLiveOutput, error)
+	TagResource(context.Context, *dynamodb.TagResourceInput, ...func(*dynamodb.Options)) (*dynamodb.TagResourceOutput, error)
 }
 
 var _ dynamoAPI = (*dynamodb.Client)(nil)
@@ -75,6 +79,10 @@ type Store struct {
 	watchesTable   string
 	historyTable   string
 	scheduledTable string
+	// region is the spore-host:scope of the tables (#324), and stamp their
+	// owner and clock (SetTagStamp).
+	region string
+	stamp  managedtags.Stamp
 }
 
 // DefaultScheduledTable is the scheduled-launches table every lagotto command
@@ -90,7 +98,89 @@ func NewStore(cfg aws.Config, watchesTable, historyTable string) *Store {
 		watchesTable:   watchesTable,
 		historyTable:   historyTable,
 		scheduledTable: DefaultScheduledTable,
+		region:         cfg.Region,
 	}
+}
+
+// SetTagStamp sets the owner (the caller's aws:userid) and clock of the
+// spore.host tags on the tables this store creates (#324).
+func (s *Store) SetTagStamp(stamp managedtags.Stamp) {
+	s.stamp = stamp
+}
+
+// tableTags are the tags lagotto's tables are created with: managedTag, which
+// the deleters are gated on, and the spore.host infrastructure tags (#324).
+func (s *Store) tableTags() map[string]string {
+	return managedtags.With(
+		map[string]string{aws.ToString(managedTag.Key): aws.ToString(managedTag.Value)},
+		s.stamp.Infrastructure(s.region, managedtags.ComponentStore))
+}
+
+// EnsureTableTags adds the spore.host tags (#324) to lagotto's existing
+// tables that lack them, and returns the names it tagged; `lagotto setup` and
+// `lagotto deploy` call it, so a deployment an older lagotto made gains them.
+// A table keeps its first spore-host:created (managedtags.Converge). Absent
+// tables are skipped.
+//
+// lagotto:managed=cli is never added here: the poller's AUTO_DELETE_TABLES
+// teardown deletes what carries it, and a watches or history table without it
+// is one a CloudFormation stack created. A scheduled-launches table without it
+// is not lagotto's (see DeleteTables) and is left untagged.
+func (s *Store) EnsureTableTags(ctx context.Context) ([]string, error) {
+	want := s.stamp.Infrastructure(s.region, managedtags.ComponentStore)
+	var tagged []string
+	for _, name := range s.tableNames() {
+		desc, err := s.client.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: aws.String(name)})
+		if err != nil {
+			var notFound *types.ResourceNotFoundException
+			if errors.As(err, &notFound) {
+				continue
+			}
+			return tagged, fmt.Errorf("describe table %q: %w", name, err)
+		}
+		if desc.Table == nil || desc.Table.TableArn == nil {
+			continue
+		}
+		have, err := s.allTableTags(ctx, desc.Table.TableArn)
+		if err != nil {
+			return tagged, fmt.Errorf("read tags of table %q: %w", name, err)
+		}
+		if name == s.scheduledTable && have[aws.ToString(managedTag.Key)] != aws.ToString(managedTag.Value) {
+			continue
+		}
+		add := managedtags.Converge(have, want)
+		if len(add) == 0 {
+			continue
+		}
+		if _, err := s.client.TagResource(ctx, &dynamodb.TagResourceInput{
+			ResourceArn: desc.Table.TableArn,
+			Tags:        dynamodbtags.FromMap(add),
+		}); err != nil {
+			return tagged, fmt.Errorf("tag table %q: %w", name, err)
+		}
+		tagged = append(tagged, name)
+	}
+	return tagged, nil
+}
+
+// allTableTags reads every tag of a table, following ListTagsOfResource's pages.
+func (s *Store) allTableTags(ctx context.Context, arn *string) (map[string]string, error) {
+	tags := map[string]string{}
+	in := &dynamodb.ListTagsOfResourceInput{ResourceArn: arn}
+	for page := 0; page < 100; page++ {
+		out, err := s.client.ListTagsOfResource(ctx, in)
+		if err != nil {
+			return nil, err
+		}
+		for k, v := range dynamodbtags.ToMap(out.Tags) {
+			tags[k] = v
+		}
+		if aws.ToString(out.NextToken) == "" {
+			return tags, nil
+		}
+		in.NextToken = out.NextToken
+	}
+	return nil, fmt.Errorf("still paging tags after 100 pages")
 }
 
 // SetScheduledTable overrides the scheduled-launches table name (for tests / a
@@ -1092,7 +1182,11 @@ func (s *Store) ensureTable(ctx context.Context, name string, input *dynamodb.Cr
 		return false, fmt.Errorf("describe table: %w", err)
 	}
 
-	if _, err := s.client.CreateTable(ctx, input); err != nil {
+	// Created with every tag (#324), so it is never untagged, not even for
+	// the moment between a create and a later tag call.
+	in := *input
+	in.Tags = dynamodbtags.FromMap(s.tableTags())
+	if _, err := s.client.CreateTable(ctx, &in); err != nil {
 		// Tolerate a concurrent creator (another lagotto invocation racing us).
 		var inUse *types.ResourceInUseException
 		if errors.As(err, &inUse) {

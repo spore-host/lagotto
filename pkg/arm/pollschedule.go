@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/scheduler"
 	schedulertypes "github.com/aws/aws-sdk-go-v2/service/scheduler/types"
 	"github.com/aws/smithy-go"
@@ -14,6 +13,7 @@ import (
 	"github.com/spore-host/lagotto/pkg/deploy"
 	"github.com/spore-host/lagotto/pkg/pollcadence"
 	"github.com/spore-host/lagotto/pkg/runtimeiam"
+	"github.com/spore-host/lagotto/pkg/schedgroup"
 )
 
 // PollScheduleAPI is the slice of EventBridge Scheduler that arming a watch
@@ -80,10 +80,12 @@ func PollScheduleName() string {
 // should be stored. action names what is refused ("create watch w-1").
 func PreflightPollSchedule(ctx context.Context, sched PollScheduleAPI, action string) (*scheduler.GetScheduleOutput, error) {
 	name := PollScheduleName()
-	cur, err := sched.GetSchedule(ctx, &scheduler.GetScheduleInput{Name: aws.String(name)})
+	// In lagotto's schedule group, or the default one before `lagotto deploy`
+	// has moved it (lagotto#324). The result carries the group it was found in,
+	// which ArmPollSchedule's re-read and UpdateSchedule then address.
+	cur, err := schedgroup.Find(ctx, sched, name)
 	if err != nil {
-		var notFound *schedulertypes.ResourceNotFoundException
-		if errors.As(err, &notFound) {
+		if schedgroup.IsNotFound(err) {
 			return nil, nil
 		}
 		return nil, pollScheduleError(action, "nothing was changed", "scheduler:GetSchedule", name, err)

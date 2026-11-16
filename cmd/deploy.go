@@ -2,19 +2,24 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"sort"
 	"strings"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spf13/cobra"
 	"github.com/spore-host/lagotto/pkg/awscfg"
+	"github.com/spore-host/lagotto/pkg/cliiam"
 	"github.com/spore-host/lagotto/pkg/deploy"
+	"github.com/spore-host/lagotto/pkg/managedtags"
 	"github.com/spore-host/lagotto/pkg/runtimeiam"
 	"github.com/spore-host/lagotto/pkg/watcher"
+	"github.com/spore-host/libs/tags"
 )
 
 var (
@@ -60,8 +65,19 @@ Deploy also creates the poller's CloudWatch Logs log group
 and the lagotto:managed=cli tag, so Lambda never creates an unowned one. A group
 that already exists is tagged, and given the retention only if it has none.
 
-Use --teardown to delete the poller's schedule, Lambda, log group and SNS topic
-in this region, and then the default artifact bucket lagotto-lambda-<account>-<region> with every object version in
+Everything deploy creates is tagged spore-host:managed-by=lagotto (with
+spore-host:scope, :created, :schema, :component and :owner, your aws:userid),
+and resources an older lagotto created without those tags gain them. Schedules
+cannot be tagged, so the poller schedule lives in the tagged EventBridge
+Scheduler schedule group "lagotto", which deploy creates. A schedule an older
+lagotto left in the "default" group is moved: created in "lagotto", then deleted
+from "default". It stays in "default" (deploy says why) while a legacy
+CloudFormation stack owns it or the IAM policies predate the group: run 'lagotto
+setup' and then deploy again.
+
+Use --teardown to delete the poller's schedule (in either group), Lambda, log
+group and SNS topic in this region, then the schedule group once nothing is left
+in it, and then the default artifact bucket lagotto-lambda-<account>-<region> with every object version in
 it. The bucket is deleted only when this account owns it and it carries the
 lagotto:managed=cli tag, which deploy writes when it creates the bucket and
 back-fills on an existing default-named bucket. A --lambda-bucket you supplied
@@ -104,10 +120,13 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no AWS region set; pass --region or configure one")
 	}
 
-	acctID := ""
+	acctID, owner := "", ""
 	if id, ierr := sts.NewFromConfig(cfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{}); ierr == nil && id.Account != nil {
 		acctID = *id.Account
+		// spore-host:owner on what this deploy creates (#324).
+		owner = aws.ToString(id.UserId)
 	}
+	stamp := managedtags.Stamp{Owner: owner}
 
 	d := deploy.New(cfg)
 
@@ -189,6 +208,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	// account that already ran `lagotto watch`/`launch` (tables present) — or a
 	// fresh account (tables absent) — both work. EnsureTables is idempotent.
 	store := watcher.NewStore(cfg, watchesTable, historyTable)
+	store.SetTagStamp(stamp)
 	if created, terr := store.EnsureTables(ctx); terr != nil {
 		return fmt.Errorf("ensure watches/history tables: %w", terr)
 	} else if len(created) > 0 {
@@ -199,25 +219,42 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	} else if name != "" {
 		fmt.Fprintf(os.Stderr, "Created DynamoDB table: %s\n", name)
 	}
+	// Tables an older lagotto created gain the spore.host tags (#324).
+	if tagged, terr := store.EnsureTableTags(ctx); terr != nil {
+		return fmt.Errorf("tag DynamoDB tables: %w", terr)
+	} else if len(tagged) > 0 {
+		fmt.Fprintf(os.Stderr, "Tagged DynamoDB table(s) %s=%s: %v\n", tags.ManagedBy, tags.ToolLagotto, tagged)
+	}
 
 	// Ensure the CLI-owned IAM roles exist before deploying (#145/#146), exactly as
 	// the tables above: the Lambda's execution role and the role EventBridge
 	// Scheduler assumes to invoke it. Idempotent.
-	if rerr := runtimeiam.EnsureRoles(ctx, iam.NewFromConfig(cfg), region, acctID); rerr != nil {
+	iamClient := iam.NewFromConfig(cfg)
+	if rerr := runtimeiam.EnsureRoles(ctx, iamClient, region, acctID, stamp); rerr != nil {
 		return fmt.Errorf("ensure poller IAM roles: %w", rerr)
+	}
+
+	// Whether the poller schedule may move into lagotto's schedule group yet
+	// (#324): not while a legacy stack owns it, nor before the IAM policies
+	// grant the group.
+	hold := scheduleMoveHold(ctx, d, iamClient, acctID, deployStackName)
+	if hold != "" {
+		fmt.Fprintf(os.Stderr, "Keeping the poller schedule in the default schedule group: %s.\n", hold)
 	}
 
 	fmt.Fprintf(os.Stderr, "Deploying the poller (v%s) into %s / %s...\n", deployVersion, acctID, region)
 	res, err := d.Deploy(ctx, deploy.Options{
-		StackName:      deployStackName,
-		Region:         region,
-		Version:        deployVersion,
-		Environment:    deployEnv,
-		Bucket:         deployBucket,
-		AccountID:      acctID,
-		WatchesTable:   watchesTable,
-		HistoryTable:   historyTable,
-		ScheduledTable: store.ScheduledTable(),
+		StackName:        deployStackName,
+		Region:           region,
+		Version:          deployVersion,
+		Environment:      deployEnv,
+		Bucket:           deployBucket,
+		AccountID:        acctID,
+		WatchesTable:     watchesTable,
+		HistoryTable:     historyTable,
+		ScheduledTable:   store.ScheduledTable(),
+		Owner:            owner,
+		HoldScheduleMove: hold,
 	})
 	if err != nil {
 		return err
@@ -327,13 +364,83 @@ func deployTeardownPrompt(region, acctID, userBucket string) string {
 		}
 	}
 	return fmt.Sprintf(`Delete the lagotto poller in %s (account %s)?
-This deletes the schedule %s, the Lambda %s, its log group %s and the SNS topic %s%s`+`RETAINED: the DynamoDB tables %s ('lagotto teardown' deletes those),
+This deletes the schedule %s, the Lambda %s, its log group %s, the SNS topic %s and the schedule group %s if nothing is left in it%s`+`RETAINED: the DynamoDB tables %s ('lagotto teardown' deletes those),
 RETAINED: the IAM roles %s and %s (CLI-owned, IAM-global: shared by every region's poller and by per-launch scheduled launches),
 %sRETAINED: any per-launch 'lagotto-launch-sl-*' schedules: they belong to the scheduled launches in those tables ('lagotto teardown' deletes both).
 Continue?`,
 		region, acctID,
-		deploy.PollerScheduleName, deploy.PollerFunctionName, deploy.PollerLogGroupName, deploy.AlertsTopicName, bucketLine,
+		deploy.PollerScheduleName, deploy.PollerFunctionName, deploy.PollerLogGroupName, deploy.AlertsTopicName, deploy.ScheduleGroupName, bucketLine,
 		strings.Join(cliTables(), ", "),
 		runtimeiam.RoleName, runtimeiam.SchedulerInvokeRoleName,
 		retainedUser)
+}
+
+// scheduleMoveHold says why `lagotto deploy` must keep the poller schedule in
+// the default schedule group rather than move it into lagotto's tagged group
+// (#324), or "" when it may move it. Every doubt holds it: a moved schedule
+// the poller's role cannot read or update would freeze the poller's cadence,
+// and one the lagotto-cli-user policy does not cover would make 'lagotto watch'
+// refuse to arm watches.
+//
+//   - A legacy CloudFormation stack still exists: it owns the schedule in the
+//     default group, and moving it would delete the stack's resource.
+//   - The poller's runtime policy, or the lagotto-cli-user policy, predates the
+//     group: re-running 'lagotto setup' rewrites both. An absent policy is no
+//     reason to hold (setup writes the current one when it runs).
+func scheduleMoveHold(ctx context.Context, d legacyStackChecker, client scheduleMoveIAM, accountID, stackName string) string {
+	if stackName != "" {
+		exists, _, err := d.LegacyStackState(ctx, stackName)
+		switch {
+		case err != nil:
+			return fmt.Sprintf("could not check for the legacy CloudFormation stack %s (%v)", stackName, err)
+		case exists:
+			return fmt.Sprintf("the legacy CloudFormation stack %s owns it; detach the stack with 'lagotto deploy --migrate-from-cloudformation', then deploy again", stackName)
+		}
+	}
+	setupFix := "run 'lagotto setup', then 'lagotto deploy' again"
+	doc, err := runtimeiam.ReadRuntimePolicy(ctx, client)
+	switch {
+	case errors.Is(err, runtimeiam.ErrRoleNotFound), errors.Is(err, runtimeiam.ErrPolicyNotFound):
+	case err != nil:
+		return fmt.Sprintf("could not read the poller's runtime policy (%v)", err)
+	case !grantsScheduleGroup(doc):
+		return "the poller's runtime IAM policy does not grant schedule group " + deploy.ScheduleGroupName + " yet; " + setupFix
+	}
+	doc, found, err := cliiam.ReadPolicy(ctx, client, accountID)
+	switch {
+	case errors.Is(err, cliiam.ErrUnmanagedPolicy), err == nil && !found:
+	case err != nil:
+		return fmt.Sprintf("could not read the %s policy (%v)", cliiam.PolicyName, err)
+	case !grantsScheduleGroup(doc):
+		return "the " + cliiam.PolicyName + " IAM policy does not grant schedule group " + deploy.ScheduleGroupName + " yet; " + setupFix
+	}
+	return ""
+}
+
+// scheduleMoveIAM is the IAM scheduleMoveHold reads both policies with.
+// *iam.Client satisfies it.
+type scheduleMoveIAM interface {
+	runtimeiam.IAMAPI
+	cliiam.PolicyAPI
+}
+
+// legacyStackChecker is the part of *deploy.Deployer scheduleMoveHold uses.
+type legacyStackChecker interface {
+	LegacyStackState(ctx context.Context, stackName string) (bool, string, error)
+}
+
+// grantsScheduleGroup reports whether a policy document lets its holder update
+// the poller schedule in lagotto's schedule group (#324).
+func grantsScheduleGroup(doc string) bool {
+	grants, err := runtimeiam.ParsePolicy(doc)
+	if err != nil {
+		return false
+	}
+	want := ":schedule/" + deploy.ScheduleGroupName + "/" + deploy.PollerScheduleName
+	for _, g := range grants {
+		if strings.EqualFold(g.Effect, "Allow") && g.Action == "scheduler:UpdateSchedule" && strings.HasSuffix(g.Resource, want) {
+			return true
+		}
+	}
+	return false
 }

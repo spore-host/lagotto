@@ -113,14 +113,41 @@ type fakeIAM struct {
 	// getRoleErr, when set, is what GetRole returns — an error that is NOT a
 	// NoSuchEntity, so "absent" and "can't tell" stay distinguishable.
 	getRoleErr error
+	// tags are each role's tags (#324), written by CreateRole and TagRole;
+	// tagged records each TagRole's role name.
+	tags   map[string]map[string]string
+	tagged []string
+}
+
+func (f *fakeIAM) TagRole(_ context.Context, in *iam.TagRoleInput, _ ...func(*iam.Options)) (*iam.TagRoleOutput, error) {
+	name := aws.ToString(in.RoleName)
+	f.tagged = append(f.tagged, name)
+	f.setTags(name, in.Tags)
+	return &iam.TagRoleOutput{}, nil
+}
+
+func (f *fakeIAM) setTags(name string, ts []iamtypes.Tag) {
+	if f.tags == nil {
+		f.tags = map[string]map[string]string{}
+	}
+	if f.tags[name] == nil {
+		f.tags[name] = map[string]string{}
+	}
+	for _, t := range ts {
+		f.tags[name][aws.ToString(t.Key)] = aws.ToString(t.Value)
+	}
 }
 
 func (f *fakeIAM) GetRole(_ context.Context, in *iam.GetRoleInput, _ ...func(*iam.Options)) (*iam.GetRoleOutput, error) {
 	if f.getRoleErr != nil {
 		return nil, f.getRoleErr
 	}
-	if f.existing[aws.ToString(in.RoleName)] {
-		return &iam.GetRoleOutput{Role: &iamtypes.Role{RoleName: in.RoleName}}, nil
+	if name := aws.ToString(in.RoleName); f.existing[name] {
+		var ts []iamtypes.Tag
+		for k, v := range f.tags[name] {
+			ts = append(ts, iamtypes.Tag{Key: aws.String(k), Value: aws.String(v)})
+		}
+		return &iam.GetRoleOutput{Role: &iamtypes.Role{RoleName: in.RoleName, Tags: ts}}, nil
 	}
 	return nil, &iamtypes.NoSuchEntityException{}
 }
@@ -132,6 +159,7 @@ func (f *fakeIAM) CreateRole(_ context.Context, in *iam.CreateRoleInput, _ ...fu
 		f.existing = map[string]bool{}
 	}
 	f.existing[name] = true
+	f.setTags(name, in.Tags)
 	return &iam.CreateRoleOutput{Role: &iamtypes.Role{RoleName: in.RoleName}}, nil
 }
 

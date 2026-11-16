@@ -110,6 +110,7 @@ func TestCheckCallerReportsWhatIsMissing(t *testing.T) {
 		"dynamodb:PutItem on arn:aws:dynamodb:*:123456789012:table/lagotto-match-history",
 		"ec2:DescribeSubnets on *",
 		"scheduler:UpdateSchedule on arn:aws:scheduler:*:123456789012:schedule/default/lagotto-capacity-poller",
+		"scheduler:UpdateSchedule on arn:aws:scheduler:*:123456789012:schedule/lagotto/lagotto-capacity-poller",
 		"sns:Subscribe on arn:aws:sns:*:123456789012:lagotto-capacity-alerts",
 	}
 	if strings.Join(res.Missing, "\n") != strings.Join(want, "\n") {

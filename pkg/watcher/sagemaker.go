@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sagemaker"
@@ -94,7 +95,7 @@ func (l *SageMakerLauncher) submit(ctx context.Context, client *sagemaker.Client
 	// be unique within an account+region; reusing one would collide).
 	jobName := sageMakerJobName(w)
 	input.TrainingJobName = aws.String(jobName)
-	addLagottoTag(&input, ShortID(w.WatchID))
+	addLagottoTag(&input, ShortID(w.WatchID), RuntimeTags(w, client.Options().Region))
 
 	out, err := client.CreateTrainingJob(ctx, &input)
 	if err != nil {
@@ -171,8 +172,30 @@ func sageMakerJobName(w *Watch) string {
 	return fmt.Sprintf("%s%s-%d", prefix, ShortID(w.WatchID), w.MatchCount+1)
 }
 
-func addLagottoTag(input *sagemaker.CreateTrainingJobInput, watchID string) {
-	input.Tags = append(input.Tags, smTag("lagotto:watch-id", watchID), smTag("lagotto:managed", "true"))
+// addLagottoTag also stamps the spore.host tags (#324, extra). A tag the job spec itself
+// carries under one of those keys is replaced, not duplicated: SageMaker
+// refuses a request with a key twice, and the spec must not be able to claim
+// another tool's ownership.
+func addLagottoTag(input *sagemaker.CreateTrainingJobInput, watchID string, extra map[string]string) {
+	ours := map[string]string{"lagotto:watch-id": watchID, "lagotto:managed": "true"}
+	for k, v := range extra {
+		ours[k] = v
+	}
+	kept := input.Tags[:0:0]
+	for _, t := range input.Tags {
+		if _, mine := ours[aws.ToString(t.Key)]; !mine {
+			kept = append(kept, t)
+		}
+	}
+	input.Tags = append(kept, smTag("lagotto:watch-id", watchID), smTag("lagotto:managed", "true"))
+	keys := make([]string, 0, len(extra))
+	for k := range extra {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		input.Tags = append(input.Tags, smTag(k, extra[k]))
+	}
 }
 
 func smTag(key, value string) smtypes.Tag {

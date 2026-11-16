@@ -16,6 +16,7 @@ import (
 	"github.com/spore-host/lagotto/pkg/arm"
 	"github.com/spore-host/lagotto/pkg/awscfg"
 	"github.com/spore-host/lagotto/pkg/deploy"
+	"github.com/spore-host/lagotto/pkg/managedtags"
 	"github.com/spore-host/lagotto/pkg/quotacheck"
 	"github.com/spore-host/lagotto/pkg/watcher"
 	"gopkg.in/yaml.v3"
@@ -289,6 +290,8 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	quotaReport := pre.Quota
 
 	store := watcher.NewStore(cfg, watchesTable, historyTable)
+	// A table this creates is tagged with its creator as spore-host:owner (#324).
+	store.SetTagStamp(managedtags.Stamp{Owner: w.OwnerID})
 
 	// Auto-create the backing tables on first use so the tool is zero-setup (#12).
 	created, err := store.EnsureTables(ctx)

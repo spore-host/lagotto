@@ -27,6 +27,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
 	logstypes "github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs/types"
+
+	"github.com/spore-host/lagotto/pkg/managedtags"
 )
 
 // PollerLogGroupName is the log group the poller Lambda writes to: Lambda's
@@ -44,6 +46,7 @@ type logsAPI interface {
 	DescribeLogGroups(ctx context.Context, in *cloudwatchlogs.DescribeLogGroupsInput, optFns ...func(*cloudwatchlogs.Options)) (*cloudwatchlogs.DescribeLogGroupsOutput, error)
 	PutRetentionPolicy(ctx context.Context, in *cloudwatchlogs.PutRetentionPolicyInput, optFns ...func(*cloudwatchlogs.Options)) (*cloudwatchlogs.PutRetentionPolicyOutput, error)
 	TagResource(ctx context.Context, in *cloudwatchlogs.TagResourceInput, optFns ...func(*cloudwatchlogs.Options)) (*cloudwatchlogs.TagResourceOutput, error)
+	ListTagsForResource(ctx context.Context, in *cloudwatchlogs.ListTagsForResourceInput, optFns ...func(*cloudwatchlogs.Options)) (*cloudwatchlogs.ListTagsForResourceOutput, error)
 	DeleteLogGroup(ctx context.Context, in *cloudwatchlogs.DeleteLogGroupInput, optFns ...func(*cloudwatchlogs.Options)) (*cloudwatchlogs.DeleteLogGroupOutput, error)
 }
 
@@ -54,14 +57,15 @@ func PollerLogGroupARN(region, accountID string) string {
 }
 
 // pollerLogGroupTags are the tags on the poller's log group: the managed tag
-// that names lagotto as its owner, and the function's Application/Component
-// pair, so the group sorts with the function in a tag-based view.
-func pollerLogGroupTags() map[string]string {
-	return map[string]string{
+// that names lagotto as its owner, the function's Application/Component pair,
+// so the group sorts with the function in a tag-based view, and the
+// spore.host infrastructure tags (#324).
+func (d *Deployer) pollerLogGroupTags(region string) map[string]string {
+	return managedtags.With(map[string]string{
 		ManagedTagKey: ManagedTagValue,
 		"Application": "lagotto",
 		"Component":   "capacity-poller",
-	}
+	}, d.infraTags(region, managedtags.ComponentPoller))
 }
 
 // ensurePollerLogGroup creates the poller's log group, tagged and with
@@ -75,7 +79,7 @@ func pollerLogGroupTags() map[string]string {
 func (d *Deployer) ensurePollerLogGroup(ctx context.Context, region, accountID string) (string, error) {
 	_, err := d.logs.CreateLogGroup(ctx, &cloudwatchlogs.CreateLogGroupInput{
 		LogGroupName: aws.String(PollerLogGroupName),
-		Tags:         pollerLogGroupTags(),
+		Tags:         d.pollerLogGroupTags(region),
 	}, logsInRegion(region))
 	if err == nil {
 		if err := d.putPollerLogRetention(ctx, region); err != nil {
@@ -88,12 +92,20 @@ func (d *Deployer) ensurePollerLogGroup(ctx context.Context, region, accountID s
 		return "", fmt.Errorf("create log group %s: %w", PollerLogGroupName, err)
 	}
 
-	if _, err := d.logs.TagResource(ctx, &cloudwatchlogs.TagResourceInput{
-		ResourceArn: aws.String(PollerLogGroupARN(region, accountID)),
-		Tags:        pollerLogGroupTags(),
-	}, logsInRegion(region)); err != nil {
-		return "", fmt.Errorf("tag existing log group %s %s=%s (without the tag nothing marks lagotto as its owner): %w",
-			PollerLogGroupName, ManagedTagKey, ManagedTagValue, err)
+	// Only the tags it lacks, so the group keeps its first spore-host:created.
+	arn := aws.String(PollerLogGroupARN(region, accountID))
+	cur, err := d.logs.ListTagsForResource(ctx, &cloudwatchlogs.ListTagsForResourceInput{ResourceArn: arn}, logsInRegion(region))
+	if err != nil {
+		return "", fmt.Errorf("read tags of existing log group %s: %w", PollerLogGroupName, err)
+	}
+	if add := managedtags.Converge(cur.Tags, d.pollerLogGroupTags(region)); len(add) > 0 {
+		if _, err := d.logs.TagResource(ctx, &cloudwatchlogs.TagResourceInput{
+			ResourceArn: arn,
+			Tags:        add,
+		}, logsInRegion(region)); err != nil {
+			return "", fmt.Errorf("tag existing log group %s %s=%s (without the tag nothing marks lagotto as its owner): %w",
+				PollerLogGroupName, ManagedTagKey, ManagedTagValue, err)
+		}
 	}
 	retention, err := d.pollerLogRetention(ctx, region)
 	if err != nil {

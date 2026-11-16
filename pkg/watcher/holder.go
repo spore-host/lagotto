@@ -10,6 +10,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/smithy-go"
+	"github.com/spore-host/libs/tags/ec2tags"
+
+	"github.com/spore-host/lagotto/pkg/managedtags"
 )
 
 // holderReleaseAPI is the slice of EC2 that Release calls, so tests can count
@@ -174,15 +177,12 @@ func (h *Holder) Hold(ctx context.Context, w *Watch, m *MatchResult) error {
 		EndDateType:           ec2types.EndDateTypeLimited,
 		EndDate:               aws.Time(endDate),
 		InstanceMatchCriteria: ec2types.InstanceMatchCriteriaTargeted,
-		TagSpecifications: []ec2types.TagSpecification{
-			{
-				ResourceType: ec2types.ResourceTypeCapacityReservation,
-				Tags: []ec2types.Tag{
-					{Key: aws.String("lagotto:watch-id"), Value: aws.String(w.WatchID)},
-					{Key: aws.String("lagotto:managed"), Value: aws.String("true")},
-				},
-			},
-		},
+		// lagotto:managed=true is what `lagotto cancel` releases on; the
+		// spore.host tags (#324) are the uniform ones.
+		TagSpecifications: ec2tags.Specifications(managedtags.With(map[string]string{
+			"lagotto:watch-id": w.WatchID,
+			"lagotto:managed":  "true",
+		}, RuntimeTags(w, m.Region)), ec2types.ResourceTypeCapacityReservation),
 	})
 	if err != nil {
 		m.ActionTaken = "hold_failed"

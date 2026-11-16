@@ -237,6 +237,12 @@ func (s *Spawner) Spawn(ctx context.Context, w *Watch, m *MatchResult) error {
 	if w.Project != "" {
 		cfg.Tags[ProjectTagKey] = w.Project
 	}
+	// The spore.host tags (#324), on the same path: spore-host:managed-by=lagotto,
+	// the region, and the watch's owner. They replace any the stored config
+	// carries, which must not be able to claim another tool's ownership.
+	for k, v := range RuntimeTags(w, cfg.Region) {
+		cfg.Tags[k] = v
+	}
 
 	// Goal-driven fleet watch: stamp the fleet tag so the supervisor can count
 	// running members and top up toward DesiredCount (#70). Harmless for
@@ -502,6 +508,14 @@ func (s *Spawner) LaunchScheduled(ctx context.Context, sl *ScheduledLaunch) (str
 	}
 	if sl.Region != "" {
 		cfg.Region = sl.Region
+	}
+	// The spore.host tags (#324), as Spawn stamps them, with the scheduled
+	// launch's creator as the owner.
+	if cfg.Tags == nil {
+		cfg.Tags = map[string]string{}
+	}
+	for k, v := range RuntimeTags(&Watch{WatchID: sl.ScheduleID, OwnerID: sl.OwnerID}, cfg.Region) {
+		cfg.Tags[k] = v
 	}
 	az := sl.AvailabilityZone
 	if sl.ReservationID != "" && cfg.ReservationID == "" {

@@ -28,6 +28,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
+	"github.com/spore-host/libs/tags/iamtags"
+
+	"github.com/spore-host/lagotto/pkg/managedtags"
+	"github.com/spore-host/lagotto/pkg/schedgroup"
 	"github.com/spore-host/lagotto/pkg/watcher"
 )
 
@@ -93,20 +97,57 @@ type IAMAPI interface {
 	CreateRole(ctx context.Context, in *iam.CreateRoleInput, optFns ...func(*iam.Options)) (*iam.CreateRoleOutput, error)
 	AttachRolePolicy(ctx context.Context, in *iam.AttachRolePolicyInput, optFns ...func(*iam.Options)) (*iam.AttachRolePolicyOutput, error)
 	PutRolePolicy(ctx context.Context, in *iam.PutRolePolicyInput, optFns ...func(*iam.Options)) (*iam.PutRolePolicyOutput, error)
+	// TagRole adds the spore.host tags to a role an older lagotto created
+	// without them (#324).
+	TagRole(ctx context.Context, in *iam.TagRoleInput, optFns ...func(*iam.Options)) (*iam.TagRoleOutput, error)
 }
 
 // roleExists reports whether the named role already exists (a NoSuchEntity is
 // "absent", not an error).
 func roleExists(ctx context.Context, client IAMAPI, name string) (bool, error) {
-	_, err := client.GetRole(ctx, &iam.GetRoleInput{RoleName: aws.String(name)})
+	r, err := getRole(ctx, client, name)
+	return r != nil, err
+}
+
+// getRole returns the named role, nil when it does not exist.
+func getRole(ctx context.Context, client IAMAPI, name string) (*iamtypes.Role, error) {
+	out, err := client.GetRole(ctx, &iam.GetRoleInput{RoleName: aws.String(name)})
 	if err == nil {
-		return true, nil
+		if out.Role == nil {
+			return &iamtypes.Role{RoleName: aws.String(name)}, nil
+		}
+		return out.Role, nil
 	}
 	var notFound *iamtypes.NoSuchEntityException
 	if errors.As(err, &notFound) {
-		return false, nil
+		return nil, nil
 	}
-	return false, err
+	return nil, err
+}
+
+// roleTags are the tags on one of the two CLI-owned poller roles: the
+// Application/Component pair the poller role always had, and the spore.host
+// infrastructure tags with scope "global" (#324).
+func roleTags(stamp managedtags.Stamp) map[string]string {
+	return managedtags.With(map[string]string{
+		"Application": "lagotto",
+		"Component":   "capacity-poller",
+	}, stamp.Infrastructure(managedtags.ScopeGlobal, managedtags.ComponentPoller))
+}
+
+// ensureRoleTags adds to an existing role the desired tags it lacks
+// (managedtags.Converge: a spore-host:created already there is kept). A role
+// that has them all costs nothing: GetRole already returned its tags.
+func ensureRoleTags(ctx context.Context, client IAMAPI, role *iamtypes.Role, desired map[string]string) error {
+	add := managedtags.Converge(iamtags.ToMap(role.Tags), desired)
+	if len(add) == 0 {
+		return nil
+	}
+	name := aws.ToString(role.RoleName)
+	if _, err := client.TagRole(ctx, &iam.TagRoleInput{RoleName: aws.String(name), Tags: iamtags.FromMap(add)}); err != nil {
+		return fmt.Errorf("runtimeiam: tag role %s: %w", name, err)
+	}
+	return nil
 }
 
 // EnsureRoles creates the two CLI-owned poller roles if absent — the poller
@@ -122,14 +163,18 @@ func roleExists(ctx context.Context, client IAMAPI, name string) (bool, error) {
 // stays with EnsureRuntimeRole (setup), preserving the #16 division where the
 // broad spawn/hold/sagemaker grant is applied by the human admin. Called by
 // `lagotto deploy` before CreateStack, mirroring how the tables are ensured.
-func EnsureRoles(ctx context.Context, client IAMAPI, region, accountID string) error {
+//
+// Both roles carry the spore.host tags (#324): set at create, and added to an
+// existing role that lacks them. stamp (optional) is the owner and clock.
+func EnsureRoles(ctx context.Context, client IAMAPI, region, accountID string, stamp ...managedtags.Stamp) error {
 	if region == "" || accountID == "" {
 		return fmt.Errorf("runtimeiam: region and accountID are required")
 	}
-	if _, err := ensurePollerRole(ctx, client); err != nil {
+	st := managedtags.FirstStamp(stamp)
+	if _, err := ensurePollerRole(ctx, client, st); err != nil {
 		return err
 	}
-	_, err := ensureSchedulerInvokeRole(ctx, client, accountID)
+	_, err := ensureSchedulerInvokeRole(ctx, client, accountID, st)
 	return err
 }
 
@@ -146,12 +191,15 @@ func EnsureRoles(ctx context.Context, client IAMAPI, region, accountID string) e
 // setup in any region writes the same bytes and cannot flip-flop another
 // region's grants. Idempotent: a re-run creates nothing and rewrites both
 // policies in place.
-func EnsureSetupRoles(ctx context.Context, client IAMAPI, region, accountID string, auth Authorizations) ([]string, error) {
+//
+// Both roles carry the spore.host tags, as in [EnsureRoles].
+func EnsureSetupRoles(ctx context.Context, client IAMAPI, region, accountID string, auth Authorizations, stamp ...managedtags.Stamp) ([]string, error) {
 	if region == "" || accountID == "" {
 		return nil, fmt.Errorf("runtimeiam: region and accountID are required")
 	}
+	st := managedtags.FirstStamp(stamp)
 	var created []string
-	made, err := ensurePollerRole(ctx, client)
+	made, err := ensurePollerRole(ctx, client, st)
 	if err != nil {
 		return nil, err
 	}
@@ -161,7 +209,7 @@ func EnsureSetupRoles(ctx context.Context, client IAMAPI, region, accountID stri
 	if err := putRuntimePolicy(ctx, client, accountID, auth); err != nil {
 		return created, err
 	}
-	made, err = ensureSchedulerInvokeRole(ctx, client, accountID)
+	made, err = ensureSchedulerInvokeRole(ctx, client, accountID, st)
 	if made {
 		created = append(created, SchedulerInvokeRoleName)
 	}
@@ -170,38 +218,39 @@ func EnsureSetupRoles(ctx context.Context, client IAMAPI, region, accountID stri
 
 // ensurePollerRole get-or-creates RoleName with the Lambda trust relationship
 // and the AWS-managed basic-execution policy (its permissions policy is added by
-// EnsureRuntimeRole).
+// EnsureRuntimeRole), tagged (roleTags).
 //
 // created reports whether this call created the role.
-func ensurePollerRole(ctx context.Context, client IAMAPI) (created bool, err error) {
-	exists, err := roleExists(ctx, client, RoleName)
+func ensurePollerRole(ctx context.Context, client IAMAPI, stamp managedtags.Stamp) (created bool, err error) {
+	role, err := getRole(ctx, client, RoleName)
 	if err != nil {
 		return false, fmt.Errorf("runtimeiam: check role %s: %w", RoleName, err)
 	}
-	if !exists {
+	tags := roleTags(stamp)
+	if role == nil {
 		if _, err := client.CreateRole(ctx, &iam.CreateRoleInput{
 			RoleName:                 aws.String(RoleName),
 			AssumeRolePolicyDocument: aws.String(trust("lambda.amazonaws.com")),
-			Tags: []iamtypes.Tag{
-				{Key: aws.String("Application"), Value: aws.String("lagotto")},
-				{Key: aws.String("Component"), Value: aws.String("capacity-poller")},
-			},
+			Tags:                     iamtags.FromMap(tags),
 		}); err != nil {
 			return false, fmt.Errorf("runtimeiam: create role %s: %w", RoleName, err)
 		}
+	} else if err := ensureRoleTags(ctx, client, role, tags); err != nil {
+		return false, err
 	}
 	// AttachRolePolicy is idempotent (re-attaching the same managed policy is a no-op).
 	if _, err := client.AttachRolePolicy(ctx, &iam.AttachRolePolicyInput{
 		RoleName:  aws.String(RoleName),
 		PolicyArn: aws.String(lambdaBasicExecutionARN),
 	}); err != nil {
-		return !exists, fmt.Errorf("runtimeiam: attach basic-execution to %s: %w", RoleName, err)
+		return role == nil, fmt.Errorf("runtimeiam: attach basic-execution to %s: %w", RoleName, err)
 	}
-	return !exists, nil
+	return role == nil, nil
 }
 
 // ensureSchedulerInvokeRole get-or-creates SchedulerInvokeRoleName with the
-// Scheduler trust relationship and writes [SchedulerInvokePolicyDocument] onto it.
+// Scheduler trust relationship, tagged (roleTags; it was created untagged
+// before #324), and writes [SchedulerInvokePolicyDocument] onto it.
 //
 // It deliberately takes no region (#218). IAM is global, so this one role is
 // shared by the poller schedule in EVERY region of the account and by every
@@ -212,32 +261,39 @@ func ensurePollerRole(ctx context.Context, client IAMAPI) (created bool, err err
 // the structural fix — deploying region A then region B converges, with nothing
 // to flip-flop.
 //
+// The trust names only the Scheduler service, not a schedule group or ARN, so
+// the schedules' move into lagotto's group (#324) needs no change to it.
+//
 // created reports whether this call created the role.
-func ensureSchedulerInvokeRole(ctx context.Context, client IAMAPI, accountID string) (created bool, err error) {
+func ensureSchedulerInvokeRole(ctx context.Context, client IAMAPI, accountID string, stamp managedtags.Stamp) (created bool, err error) {
 	doc, err := SchedulerInvokePolicyDocument(accountID)
 	if err != nil {
 		return false, err
 	}
-	exists, err := roleExists(ctx, client, SchedulerInvokeRoleName)
+	role, err := getRole(ctx, client, SchedulerInvokeRoleName)
 	if err != nil {
 		return false, fmt.Errorf("runtimeiam: check role %s: %w", SchedulerInvokeRoleName, err)
 	}
-	if !exists {
+	tags := roleTags(stamp)
+	if role == nil {
 		if _, err := client.CreateRole(ctx, &iam.CreateRoleInput{
 			RoleName:                 aws.String(SchedulerInvokeRoleName),
 			AssumeRolePolicyDocument: aws.String(trust("scheduler.amazonaws.com")),
+			Tags:                     iamtags.FromMap(tags),
 		}); err != nil {
 			return false, fmt.Errorf("runtimeiam: create role %s: %w", SchedulerInvokeRoleName, err)
 		}
+	} else if err := ensureRoleTags(ctx, client, role, tags); err != nil {
+		return false, err
 	}
 	if _, err := client.PutRolePolicy(ctx, &iam.PutRolePolicyInput{
 		RoleName:       aws.String(SchedulerInvokeRoleName),
 		PolicyName:     aws.String(SchedulerInvokePolicyName),
 		PolicyDocument: aws.String(doc),
 	}); err != nil {
-		return !exists, fmt.Errorf("runtimeiam: put invoke policy on %s: %w", SchedulerInvokeRoleName, err)
+		return role == nil, fmt.Errorf("runtimeiam: put invoke policy on %s: %w", SchedulerInvokeRoleName, err)
 	}
-	return !exists, nil
+	return role == nil, nil
 }
 
 // SchedulerInvokeFunctionARN is the Resource of the Scheduler invoke policy:
@@ -284,11 +340,11 @@ func SchedulerInvokePolicyDocument(accountID string) (string, error) {
 // region is validated but does not shape what is written (#219): the role is
 // IAM-global and shared by every region's poller, so the policy covers lagotto's
 // resources in every region and `setup` in any one region serves all of them.
-func EnsureRuntimeRole(ctx context.Context, client IAMAPI, region, accountID string, auth Authorizations) error {
+func EnsureRuntimeRole(ctx context.Context, client IAMAPI, region, accountID string, auth Authorizations, stamp ...managedtags.Stamp) error {
 	if region == "" || accountID == "" {
 		return fmt.Errorf("runtimeiam: region and accountID are required")
 	}
-	if _, err := ensurePollerRole(ctx, client); err != nil {
+	if _, err := ensurePollerRole(ctx, client, managedtags.FirstStamp(stamp)); err != nil {
 		return err
 	}
 	return putRuntimePolicy(ctx, client, accountID, auth)
@@ -507,8 +563,13 @@ func PolicyDocument(accountID string, instanceRoles []string) (string, error) {
 // PolicyDocumentFor is [PolicyDocument] with SageMaker execution roles too.
 func PolicyDocumentFor(accountID string, auth Authorizations) (string, error) {
 	arn := func(f string, a ...interface{}) string { return fmt.Sprintf(f, a...) }
-	schedulerARN := RegionalARN("scheduler", accountID, "schedule/default/lagotto-capacity-poller")
-	launchSchedARN := RegionalARN("scheduler", accountID, "schedule/default/lagotto-launch-*")
+	// Each in lagotto's tagged schedule group and in the default one, where
+	// everything created before #324 still is (pkg/schedgroup).
+	var schedulerARNs, launchSchedARNs []string
+	for _, group := range schedgroup.Groups {
+		schedulerARNs = append(schedulerARNs, RegionalARN("scheduler", accountID, "schedule/"+group+"/lagotto-capacity-poller"))
+		launchSchedARNs = append(launchSchedARNs, RegionalARN("scheduler", accountID, "schedule/"+group+"/lagotto-launch-*"))
+	}
 	schedulerInvokeRoleARN := arn("arn:aws:iam::%s:role/lagotto-capacity-poller-scheduler-invoke", accountID)
 	// The instance roles the poller may pass to EC2: lagotto's own, then each
 	// one an administrator authorized, by exact ARN. No prefix: spawn-instance*
@@ -596,9 +657,9 @@ func PolicyDocumentFor(accountID string, auth Authorizations) (string, error) {
 		}, Resource: "*"},
 		// Scheduler: manage this poller's schedule + the #62 per-launch schedules.
 		{Effect: "Allow", Action: []string{"scheduler:UpdateSchedule", "scheduler:GetSchedule"},
-			Resource: schedulerARN},
+			Resource: schedulerARNs},
 		{Effect: "Allow", Action: []string{"scheduler:CreateSchedule", "scheduler:DeleteSchedule"},
-			Resource: launchSchedARN},
+			Resource: launchSchedARNs},
 		{Effect: "Allow", Action: []string{"iam:PassRole"}, Resource: schedulerInvokeRoleARN,
 			Condition: passToService("scheduler.amazonaws.com")},
 		// spawn launch set: RunInstances/tags/SG. No IAM writes: the launch names

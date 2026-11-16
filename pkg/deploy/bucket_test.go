@@ -14,6 +14,7 @@ import (
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	schedulertypes "github.com/aws/aws-sdk-go-v2/service/scheduler/types"
 	"github.com/aws/smithy-go"
+	"github.com/spore-host/libs/tags"
 )
 
 const (
@@ -190,8 +191,8 @@ func TestEnsureBucket_NewDefaultBucketIsCreatedTagged(t *testing.T) {
 	if act != "created" || f.called("CreateBucket") != 1 || len(f.puts) != 1 {
 		t.Fatalf("action %q, calls %v", act, f.calls)
 	}
-	if f.tags[ManagedTagKey] != ManagedTagValue {
-		t.Errorf("tags after create = %v, want %s=%s", f.tags, ManagedTagKey, ManagedTagValue)
+	if f.tags[ManagedTagKey] != ManagedTagValue || !tags.IsManagedBy(f.tags, tags.ToolLagotto) || (f.tags[tags.Role] != "" || f.tags[tags.Component] == "") {
+		t.Errorf("tags after create = %v, want %s=%s and the spore.host infrastructure tags", f.tags, ManagedTagKey, ManagedTagValue)
 	}
 	f.assertOwnerOnEvery(t, "HeadBucket", "GetBucketTagging", "PutBucketTagging")
 }
@@ -225,10 +226,55 @@ func TestEnsureBucket_BackfillsTheTagKeepingExistingTags(t *testing.T) {
 }
 
 func TestEnsureBucket_AlreadyTaggedIsNotRewritten(t *testing.T) {
-	f := &fakeS3{tags: map[string]string{ManagedTagKey: ManagedTagValue}}
-	act, err := s3Deployer(f).ensureBucket(context.Background(), bDefault, bRegion, bAcct, true)
+	// A bucket that already has every tag deploy writes, its spore-host:created
+	// from an earlier deploy: one read, no write.
+	d := s3Deployer(nil)
+	d.now = func() time.Time { return time.Unix(1, 0) }
+	f := &fakeS3{tags: d.artifactBucketTags(bRegion)}
+	d.s3 = f
+	d.now = time.Now
+	act, err := d.ensureBucket(context.Background(), bDefault, bRegion, bAcct, true)
 	if err != nil || act != "exists" || len(f.puts) != 0 {
 		t.Errorf("action %q err %v puts %d", act, err, len(f.puts))
+	}
+}
+
+// The #324 back-fill onto a bucket an older lagotto created (it carries only
+// lagotto:managed=cli) and the user tagged: every spore.host tag is added, and
+// nothing already on the bucket is dropped or changed.
+func TestEnsureBucket_MergesSporeHostTagsIntoExistingTags(t *testing.T) {
+	f := &fakeS3{tags: map[string]string{ManagedTagKey: ManagedTagValue, "CostCenter": "42", "Name": "mine"}}
+	d := s3Deployer(f)
+	d.owner = "AIDAOWNER"
+	act, err := d.ensureBucket(context.Background(), bDefault, bRegion, bAcct, true)
+	if err != nil || !strings.Contains(act, "tagged") || len(f.puts) != 1 {
+		t.Fatalf("action %q err %v puts %d", act, err, len(f.puts))
+	}
+	want := map[string]string{
+		ManagedTagKey: ManagedTagValue, "CostCenter": "42", "Name": "mine",
+		tags.ManagedBy: "lagotto", tags.Scope: bRegion, tags.Schema: tags.SchemaVersion,
+		tags.Owner: "AIDAOWNER", tags.Component: "artifacts",
+	}
+	if _, ok := f.tags[tags.Role]; ok {
+		t.Errorf("the bucket carries %s, which only spore.host's own service may: %v", tags.Role, f.tags)
+	}
+	for k, v := range want {
+		if f.tags[k] != v {
+			t.Errorf("tag %s = %q, want %q (all: %v)", k, f.tags[k], v, f.tags)
+		}
+	}
+	if _, ok := tags.CreatedAt(f.tags); !ok {
+		t.Errorf("no %s tag: %v", tags.Created, f.tags)
+	}
+
+	// A re-run by another principal keeps the first created and owner.
+	first := f.tags[tags.Created]
+	d.owner, d.now = "AIDASOMEONEELSE", func() time.Time { return time.Now().Add(48 * time.Hour) }
+	if act, err := d.ensureBucket(context.Background(), bDefault, bRegion, bAcct, true); err != nil || act != "exists" {
+		t.Fatalf("re-run: action %q err %v", act, err)
+	}
+	if len(f.puts) != 1 || f.tags[tags.Created] != first || f.tags[tags.Owner] != "AIDAOWNER" {
+		t.Errorf("re-run rewrote the tags: puts %d, %v", len(f.puts), f.tags)
 	}
 }
 
