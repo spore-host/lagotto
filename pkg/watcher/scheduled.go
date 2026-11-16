@@ -345,7 +345,7 @@ func (s *Store) HasPendingScheduledLaunches(ctx context.Context) (bool, error) {
 	// The status test is a FilterExpression, applied after each 1 MB page is
 	// read, so a pending launch can sit on any page; scanFindsAny follows them
 	// all (#181). Reading only the first page could report "none pending" and
-	// let the poller disable its schedule under an armed launch.
+	// let the poller idle its schedule (hourly, #323) under an armed launch.
 	found, err := scanFindsAny(ctx, s.client, &dynamodb.ScanInput{
 		TableName:                aws.String(s.scheduledTable),
 		FilterExpression:         aws.String("#s = :p OR #s = :r"),

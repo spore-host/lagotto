@@ -10,7 +10,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/scheduler"
 	schedulertypes "github.com/aws/aws-sdk-go-v2/service/scheduler/types"
 	"github.com/aws/smithy-go"
+	"github.com/spore-host/lagotto/pkg/cliiam"
 	"github.com/spore-host/lagotto/pkg/deploy"
+	"github.com/spore-host/lagotto/pkg/pollcadence"
 	"github.com/spore-host/lagotto/pkg/runtimeiam"
 )
 
@@ -34,30 +36,39 @@ func PollScheduleName() string {
 	return deploy.PollerScheduleName
 }
 
-// Arming a watch the hosted poller must service (#231). The hosted poller
-// switches its own schedule off when no watches are active, so a new or
-// reactivated watch is only polled if the program arming it switches it back on.
-// The CLI used to treat ANY GetSchedule error as "poller not deployed" and
-// report an UpdateSchedule failure only under --verbose: a user without the
-// Scheduler permissions got an active watch, a schedule left off, and no
-// message.
+// Arming a watch the hosted poller must service (#231, #323). An idle hosted
+// poller slows its schedule to the idle cadence (pollcadence.IdleExpression,
+// hourly), and a poller older than #323 switched it off altogether, so a new
+// or reactivated watch is polled promptly only if the program arming it puts
+// the schedule back to the normal cadence. The CLI used to treat ANY
+// GetSchedule error as "poller not deployed" and report an UpdateSchedule
+// failure only under --verbose: a user without the Scheduler permissions got
+// an active watch, a schedule left off, and no message.
 //
 // A caller (lagotto watch, extend, update; spore-host-mcp's lagotto_watch)
-// sequences three steps, in this order:
+// sequences four steps, in this order:
 //
 //  1. PreflightPollSchedule, BEFORE persisting. ResourceNotFound really means
 //     the hosted poller is not deployed (the watch is for 'lagotto poll
 //     --daemon'), so the watch is stored as before. Any other error,
 //     AccessDenied included, means we cannot know whether the watch will be
 //     polled: refuse, and store nothing.
-//  2. persist (PutWatch / ExtendWatch / UpdateWatch). Storing first and
-//     enabling second means a poller run that starts after the enable always
-//     sees the watch; the other order lets a run that starts in between find
-//     no watch and switch the schedule straight back off.
-//  3. EnablePollScheduleIfOff. If it fails (scheduler:UpdateSchedule, or
-//     iam:PassRole on the invoke role the schedule assumes), the caller undoes
-//     the persist, so no active watch is left orphaned, and refuses with
+//  2. persist (PutWatch / ExtendWatch / UpdateWatch).
+//  3. BumpPollerEpoch: increment the poller epoch, so a poller that counted no
+//     watches before step 2 and is slowing down sees that one was armed and
+//     undoes its slow-down (pkg/pollcadence has the protocol). Best effort: a
+//     failure is a warning, because the schedule is never disabled and the
+//     watch is polled within the hour regardless.
+//  4. ArmPollSchedule: re-read the schedule and make it ENABLED at the normal
+//     cadence. If it fails (scheduler:UpdateSchedule, or iam:PassRole on the
+//     invoke role the schedule assumes), the caller undoes the persist, so no
+//     active watch is left orphaned, and refuses with
 //     PollScheduleUpdateRefusal.
+//
+// Storing first and setting the schedule last is what makes the protocol
+// work: a poller run that counts after step 2 sees the watch, and one that
+// counted before it either sees the epoch move (step 3) or has its slow-down
+// overwritten by step 4.
 //
 // The steps are separate functions rather than one taking persist/rollback
 // callbacks so that lagotto's generated IAM inventory (internal/iamcoverage),
@@ -80,15 +91,62 @@ func PreflightPollSchedule(ctx context.Context, sched PollScheduleAPI, action st
 	return cur, nil
 }
 
-// EnablePollScheduleIfOff switches a DISABLED schedule on and reports whether
-// it did. A nil (not deployed) or already-enabled schedule is left alone. cur
-// is PreflightPollSchedule's result. The error is the raw Scheduler error: undo
-// the persist, then pass it to PollScheduleUpdateRefusal.
-func EnablePollScheduleIfOff(ctx context.Context, sched PollScheduleAPI, cur *scheduler.GetScheduleOutput) (bool, error) {
-	if cur == nil || cur.State != schedulertypes.ScheduleStateDisabled {
+// PollerEpochBumper is the store half of step 3. *watcher.Store satisfies it.
+type PollerEpochBumper interface {
+	BumpPollerEpoch(ctx context.Context) error
+}
+
+// BumpPollerEpoch is step 3: increment the poller epoch after persisting and
+// before ArmPollSchedule. cur is PreflightPollSchedule's result; with no
+// hosted poller (nil) there is nothing to tell and nothing is written. It
+// returns the warning to show when the increment failed (empty otherwise):
+// the watch is still armed, only possibly up to an hour late.
+func BumpPollerEpoch(ctx context.Context, ep PollerEpochBumper, cur *scheduler.GetScheduleOutput) string {
+	if cur == nil {
+		return ""
+	}
+	if err := ep.BumpPollerEpoch(ctx); err != nil {
+		return fmt.Sprintf("Warning: could not tell the hosted poller that a watch was armed (%v). "+
+			"If it is idle it may take up to an hour to poll this watch for the first time. "+
+			"A %s policy written before lagotto#323 does not grant dynamodb:UpdateItem on the poller-control item; "+
+			"an administrator can re-run 'lagotto setup' to update it.", err, cliiam.PolicyName)
+	}
+	return ""
+}
+
+// ArmPollSchedule is step 4: it re-reads the schedule and makes it ENABLED at
+// the normal cadence (pollcadence.NormalExpression), reporting whether that
+// took an UpdateSchedule. A schedule already there is left alone; one an
+// idle poller slowed, or one a poller older than #323 disabled, is set back.
+// cur is PreflightPollSchedule's result: nil (not deployed) does nothing. The
+// re-read matters because cur was read before the persist, and a slow-down
+// in between must not be mistaken for a schedule that needs nothing.
+//
+// The error is the raw Scheduler error: undo the persist, then pass it to
+// PollScheduleUpdateRefusal.
+func ArmPollSchedule(ctx context.Context, sched PollScheduleAPI, cur *scheduler.GetScheduleOutput) (bool, error) {
+	if cur == nil {
 		return false, nil
 	}
-	if err := enablePollSchedule(ctx, sched, cur); err != nil {
+	fresh, err := sched.GetSchedule(ctx, &scheduler.GetScheduleInput{Name: cur.Name, GroupName: cur.GroupName})
+	if err != nil {
+		return false, err
+	}
+	return pollcadence.SetFrom(ctx, sched, fresh, pollcadence.NormalExpression)
+}
+
+// EnablePollScheduleIfOff puts a DISABLED or idle-cadence schedule back to
+// ENABLED at the normal cadence, from cur, and reports whether it did. A nil
+// (not deployed) schedule, or one already ENABLED at another cadence, is left
+// alone.
+//
+// Deprecated: it does not re-read the schedule or bump the poller epoch, so
+// it can lose the race #323 fixed. Use BumpPollerEpoch and ArmPollSchedule.
+func EnablePollScheduleIfOff(ctx context.Context, sched PollScheduleAPI, cur *scheduler.GetScheduleOutput) (bool, error) {
+	if cur == nil || (cur.State != schedulertypes.ScheduleStateDisabled && !pollcadence.IsIdle(cur)) {
+		return false, nil
+	}
+	if _, err := sched.UpdateSchedule(ctx, pollcadence.UpdateInput(cur, pollcadence.NormalExpression, schedulertypes.ScheduleStateEnabled)); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -106,27 +164,6 @@ func PollScheduleUpdateRefusal(action, undone string, rollbackErr, err error) er
 	return pollScheduleError(action, state, "scheduler:UpdateSchedule", PollScheduleName(), err)
 }
 
-// enablePollSchedule switches the schedule on. UpdateSchedule is a full PUT,
-// so every field the schedule carries is round-tripped (an omitted optional
-// field is dropped), as pkg/deploy's updatePollerSchedule does.
-func enablePollSchedule(ctx context.Context, sched PollScheduleAPI, cur *scheduler.GetScheduleOutput) error {
-	_, err := sched.UpdateSchedule(ctx, &scheduler.UpdateScheduleInput{
-		Name:                       cur.Name,
-		Description:                cur.Description,
-		ScheduleExpression:         cur.ScheduleExpression,
-		ScheduleExpressionTimezone: cur.ScheduleExpressionTimezone,
-		FlexibleTimeWindow:         cur.FlexibleTimeWindow,
-		Target:                     cur.Target,
-		GroupName:                  cur.GroupName,
-		KmsKeyArn:                  cur.KmsKeyArn,
-		StartDate:                  cur.StartDate,
-		EndDate:                    cur.EndDate,
-		ActionAfterCompletion:      cur.ActionAfterCompletion,
-		State:                      schedulertypes.ScheduleStateEnabled,
-	})
-	return err
-}
-
 // pollScheduleError is the refusal: what failed, what state it left, and — for
 // AccessDenied — exactly which permissions the caller is missing.
 func pollScheduleError(action, state, call, name string, err error) error {
@@ -138,9 +175,10 @@ func pollScheduleError(action, state, call, name string, err error) error {
 	}
 	return fmt.Errorf(`cannot %s: %s on the hosted poller's schedule %s was denied (%s): %w
 
-The hosted poller switches its schedule off when no watches are active, so
-arming a watch must read the schedule and switch it back on. Without that the
-watch would be stored as active and never polled. Your identity needs:
+An idle hosted poller slows its schedule to once an hour (an older poller
+switches it off), so arming a watch must read the schedule and set it back to
+every 5 minutes. Without that the watch could be stored as active and not be
+polled. Your identity needs:
   - scheduler:GetSchedule and scheduler:UpdateSchedule on schedule %s
   - iam:PassRole on role %s (UpdateSchedule passes the role the schedule assumes)
 See docs/reference/cli-iam-actions.md for every action each command needs. Ask an

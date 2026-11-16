@@ -63,10 +63,11 @@ type PollerInfo struct {
 type ScheduleInfo struct {
 	// Exists is false (with a nil error) when the schedule isn't there.
 	Exists bool `json:"exists"`
-	// State is the raw ENABLED/DISABLED string. The schedule's state is owned out
-	// of band (see EnsurePollerSchedule): `watch`/`extend` enable it, the poller
-	// disables itself when idle — which is exactly why a mismatch against "are
-	// there active watches" is worth reporting.
+	// State is the raw ENABLED/DISABLED string. The schedule's state and
+	// cadence are owned out of band (see EnsurePollerSchedule): arming a watch
+	// sets it ENABLED every 5 minutes, an idle poller slows it to hourly (#323;
+	// an older poller disabled it) — which is exactly why a mismatch against
+	// "are there active watches" is worth reporting.
 	State      string `json:"state,omitempty"`
 	Expression string `json:"expression,omitempty"`
 	TargetARN  string `json:"target_arn,omitempty"`

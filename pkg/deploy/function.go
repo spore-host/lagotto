@@ -45,7 +45,7 @@ type PollerFunctionInput struct {
 //
 //	WATCHES_TABLE, HISTORY_TABLE, SCHEDULED_TABLE  → the CLI-owned tables (#59)
 //	SNS_TOPIC_ARN                                  → capacity alerts (empty = no notifier)
-//	SCHEDULE_NAME                                  → the schedule the poller self-disables
+//	SCHEDULE_NAME                                  → the schedule whose cadence the poller slows when idle (#323)
 //	POLLER_FUNCTION_ARN, SCHEDULER_INVOKE_ROLE_ARN → re-arming a #62 boundary retry
 //
 // A MISSING VARIABLE SILENTLY DEGRADES THE POLLER rather than failing it (the

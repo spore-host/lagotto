@@ -117,9 +117,10 @@ func parseStatements(t *testing.T, doc string) []parsedStatement {
 // that CreatePolicy accepts (spawn#665).
 func TestConditionKeysMatchActionService(t *testing.T) {
 	known := map[string]bool{"iam:PassedToService": true, "sns:Protocol": true, "ec2:ResourceTag/" + holdTagKey: true,
-		"dynamodb:LeadingKeys": true}
-	// The caller check models StringEquals, and the owner-scoped statements'
-	// LeadingKeys operators through their own context (ownerScoped).
+		"dynamodb:LeadingKeys": true, "dynamodb:Attributes": true}
+	// The caller check models StringEquals, the owner-scoped statements'
+	// LeadingKeys operators through their own context (ownerScoped), and the
+	// poller-control statement's key and attributes through its (pinnedKey).
 	ops := map[string]bool{"StringEquals": true, "ForAllValues:StringLike": true, "ForAllValues:StringEquals": true, "Null": true}
 	n := 0
 	for _, st := range parseStatements(t, goldenDoc(t)) {
@@ -129,8 +130,8 @@ func TestConditionKeysMatchActionService(t *testing.T) {
 			}
 			if op != "StringEquals" {
 				for key := range kv {
-					if key != "dynamodb:LeadingKeys" {
-						t.Errorf("%s: %s on %s; only dynamodb:LeadingKeys is owner-scoped", st.Sid, op, key)
+					if key != "dynamodb:LeadingKeys" && (st.Sid != "PollerControl" || key != "dynamodb:Attributes") {
+						t.Errorf("%s: %s on %s; only dynamodb:LeadingKeys is owner-scoped (and PollerControl's attributes)", st.Sid, op, key)
 					}
 				}
 			}
@@ -149,8 +150,9 @@ func TestConditionKeysMatchActionService(t *testing.T) {
 			}
 		}
 	}
-	if n != 6 {
-		t.Errorf("found %d condition keys, want 6 (PassRole, Subscribe, CancelCapacityReservation, and LeadingKeys x3)", n)
+	if n != 9 {
+		t.Errorf("found %d condition keys, want 9 (PassRole, Subscribe, CancelCapacityReservation, LeadingKeys x3, "+
+			"and PollerControl's LeadingKeys x2 and Attributes)", n)
 	}
 }
 

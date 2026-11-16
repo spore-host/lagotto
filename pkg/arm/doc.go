@@ -8,11 +8,12 @@
 // (spore-host-mcp#78, #81), then fixed them by copying the code. This package is
 // that code, exported, so the CLI and every other caller run the same steps:
 //
-//   - The poll schedule (#231). The hosted poller switches its own schedule off
-//     when no watch is active, so arming a watch must switch it back on:
-//     PreflightPollSchedule BEFORE storing the watch, store it, then
-//     EnablePollScheduleIfOff; if that fails, undo the store and return
-//     PollScheduleUpdateRefusal. pollschedule.go has the full sequence.
+//   - The poll schedule (#231, #323). An idle hosted poller slows its schedule
+//     to once an hour (an older one switched it off), so arming a watch must
+//     set it back to every 5 minutes: PreflightPollSchedule BEFORE storing the
+//     watch, store it, BumpPollerEpoch, then ArmPollSchedule; if that fails,
+//     undo the store and return PollScheduleUpdateRefusal. pollschedule.go
+//     has the full sequence, and pkg/pollcadence the poller's half.
 //   - The alerts topic (#241): ResolveAlertsTopic finds the SNS topic email
 //     channels are delivered through, the way the hosted poller gets it.
 //   - Email subscriptions (#240): SubscribeWatchEmails subscribes each email
