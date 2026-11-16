@@ -208,3 +208,12 @@ func hasManagedTag(tags []iamtypes.Tag) bool {
 	}
 	return false
 }
+
+// DeleteInstanceProfile is the per-profile deleter of `lagotto teardown
+// --plan` (#325): lagotto's own instance profile ([InstanceRoleName]) as
+// [DeleteInstanceRole] removes it, and any other profile only as
+// [DeleteManagedInstanceProfile] does, when `setup` created it. deleted is
+// false when the profile was absent or, for another name, lacks lagotto's tag.
+func DeleteInstanceProfile(ctx context.Context, client InstanceRoleDeleteAPI, name string) (deleted bool, err error) {
+	return deleteProfile(ctx, client, name, name != InstanceRoleName)
+}

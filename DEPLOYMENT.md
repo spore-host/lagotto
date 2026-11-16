@@ -494,6 +494,29 @@ in a region with no poller (`artifact-buckets`) and a per-launch schedule that n
 scheduled-launch record names. The new permissions these commands need are in
 [docs/reference/cli-iam-actions.md](docs/reference/cli-iam-actions.md).
 
+### Footprint and the plan-driven teardown
+
+`lagotto footprint --all-regions` lists everything lagotto has in the account
+(#325, part of [spore-host#752](https://github.com/spore-host/spore-host/issues/752))
+and classifies each resource: `active` (in use, or something in use depends on
+it), `residue` (lagotto's own machinery: the shared Scheduler invoke role, and a
+poller log group whose function is gone), `permanent` (only what is tagged
+`spore-host:permanent=true`), `user-data` and `litter` (removable now). Nothing
+lagotto makes is user data: **the match history is deleted with the teardown**,
+by owner decision; export it with `lagotto history` first. `lagotto-cli-user` is
+litter only once nothing is attached to it. A resource matched by name alone
+(made before #324 tagged everything) is reported and never deleted. `-o json` is
+the shared spore.host footprint schema, and doctor's orphan-bucket and
+orphan-schedule checks use the same reader and rule.
+
+`lagotto footprint --all-regions -o json > plan.json`, then `lagotto teardown
+--plan plan.json` (report mode, the default) says what would be deleted:
+everything not active and not depended on by something active, dependents
+first, each re-checked against a fresh footprint. `--mode reap --yes` deletes it
+with the same deleters as the steps above. Until the teardown lease of #326
+exists, which keeps one user's teardown from racing another's setup in a shared
+account, reap refuses without a hidden acknowledgement flag; use the steps above.
+
 ## Alternate: deploy via CloudFormation (IaC / enterprise)
 
 `lagotto deploy` does not use CloudFormation. The template is still shipped —

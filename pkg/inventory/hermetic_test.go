@@ -1,0 +1,12 @@
+package inventory
+
+import (
+	"testing"
+
+	"github.com/spore-host/lagotto/pkg/testutil/hermetic"
+)
+
+// TestMain makes this package's tests hermetic even under a plain `go test`
+// (#214): the ambient AWS credentials, profile and config are replaced with
+// fakes, and any request that would leave the machine fails the binary.
+func TestMain(m *testing.M) { hermetic.Main(m) }

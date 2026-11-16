@@ -58,6 +58,9 @@ type PollerInfo struct {
 	RoleARN    string `json:"role_arn,omitempty"`
 	Runtime    string `json:"runtime,omitempty"`
 	CodeSHA256 string `json:"code_sha256,omitempty"`
+	// Tags are the function's tags (`lagotto footprint`, #325). Not part of
+	// doctor's JSON.
+	Tags map[string]string `json:"-"`
 }
 
 // ScheduleInfo is a read-only snapshot of the poller's EventBridge schedule.
@@ -100,7 +103,7 @@ func (d *Deployer) InspectPoller(ctx context.Context) (PollerInfo, error) {
 		}
 		return PollerInfo{}, fmt.Errorf("look up function %s: %w", PollerFunctionName, err)
 	}
-	info := PollerInfo{Exists: true, Version: out.Tags[VersionTag]}
+	info := PollerInfo{Exists: true, Version: out.Tags[VersionTag], Tags: out.Tags}
 	if cfg := out.Configuration; cfg != nil {
 		info.ARN = aws.ToString(cfg.FunctionArn)
 		info.RoleARN = aws.ToString(cfg.Role)

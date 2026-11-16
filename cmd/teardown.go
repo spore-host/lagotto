@@ -82,7 +82,29 @@ deleting anything, while a poller still exists in any of them (remove each with
 to delete an attached policy, so teardown first DETACHES it from every user,
 group and role it is attached to (each is printed; they lose those permissions),
 then deletes its non-default versions, then the policy. A policy of that name
-without lagotto's lagotto:managed=cli tag is left in place and reported.`,
+without lagotto's lagotto:managed=cli tag is left in place and reported.
+
+--plan <file|-> takes the other path (lagotto#325): it executes a footprint,
+the JSON 'lagotto footprint -o json' writes, through the shared spore.host
+teardown executor, and none of the above applies (--force and --iam-roles are
+refused with it). It first takes the footprint again, of the plan's regions (of
+every region when the plan names an account-wide resource), and keeps whatever
+is active in either, and everything an active resource depends on: a pending
+launch's schedule group, the role an active poller runs as. The rest is deleted
+in dependency order (a profile before its role, a schedule before its group,
+the poller before its role, topic and tables, each log group after every
+function), each one re-checked first: one that is gone is skipped, and one
+whose tags or class changed since the plan is refused. Only a resource tagged
+spore-host:managed-by=lagotto, with lagotto's name, is ever deleted; never one
+tagged spore-host:role=service or spore-host:permanent=true, a legacy-name or
+foreign one, a capacity reservation, a training job or the legacy stack. When
+one is not removed, nothing it depends on is tried.
+
+--mode report, the default, deletes nothing and says what reap would delete.
+--mode reap deletes and needs --yes. Until the teardown lease of lagotto#326
+exists, which stops one user's teardown racing another's setup in a shared
+account, reap also refuses unless a hidden --i-understand-no-lease is passed.
+Use -o json for the outcome of every step.`,
 	RunE: runTeardown,
 }
 
@@ -95,6 +117,12 @@ func init() {
 }
 
 func runTeardown(cmd *cobra.Command, args []string) error {
+	if err := checkTeardownFlags(cmd); err != nil {
+		return err
+	}
+	if teardownPlan != "" {
+		return runTeardownPlan(cmd)
+	}
 	ctx := context.Background()
 
 	cfg, err := awscfg.Load(ctx, "")

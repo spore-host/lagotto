@@ -3,24 +3,19 @@ package doctor
 import (
 	"fmt"
 	"strings"
+
+	"github.com/spore-host/lagotto/pkg/inventory"
 )
 
 // CheckArtifactBuckets names the orphan artifact bucket check (#264).
 const CheckArtifactBuckets = "artifact-buckets"
 
 // ArtifactBucket is one default-named lagotto-lambda-<account>-<region>
-// bucket and what doctor learned about its region.
-type ArtifactBucket struct {
-	Region string
-	Name   string
-	// Poller is whether the poller Lambda exists in Region.
-	Poller bool
-	// Managed is whether the bucket carries lagotto's managed tag, which is
-	// what lets `deploy --teardown` delete it. Only read for an orphan.
-	Managed bool
-	// Err is a failed poller or tag lookup; the bucket is then unclassified.
-	Err error
-}
+// bucket and what doctor learned about its region. It is the footprint's own
+// record of the bucket (pkg/inventory, #325), read by the same
+// inventory.GatherArtifactBuckets, so doctor and `lagotto footprint` cannot
+// disagree about which bucket is an orphan.
+type ArtifactBucket = inventory.ArtifactBucket
 
 // EvalArtifactBuckets reports artifact buckets in regions with no poller: left
 // by a `deploy --teardown` from before #264, which retained the bucket, or by
@@ -44,7 +39,7 @@ func EvalArtifactBuckets(buckets []ArtifactBucket, listErr error) (Check, bool) 
 		switch {
 		case b.Err != nil:
 			unknown = append(unknown, fmt.Sprintf("%s: could not check the poller or tag in %s: %v", b.Name, b.Region, b.Err))
-		case b.Poller:
+		case !b.Orphan():
 		case b.Managed:
 			orphans = append(orphans, fmt.Sprintf("%s: no poller in %s; 'lagotto deploy --teardown --region %s' deletes it",
 				b.Name, b.Region, b.Region))

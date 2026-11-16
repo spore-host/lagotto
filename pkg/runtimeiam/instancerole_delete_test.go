@@ -124,3 +124,11 @@ func TestDeleteManagedInstanceProfile(t *testing.T) {
 		}
 	}
 }
+
+// TestDeleteRoleOnlyLagottos: the per-role deleter of `teardown --plan`
+// (#325) refuses any role that is not lagotto's, before any IAM call.
+func TestDeleteRoleOnlyLagottos(t *testing.T) {
+	if _, err := DeleteRole(context.Background(), nil, "team-gpu"); err == nil {
+		t.Error("DeleteRole accepted an administrator's role")
+	}
+}

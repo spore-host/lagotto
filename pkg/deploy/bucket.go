@@ -311,11 +311,19 @@ func (d *Deployer) ArtifactBucketRegions(ctx context.Context, accountID string) 
 // ArtifactBucketManaged reports whether the default artifact bucket in region
 // carries the managed tag. Read-only. d must be a Deployer for that region.
 func (d *Deployer) ArtifactBucketManaged(ctx context.Context, region, accountID string) (bool, error) {
-	tags, err := d.bucketTags(ctx, DefaultBucketName(accountID, region), accountID)
+	tags, err := d.ArtifactBucketTags(ctx, region, accountID)
 	if err != nil {
 		return false, err
 	}
 	return tags[ManagedTagKey] == ManagedTagValue, nil
+}
+
+// ArtifactBucketTags returns the tags of the default artifact bucket in region
+// (an empty map when it has none). Read-only, one s3:GetBucketTagging. d must
+// be a Deployer for that region. `lagotto doctor` and `lagotto footprint`
+// (#325) both read the bucket through it.
+func (d *Deployer) ArtifactBucketTags(ctx context.Context, region, accountID string) (map[string]string, error) {
+	return d.bucketTags(ctx, DefaultBucketName(accountID, region), accountID)
 }
 
 // isBucketNotFound reports whether a HeadBucket error means no such bucket.

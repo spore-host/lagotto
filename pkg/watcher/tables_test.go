@@ -294,3 +294,27 @@ func TestDeleteManagedTables_DeletesTaggedTables(t *testing.T) {
 		t.Errorf("deleted %v; expected both CLI-managed tables to be deleted", deleted)
 	}
 }
+
+// TestDeleteTableOneAtATime: the per-table deleter of `teardown --plan`
+// (#325) deletes one of the store's tables, reports an absent one as absent,
+// and refuses a table that is not one of the three before any call.
+func TestDeleteTableOneAtATime(t *testing.T) {
+	env := testutil.SubstrateServer(t)
+	store := watcher.NewStore(env.AWSConfig, "dt-watches", "dt-history")
+	ctx := context.Background()
+	if _, err := store.EnsureTables(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := store.DeleteTable(ctx, "dt-watches"); err != nil || out != watcher.TableDeleted {
+		t.Fatalf("DeleteTable = %q, %v", out, err)
+	}
+	if out, err := store.DeleteTable(ctx, "dt-watches"); err != nil || out != watcher.TableAbsent {
+		t.Errorf("second DeleteTable = %q, %v", out, err)
+	}
+	if _, err := store.DeleteTable(ctx, "someone-elses-table"); err == nil {
+		t.Error("DeleteTable accepted a table that is not lagotto's")
+	}
+	if _, err := env.DynamoDBClient().DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: aws.String("dt-history")}); err != nil {
+		t.Errorf("deleting one table touched another: %v", err)
+	}
+}

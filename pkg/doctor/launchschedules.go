@@ -2,7 +2,8 @@ package doctor
 
 import (
 	"fmt"
-	"strings"
+
+	"github.com/spore-host/lagotto/pkg/inventory"
 )
 
 // CheckLaunchSchedules names the orphan per-launch schedule check (#260).
@@ -38,7 +39,7 @@ func EvalLaunchSchedules(region string, schedules []string, listErr error, recor
 
 	var orphans []string
 	for _, s := range schedules {
-		if !hasRecord(s, recorded) {
+		if !inventory.LaunchScheduleRecorded(s, recorded) {
 			orphans = append(orphans, s)
 		}
 	}
@@ -54,15 +55,4 @@ func EvalLaunchSchedules(region string, schedules []string, listErr error, recor
 	}
 	c.Detail = append(c.Detail, "or 'lagotto teardown' (deletes every per-launch schedule together with lagotto's tables)")
 	return c, true
-}
-
-// hasRecord reports whether schedule is a recorded schedule or one of its
-// boundary retries.
-func hasRecord(schedule string, recorded []string) bool {
-	for _, r := range recorded {
-		if r != "" && (schedule == r || strings.HasPrefix(schedule, r+"-r")) {
-			return true
-		}
-	}
-	return false
 }
