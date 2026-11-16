@@ -69,3 +69,20 @@ func TestWithDoesNotModifyArguments(t *testing.T) {
 		t.Errorf("With = %v, a = %v", got, a)
 	}
 }
+
+func TestStamp(t *testing.T) {
+	at := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	s := Stamp{Owner: "AIDAX", Now: func() time.Time { return at }}
+	if got := s.Service("global", ComponentCLIPolicy); got[tags.Created] != "2026-03-04T05:06:07Z" || got[tags.Owner] != "AIDAX" || !tags.IsService(got) {
+		t.Errorf("Service = %v", got)
+	}
+	if got := s.Workload("us-east-1"); tags.IsService(got) || got[tags.Scope] != "us-east-1" {
+		t.Errorf("Workload = %v", got)
+	}
+	if FirstStamp(nil).Owner != "" || FirstStamp([]Stamp{s}).Owner != "AIDAX" {
+		t.Error("FirstStamp")
+	}
+	if _, ok := tags.CreatedAt(Stamp{}.Workload("r")); !ok {
+		t.Error("the zero Stamp has no created time")
+	}
+}
