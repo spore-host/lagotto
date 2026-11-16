@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.71.0] - 2026-11-16
+
 ### Added
 
 - **`docs-gen/_levels.json`: the disclosure level of every command and flag** (#297), for the spore.host portal's CLI⇄GUI parity gate. `lagotto gen-docs` writes it beside the markdown reference, which is unchanged. Each command's level comes from its `spore.host/level` cobra annotation, and each flag's from the same annotation on the flag (unannotated flags are `advanced`). Every command must set a level explicitly, and a test fails when one does not. The basic set is `watch` (with `--action`), `list`, `status`, `ack`, `cancel` and `history`. The format, `spore.host/cli-levels/v1`, is proposed for spawn and truffle too.
@@ -2480,7 +2482,8 @@ Initial tagged release from the standalone `spore-host/lagotto` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/lagotto/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.70.0...HEAD
+[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.71.0...HEAD
+[0.71.0]: https://github.com/spore-host/lagotto/compare/v0.70.0...v0.71.0
 [0.70.0]: https://github.com/spore-host/lagotto/compare/v0.69.2...v0.70.0
 [0.69.2]: https://github.com/spore-host/lagotto/compare/v0.69.1...v0.69.2
 [0.69.1]: https://github.com/spore-host/lagotto/compare/v0.69.0...v0.69.1
