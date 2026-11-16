@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/scheduler"
 	schedulertypes "github.com/aws/aws-sdk-go-v2/service/scheduler/types"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
+	snstypes "github.com/aws/aws-sdk-go-v2/service/sns/types"
 )
 
 // In-package fakes that record every call, patterned on
@@ -125,9 +126,14 @@ func (f *fakeLambda) TagResource(_ context.Context, in *lambda.TagResourceInput,
 }
 
 // fakeSNS records SNS calls over a single in-memory topic.
+//
+// The topic exists unless absent is set; CreateTopic creates it. tags are
+// its tags, written by CreateTopic and TagResource.
 type fakeSNS struct {
 	arn        string
 	attributes map[string]string
+	absent     bool
+	tags       map[string]string
 
 	createCalls []*sns.CreateTopicInput
 	setCalls    []*sns.SetTopicAttributesInput
@@ -146,7 +152,22 @@ func (f *fakeSNS) CreateTopic(_ context.Context, in *sns.CreateTopicInput, _ ...
 	if f.createErr != nil {
 		return nil, f.createErr
 	}
+	if f.absent {
+		f.absent = false
+		f.tags = map[string]string{}
+		for _, t := range in.Tags {
+			f.tags[deref(t.Key)] = deref(t.Value)
+		}
+	}
 	return &sns.CreateTopicOutput{TopicArn: strptr(f.arn)}, nil
+}
+
+func (f *fakeSNS) ListTagsForResource(_ context.Context, _ *sns.ListTagsForResourceInput, _ ...func(*sns.Options)) (*sns.ListTagsForResourceOutput, error) {
+	out := &sns.ListTagsForResourceOutput{}
+	for k, v := range f.tags {
+		out.Tags = append(out.Tags, snstypes.Tag{Key: aws.String(k), Value: aws.String(v)})
+	}
+	return out, nil
 }
 
 func (f *fakeSNS) GetTopicAttributes(_ context.Context, _ *sns.GetTopicAttributesInput, _ ...func(*sns.Options)) (*sns.GetTopicAttributesOutput, error) {
@@ -154,7 +175,10 @@ func (f *fakeSNS) GetTopicAttributes(_ context.Context, _ *sns.GetTopicAttribute
 	if f.getErr != nil {
 		return nil, f.getErr
 	}
-	attrs := map[string]string{}
+	if f.absent {
+		return nil, &snstypes.NotFoundException{Message: aws.String("Topic does not exist")}
+	}
+	attrs := map[string]string{"TopicArn": f.arn}
 	for k, v := range f.attributes {
 		attrs[k] = v
 	}
@@ -172,6 +196,12 @@ func (f *fakeSNS) SetTopicAttributes(_ context.Context, in *sns.SetTopicAttribut
 
 func (f *fakeSNS) TagResource(_ context.Context, in *sns.TagResourceInput, _ ...func(*sns.Options)) (*sns.TagResourceOutput, error) {
 	f.tagCalls = append(f.tagCalls, in)
+	if f.tags == nil {
+		f.tags = map[string]string{}
+	}
+	for _, t := range in.Tags {
+		f.tags[deref(t.Key)] = deref(t.Value)
+	}
 	return &sns.TagResourceOutput{}, nil
 }
 
@@ -185,9 +215,31 @@ func (f *fakeSNS) DeleteTopic(_ context.Context, _ *sns.DeleteTopicInput, _ ...f
 }
 
 // fakeScheduler records Scheduler calls.
+//
+// The poller schedule is getOut, in schedule group group (lagotto's when
+// empty), unless schedules is set: then it holds the schedule per group, and
+// CreateSchedule and DeleteSchedule change it. getErr fails every read.
 type fakeScheduler struct {
-	getOut *scheduler.GetScheduleOutput
-	getErr error
+	getOut    *scheduler.GetScheduleOutput
+	getErr    error
+	group     string
+	schedules map[string]*scheduler.GetScheduleOutput
+	getGroups []string
+
+	// The schedule group (#324).
+	groupExists      bool
+	groupTags        map[string]string
+	groupCreateCalls []*scheduler.CreateScheduleGroupInput
+	groupTagCalls    []*scheduler.TagResourceInput
+	groupDeletes     int
+	groupCreateErr   error
+
+	// listByGroup, when set, are the ListSchedules pages per group; otherwise
+	// listPages are the default group's and every other group is empty.
+	listByGroup map[string][][]string
+	// deleteByGroup fails DeleteSchedule in one group ("group/name" -> err).
+	deleteByGroup map[string]error
+	deletedRefs   []string // "group/name"
 
 	createErr error
 
@@ -212,36 +264,131 @@ func (f *fakeScheduler) ListSchedules(_ context.Context, in *scheduler.ListSched
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
+	group := aws.ToString(in.GroupName)
+	pages := f.listByGroup[group]
+	if f.listByGroup == nil {
+		if group == "lagotto" && !f.groupExists && f.schedules == nil {
+			return nil, &schedulertypes.ResourceNotFoundException{Message: aws.String("Schedule group lagotto does not exist.")}
+		}
+		if group != "default" {
+			// The poller schedule, when the fake models one, lives here.
+			if s := f.schedules[group]; s != nil && in.NamePrefix == nil {
+				return &scheduler.ListSchedulesOutput{Schedules: []schedulertypes.ScheduleSummary{{Name: s.Name}}}, nil
+			}
+			return &scheduler.ListSchedulesOutput{}, nil
+		}
+		pages = f.listPages
+	}
 	page := 0
 	if in.NextToken != nil {
 		_, _ = fmt.Sscanf(*in.NextToken, "page-%d", &page)
 	}
 	out := &scheduler.ListSchedulesOutput{}
-	if page < len(f.listPages) {
-		for _, n := range f.listPages[page] {
+	if page < len(pages) {
+		for _, n := range pages[page] {
 			out.Schedules = append(out.Schedules, schedulertypes.ScheduleSummary{Name: aws.String(n)})
 		}
 	}
-	if page+1 < len(f.listPages) {
+	if page+1 < len(pages) {
 		out.NextToken = aws.String(fmt.Sprintf("page-%d", page+1))
 	}
 	return out, nil
 }
 
-func (f *fakeScheduler) GetSchedule(_ context.Context, _ *scheduler.GetScheduleInput, _ ...func(*scheduler.Options)) (*scheduler.GetScheduleOutput, error) {
+func (f *fakeScheduler) GetSchedule(_ context.Context, in *scheduler.GetScheduleInput, _ ...func(*scheduler.Options)) (*scheduler.GetScheduleOutput, error) {
 	f.getCalls++
+	group := aws.ToString(in.GroupName)
+	if group == "" {
+		group = "default"
+	}
+	f.getGroups = append(f.getGroups, group)
 	if f.getErr != nil {
 		return nil, f.getErr
+	}
+	notFound := &schedulertypes.ResourceNotFoundException{Message: aws.String("Schedule " + aws.ToString(in.Name) + " does not exist.")}
+	if f.schedules != nil {
+		s := f.schedules[group]
+		if s == nil {
+			return nil, notFound
+		}
+		cp := *s
+		cp.GroupName = aws.String(group)
+		return &cp, nil
+	}
+	want := f.group
+	if want == "" {
+		want = "lagotto"
+	}
+	if group != want || f.getOut == nil {
+		return nil, notFound
 	}
 	return f.getOut, nil
 }
 
 func (f *fakeScheduler) CreateSchedule(_ context.Context, in *scheduler.CreateScheduleInput, _ ...func(*scheduler.Options)) (*scheduler.CreateScheduleOutput, error) {
 	f.createCalls = append(f.createCalls, in)
+	f.log.add("CreateSchedule " + aws.ToString(in.GroupName))
 	if f.createErr != nil {
 		return nil, f.createErr
 	}
+	if f.schedules != nil {
+		group := aws.ToString(in.GroupName)
+		if f.schedules[group] != nil {
+			return nil, &schedulertypes.ConflictException{Message: aws.String("exists")}
+		}
+		f.schedules[group] = &scheduler.GetScheduleOutput{
+			Name: in.Name, Description: in.Description, ScheduleExpression: in.ScheduleExpression,
+			FlexibleTimeWindow: in.FlexibleTimeWindow, Target: in.Target, State: in.State,
+			ScheduleExpressionTimezone: in.ScheduleExpressionTimezone, KmsKeyArn: in.KmsKeyArn,
+			StartDate: in.StartDate, EndDate: in.EndDate, ActionAfterCompletion: in.ActionAfterCompletion,
+		}
+	}
 	return &scheduler.CreateScheduleOutput{}, nil
+}
+
+func (f *fakeScheduler) CreateScheduleGroup(_ context.Context, in *scheduler.CreateScheduleGroupInput, _ ...func(*scheduler.Options)) (*scheduler.CreateScheduleGroupOutput, error) {
+	f.groupCreateCalls = append(f.groupCreateCalls, in)
+	f.log.add("CreateScheduleGroup")
+	if f.groupCreateErr != nil {
+		return nil, f.groupCreateErr
+	}
+	if f.groupExists {
+		return nil, &schedulertypes.ConflictException{Message: aws.String("exists")}
+	}
+	f.groupExists, f.groupTags = true, map[string]string{}
+	for _, t := range in.Tags {
+		f.groupTags[deref(t.Key)] = deref(t.Value)
+	}
+	return &scheduler.CreateScheduleGroupOutput{}, nil
+}
+
+func (f *fakeScheduler) DeleteScheduleGroup(_ context.Context, _ *scheduler.DeleteScheduleGroupInput, _ ...func(*scheduler.Options)) (*scheduler.DeleteScheduleGroupOutput, error) {
+	f.groupDeletes++
+	f.log.add("DeleteScheduleGroup")
+	if !f.groupExists {
+		return nil, &schedulertypes.ResourceNotFoundException{Message: aws.String("no group")}
+	}
+	f.groupExists = false
+	return &scheduler.DeleteScheduleGroupOutput{}, nil
+}
+
+func (f *fakeScheduler) ListTagsForResource(_ context.Context, _ *scheduler.ListTagsForResourceInput, _ ...func(*scheduler.Options)) (*scheduler.ListTagsForResourceOutput, error) {
+	out := &scheduler.ListTagsForResourceOutput{}
+	for k, v := range f.groupTags {
+		out.Tags = append(out.Tags, schedulertypes.Tag{Key: aws.String(k), Value: aws.String(v)})
+	}
+	return out, nil
+}
+
+func (f *fakeScheduler) TagResource(_ context.Context, in *scheduler.TagResourceInput, _ ...func(*scheduler.Options)) (*scheduler.TagResourceOutput, error) {
+	f.groupTagCalls = append(f.groupTagCalls, in)
+	if f.groupTags == nil {
+		f.groupTags = map[string]string{}
+	}
+	for _, t := range in.Tags {
+		f.groupTags[deref(t.Key)] = deref(t.Value)
+	}
+	return &scheduler.TagResourceOutput{}, nil
 }
 
 func (f *fakeScheduler) UpdateSchedule(_ context.Context, in *scheduler.UpdateScheduleInput, _ ...func(*scheduler.Options)) (*scheduler.UpdateScheduleOutput, error) {
@@ -251,14 +398,25 @@ func (f *fakeScheduler) UpdateSchedule(_ context.Context, in *scheduler.UpdateSc
 
 func (f *fakeScheduler) DeleteSchedule(_ context.Context, in *scheduler.DeleteScheduleInput, _ ...func(*scheduler.Options)) (*scheduler.DeleteScheduleOutput, error) {
 	f.deleteCalls++
-	f.log.add("DeleteSchedule")
+	group := aws.ToString(in.GroupName)
+	f.log.add("DeleteSchedule " + group)
 	if f.deleteErr != nil {
 		return nil, f.deleteErr
 	}
 	if err := f.deleteErrs[aws.ToString(in.Name)]; err != nil {
 		return nil, err
 	}
+	if err := f.deleteByGroup[group+"/"+aws.ToString(in.Name)]; err != nil {
+		return nil, err
+	}
+	if f.schedules != nil {
+		if f.schedules[group] == nil {
+			return nil, &schedulertypes.ResourceNotFoundException{Message: aws.String("no such schedule")}
+		}
+		delete(f.schedules, group)
+	}
 	f.deleted = append(f.deleted, aws.ToString(in.Name))
+	f.deletedRefs = append(f.deletedRefs, group+"/"+aws.ToString(in.Name))
 	return &scheduler.DeleteScheduleOutput{}, nil
 }
 

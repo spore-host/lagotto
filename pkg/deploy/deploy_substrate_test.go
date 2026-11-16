@@ -265,8 +265,8 @@ func TestSubstrate_Deploy_CreatesAllThreeResources(t *testing.T) {
 	if len(res.Outputs) != len(want) {
 		t.Errorf("outputs has %d keys, want exactly %d (%v)", len(res.Outputs), len(want), res.Outputs)
 	}
-	if len(res.Actions) != 5 {
-		t.Errorf("Actions = %v, want one line per resource (bucket, topic, log group, function, schedule)", res.Actions)
+	if len(res.Actions) != 6 {
+		t.Errorf("Actions = %v, want one line per resource (bucket, topic, log group, function, schedule group, schedule)", res.Actions)
 	}
 
 	// The log group is there, tagged as lagotto's and with a retention (#305).
@@ -283,7 +283,7 @@ func TestSubstrate_Deploy_CreatesAllThreeResources(t *testing.T) {
 	if _, err := d.lambda.GetFunction(ctx, &lambda.GetFunctionInput{FunctionName: aws.String(PollerFunctionName)}); err != nil {
 		t.Errorf("GetFunction after Deploy: %v", err)
 	}
-	if _, err := d.sched.GetSchedule(ctx, &scheduler.GetScheduleInput{Name: aws.String(PollerScheduleName)}); err != nil {
+	if _, err := d.sched.GetSchedule(ctx, &scheduler.GetScheduleInput{Name: aws.String(PollerScheduleName), GroupName: aws.String(ScheduleGroupName)}); err != nil {
 		t.Errorf("GetSchedule after Deploy: %v", err)
 	}
 	if _, err := d.sns.GetTopicAttributes(ctx, &sns.GetTopicAttributesInput{
@@ -342,12 +342,13 @@ func TestSubstrate_Deploy_PreservesEnabledSchedule(t *testing.T) {
 	}
 
 	// Exactly what cmd/pollschedule.go's enablePollSchedule does, out of band.
-	cur, err := d.sched.GetSchedule(ctx, &scheduler.GetScheduleInput{Name: aws.String(PollerScheduleName)})
+	cur, err := d.sched.GetSchedule(ctx, &scheduler.GetScheduleInput{Name: aws.String(PollerScheduleName), GroupName: aws.String(ScheduleGroupName)})
 	if err != nil {
 		t.Fatalf("GetSchedule: %v", err)
 	}
 	if _, err := d.sched.UpdateSchedule(ctx, &scheduler.UpdateScheduleInput{
 		Name:               cur.Name,
+		GroupName:          cur.GroupName,
 		ScheduleExpression: cur.ScheduleExpression,
 		FlexibleTimeWindow: cur.FlexibleTimeWindow,
 		Target:             cur.Target,
@@ -360,7 +361,7 @@ func TestSubstrate_Deploy_PreservesEnabledSchedule(t *testing.T) {
 		t.Fatalf("second Deploy: %v", err)
 	}
 
-	after, err := d.sched.GetSchedule(ctx, &scheduler.GetScheduleInput{Name: aws.String(PollerScheduleName)})
+	after, err := d.sched.GetSchedule(ctx, &scheduler.GetScheduleInput{Name: aws.String(PollerScheduleName), GroupName: aws.String(ScheduleGroupName)})
 	if err != nil {
 		t.Fatalf("GetSchedule after redeploy: %v", err)
 	}
@@ -386,8 +387,8 @@ func TestSubstrate_Teardown_RemovesAllThreeAndIsRepeatable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
-	if len(deleted) != 4 {
-		t.Errorf("Teardown deleted %v, want all four resources", deleted)
+	if len(deleted) != 5 {
+		t.Errorf("Teardown deleted %v, want all five resources", deleted)
 	}
 
 	if _, err := d.pollerLogRetention(ctx, "us-east-1"); err == nil {
@@ -396,7 +397,7 @@ func TestSubstrate_Teardown_RemovesAllThreeAndIsRepeatable(t *testing.T) {
 	if _, err := d.lambda.GetFunction(ctx, &lambda.GetFunctionInput{FunctionName: aws.String(PollerFunctionName)}); err == nil {
 		t.Error("the poller Lambda is still there after Teardown")
 	}
-	if _, err := d.sched.GetSchedule(ctx, &scheduler.GetScheduleInput{Name: aws.String(PollerScheduleName)}); err == nil {
+	if _, err := d.sched.GetSchedule(ctx, &scheduler.GetScheduleInput{Name: aws.String(PollerScheduleName), GroupName: aws.String(ScheduleGroupName)}); err == nil {
 		t.Error("the poller schedule is still there after Teardown")
 	}
 	if _, err := d.sns.GetTopicAttributes(ctx, &sns.GetTopicAttributesInput{
@@ -433,7 +434,11 @@ func TestSubstrate_MigrateFromStack_FailsClosed(t *testing.T) {
 	ctx := context.Background()
 
 	createLegacyStack(t, d, "lagotto")
-	if _, err := d.Deploy(ctx, substrateDeployOptions()); err != nil {
+	// As cmd/deploy.go does while a legacy stack exists (#324): the stack owns
+	// the schedule in the default group, so deploy must not move it.
+	opts := substrateDeployOptions()
+	opts.HoldScheduleMove = "a legacy CloudFormation stack owns it"
+	if _, err := d.Deploy(ctx, opts); err != nil {
 		t.Fatalf("Deploy (adopting the stack's resources): %v", err)
 	}
 
@@ -588,8 +593,8 @@ func TestDeploy_RequiresAccountAndRegion(t *testing.T) {
 	}
 }
 
-// TestTeardown_DeletesInTheRightOrder: schedule → function → log group → topic,
-// so nothing can fire into a half-deleted poller, and Lambda cannot recreate the
+// TestTeardown_DeletesInTheRightOrder: schedule → function → log group → topic
+// → schedule group, so nothing can fire into a half-deleted poller, and Lambda cannot recreate the
 // log group after it is gone (#305).
 func TestTeardown_DeletesInTheRightOrder(t *testing.T) {
 	log := &callLog{}
@@ -601,7 +606,10 @@ func TestTeardown_DeletesInTheRightOrder(t *testing.T) {
 	}}
 	sn := &fakeSNS{log: log, arn: AlertsTopicARN("us-east-1", "123456789012"),
 		attributes: map[string]string{"DisplayName": "Lagotto Capacity Alerts"}}
-	sc := &fakeScheduler{log: log, getOut: &scheduler.GetScheduleOutput{Name: aws.String(PollerScheduleName)}}
+	sc := &fakeScheduler{log: log, groupExists: true, schedules: map[string]*scheduler.GetScheduleOutput{
+		"lagotto": {Name: aws.String(PollerScheduleName)},
+		"default": {Name: aws.String(PollerScheduleName)}, // an interrupted #324 move
+	}}
 	d, _ := testDeployer(l, sn, sc)
 	d.logs = &fakeLogs{log: log, exists: true}
 
@@ -609,7 +617,9 @@ func TestTeardown_DeletesInTheRightOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
-	want := []string{"DeleteSchedule", "DeleteFunction", "DeleteLogGroup", "DeleteTopic"}
+	// Both copies of the schedule first, the schedule group (#324), empty by
+	// then, last.
+	want := []string{"DeleteSchedule lagotto", "DeleteSchedule default", "DeleteFunction", "DeleteLogGroup", "DeleteTopic", "DeleteScheduleGroup"}
 	if len(log.calls) != len(want) {
 		t.Fatalf("delete calls = %v, want %v", log.calls, want)
 	}
@@ -618,8 +628,8 @@ func TestTeardown_DeletesInTheRightOrder(t *testing.T) {
 			t.Errorf("delete call %d = %s, want %s (order: %v, want %v)", i, log.calls[i], w, log.calls, want)
 		}
 	}
-	if len(deleted) != 4 {
-		t.Errorf("Teardown reported %v, want all four resources", deleted)
+	if len(deleted) != 6 {
+		t.Errorf("Teardown reported %v, want both schedules, the function, log group, topic and schedule group", deleted)
 	}
 }
 
@@ -678,7 +688,7 @@ func TestSubstrate_EnsureAlertsTopic(t *testing.T) {
 	d := substrateDeployer(t)
 	ctx := context.Background()
 
-	arn, err := d.EnsureAlertsTopic(ctx, "production")
+	arn, err := d.EnsureAlertsTopic(ctx, "production", testRegion, testAccount)
 	if err != nil {
 		t.Fatalf("EnsureAlertsTopic: %v", err)
 	}
@@ -705,11 +715,11 @@ func TestSubstrate_EnsureAlertsTopic_IsIdempotent(t *testing.T) {
 	d := substrateDeployer(t)
 	ctx := context.Background()
 
-	first, err := d.EnsureAlertsTopic(ctx, "production")
+	first, err := d.EnsureAlertsTopic(ctx, "production", testRegion, testAccount)
 	if err != nil {
 		t.Fatalf("first EnsureAlertsTopic: %v", err)
 	}
-	second, err := d.EnsureAlertsTopic(ctx, "production")
+	second, err := d.EnsureAlertsTopic(ctx, "production", testRegion, testAccount)
 	if err != nil {
 		t.Fatalf("second EnsureAlertsTopic: %v", err)
 	}
@@ -727,7 +737,7 @@ func TestSubstrate_EnsurePollerFunction(t *testing.T) {
 	d := substrateDeployer(t)
 	ctx := context.Background()
 
-	topicARN, err := d.EnsureAlertsTopic(ctx, "production")
+	topicARN, err := d.EnsureAlertsTopic(ctx, "production", testRegion, testAccount)
 	if err != nil {
 		t.Fatalf("EnsureAlertsTopic: %v", err)
 	}
@@ -812,7 +822,7 @@ func TestSubstrate_EnsurePollerFunction_IsIdempotent(t *testing.T) {
 	d := substrateDeployer(t)
 	ctx := context.Background()
 
-	topicARN, err := d.EnsureAlertsTopic(ctx, "production")
+	topicARN, err := d.EnsureAlertsTopic(ctx, "production", testRegion, testAccount)
 	if err != nil {
 		t.Fatalf("EnsureAlertsTopic: %v", err)
 	}
@@ -858,6 +868,7 @@ func TestSubstrate_EnsurePollerSchedule(t *testing.T) {
 	ctx := context.Background()
 	fnARN := PollerFunctionARN("us-east-1", "123456789012")
 	roleARN := schedulerInvokeRoleARN("123456789012")
+	mustEnsureScheduleGroup(t, d)
 
 	action, err := d.EnsurePollerSchedule(ctx, fnARN, roleARN)
 	if err != nil {
@@ -867,7 +878,7 @@ func TestSubstrate_EnsurePollerSchedule(t *testing.T) {
 		t.Errorf("action = %q, want %q", action, ActionCreated)
 	}
 
-	got, err := d.sched.GetSchedule(ctx, &scheduler.GetScheduleInput{Name: aws.String(PollerScheduleName)})
+	got, err := d.sched.GetSchedule(ctx, &scheduler.GetScheduleInput{Name: aws.String(PollerScheduleName), GroupName: aws.String(ScheduleGroupName)})
 	if err != nil {
 		t.Fatalf("GetSchedule: %v", err)
 	}
@@ -908,18 +919,20 @@ func TestSubstrate_EnsurePollerSchedule_PreservesEnabledState(t *testing.T) {
 	ctx := context.Background()
 	fnARN := PollerFunctionARN("us-east-1", "123456789012")
 	roleARN := schedulerInvokeRoleARN("123456789012")
+	mustEnsureScheduleGroup(t, d)
 
 	if _, err := d.EnsurePollerSchedule(ctx, fnARN, roleARN); err != nil {
 		t.Fatalf("EnsurePollerSchedule: %v", err)
 	}
 
 	// Exactly what cmd/pollschedule.go's enablePollSchedule does, out of band.
-	cur, err := d.sched.GetSchedule(ctx, &scheduler.GetScheduleInput{Name: aws.String(PollerScheduleName)})
+	cur, err := d.sched.GetSchedule(ctx, &scheduler.GetScheduleInput{Name: aws.String(PollerScheduleName), GroupName: aws.String(ScheduleGroupName)})
 	if err != nil {
 		t.Fatalf("GetSchedule: %v", err)
 	}
 	if _, err := d.sched.UpdateSchedule(ctx, &scheduler.UpdateScheduleInput{
 		Name:               cur.Name,
+		GroupName:          cur.GroupName,
 		ScheduleExpression: cur.ScheduleExpression,
 		FlexibleTimeWindow: cur.FlexibleTimeWindow,
 		Target:             cur.Target,
@@ -933,7 +946,7 @@ func TestSubstrate_EnsurePollerSchedule_PreservesEnabledState(t *testing.T) {
 		t.Fatalf("re-deploy EnsurePollerSchedule: %v", err)
 	}
 
-	after, err := d.sched.GetSchedule(ctx, &scheduler.GetScheduleInput{Name: aws.String(PollerScheduleName)})
+	after, err := d.sched.GetSchedule(ctx, &scheduler.GetScheduleInput{Name: aws.String(PollerScheduleName), GroupName: aws.String(ScheduleGroupName)})
 	if err != nil {
 		t.Fatalf("GetSchedule after redeploy: %v", err)
 	}
@@ -945,7 +958,7 @@ func TestSubstrate_EnsurePollerSchedule_PreservesEnabledState(t *testing.T) {
 	if _, err := d.EnsurePollerSchedule(ctx, "arn:aws:lambda:us-east-1:123456789012:function:other", roleARN); err != nil {
 		t.Fatalf("converging EnsurePollerSchedule: %v", err)
 	}
-	after, err = d.sched.GetSchedule(ctx, &scheduler.GetScheduleInput{Name: aws.String(PollerScheduleName)})
+	after, err = d.sched.GetSchedule(ctx, &scheduler.GetScheduleInput{Name: aws.String(PollerScheduleName), GroupName: aws.String(ScheduleGroupName)})
 	if err != nil {
 		t.Fatalf("GetSchedule after converging redeploy: %v", err)
 	}
@@ -968,12 +981,12 @@ func TestSubstrate_DeleteHelpersTolerateAbsence(t *testing.T) {
 	if err := d.deletePollerFunction(ctx); err != nil {
 		t.Errorf("deletePollerFunction with no function: %v", err)
 	}
-	if err := d.deletePollerSchedule(ctx); err != nil {
+	if err := d.deletePollerSchedule(ctx, ScheduleGroupName); err != nil {
 		t.Errorf("deletePollerSchedule with no schedule: %v", err)
 	}
 
 	// Now stand the resources up and delete them for real.
-	topicARN, err := d.EnsureAlertsTopic(ctx, "production")
+	topicARN, err := d.EnsureAlertsTopic(ctx, "production", testRegion, testAccount)
 	if err != nil {
 		t.Fatalf("EnsureAlertsTopic: %v", err)
 	}
@@ -994,11 +1007,12 @@ func TestSubstrate_DeleteHelpersTolerateAbsence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsurePollerFunction: %v", err)
 	}
+	mustEnsureScheduleGroup(t, d)
 	if _, err := d.EnsurePollerSchedule(ctx, fnARN, schedulerInvokeRoleARN("123456789012")); err != nil {
 		t.Fatalf("EnsurePollerSchedule: %v", err)
 	}
 
-	if err := d.deletePollerSchedule(ctx); err != nil {
+	if err := d.deletePollerSchedule(ctx, ScheduleGroupName); err != nil {
 		t.Errorf("deletePollerSchedule: %v", err)
 	}
 	if err := d.deletePollerFunction(ctx); err != nil {
@@ -1009,7 +1023,7 @@ func TestSubstrate_DeleteHelpersTolerateAbsence(t *testing.T) {
 	}
 
 	// Re-running each delete must still be a no-op success (Teardown is re-runnable).
-	if err := d.deletePollerSchedule(ctx); err != nil {
+	if err := d.deletePollerSchedule(ctx, ScheduleGroupName); err != nil {
 		t.Errorf("second deletePollerSchedule: %v", err)
 	}
 	if err := d.deletePollerFunction(ctx); err != nil {
@@ -1018,4 +1032,65 @@ func TestSubstrate_DeleteHelpersTolerateAbsence(t *testing.T) {
 	if err := d.deleteAlertsTopic(ctx, "us-east-1", "123456789012"); err != nil {
 		t.Errorf("second deleteAlertsTopic: %v", err)
 	}
+}
+
+// mustEnsureScheduleGroup creates lagotto's schedule group, as Deploy does
+// before the schedule (#324).
+func mustEnsureScheduleGroup(t *testing.T, d *Deployer) {
+	t.Helper()
+	if _, err := d.ensureScheduleGroup(context.Background(), "us-east-1", "123456789012"); err != nil {
+		t.Fatalf("ensureScheduleGroup: %v", err)
+	}
+}
+
+// TestSubstrate_EnsurePollerSchedule_MovesItOutOfTheDefaultGroup is the #324
+// move against a real wire protocol: a poller schedule a pre-#324 deploy left
+// in the default group, ENABLED and slowed to the idle cadence, ends up in
+// lagotto's group alone, with its state and cadence, and a re-run changes
+// nothing.
+func TestSubstrate_EnsurePollerSchedule_MovesItOutOfTheDefaultGroup(t *testing.T) {
+	d := substrateDeployer(t)
+	ctx := context.Background()
+	fnARN := PollerFunctionARN("us-east-1", "123456789012")
+	roleARN := schedulerInvokeRoleARN("123456789012")
+	mustEnsureScheduleGroup(t, d)
+
+	if _, err := d.sched.CreateSchedule(ctx, &scheduler.CreateScheduleInput{
+		Name:               aws.String(PollerScheduleName),
+		Description:        aws.String(pollerScheduleDescription),
+		ScheduleExpression: aws.String("rate(1 hour)"),
+		FlexibleTimeWindow: &schedulertypes.FlexibleTimeWindow{Mode: schedulertypes.FlexibleTimeWindowModeOff},
+		Target:             &schedulertypes.Target{Arn: aws.String(fnARN), RoleArn: aws.String(roleARN)},
+		State:              schedulertypes.ScheduleStateEnabled,
+	}); err != nil {
+		t.Fatalf("seeding the pre-#324 schedule: %v", err)
+	}
+
+	action, err := d.EnsurePollerSchedule(ctx, fnARN, roleARN)
+	if err != nil {
+		t.Fatalf("EnsurePollerSchedule: %v", err)
+	}
+	if !strings.Contains(action, "moved from schedule group default to lagotto") {
+		t.Errorf("action = %q, want the move reported", action)
+	}
+	if _, err := d.sched.GetSchedule(ctx, &scheduler.GetScheduleInput{Name: aws.String(PollerScheduleName)}); !isSchedulerNotFound(err) {
+		t.Errorf("the default group's schedule is still there after the move (err %v): both would fire", err)
+	}
+	moved, err := d.sched.GetSchedule(ctx, &scheduler.GetScheduleInput{Name: aws.String(PollerScheduleName), GroupName: aws.String(ScheduleGroupName)})
+	if err != nil {
+		t.Fatalf("GetSchedule in %s: %v", ScheduleGroupName, err)
+	}
+	if moved.State != schedulertypes.ScheduleStateEnabled || aws.ToString(moved.ScheduleExpression) != "rate(1 hour)" {
+		t.Errorf("moved schedule is %s at %s, want ENABLED at rate(1 hour): the move must keep state and cadence",
+			moved.State, aws.ToString(moved.ScheduleExpression))
+	}
+
+	if action, err := d.EnsurePollerSchedule(ctx, fnARN, roleARN); err != nil || strings.Contains(action, "moved") {
+		t.Errorf("re-run = %q, %v; want no second move", action, err)
+	}
+}
+
+func isSchedulerNotFound(err error) bool {
+	var nf *schedulertypes.ResourceNotFoundException
+	return errors.As(err, &nf)
 }

@@ -9,6 +9,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
 	lambdatypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
+
+	"github.com/spore-host/lagotto/pkg/managedtags"
 )
 
 // Action strings returned by EnsurePollerFunction / EnsurePollerSchedule, so a
@@ -109,7 +111,7 @@ func (d *Deployer) EnsurePollerFunction(ctx context.Context, in PollerFunctionIn
 	if cur.Configuration == nil {
 		return "", "", fmt.Errorf("look up function %s: no configuration returned", PollerFunctionName)
 	}
-	return d.updatePollerFunction(ctx, in, cur.Configuration)
+	return d.updatePollerFunction(ctx, in, cur.Configuration, cur.Tags)
 }
 
 // RequirePollerDeployed confirms the hosted poller Lambda actually exists in the
@@ -198,7 +200,9 @@ func (d *Deployer) createPollerFunction(ctx context.Context, in PollerFunctionIn
 // updatePollerFunction converges an existing function: code, then configuration,
 // then tags. Each step is skipped when it would be a no-op — that's what makes a
 // re-run cheap and avoids pointless revision churn.
-func (d *Deployer) updatePollerFunction(ctx context.Context, in PollerFunctionInput, cur *lambdatypes.FunctionConfiguration) (string, string, error) {
+//
+// curTags are the function's tags as GetFunction reported them.
+func (d *Deployer) updatePollerFunction(ctx context.Context, in PollerFunctionInput, cur *lambdatypes.FunctionConfiguration, curTags map[string]string) (string, string, error) {
 	arn := aws.ToString(cur.FunctionArn)
 
 	// A function created seconds ago, or a concurrent deploy, leaves an update in
@@ -261,11 +265,13 @@ func (d *Deployer) updatePollerFunction(ctx context.Context, in PollerFunctionIn
 
 	// Lambda tags are not part of UpdateFunctionConfiguration, so they need their
 	// own (idempotent) upsert — this is what makes a changed --environment retag
-	// an existing function.
-	if len(in.Tags) > 0 && arn != "" {
+	// an existing function, and a function an older lagotto created gain the
+	// spore.host tags (#324). Only what differs is written, keeping the
+	// function's first spore-host:created (managedtags.Converge).
+	if add := managedtags.Converge(curTags, in.Tags); len(add) > 0 && arn != "" {
 		if _, err := d.lambda.TagResource(ctx, &lambda.TagResourceInput{
 			Resource: aws.String(arn),
-			Tags:     in.Tags,
+			Tags:     add,
 		}); err != nil {
 			return arn, "", fmt.Errorf("tag function %s: %w", PollerFunctionName, err)
 		}

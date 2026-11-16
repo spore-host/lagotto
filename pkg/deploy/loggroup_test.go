@@ -54,6 +54,15 @@ func (f *fakeLogs) CreateLogGroup(_ context.Context, in *cloudwatchlogs.CreateLo
 	return &cloudwatchlogs.CreateLogGroupOutput{}, nil
 }
 
+func (f *fakeLogs) ListTagsForResource(_ context.Context, _ *cloudwatchlogs.ListTagsForResourceInput, optFns ...func(*cloudwatchlogs.Options)) (*cloudwatchlogs.ListTagsForResourceOutput, error) {
+	f.record("ListTagsForResource", optFns)
+	tags := map[string]string{}
+	for k, v := range f.tags {
+		tags[k] = v
+	}
+	return &cloudwatchlogs.ListTagsForResourceOutput{Tags: tags}, nil
+}
+
 func (f *fakeLogs) DescribeLogGroups(_ context.Context, _ *cloudwatchlogs.DescribeLogGroupsInput, optFns ...func(*cloudwatchlogs.Options)) (*cloudwatchlogs.DescribeLogGroupsOutput, error) {
 	f.record("DescribeLogGroups", optFns)
 	if f.describeErr != nil {

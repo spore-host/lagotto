@@ -209,6 +209,13 @@ func (s *Spawner) buildSnipeConfig(ctx context.Context, target SnipeTarget) (spa
 	cfg.Region = target.Region
 	cfg.InstanceType = target.InstanceType
 	cfg.Spot = target.Spot
+	// The spore.host tags (#324). A snipe belongs to no watch, so no owner.
+	if cfg.Tags == nil {
+		cfg.Tags = map[string]string{}
+	}
+	for k, v := range RuntimeTags(nil, cfg.Region) {
+		cfg.Tags[k] = v
+	}
 
 	// When none of iam_role/iam_policy/iam_policy_file are given, Provision sets
 	// up the default spored profile itself, so we leave IamInstanceProfile empty.

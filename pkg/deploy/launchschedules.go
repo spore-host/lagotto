@@ -2,20 +2,15 @@ package deploy
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/scheduler"
-	schedulertypes "github.com/aws/aws-sdk-go-v2/service/scheduler/types"
-)
 
-// launchScheduleGroup is the EventBridge Scheduler group the per-launch
-// schedules live in: `lagotto launch` and the poller's #62 boundary retry both
-// create them without a GroupName, i.e. in "default".
-const launchScheduleGroup = "default"
+	"github.com/spore-host/lagotto/pkg/schedgroup"
+)
 
 // LaunchSchedulePrefix starts the name of every per-launch schedule lagotto
 // creates: `lagotto launch`'s lagotto-launch-sl-<id> and the poller's boundary
@@ -65,39 +60,62 @@ func IsScheduleOfLaunch(name, scheduleID string) bool {
 	return true
 }
 
-// ListLaunchSchedules returns the name of every per-launch schedule in the
-// default group, sorted, following every page.
+// ListLaunchSchedules returns the name of every per-launch schedule in
+// lagotto's schedule group and the default one (#324), sorted and without
+// duplicates, following every page.
 func (d *Deployer) ListLaunchSchedules(ctx context.Context) ([]string, error) {
-	return d.listSchedulesWithPrefix(ctx, LaunchSchedulePrefix, IsLaunchSchedule)
+	refs, err := d.listSchedulesWithPrefix(ctx, LaunchSchedulePrefix, IsLaunchSchedule)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	var names []string
+	for _, r := range refs {
+		if !seen[r.name] {
+			seen[r.name] = true
+			names = append(names, r.name)
+		}
+	}
+	return names, nil
 }
 
-// listSchedulesWithPrefix lists the default group's schedules whose name
-// starts with prefix and satisfies keep, sorted, following every page.
-func (d *Deployer) listSchedulesWithPrefix(ctx context.Context, prefix string, keep func(string) bool) ([]string, error) {
-	var names []string
-	in := &scheduler.ListSchedulesInput{
-		GroupName:  aws.String(launchScheduleGroup),
-		NamePrefix: aws.String(prefix),
-	}
-	for {
-		out, err := d.sched.ListSchedules(ctx, in)
-		if err != nil {
-			return nil, fmt.Errorf("list %s* schedules: %w", prefix, err)
+// scheduleRef is one schedule and the group it is in.
+type scheduleRef struct{ group, name string }
+
+// listSchedulesWithPrefix lists the schedules of both of lagotto's groups
+// (schedgroup.Groups) whose name starts with prefix and satisfies keep,
+// sorted by name, following every page. A group that does not exist (lagotto's,
+// before a #324 deploy created it) has none.
+func (d *Deployer) listSchedulesWithPrefix(ctx context.Context, prefix string, keep func(string) bool) ([]scheduleRef, error) {
+	var refs []scheduleRef
+	for _, group := range schedgroup.Groups {
+		in := &scheduler.ListSchedulesInput{
+			GroupName:  aws.String(group),
+			NamePrefix: aws.String(prefix),
 		}
-		for _, s := range out.Schedules {
-			// NamePrefix already filters; checking again keeps a scheduler that
-			// ignores it (an emulator) from handing back a schedule we must not delete.
-			if name := aws.ToString(s.Name); keep(name) {
-				names = append(names, name)
+		for {
+			out, err := d.sched.ListSchedules(ctx, in)
+			if err != nil {
+				if group != schedgroup.Default && schedgroup.IsNotFound(err) {
+					break
+				}
+				return nil, fmt.Errorf("list %s* schedules in schedule group %s: %w", prefix, group, err)
 			}
+			for _, s := range out.Schedules {
+				// NamePrefix already filters; checking again keeps a scheduler that
+				// ignores it (an emulator) from handing back a schedule we must not delete.
+				if name := aws.ToString(s.Name); keep(name) {
+					refs = append(refs, scheduleRef{group: group, name: name})
+				}
+			}
+			if aws.ToString(out.NextToken) == "" {
+				break
+			}
+			in.NextToken = out.NextToken
 		}
-		if aws.ToString(out.NextToken) == "" {
-			break
-		}
-		in.NextToken = out.NextToken
 	}
-	sort.Strings(names)
-	return names, nil
+	sort.SliceStable(refs, func(i, j int) bool { return refs[i].name < refs[j].name })
+	return refs, nil
 }
 
 // LaunchScheduleTeardown is what DeleteLaunchSchedules did.
@@ -107,40 +125,40 @@ type LaunchScheduleTeardown struct {
 	// Absent holds recorded schedules that no longer existed: typically a
 	// one-shot that fired and removed itself (ActionAfterCompletion=DELETE).
 	Absent []string
+	// GroupDeleted reports that DeleteLaunchSchedules also deleted lagotto's
+	// schedule group, which nothing was left in (#324).
+	GroupDeleted bool
 }
 
 // DeleteLaunchSchedules deletes every per-launch schedule (#260): the ones
 // named by scheduled-launch records (recorded) and every one ListLaunchSchedules
 // finds, which catches the poller's retry schedules and any schedule whose
 // record is gone. A recorded name without LaunchSchedulePrefix is skipped:
-// lagotto never writes one, so it is not lagotto's to delete.
+// lagotto never writes one, so it is not lagotto's to delete. Then, when no
+// schedule is left in it, it deletes lagotto's schedule group (#324).
 //
 // The listing runs before any deletion, so a caller without
 // scheduler:ListSchedules gets an error and nothing is deleted. A schedule that
 // is already gone is reported in Absent, never as an error.
 func (d *Deployer) DeleteLaunchSchedules(ctx context.Context, recorded []string) (LaunchScheduleTeardown, error) {
-	var res LaunchScheduleTeardown
-	listed, err := d.ListLaunchSchedules(ctx)
+	listed, err := d.listSchedulesWithPrefix(ctx, LaunchSchedulePrefix, IsLaunchSchedule)
+	if err != nil {
+		return LaunchScheduleTeardown{}, err
+	}
+	res, err := d.deleteSchedules(ctx, recorded, listed, IsLaunchSchedule)
 	if err != nil {
 		return res, err
 	}
-	seen := map[string]bool{}
-	var names []string
-	for _, n := range append(append([]string{}, recorded...), listed...) {
-		if IsLaunchSchedule(n) && !seen[n] {
-			seen[n] = true
-			names = append(names, n)
-		}
-	}
-	return d.deleteSchedules(ctx, names)
+	res.GroupDeleted, err = d.deleteScheduleGroupIfEmpty(ctx)
+	return res, err
 }
 
 // DeleteScheduledLaunchSchedules deletes the schedules of one scheduled launch
 // (`lagotto cancel sl-…`, #279): recorded, the ScheduleName its record holds,
-// and every schedule IsScheduleOfLaunch matches in the default group, which
-// catches the poller's -r<n> boundary retries. A name that is not one of the
-// launch's own is skipped, so a corrupt record cannot point cancel at another
-// schedule.
+// and every schedule IsScheduleOfLaunch matches in lagotto's and the default
+// schedule group, which catches the poller's -r<n> boundary retries. A name
+// that is not one of the launch's own is skipped, so a corrupt record cannot
+// point cancel at another schedule.
 //
 // The listing runs before any deletion; an error there deletes nothing. A
 // schedule that is already gone (a one-shot that fired and removed itself) is
@@ -151,37 +169,69 @@ func (d *Deployer) DeleteScheduledLaunchSchedules(ctx context.Context, scheduleI
 	if err != nil {
 		return LaunchScheduleTeardown{}, err
 	}
-	seen := map[string]bool{}
-	var names []string
 	// The launch's own schedule is always tried, even when the record names none:
 	// it is the one `lagotto launch` creates, and not-found is not an error.
-	for _, n := range append([]string{LaunchScheduleName(scheduleID), recorded}, listed...) {
-		if mine(n) && !seen[n] {
-			seen[n] = true
-			names = append(names, n)
-		}
-	}
-	return d.deleteSchedules(ctx, names)
+	return d.deleteSchedules(ctx, []string{LaunchScheduleName(scheduleID), recorded}, listed, mine)
 }
 
-// deleteSchedules deletes names from the default group in sorted order,
-// reporting each as Deleted or, when it no longer exists, Absent.
-func (d *Deployer) deleteSchedules(ctx context.Context, names []string) (LaunchScheduleTeardown, error) {
+// deleteSchedules deletes, in name order, every listed schedule in the group
+// it was listed in, and every recorded name the listing did not show, which
+// it tries in the default group (where a schedule just created by an older
+// lagotto, too new to be listed, would be) and in lagotto's. Names keep
+// rejects are skipped. Each is reported as Deleted or, when no group had it,
+// Absent.
+//
+// A recorded name not listed is gone, or too new to be listed. For it, an
+// AccessDenied from lagotto's group (a caller whose policy predates #324) is
+// read as absent there: a schedule can only be in that group if its creator
+// was granted the group, and the listing, which covers it, did not show one.
+func (d *Deployer) deleteSchedules(ctx context.Context, recorded []string, listed []scheduleRef, keep func(string) bool) (LaunchScheduleTeardown, error) {
 	var res LaunchScheduleTeardown
+	groupsOf := map[string][]string{}
+	for _, r := range listed {
+		if keep(r.name) {
+			groupsOf[r.name] = append(groupsOf[r.name], r.group)
+		}
+	}
+	unlisted := map[string]bool{}
+	for _, n := range recorded {
+		if keep(n) && groupsOf[n] == nil {
+			unlisted[n] = true
+		}
+	}
+	var names []string
+	for n := range groupsOf {
+		names = append(names, n)
+	}
+	for n := range unlisted {
+		names = append(names, n)
+	}
 	sort.Strings(names)
+
 	for _, name := range names {
-		_, err := d.sched.DeleteSchedule(ctx, &scheduler.DeleteScheduleInput{
-			Name:      aws.String(name),
-			GroupName: aws.String(launchScheduleGroup),
-		})
-		var notFound *schedulertypes.ResourceNotFoundException
-		switch {
-		case err == nil:
+		groups, tolerateDenied := groupsOf[name], false
+		if groups == nil {
+			groups, tolerateDenied = []string{schedgroup.Default, schedgroup.Name}, true
+		}
+		gone := false
+		for _, group := range groups {
+			_, err := d.sched.DeleteSchedule(ctx, &scheduler.DeleteScheduleInput{
+				Name:      aws.String(name),
+				GroupName: aws.String(group),
+			})
+			switch {
+			case err == nil:
+				gone = true
+			case schedgroup.IsNotFound(err):
+			case tolerateDenied && group == schedgroup.Name && schedgroup.IsAccessDenied(err):
+			default:
+				return res, fmt.Errorf("delete schedule %s from schedule group %s: %w", name, group, err)
+			}
+		}
+		if gone {
 			res.Deleted = append(res.Deleted, name)
-		case errors.As(err, &notFound):
+		} else {
 			res.Absent = append(res.Absent, name)
-		default:
-			return res, fmt.Errorf("delete schedule %s: %w", name, err)
 		}
 	}
 	return res, nil

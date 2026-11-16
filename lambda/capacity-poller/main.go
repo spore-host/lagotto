@@ -16,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/scheduler"
 	schedulertypes "github.com/aws/aws-sdk-go-v2/service/scheduler/types"
 	"github.com/spore-host/lagotto/pkg/pollcadence"
+	"github.com/spore-host/lagotto/pkg/schedgroup"
 	"github.com/spore-host/lagotto/pkg/watcher"
 	truffleaws "github.com/spore-host/truffle/pkg/aws"
 	"github.com/spore-host/truffle/pkg/quotas"
@@ -242,7 +243,10 @@ func rearmBoundaryRetry(ctx context.Context, sl *watcher.ScheduledLaunch) error 
 	retryName := fmt.Sprintf("lagotto-launch-%s-r%d", watcher.ShortID(sl.ScheduleID), sl.Attempts) // as deploy.LaunchScheduleName
 	expr := fmt.Sprintf("at(%s)", next.Format("2006-01-02T15:04:05"))
 	payload := fmt.Sprintf(`{"scheduled_launch_id":%q}`, sl.ScheduleID)
-	_, err := schedulerClient.CreateSchedule(ctx, &scheduler.CreateScheduleInput{
+	// In lagotto's tagged schedule group (#324), or the default one when this
+	// account's poller was deployed, or its runtime policy written, by a
+	// lagotto from before that group (schedgroup.Create).
+	_, err := schedgroup.Create(ctx, schedulerClient, &scheduler.CreateScheduleInput{
 		Name:                  aws.String(retryName),
 		ScheduleExpression:    aws.String(expr),
 		FlexibleTimeWindow:    &schedulertypes.FlexibleTimeWindow{Mode: schedulertypes.FlexibleTimeWindowModeOff},

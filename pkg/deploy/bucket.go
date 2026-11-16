@@ -19,6 +19,10 @@ package deploy
 //  3. The bucket carries ManagedTagKey=ManagedTagValue, which lagotto writes
 //     only when it created the bucket or when a deploy back-fills it on a
 //     default-named bucket this account owns. An untagged bucket is retained.
+//
+// The bucket is tagged by a PutBucketTagging right after CreateBucket rather
+// than at create: that call also merges into the tags of a bucket that
+// already exists, and its failure on a new bucket fails the deploy.
 
 import (
 	"context"
@@ -30,6 +34,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
+	"github.com/spore-host/libs/tags/s3tags"
+
+	"github.com/spore-host/lagotto/pkg/managedtags"
 )
 
 // ManagedTagKey / ManagedTagValue mark an artifact bucket as lagotto-managed:
@@ -77,7 +84,7 @@ func (d *Deployer) ensureBucket(ctx context.Context, bucket, region, accountID s
 		if !managed {
 			return "exists", nil
 		}
-		tagged, terr := d.tagManagedBucket(ctx, bucket, accountID)
+		tagged, terr := d.tagManagedBucket(ctx, bucket, region, accountID)
 		switch {
 		case terr != nil:
 			return fmt.Sprintf("exists, NOT tagged %s=%s (%v): 'deploy --teardown' will retain it", ManagedTagKey, ManagedTagValue, terr), nil
@@ -100,38 +107,44 @@ func (d *Deployer) ensureBucket(ctx context.Context, bucket, region, accountID s
 	if !managed {
 		return "created", nil
 	}
-	if _, err := d.tagManagedBucket(ctx, bucket, accountID); err != nil {
+	if _, err := d.tagManagedBucket(ctx, bucket, region, accountID); err != nil {
 		return "", fmt.Errorf("tag new artifact bucket %s %s=%s (without the tag no lagotto command deletes it; "+
 			"re-running 'lagotto deploy' retries the tag): %w", bucket, ManagedTagKey, ManagedTagValue, err)
 	}
 	return "created", nil
 }
 
-// tagManagedBucket adds the managed tag to a bucket this account owns, keeping
-// every tag already on it (PutBucketTagging replaces the whole set). It reports
-// whether it wrote anything.
-func (d *Deployer) tagManagedBucket(ctx context.Context, bucket, accountID string) (bool, error) {
-	tags, err := d.bucketTags(ctx, bucket, accountID)
+// tagManagedBucket adds the managed tag and the spore.host tags (#324) to a
+// bucket this account owns, keeping every tag already on it: PutBucketTagging
+// replaces the whole set, so the set written is the bucket's own tags merged
+// with the ones it lacks (managedtags.Converge, which also keeps a
+// spore-host:created or spore-host:owner already there). It reports whether
+// it wrote anything; a bucket that has them all costs one read.
+func (d *Deployer) tagManagedBucket(ctx context.Context, bucket, region, accountID string) (bool, error) {
+	cur, err := d.bucketTags(ctx, bucket, accountID)
 	if err != nil {
 		return false, err
 	}
-	if tags[ManagedTagKey] == ManagedTagValue {
+	add := managedtags.Converge(cur, d.artifactBucketTags(region))
+	if len(add) == 0 {
 		return false, nil
-	}
-	set := []s3types.Tag{{Key: aws.String(ManagedTagKey), Value: aws.String(ManagedTagValue)}}
-	for k, v := range tags {
-		if k != ManagedTagKey {
-			set = append(set, s3types.Tag{Key: aws.String(k), Value: aws.String(v)})
-		}
 	}
 	if _, err := d.s3.PutBucketTagging(ctx, &s3.PutBucketTaggingInput{
 		Bucket:              aws.String(bucket),
 		ExpectedBucketOwner: aws.String(accountID),
-		Tagging:             &s3types.Tagging{TagSet: set},
+		Tagging:             s3tags.Tagging(managedtags.With(cur, add)),
 	}); err != nil {
 		return false, fmt.Errorf("put bucket tagging: %w", err)
 	}
 	return true, nil
+}
+
+// artifactBucketTags are the tags deploy puts on the default artifact bucket:
+// ManagedTagKey=ManagedTagValue, which teardown's deletion is gated on, and
+// the spore.host service tags.
+func (d *Deployer) artifactBucketTags(region string) map[string]string {
+	return managedtags.With(map[string]string{ManagedTagKey: ManagedTagValue},
+		d.serviceTags(region, managedtags.ComponentArtifacts))
 }
 
 // bucketTags returns the bucket's tags; a bucket with none is an empty map.

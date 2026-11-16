@@ -343,8 +343,9 @@ func TestWatchNotDeployedStillCreates(t *testing.T) {
 	if got := putStatuses(f); len(got) != 1 || got[0] != "active" {
 		t.Errorf("PutItem statuses = %v, want one active watch", got)
 	}
-	if n := f.called("scheduler:GetSchedule"); n != 1 {
-		t.Errorf("GetSchedule called %d times, want 1", n)
+	// Once in lagotto's schedule group, once in the default one (#324).
+	if n := f.called("scheduler:GetSchedule"); n != 2 {
+		t.Errorf("GetSchedule called %d times, want 2", n)
 	}
 	if n := f.called("scheduler:UpdateSchedule"); n != 0 {
 		t.Errorf("UpdateSchedule called %d times with no schedule deployed", n)

@@ -28,8 +28,19 @@ Deploy also creates the poller's CloudWatch Logs log group
 and the lagotto:managed=cli tag, so Lambda never creates an unowned one. A group
 that already exists is tagged, and given the retention only if it has none.
 
-Use --teardown to delete the poller's schedule, Lambda, log group and SNS topic
-in this region, and then the default artifact bucket lagotto-lambda-&lt;account&gt;-&lt;region&gt; with every object version in
+Everything deploy creates is tagged spore-host:managed-by=lagotto (with
+spore-host:scope, :created, :schema, :role=service and :owner, your aws:userid),
+and resources an older lagotto created without those tags gain them. Schedules
+cannot be tagged, so the poller schedule lives in the tagged EventBridge
+Scheduler schedule group "lagotto", which deploy creates. A schedule an older
+lagotto left in the "default" group is moved: created in "lagotto", then deleted
+from "default". It stays in "default" (deploy says why) while a legacy
+CloudFormation stack owns it or the IAM policies predate the group: run 'lagotto
+setup' and then deploy again.
+
+Use --teardown to delete the poller's schedule (in either group), Lambda, log
+group and SNS topic in this region, then the schedule group once nothing is left
+in it, and then the default artifact bucket lagotto-lambda-&lt;account&gt;-&lt;region&gt; with every object version in
 it. The bucket is deleted only when this account owns it and it carries the
 lagotto:managed=cli tag, which deploy writes when it creates the bucket and
 back-fills on an existing default-named bucket. A --lambda-bucket you supplied

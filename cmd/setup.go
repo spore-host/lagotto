@@ -14,8 +14,10 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spore-host/lagotto/pkg/awscfg"
 	"github.com/spore-host/lagotto/pkg/cliiam"
+	"github.com/spore-host/lagotto/pkg/managedtags"
 	"github.com/spore-host/lagotto/pkg/runtimeiam"
 	"github.com/spore-host/lagotto/pkg/watcher"
+	"github.com/spore-host/libs/tags"
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
 )
 
@@ -67,7 +69,13 @@ reached); an unchanged one is left alone. 'poll', 'setup', 'deploy' and
 'teardown' are not covered: they need administrator permissions. s3:// spawn
 configs are readable only from the buckets you name with --config-bucket; those
 are carried forward on later runs. 'lagotto teardown --iam-roles' detaches and
-deletes the policy.`,
+deletes the policy.
+
+Everything setup creates is tagged spore-host:managed-by=lagotto (with
+spore-host:scope, :created, :schema, :role=service and :owner, your aws:userid),
+and the tables, roles, instance profiles and policy an older lagotto created
+without those tags gain them. An administrator's own role authorized with
+--instance-role is never tagged.`,
 	RunE: runSetup,
 }
 
@@ -108,9 +116,13 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("load AWS config: %w", err)
 	}
+	// Everything setup creates or adopts carries the spore.host tags (#324),
+	// with the administrator running it as the spore-host:owner.
+	setupStamp = managedtags.Stamp{Owner: setupCallerOwner(ctx, cfg)}
 
 	// 1. Tables (CLI-owned, #59).
 	store := watcher.NewStore(cfg, watchesTable, historyTable)
+	store.SetTagStamp(setupStamp)
 	created, err := store.EnsureTables(ctx)
 	if err != nil {
 		return fmt.Errorf("ensure tables: %w", err)
@@ -120,6 +132,13 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	}
 	for _, name := range created {
 		_, _ = fmt.Fprintf(out, "Created table %s\n", name)
+	}
+	retagged, err := store.EnsureTableTags(ctx)
+	if err != nil {
+		return fmt.Errorf("tag tables: %w", err)
+	}
+	for _, name := range retagged {
+		_, _ = fmt.Fprintf(out, "Tagged table %s %s=%s\n", name, tags.ManagedBy, tags.ToolLagotto)
 	}
 
 	// 2. The CLI-owned IAM roles and their policies (#16, #145, #229): lagotto
@@ -188,16 +207,37 @@ var newInstanceProfileSetup = func(cfg aws.Config) instanceProfileSetup { return
 // It runs here, with an administrator's credentials, and never in the poller.
 type spawnProfileSetup struct{ cfg aws.Config }
 
+// EnsureInstanceProfile has spawn create what is missing, tagged
+// runtimeiam.InstanceProfileTags (#324), and then adds those tags to what an
+// older lagotto created without them (runtimeiam.EnsureInstanceRoleTags:
+// lagotto's own role and profile, and a profile setup made for an authorized
+// role; never an administrator's role).
 func (p spawnProfileSetup) EnsureInstanceProfile(ctx context.Context, roleName string) error {
-	_, err := spawnaws.NewClientFromConfig(p.cfg).CreateOrGetInstanceProfile(ctx, spawnaws.IAMRoleConfig{
+	if _, err := spawnaws.NewClientFromConfig(p.cfg).CreateOrGetInstanceProfile(ctx, spawnaws.IAMRoleConfig{
 		RoleName: roleName,
-		Tags:     runtimeiam.ManagedProfileTags(),
-	})
-	return err
+		Tags:     runtimeiam.InstanceProfileTags(setupStamp),
+	}); err != nil {
+		return err
+	}
+	return runtimeiam.EnsureInstanceRoleTags(ctx, iam.NewFromConfig(p.cfg), roleName, setupStamp)
 }
 
 func (p spawnProfileSetup) DeleteManagedProfile(ctx context.Context, roleName string) (bool, error) {
 	return runtimeiam.DeleteManagedInstanceProfile(ctx, iam.NewFromConfig(p.cfg), roleName)
+}
+
+// setupStamp is the owner and clock of the spore.host tags (#324) on what
+// this run of setup creates. runSetup sets it; its zero value omits the owner.
+var setupStamp managedtags.Stamp
+
+// setupCallerOwner is the caller's aws:userid, for spore-host:owner. Best
+// effort: "" (no owner tag) when it cannot be read. A seam for tests.
+var setupCallerOwner = func(ctx context.Context, cfg aws.Config) string {
+	out, err := sts.NewFromConfig(cfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	if err != nil {
+		return ""
+	}
+	return aws.ToString(out.UserId)
 }
 
 // setupCallerAccount and newSetupIAMClient are setup's AWS clients, seams so
@@ -228,7 +268,7 @@ func applyCLIUserPolicy(ctx context.Context, client cliiam.PolicyAPI, accountID 
 	if err != nil {
 		return err
 	}
-	res, err := cliiam.EnsurePolicy(ctx, client, accountID, doc)
+	res, err := cliiam.EnsurePolicy(ctx, client, accountID, doc, setupStamp)
 	if res.DeletedVersion != "" {
 		_, _ = fmt.Fprintf(out, "Deleted the oldest version (%s) of IAM policy %s to stay within IAM's five versions.\n",
 			res.DeletedVersion, cliiam.PolicyName)
@@ -326,7 +366,7 @@ func applySetupRoles(ctx context.Context, iamClient runtimeiam.IAMAPI, profiles 
 	// assumes, so without it nothing ever invokes the poller. Before #229 only
 	// `lagotto deploy` created it.
 	created, err := runtimeiam.EnsureSetupRoles(ctx, iamClient, region, accountID,
-		runtimeiam.Authorizations{InstanceRoles: roles, SageMakerRoles: smRoles})
+		runtimeiam.Authorizations{InstanceRoles: roles, SageMakerRoles: smRoles}, setupStamp)
 	for _, name := range created {
 		_, _ = fmt.Fprintf(out, "Created IAM role %s\n", name)
 	}

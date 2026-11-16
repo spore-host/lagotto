@@ -246,9 +246,11 @@ type conflictOnceScheduler struct {
 	existing *scheduler.GetScheduleOutput
 }
 
-func (f *conflictOnceScheduler) GetSchedule(_ context.Context, _ *scheduler.GetScheduleInput, _ ...func(*scheduler.Options)) (*scheduler.GetScheduleOutput, error) {
+// GetSchedule finds nothing in either group until the (conflicting) create,
+// and then the schedule a racing deploy made in lagotto's group.
+func (f *conflictOnceScheduler) GetSchedule(_ context.Context, in *scheduler.GetScheduleInput, _ ...func(*scheduler.Options)) (*scheduler.GetScheduleOutput, error) {
 	f.getCalls++
-	if f.getCalls == 1 {
+	if len(f.createCalls) == 0 || aws.ToString(in.GroupName) != ScheduleGroupName {
 		return nil, &schedulertypes.ResourceNotFoundException{}
 	}
 	return f.existing, nil
@@ -341,13 +343,13 @@ func TestEnsurePollerSchedule_KeepsIdleCadence(t *testing.T) {
 func TestDeletePollerSchedule_AbsentIsNotAnError(t *testing.T) {
 	fsc := &fakeScheduler{deleteErr: &schedulertypes.ResourceNotFoundException{}}
 	d, _ := testDeployer(nil, nil, fsc)
-	if err := d.deletePollerSchedule(context.Background()); err != nil {
+	if err := d.deletePollerSchedule(context.Background(), ScheduleGroupName); err != nil {
 		t.Errorf("deleting an absent schedule should be a no-op success, got %v", err)
 	}
 
 	fsc2 := &fakeScheduler{}
 	d2, _ := testDeployer(nil, nil, fsc2)
-	if err := d2.deletePollerSchedule(context.Background()); err != nil {
+	if err := d2.deletePollerSchedule(context.Background(), ScheduleGroupName); err != nil {
 		t.Errorf("deletePollerSchedule: %v", err)
 	}
 	if fsc2.deleteCalls != 1 {
@@ -356,7 +358,7 @@ func TestDeletePollerSchedule_AbsentIsNotAnError(t *testing.T) {
 
 	fsc3 := &fakeScheduler{deleteErr: errors.New("AccessDeniedException")}
 	d3, _ := testDeployer(nil, nil, fsc3)
-	if err := d3.deletePollerSchedule(context.Background()); err == nil {
+	if err := d3.deletePollerSchedule(context.Background(), ScheduleGroupName); err == nil {
 		t.Error("a real delete failure must surface")
 	}
 }

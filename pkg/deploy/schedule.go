@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/scheduler"
 	schedulertypes "github.com/aws/aws-sdk-go-v2/service/scheduler/types"
+
 	"github.com/spore-host/lagotto/pkg/pollcadence"
+	"github.com/spore-host/lagotto/pkg/schedgroup"
 )
 
 const (
@@ -20,7 +23,8 @@ const (
 
 // EnsurePollerSchedule get-or-creates the lagotto-capacity-poller EventBridge
 // Scheduler schedule and converges it, returning ActionCreated,
-// ActionConfigUpdated or ActionUnchanged.
+// ActionConfigUpdated or ActionUnchanged, or a description of a move between
+// schedule groups.
 //
 // THE CENTRAL GUARANTEE OF THIS FUNCTION: `lagotto deploy` must never be able to
 // turn off a running poller.
@@ -38,33 +42,98 @@ const (
 // schedule to pollcadence.IdleExpression and arming a watch sets it back to
 // the normal one. Deploy treats either as current and keeps the one it finds.
 //
+// # Schedule groups (#324)
+//
+// A schedule cannot be tagged, so the schedule lives in lagotto's tagged
+// schedule group (schedgroup.Name). One created before #324 is in the default
+// group, and deploy MOVES it: it creates the schedule in lagotto's group as a
+// copy of the old one (same state, cadence, target input and settings), and
+// only then deletes the old one, so there is never a moment with no schedule
+// (for that moment both exist, and a tick may fire twice; the poller is safe
+// to run concurrently). A re-run after a failure between the two steps finds
+// both and deletes the one in the default group, so only one is ever left to
+// fire. While Options.HoldScheduleMove is set the schedule stays in (or is
+// created in) the default group.
+//
 // Convergence compares only the non-State fields; when they all match, it issues
 // no API call at all.
 func (d *Deployer) EnsurePollerSchedule(ctx context.Context, fnARN, roleARN string) (string, error) {
-	cur, err := d.sched.GetSchedule(ctx, &scheduler.GetScheduleInput{
-		Name: aws.String(PollerScheduleName),
-	})
+	inGroup, err := d.getPollerSchedule(ctx, schedgroup.Name)
 	if err != nil {
-		var notFound *schedulertypes.ResourceNotFoundException
-		if !errors.As(err, &notFound) {
-			return "", fmt.Errorf("look up schedule %s: %w", PollerScheduleName, err)
-		}
-		created, cErr := d.createPollerSchedule(ctx, fnARN, roleARN)
-		if cErr != nil {
-			return "", cErr
-		}
-		if created {
-			return ActionCreated, nil
-		}
-		// A concurrent deploy won the race; re-read and converge instead of failing.
-		cur, err = d.sched.GetSchedule(ctx, &scheduler.GetScheduleInput{
-			Name: aws.String(PollerScheduleName),
-		})
-		if err != nil {
-			return "", fmt.Errorf("look up schedule %s after create conflict: %w", PollerScheduleName, err)
-		}
+		return "", err
+	}
+	inDefault, err := d.getPollerSchedule(ctx, schedgroup.Default)
+	if err != nil {
+		return "", err
 	}
 
+	switch {
+	case inGroup != nil:
+		action, err := d.convergePollerSchedule(ctx, inGroup, fnARN, roleARN)
+		if err != nil || inDefault == nil {
+			return action, err
+		}
+		// A move interrupted after its create, or a schedule re-created in the
+		// default group by an older lagotto: two schedules would both fire.
+		if err := d.deletePollerSchedule(ctx, schedgroup.Default); err != nil {
+			return "", err
+		}
+		return action + ", removed the duplicate in schedule group " + schedgroup.Default, nil
+
+	case inDefault != nil && d.holdScheduleMove == "":
+		return d.movePollerSchedule(ctx, inDefault, fnARN, roleARN)
+
+	case inDefault != nil:
+		action, err := d.convergePollerSchedule(ctx, inDefault, fnARN, roleARN)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("%s, kept in schedule group %s (%s)", action, schedgroup.Default, d.holdScheduleMove), nil
+	}
+
+	group := schedgroup.Name
+	if d.holdScheduleMove != "" {
+		group = schedgroup.Default
+	}
+	created, err := d.createPollerSchedule(ctx, group, fnARN, roleARN)
+	if err != nil {
+		return "", err
+	}
+	if created {
+		return ActionCreated, nil
+	}
+	// A concurrent deploy won the race; re-read and converge instead of failing.
+	cur, err := d.getPollerSchedule(ctx, group)
+	if err != nil {
+		return "", err
+	}
+	if cur == nil {
+		return "", fmt.Errorf("look up schedule %s after create conflict: not found in schedule group %s", PollerScheduleName, group)
+	}
+	return d.convergePollerSchedule(ctx, cur, fnARN, roleARN)
+}
+
+// getPollerSchedule reads the poller schedule from group. An absent schedule
+// (or group) is (nil, nil). The result's GroupName is always set.
+func (d *Deployer) getPollerSchedule(ctx context.Context, group string) (*scheduler.GetScheduleOutput, error) {
+	out, err := d.sched.GetSchedule(ctx, &scheduler.GetScheduleInput{
+		Name:      aws.String(PollerScheduleName),
+		GroupName: aws.String(group),
+	})
+	if err != nil {
+		if schedgroup.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("look up schedule %s in schedule group %s: %w", PollerScheduleName, group, err)
+	}
+	if out.GroupName == nil {
+		out.GroupName = aws.String(group)
+	}
+	return out, nil
+}
+
+// convergePollerSchedule updates cur when a field deploy owns differs.
+func (d *Deployer) convergePollerSchedule(ctx context.Context, cur *scheduler.GetScheduleOutput, fnARN, roleARN string) (string, error) {
 	if !scheduleDiffers(cur, fnARN, roleARN) {
 		return ActionUnchanged, nil
 	}
@@ -74,13 +143,79 @@ func (d *Deployer) EnsurePollerSchedule(ctx context.Context, fnARN, roleARN stri
 	return ActionConfigUpdated, nil
 }
 
-// createPollerSchedule creates the schedule DISABLED. It reports created=false
-// (with a nil error) when the schedule already existed — EventBridge Scheduler
-// answers a raced create with ConflictException, which is a signal to fall
-// through to the update path rather than an error to surface.
-func (d *Deployer) createPollerSchedule(ctx context.Context, fnARN, roleARN string) (bool, error) {
+// movePollerSchedule moves old, the poller schedule in the default group,
+// into lagotto's group: create the copy, then delete the original. A copy a
+// concurrent deploy created first is converged instead.
+func (d *Deployer) movePollerSchedule(ctx context.Context, old *scheduler.GetScheduleOutput, fnARN, roleARN string) (string, error) {
+	_, err := d.sched.CreateSchedule(ctx, movedScheduleInput(old, fnARN, roleARN, d.now))
+	if err != nil {
+		var conflict *schedulertypes.ConflictException
+		if !errors.As(err, &conflict) {
+			return "", fmt.Errorf("create schedule %s in schedule group %s (moving it from %s; the original is untouched): %w",
+				PollerScheduleName, schedgroup.Name, schedgroup.Default, err)
+		}
+		cur, gerr := d.getPollerSchedule(ctx, schedgroup.Name)
+		if gerr != nil {
+			return "", gerr
+		}
+		if cur == nil {
+			return "", fmt.Errorf("look up schedule %s in schedule group %s after create conflict: not found", PollerScheduleName, schedgroup.Name)
+		}
+		if _, err := d.convergePollerSchedule(ctx, cur, fnARN, roleARN); err != nil {
+			return "", err
+		}
+	}
+	if err := d.deletePollerSchedule(ctx, schedgroup.Default); err != nil {
+		return "", fmt.Errorf("%w (schedule group %s now has the poller schedule too, so both fire until a re-run of 'lagotto deploy' deletes the old one)",
+			err, schedgroup.Name)
+	}
+	return fmt.Sprintf("moved from schedule group %s to %s (%s)", schedgroup.Default, schedgroup.Name, old.State), nil
+}
+
+// movedScheduleInput is the CreateSchedule that copies old into lagotto's
+// group, converged onto the desired target and description. The state and
+// cadence are old's (they are not deploy's to decide), and so is every
+// optional setting UpdateSchedule would round-trip. A start date already past
+// is dropped: Scheduler refuses one on create.
+func movedScheduleInput(old *scheduler.GetScheduleOutput, fnARN, roleARN string, now func() time.Time) *scheduler.CreateScheduleInput {
+	target := &schedulertypes.Target{Arn: aws.String(fnARN), RoleArn: aws.String(roleARN)}
+	if old.Target != nil {
+		target.Input = old.Target.Input
+		target.RetryPolicy = old.Target.RetryPolicy
+		target.DeadLetterConfig = old.Target.DeadLetterConfig
+	}
+	in := &scheduler.CreateScheduleInput{
+		Name:                       aws.String(PollerScheduleName),
+		GroupName:                  aws.String(schedgroup.Name),
+		Description:                aws.String(pollerScheduleDescription),
+		ScheduleExpression:         aws.String(currentCadence(old)),
+		FlexibleTimeWindow:         &schedulertypes.FlexibleTimeWindow{Mode: schedulertypes.FlexibleTimeWindowModeOff},
+		Target:                     target,
+		State:                      old.State,
+		ScheduleExpressionTimezone: old.ScheduleExpressionTimezone,
+		KmsKeyArn:                  old.KmsKeyArn,
+		StartDate:                  old.StartDate,
+		EndDate:                    old.EndDate,
+		ActionAfterCompletion:      old.ActionAfterCompletion,
+	}
+	if now == nil {
+		now = time.Now
+	}
+	if in.StartDate != nil && in.StartDate.Before(now()) {
+		in.StartDate = nil
+	}
+	return in
+}
+
+// createPollerSchedule creates the schedule DISABLED in group. It reports
+// created=false (with a nil error) when the schedule already existed —
+// EventBridge Scheduler answers a raced create with ConflictException, which
+// is a signal to fall through to the update path rather than an error to
+// surface.
+func (d *Deployer) createPollerSchedule(ctx context.Context, group, fnARN, roleARN string) (bool, error) {
 	_, err := d.sched.CreateSchedule(ctx, &scheduler.CreateScheduleInput{
 		Name:               aws.String(PollerScheduleName),
+		GroupName:          aws.String(group),
 		Description:        aws.String(pollerScheduleDescription),
 		ScheduleExpression: aws.String(pollerScheduleExpression),
 		FlexibleTimeWindow: &schedulertypes.FlexibleTimeWindow{Mode: schedulertypes.FlexibleTimeWindowModeOff},
@@ -99,7 +234,7 @@ func (d *Deployer) createPollerSchedule(ctx context.Context, fnARN, roleARN stri
 	if errors.As(err, &conflict) {
 		return false, nil
 	}
-	return false, fmt.Errorf("create schedule %s: %w", PollerScheduleName, err)
+	return false, fmt.Errorf("create schedule %s in schedule group %s: %w", PollerScheduleName, group, err)
 }
 
 // scheduleDiffers reports whether any field deploy owns differs from the desired
@@ -170,33 +305,31 @@ func (d *Deployer) updatePollerSchedule(ctx context.Context, cur *scheduler.GetS
 	return nil
 }
 
-// pollerScheduleExists reports whether the poller schedule is there, so Teardown
-// can report what it actually deleted (see pollerFunctionExists).
-func (d *Deployer) pollerScheduleExists(ctx context.Context) (bool, error) {
+// pollerScheduleExists reports whether the poller schedule is in group, so
+// Teardown can report what it actually deleted (see pollerFunctionExists).
+func (d *Deployer) pollerScheduleExists(ctx context.Context, group string) (bool, error) {
 	_, err := d.sched.GetSchedule(ctx, &scheduler.GetScheduleInput{
-		Name: aws.String(PollerScheduleName),
+		Name:      aws.String(PollerScheduleName),
+		GroupName: aws.String(group),
 	})
 	if err == nil {
 		return true, nil
 	}
-	var notFound *schedulertypes.ResourceNotFoundException
-	if errors.As(err, &notFound) {
+	if schedgroup.IsNotFound(err) {
 		return false, nil
 	}
-	return false, fmt.Errorf("check whether schedule %s exists: %w", PollerScheduleName, err)
+	return false, fmt.Errorf("check whether schedule %s exists in schedule group %s: %w", PollerScheduleName, group, err)
 }
 
-// deletePollerSchedule removes the poller schedule, tolerating an absent one.
-func (d *Deployer) deletePollerSchedule(ctx context.Context) error {
+// deletePollerSchedule removes the poller schedule from group, tolerating an
+// absent one.
+func (d *Deployer) deletePollerSchedule(ctx context.Context, group string) error {
 	_, err := d.sched.DeleteSchedule(ctx, &scheduler.DeleteScheduleInput{
-		Name: aws.String(PollerScheduleName),
+		Name:      aws.String(PollerScheduleName),
+		GroupName: aws.String(group),
 	})
-	if err == nil {
+	if err == nil || schedgroup.IsNotFound(err) {
 		return nil
 	}
-	var notFound *schedulertypes.ResourceNotFoundException
-	if errors.As(err, &notFound) {
-		return nil
-	}
-	return fmt.Errorf("delete schedule %s: %w", PollerScheduleName, err)
+	return fmt.Errorf("delete schedule %s from schedule group %s: %w", PollerScheduleName, group, err)
 }

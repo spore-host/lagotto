@@ -9,6 +9,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	schedulertypes "github.com/aws/aws-sdk-go-v2/service/scheduler/types"
+	"github.com/aws/smithy-go"
 )
 
 // The name `lagotto launch` builds is one the teardown prefix matches, and the
@@ -40,12 +41,80 @@ func TestListLaunchSchedules_FollowsPages(t *testing.T) {
 	if want := []string{"lagotto-launch-sl-aaaa", "lagotto-launch-sl-bbbb"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v (sorted, prefix only, both pages)", got, want)
 	}
-	if len(sc.listInputs) != 2 {
-		t.Fatalf("ListSchedules called %d times, want 2", len(sc.listInputs))
+	// lagotto's group (absent here: not deployed by a #324 lagotto), then both
+	// pages of the default group.
+	if len(sc.listInputs) != 3 {
+		t.Fatalf("ListSchedules called %d times, want 3", len(sc.listInputs))
 	}
-	in := sc.listInputs[0]
-	if aws.ToString(in.GroupName) != "default" || aws.ToString(in.NamePrefix) != LaunchSchedulePrefix {
-		t.Errorf("listed group %q prefix %q", aws.ToString(in.GroupName), aws.ToString(in.NamePrefix))
+	for i, group := range []string{"lagotto", "default", "default"} {
+		in := sc.listInputs[i]
+		if aws.ToString(in.GroupName) != group || aws.ToString(in.NamePrefix) != LaunchSchedulePrefix {
+			t.Errorf("list %d: group %q prefix %q, want %q", i, aws.ToString(in.GroupName), aws.ToString(in.NamePrefix), group)
+		}
+	}
+}
+
+// #324: per-launch schedules are listed in both groups, and each is deleted
+// in the group it is in, so neither a new one (lagotto's group) nor one made
+// before #324 (default) is left firing.
+func TestDeleteLaunchSchedules_BothGroups(t *testing.T) {
+	sc := &fakeScheduler{groupExists: true, listByGroup: map[string][][]string{
+		"lagotto": {{"lagotto-launch-sl-new", "lagotto-launch-sl-both"}},
+		"default": {{"lagotto-launch-sl-old", "lagotto-launch-sl-both"}},
+	}}
+	d, _ := testDeployer(nil, nil, sc)
+	names, err := d.ListLaunchSchedules(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"lagotto-launch-sl-both", "lagotto-launch-sl-new", "lagotto-launch-sl-old"}; !reflect.DeepEqual(names, want) {
+		t.Errorf("ListLaunchSchedules = %v, want %v (deduplicated)", names, want)
+	}
+
+	res, err := d.DeleteLaunchSchedules(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"default/lagotto-launch-sl-both", "lagotto/lagotto-launch-sl-both", "lagotto/lagotto-launch-sl-new", "default/lagotto-launch-sl-old"}
+	got := append([]string(nil), sc.deletedRefs...)
+	if len(got) != len(want) {
+		t.Fatalf("deleted %v, want %v", got, want)
+	}
+	for _, w := range want {
+		found := false
+		for _, g := range got {
+			found = found || g == w
+		}
+		if !found {
+			t.Errorf("did not delete %s (deleted %v)", w, got)
+		}
+	}
+	if len(res.Deleted) != 3 {
+		t.Errorf("Deleted = %v, want each name once", res.Deleted)
+	}
+	// The fake keeps listing what it was seeded with, so the group is not empty.
+	if res.GroupDeleted || sc.groupDeletes != 0 {
+		t.Error("deleted a schedule group that still lists schedules")
+	}
+}
+
+// The group goes once nothing is left in it, and a recorded name the listing
+// does not show is tried in both groups; an AccessDenied from lagotto's group
+// (a pre-#324 CLI-user policy) then reads as absent, since the listing
+// covered that group.
+func TestDeleteLaunchSchedules_DeletesTheEmptyGroup(t *testing.T) {
+	sc := &fakeScheduler{groupExists: true, listByGroup: map[string][][]string{},
+		deleteByGroup: map[string]error{"lagotto/lagotto-launch-sl-rec": &smithyAccessDenied{}}}
+	d, _ := testDeployer(nil, nil, sc)
+	res, err := d.DeleteLaunchSchedules(context.Background(), []string{"lagotto-launch-sl-rec"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"lagotto-launch-sl-rec"}; !reflect.DeepEqual(res.Deleted, want) {
+		t.Errorf("Deleted = %v, want %v (deleted from the default group)", res.Deleted, want)
+	}
+	if !res.GroupDeleted || sc.groupExists {
+		t.Error("the empty schedule group was not deleted")
 	}
 }
 
@@ -152,12 +221,16 @@ func TestDeleteScheduledLaunchSchedules(t *testing.T) {
 	if want := []string{"lagotto-launch-sl-aaaa-r2"}; !reflect.DeepEqual(sc.deleted, want) {
 		t.Errorf("deleted %v, want only %v", sc.deleted, want)
 	}
-	if sc.deleteCalls != 3 {
-		t.Errorf("DeleteSchedule called %d times, want 3", sc.deleteCalls)
+	// r1 and r2 in the default group, where they are listed, and the launch's
+	// own (not listed) in both groups.
+	if sc.deleteCalls != 4 {
+		t.Errorf("DeleteSchedule called %d times, want 4", sc.deleteCalls)
 	}
-	in := sc.listInputs[0]
-	if aws.ToString(in.GroupName) != "default" || aws.ToString(in.NamePrefix) != "lagotto-launch-sl-aaaa" {
-		t.Errorf("listed group %q prefix %q", aws.ToString(in.GroupName), aws.ToString(in.NamePrefix))
+	for i, group := range []string{"lagotto", "default"} {
+		in := sc.listInputs[i]
+		if aws.ToString(in.GroupName) != group || aws.ToString(in.NamePrefix) != "lagotto-launch-sl-aaaa" {
+			t.Errorf("list %d: group %q prefix %q", i, aws.ToString(in.GroupName), aws.ToString(in.NamePrefix))
+		}
 	}
 }
 
@@ -193,3 +266,11 @@ func TestDeleteScheduledLaunchSchedules_Errors(t *testing.T) {
 		t.Fatalf("delete error = %v, want it naming the schedule", err)
 	}
 }
+
+// smithyAccessDenied is an AccessDenied API error.
+type smithyAccessDenied struct{}
+
+func (*smithyAccessDenied) Error() string                 { return "AccessDeniedException: not authorized" }
+func (*smithyAccessDenied) ErrorCode() string             { return "AccessDeniedException" }
+func (*smithyAccessDenied) ErrorMessage() string          { return "not authorized" }
+func (*smithyAccessDenied) ErrorFault() smithy.ErrorFault { return smithy.FaultClient }

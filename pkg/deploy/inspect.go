@@ -21,8 +21,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
 	lambdatypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
-	"github.com/aws/aws-sdk-go-v2/service/scheduler"
 	schedulertypes "github.com/aws/aws-sdk-go-v2/service/scheduler/types"
+
+	"github.com/spore-host/lagotto/pkg/schedgroup"
 )
 
 // VersionTag is the Lambda tag `lagotto deploy` stamps the poller with, holding
@@ -71,6 +72,13 @@ type ScheduleInfo struct {
 	State      string `json:"state,omitempty"`
 	Expression string `json:"expression,omitempty"`
 	TargetARN  string `json:"target_arn,omitempty"`
+	// Group is the schedule group it is in: lagotto's (schedgroup.Name), or
+	// the default one for a schedule deployed before #324.
+	Group string `json:"group,omitempty"`
+	// Duplicate is true when the schedule is in BOTH groups, so it fires
+	// twice: a move whose delete of the old copy failed. `lagotto deploy`
+	// removes the one in the default group.
+	Duplicate bool `json:"duplicate,omitempty"`
 }
 
 // Enabled reports whether the schedule is in the ENABLED state.
@@ -102,15 +110,13 @@ func (d *Deployer) InspectPoller(ctx context.Context) (PollerInfo, error) {
 	return info, nil
 }
 
-// InspectPollerSchedule reads the poller's schedule. An absent schedule is
+// InspectPollerSchedule reads the poller's schedule, from lagotto's schedule
+// group or the default one (#324). An absent schedule is
 // (ScheduleInfo{Exists: false}, nil); any other error is returned.
 func (d *Deployer) InspectPollerSchedule(ctx context.Context) (ScheduleInfo, error) {
-	out, err := d.sched.GetSchedule(ctx, &scheduler.GetScheduleInput{
-		Name: aws.String(PollerScheduleName),
-	})
+	out, err := schedgroup.Find(ctx, d.sched, PollerScheduleName)
 	if err != nil {
-		var notFound *schedulertypes.ResourceNotFoundException
-		if errors.As(err, &notFound) {
+		if schedgroup.IsNotFound(err) {
 			return ScheduleInfo{}, nil
 		}
 		return ScheduleInfo{}, fmt.Errorf("look up schedule %s: %w", PollerScheduleName, err)
@@ -119,6 +125,13 @@ func (d *Deployer) InspectPollerSchedule(ctx context.Context) (ScheduleInfo, err
 		Exists:     true,
 		State:      string(out.State),
 		Expression: aws.ToString(out.ScheduleExpression),
+		Group:      aws.ToString(out.GroupName),
+	}
+	if info.Group == schedgroup.Name {
+		// Best effort: a failure to read the default group is not a finding.
+		if dup, derr := d.pollerScheduleExists(ctx, schedgroup.Default); derr == nil {
+			info.Duplicate = dup
+		}
 	}
 	if out.Target != nil {
 		info.TargetARN = aws.ToString(out.Target.Arn)

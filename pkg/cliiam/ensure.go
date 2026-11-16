@@ -9,7 +9,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
+	"github.com/spore-host/libs/tags/iamtags"
 
+	"github.com/spore-host/lagotto/pkg/managedtags"
 	"github.com/spore-host/lagotto/pkg/runtimeiam"
 )
 
@@ -26,6 +28,9 @@ type PolicyAPI interface {
 	CreatePolicyVersion(ctx context.Context, in *iam.CreatePolicyVersionInput, optFns ...func(*iam.Options)) (*iam.CreatePolicyVersionOutput, error)
 	ListPolicyVersions(ctx context.Context, in *iam.ListPolicyVersionsInput, optFns ...func(*iam.Options)) (*iam.ListPolicyVersionsOutput, error)
 	DeletePolicyVersion(ctx context.Context, in *iam.DeletePolicyVersionInput, optFns ...func(*iam.Options)) (*iam.DeletePolicyVersionOutput, error)
+	// TagPolicy adds the spore.host tags to a policy an older lagotto created
+	// without them (#324).
+	TagPolicy(ctx context.Context, in *iam.TagPolicyInput, optFns ...func(*iam.Options)) (*iam.TagPolicyOutput, error)
 }
 
 // ErrUnmanagedPolicy is returned when a policy named [PolicyName] exists without
@@ -63,26 +68,43 @@ func hasManagedTag(tags []iamtypes.Tag) bool {
 // policy (URL-decoded JSON as IAM returns it, which runtimeiam.ParsePolicy
 // accepts). found is false when the policy does not exist.
 func ReadPolicy(ctx context.Context, client PolicyAPI, accountID string) (doc string, found bool, err error) {
+	doc, _, found, err = readPolicy(ctx, client, accountID)
+	return doc, found, err
+}
+
+// readPolicy is [ReadPolicy], also returning the policy's tags.
+func readPolicy(ctx context.Context, client PolicyAPI, accountID string) (doc string, tags map[string]string, found bool, err error) {
 	p, err := client.GetPolicy(ctx, &iam.GetPolicyInput{PolicyArn: aws.String(PolicyARN(accountID))})
 	if err != nil {
 		if isNoSuchEntity(err) {
-			return "", false, nil
+			return "", nil, false, nil
 		}
-		return "", false, fmt.Errorf("cliiam: get policy %s: %w", PolicyName, err)
+		return "", nil, false, fmt.Errorf("cliiam: get policy %s: %w", PolicyName, err)
 	}
 	if p.Policy == nil || !hasManagedTag(p.Policy.Tags) {
-		return "", true, ErrUnmanagedPolicy
+		return "", nil, true, ErrUnmanagedPolicy
 	}
+	tags = iamtags.ToMap(p.Policy.Tags)
 	v, err := client.GetPolicyVersion(ctx, &iam.GetPolicyVersionInput{
 		PolicyArn: aws.String(PolicyARN(accountID)), VersionId: p.Policy.DefaultVersionId,
 	})
 	if err != nil {
-		return "", true, fmt.Errorf("cliiam: read the default version of %s: %w", PolicyName, err)
+		return "", tags, true, fmt.Errorf("cliiam: read the default version of %s: %w", PolicyName, err)
 	}
 	if v.PolicyVersion == nil {
-		return "", true, fmt.Errorf("cliiam: the default version of %s has no document", PolicyName)
+		return "", tags, true, fmt.Errorf("cliiam: the default version of %s has no document", PolicyName)
 	}
-	return aws.ToString(v.PolicyVersion.Document), true, nil
+	return aws.ToString(v.PolicyVersion.Document), tags, true, nil
+}
+
+// PolicyTags are the tags on the CLI-user policy: Application, the managed tag
+// its deleter is gated on, and the spore.host service tags (#324, scope
+// "global").
+func PolicyTags(stamp ...managedtags.Stamp) map[string]string {
+	return managedtags.With(map[string]string{
+		"Application": "lagotto",
+		ManagedTagKey: ManagedTagValue,
+	}, managedtags.FirstStamp(stamp).Service(managedtags.ScopeGlobal, managedtags.ComponentCLIPolicy))
 }
 
 // EnsurePolicy creates [PolicyName] with doc, or, when it exists with a
@@ -90,27 +112,33 @@ func ReadPolicy(ctx context.Context, client PolicyAPI, accountID string) (doc st
 // document that is semantically identical (runtimeiam.DiffPolicy) is left
 // alone, so a re-run of setup does not churn versions. When the policy already
 // has five versions, the oldest non-default one is deleted first.
-func EnsurePolicy(ctx context.Context, client PolicyAPI, accountID, doc string) (Outcome, error) {
+//
+// The policy carries [PolicyTags] (#324): set at create, and the ones an
+// existing policy lacks added to it. stamp (optional) is the owner and clock.
+func EnsurePolicy(ctx context.Context, client PolicyAPI, accountID, doc string, stamp ...managedtags.Stamp) (Outcome, error) {
 	out := Outcome{ARN: PolicyARN(accountID)}
-	deployed, found, err := ReadPolicy(ctx, client, accountID)
+	deployed, have, found, err := readPolicy(ctx, client, accountID)
 	if err != nil {
 		return out, err
 	}
+	desired := PolicyTags(stamp...)
 	if !found {
 		if _, err := client.CreatePolicy(ctx, &iam.CreatePolicyInput{
 			PolicyName:     aws.String(PolicyName),
 			Path:           aws.String(PolicyPath),
 			Description:    aws.String(PolicyDescription),
 			PolicyDocument: aws.String(doc),
-			Tags: []iamtypes.Tag{
-				{Key: aws.String("Application"), Value: aws.String("lagotto")},
-				{Key: aws.String(ManagedTagKey), Value: aws.String(ManagedTagValue)},
-			},
+			Tags:           iamtags.FromMap(desired),
 		}); err != nil {
 			return out, fmt.Errorf("cliiam: create policy %s: %w", PolicyName, err)
 		}
 		out.Created = true
 		return out, nil
+	}
+	if add := managedtags.Converge(have, desired); len(add) > 0 {
+		if _, err := client.TagPolicy(ctx, &iam.TagPolicyInput{PolicyArn: aws.String(out.ARN), Tags: iamtags.FromMap(add)}); err != nil {
+			return out, fmt.Errorf("cliiam: tag policy %s: %w", PolicyName, err)
+		}
 	}
 
 	if diff, derr := runtimeiam.DiffPolicy(deployed, doc); derr == nil && diff.Empty() {

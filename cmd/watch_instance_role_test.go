@@ -52,6 +52,10 @@ func (f *fakeRoleIAM) GetRole(_ context.Context, _ *iam.GetRoleInput, _ ...func(
 	return &iam.GetRoleOutput{Role: &iamtypes.Role{RoleName: aws.String(runtimeiam.RoleName)}}, nil
 }
 
+func (f *fakeRoleIAM) TagRole(context.Context, *iam.TagRoleInput, ...func(*iam.Options)) (*iam.TagRoleOutput, error) {
+	return &iam.TagRoleOutput{}, nil
+}
+
 func (f *fakeRoleIAM) CreateRole(_ context.Context, _ *iam.CreateRoleInput, _ ...func(*iam.Options)) (*iam.CreateRoleOutput, error) {
 	return nil, fmt.Errorf("unexpected CreateRole: the check must be read-only")
 }

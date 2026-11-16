@@ -851,6 +851,12 @@ func (f *fakeIAM) GetRolePolicy(_ context.Context, in *iam.GetRolePolicyInput, _
 	return &iam.GetRolePolicyOutput{PolicyDocument: aws.String(doc)}, nil
 }
 
+func (f *fakeIAM) TagRole(context.Context, *iam.TagRoleInput, ...func(*iam.Options)) (*iam.TagRoleOutput, error) {
+	f.writes++
+	f.t.Error("doctor called TagRole — it must be strictly read-only")
+	return nil, fmt.Errorf("read-only")
+}
+
 func (f *fakeIAM) CreateRole(context.Context, *iam.CreateRoleInput, ...func(*iam.Options)) (*iam.CreateRoleOutput, error) {
 	f.writes++
 	f.t.Error("doctor called CreateRole — it must be strictly read-only")

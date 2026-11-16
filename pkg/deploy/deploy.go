@@ -48,6 +48,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 
 	cfn "github.com/spore-host/lagotto/deployment/cloudformation"
+	"github.com/spore-host/lagotto/pkg/managedtags"
+	"github.com/spore-host/lagotto/pkg/schedgroup"
 )
 
 const (
@@ -75,6 +77,16 @@ type Options struct {
 	WatchesTable   string
 	HistoryTable   string
 	ScheduledTable string
+	// Owner is the deploying principal's aws:userid, written as
+	// spore-host:owner on what this deploy creates (#324). Optional.
+	Owner string
+	// HoldScheduleMove, when not empty, keeps an existing poller schedule in
+	// the default schedule group instead of moving it into lagotto's tagged
+	// group (#324), and says why: the deployed IAM policies do not grant the
+	// new group yet, so a moved schedule could not be managed by the poller or
+	// armed by CLI users until `lagotto setup` is re-run. A schedule that does
+	// not exist yet is then created in the default group too.
+	HoldScheduleMove string
 }
 
 // Result is what a Deploy reports back.
@@ -140,6 +152,13 @@ type Deployer struct {
 	logs    logsAPI
 	httpGet func(url string) (*http.Response, error)
 	sleep   func(time.Duration)
+	// now stamps spore-host:created on what Deploy creates (#324).
+	now func() time.Time
+	// owner is the spore-host:owner of what Deploy creates: the deploying
+	// principal's aws:userid (Options.Owner). Empty omits the tag.
+	owner string
+	// holdScheduleMove is Options.HoldScheduleMove for EnsurePollerSchedule.
+	holdScheduleMove string
 }
 
 // New builds a Deployer from an AWS config.
@@ -154,7 +173,18 @@ func New(cfg aws.Config) *Deployer {
 		logs:    cloudwatchlogs.NewFromConfig(cfg),
 		httpGet: http.Get,
 		sleep:   time.Sleep,
+		now:     time.Now,
 	}
+}
+
+// serviceTags are the spore.host tags of a deployment resource in region
+// (#324): spore-host:managed-by=lagotto, role=service and component.
+func (d *Deployer) serviceTags(region, component string) map[string]string {
+	now := time.Now
+	if d.now != nil {
+		now = d.now
+	}
+	return managedtags.Service(region, d.owner, component, now())
 }
 
 // Deploy provisions the hosted poller with direct SDK calls (#154) and returns the
@@ -173,9 +203,15 @@ func New(cfg aws.Config) *Deployer {
 //     retention BEFORE the function exists (#305). Created after, Lambda would
 //     already have made an untagged, never-expiring one on the first invocation.
 //  4. EnsurePollerFunction — converged onto the shape the SAM template declared.
-//  5. EnsurePollerSchedule — targets the function and the CLI-owned Scheduler
-//     invoke role. Created DISABLED; an existing schedule's state is passed
-//     through untouched, so a deploy can never switch off a running poller.
+//  5. ensureScheduleGroup + EnsurePollerSchedule — lagotto's tagged schedule
+//     group (#324), then the schedule in it, targeting the function and the
+//     CLI-owned Scheduler invoke role. Created DISABLED; an existing schedule's
+//     state is passed through untouched, so a deploy can never switch off a
+//     running poller. One in the default group (from before #324) is moved
+//     into lagotto's.
+//
+// Every resource is created with the spore.host tags (#324, pkg/managedtags),
+// and an existing one gains those it lacks.
 //
 // The DynamoDB tables and the two IAM roles are NOT touched here: they are ensured
 // by the caller (cmd/deploy.go, via watcher.Store.EnsureTables and
@@ -191,6 +227,9 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) (*Result, error) {
 	if opts.Region == "" {
 		return nil, fmt.Errorf("deploy: Region is required (the poller's ARNs are derived from it)")
 	}
+	d.owner = opts.Owner
+	d.holdScheduleMove = opts.HoldScheduleMove
+
 	// Only the derived default bucket is lagotto-managed (#264): tagged, and so
 	// deletable by Teardown. A user-supplied --lambda-bucket is left alone, even
 	// when it happens to be spelled like the default.
@@ -215,7 +254,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) (*Result, error) {
 		env = "production"
 	}
 
-	topicARN, err := d.EnsureAlertsTopic(ctx, env)
+	topicARN, err := d.EnsureAlertsTopic(ctx, env, opts.Region, opts.AccountID)
 	if err != nil {
 		return nil, err
 	}
@@ -232,7 +271,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) (*Result, error) {
 		CodeSHA256: digest,
 		EnvVars: PollerEnvVars(opts.Region, opts.AccountID,
 			opts.WatchesTable, opts.HistoryTable, opts.ScheduledTable, topicARN),
-		Tags: PollerTags(env, opts.Version),
+		Tags: managedtags.With(PollerTags(env, opts.Version), d.serviceTags(opts.Region, managedtags.ComponentPoller)),
 	})
 	if err != nil {
 		return nil, err
@@ -242,6 +281,13 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) (*Result, error) {
 	// empty Target.Arn on the schedule below, which would be an unhelpful failure.
 	if fnARN == "" {
 		fnARN = PollerFunctionARN(opts.Region, opts.AccountID)
+	}
+
+	// The tagged schedule group the schedules live in (#324), before the
+	// schedule that goes into it.
+	groupAction, err := d.ensureScheduleGroup(ctx, opts.Region, opts.AccountID)
+	if err != nil {
+		return nil, err
 	}
 
 	schedRoleARN := schedulerInvokeRoleARN(opts.AccountID)
@@ -264,13 +310,14 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) (*Result, error) {
 			fmt.Sprintf("SNS topic %s: ensured", AlertsTopicName),
 			fmt.Sprintf("log group %s: %s", PollerLogGroupName, logAction),
 			fmt.Sprintf("Lambda %s: %s", PollerFunctionName, fnAction),
+			fmt.Sprintf("schedule group %s: %s", ScheduleGroupName, groupAction),
 			fmt.Sprintf("schedule %s: %s", PollerScheduleName, schedAction),
 		},
 	}, nil
 }
 
 // Teardown deletes the poller resources explicitly, in the order
-// schedule → function → log group → topic, and returns a description of each
+// schedule → function → log group → topic → schedule group, and returns a description of each
 // one it actually removed.
 //
 // The order matters: the schedule goes FIRST so nothing can fire into a
@@ -301,14 +348,24 @@ func (d *Deployer) Teardown(ctx context.Context, region, accountID string) ([]st
 
 	// 1. Schedule first: an enabled schedule firing into a deleted function just
 	// produces invocation errors, and a schedule outliving its target is worse than
-	// a target outliving its schedule.
-	if exists, err := d.pollerScheduleExists(ctx); err != nil {
-		return deleted, err
-	} else if exists {
-		if err := d.deletePollerSchedule(ctx); err != nil {
+	// a target outliving its schedule. In both groups (#324): lagotto's, and the
+	// default one a schedule deployed before #324 is in.
+	for _, group := range schedgroup.Groups {
+		exists, err := d.pollerScheduleExists(ctx, group)
+		if err != nil {
 			return deleted, err
 		}
-		deleted = append(deleted, "schedule "+PollerScheduleName)
+		if !exists {
+			continue
+		}
+		if err := d.deletePollerSchedule(ctx, group); err != nil {
+			return deleted, err
+		}
+		what := "schedule " + PollerScheduleName
+		if group != schedgroup.Name {
+			what += " (schedule group " + group + ")"
+		}
+		deleted = append(deleted, what)
 	}
 
 	// 2. The function.
@@ -339,6 +396,14 @@ func (d *Deployer) Teardown(ctx context.Context, region, accountID string) ([]st
 			return deleted, err
 		}
 		deleted = append(deleted, "SNS topic "+AlertsTopicName)
+	}
+
+	// 5. lagotto's schedule group (#324), when nothing is left in it. Per-launch
+	// schedules are retained (see above), and keep it.
+	if gone, err := d.deleteScheduleGroupIfEmpty(ctx); err != nil {
+		return deleted, err
+	} else if gone {
+		deleted = append(deleted, "schedule group "+ScheduleGroupName)
 	}
 
 	return deleted, nil

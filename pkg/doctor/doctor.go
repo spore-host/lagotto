@@ -53,6 +53,7 @@ import (
 	"github.com/spore-host/lagotto/pkg/deploy"
 	"github.com/spore-host/lagotto/pkg/pollcadence"
 	"github.com/spore-host/lagotto/pkg/runtimeiam"
+	"github.com/spore-host/lagotto/pkg/schedgroup"
 	"github.com/spore-host/lagotto/pkg/watcher"
 )
 
@@ -160,25 +161,26 @@ type MetricsAPI interface {
 
 // Scheduler target-error lookup (#218). EventBridge Scheduler publishes its
 // metrics per account and per schedule GROUP, not per schedule, so this counts
-// every schedule in the default group: the poller's, lagotto's per-launch
-// lagotto-launch-* schedules, and anything else the account keeps there.
+// every schedule in the poller schedule's group: lagotto's own (#324), which
+// holds the poller's and lagotto's per-launch lagotto-launch-* schedules, or,
+// for a poller deployed before #324, the default group and anything else the
+// account keeps there.
 const (
 	schedulerMetricsNamespace = "AWS/Scheduler"
 	schedulerTargetErrors     = "TargetErrorCount"
 	schedulerGroupDimension   = "ScheduleGroup"
-	pollerScheduleGroup       = "default"
 	// SchedulerErrorsWindow is how far back the target-error count looks.
 	SchedulerErrorsWindow = 24 * time.Hour
 )
 
 // SchedulerErrorsQuery is the GetMetricStatistics request doctor makes: the Sum
-// of TargetErrorCount for the poller's schedule group over the last
+// of TargetErrorCount for the poller's schedule group, group, over the last
 // SchedulerErrorsWindow, in hourly buckets.
-func SchedulerErrorsQuery(now time.Time) *cloudwatch.GetMetricStatisticsInput {
+func SchedulerErrorsQuery(now time.Time, group string) *cloudwatch.GetMetricStatisticsInput {
 	return &cloudwatch.GetMetricStatisticsInput{
 		Namespace:  aws.String(schedulerMetricsNamespace),
 		MetricName: aws.String(schedulerTargetErrors),
-		Dimensions: []cwtypes.Dimension{{Name: aws.String(schedulerGroupDimension), Value: aws.String(pollerScheduleGroup)}},
+		Dimensions: []cwtypes.Dimension{{Name: aws.String(schedulerGroupDimension), Value: aws.String(group)}},
 		StartTime:  aws.Time(now.Add(-SchedulerErrorsWindow)),
 		EndTime:    aws.Time(now),
 		Period:     aws.Int32(3600),
@@ -379,7 +381,7 @@ func Gather(ctx context.Context, o Options) State {
 			now = o.Now
 		}
 		st.SchedulerErrors.Checked = true
-		out, err := o.Metrics.GetMetricStatistics(ctx, SchedulerErrorsQuery(now()))
+		out, err := o.Metrics.GetMetricStatistics(ctx, SchedulerErrorsQuery(now(), st.scheduleGroup()))
 		if err != nil {
 			st.SchedulerErrors.Err = err
 		} else {
@@ -915,16 +917,16 @@ func evalSchedulerErrors(st State) (Check, bool) {
 	case se.Count > 0:
 		c.Status = StatusWarn
 		c.Summary = fmt.Sprintf("EventBridge Scheduler reported %.0f target error(s) in schedule group %q in the last %s",
-			se.Count, pollerScheduleGroup, window)
+			se.Count, st.scheduleGroup(), window)
 		c.Detail = []string{
 			"a target error means a schedule fired and could not invoke its target — for the poller, that run never happened",
 			fmt.Sprintf("the metric (%s %s) is per schedule group, not per schedule: it includes per-launch lagotto-launch-* schedules and any other schedule in %q",
-				schedulerMetricsNamespace, schedulerTargetErrors, pollerScheduleGroup),
+				schedulerMetricsNamespace, schedulerTargetErrors, st.scheduleGroup()),
 			"if invoke-policy above FAILs, that is the cause",
 		}
 	default:
 		c.Status = StatusPass
-		c.Summary = fmt.Sprintf("no Scheduler target errors in schedule group %q in the last %s", pollerScheduleGroup, window)
+		c.Summary = fmt.Sprintf("no Scheduler target errors in schedule group %q in the last %s", st.scheduleGroup(), window)
 	}
 	return c, true
 }
@@ -985,11 +987,31 @@ func evalSchedule(st State) Check {
 		c.Status = StatusFail
 		c.Summary = fmt.Sprintf("the EventBridge schedule %s does not exist — nothing ever invokes the poller", deploy.PollerScheduleName)
 		c.Fix = []string{"lagotto deploy --version <release>"}
+	case st.Schedule.Duplicate:
+		// #324: a move into lagotto's group whose delete of the old copy failed.
+		c.Status = StatusWarn
+		c.Summary = fmt.Sprintf("the EventBridge schedule %s is in both schedule group %s and %s, so the poller runs twice per tick",
+			deploy.PollerScheduleName, deploy.ScheduleGroupName, schedgroup.Default)
+		c.Fix = []string{"lagotto deploy --version <release>   # deletes the copy in the default group"}
 	default:
 		c.Status = StatusPass
 		c.Summary = fmt.Sprintf("the EventBridge schedule %s exists (%s, %s)", deploy.PollerScheduleName, st.Schedule.State, st.Schedule.Expression)
+		if g := st.scheduleGroup(); g != deploy.ScheduleGroupName {
+			// Deployed before #324, or held there by deploy (a legacy stack, or
+			// IAM policies that predate the group).
+			c.Detail = []string{fmt.Sprintf("in schedule group %s, which cannot be tagged; 'lagotto setup' then 'lagotto deploy' move it into lagotto's tagged group %s",
+				g, deploy.ScheduleGroupName)}
+		}
 	}
 	return c
+}
+
+// scheduleGroup is the poller schedule's group, the default one when unknown.
+func (st State) scheduleGroup() string {
+	if st.Schedule.Group != "" {
+		return st.Schedule.Group
+	}
+	return schedgroup.Default
 }
 
 // evalScheduleState is the silent-death check.

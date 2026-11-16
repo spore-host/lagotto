@@ -218,9 +218,11 @@ func TestNoPrivilegeEscalation(t *testing.T) {
 		}
 		// `cancel sl-…` deletes per-launch schedules (#279), and nothing else: never
 		// the poller's own schedule, a group, or another schedule in the account.
+		// In either group they may be in (#324).
 		if strings.HasPrefix(g.Action, "scheduler:Delete") &&
 			(g.Action != "scheduler:DeleteSchedule" ||
-				g.Resource != "arn:aws:scheduler:*:"+testAccount+":schedule/default/"+launchSchedulePrefix+"*") {
+				(g.Resource != "arn:aws:scheduler:*:"+testAccount+":schedule/default/"+launchSchedulePrefix+"*" &&
+					g.Resource != "arn:aws:scheduler:*:"+testAccount+":schedule/lagotto/"+launchSchedulePrefix+"*")) {
 			t.Errorf("the CLI-user policy grants %s on %s; only DeleteSchedule on the per-launch schedules is allowed", g.Action, g.Resource)
 		}
 		if g.Action == "ec2:CancelCapacityReservation" && !strings.Contains(g.Condition, "ec2:ResourceTag/lagotto:managed") {

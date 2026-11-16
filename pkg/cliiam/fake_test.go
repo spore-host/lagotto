@@ -38,6 +38,8 @@ type fakeIAM struct {
 	roleARN string
 	// simulated records the principals simulated.
 	simulated []string
+	// tagCalls records each TagPolicy (#324).
+	tagCalls []*iam.TagPolicyInput
 }
 
 func managedTags() []iamtypes.Tag {
@@ -95,6 +97,27 @@ func (f *fakeIAM) GetPolicy(_ context.Context, in *iam.GetPolicyInput, _ ...func
 		p.DefaultVersionId = d.VersionId
 	}
 	return &iam.GetPolicyOutput{Policy: p}, nil
+}
+
+// TagPolicy merges into the policy's tags. It is recorded in tagCalls, not
+// calls, which tests compare to the version-management sequence.
+func (f *fakeIAM) TagPolicy(_ context.Context, in *iam.TagPolicyInput, _ ...func(*iam.Options)) (*iam.TagPolicyOutput, error) {
+	f.tagCalls = append(f.tagCalls, in)
+	if err := f.err("TagPolicy"); err != nil {
+		return nil, err
+	}
+	for _, t := range in.Tags {
+		replaced := false
+		for i := range f.tags {
+			if aws.ToString(f.tags[i].Key) == aws.ToString(t.Key) {
+				f.tags[i].Value, replaced = t.Value, true
+			}
+		}
+		if !replaced {
+			f.tags = append(f.tags, t)
+		}
+	}
+	return &iam.TagPolicyOutput{}, nil
 }
 
 func (f *fakeIAM) GetPolicyVersion(_ context.Context, in *iam.GetPolicyVersionInput, _ ...func(*iam.Options)) (*iam.GetPolicyVersionOutput, error) {

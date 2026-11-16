@@ -8,6 +8,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	snstypes "github.com/aws/aws-sdk-go-v2/service/sns/types"
+	"github.com/spore-host/libs/tags/snstags"
+
+	"github.com/spore-host/lagotto/pkg/managedtags"
 )
 
 const (
@@ -20,81 +23,120 @@ const (
 	alertsTopicKMSKey = "alias/aws/sns"
 )
 
-// EnsureAlertsTopic get-or-creates the lagotto-capacity-alerts SNS topic and
-// converges its attributes and tags, returning its ARN. Idempotent: safe to call
-// on every `lagotto deploy`.
+// EnsureAlertsTopic get-or-creates the lagotto-capacity-alerts SNS topic in
+// region and converges its attributes and tags, returning its ARN. Idempotent:
+// safe to call on every `lagotto deploy`.
 //
 // env is the *tag* value — production/staging/development, from `--environment`.
 // Do not confuse it with a Lambda Environment.Variables map; see
 // EnsurePollerFunction's note.
 //
-// Three steps, in this order:
+// Four steps, in this order:
 //
-//  1. CreateTopic with the attributes set at create time. CreateTopic is
-//     idempotent by name and returns the EXISTING ARN when the topic is already
-//     there, so this never fails on a re-run. Setting KmsMasterKeyId in the
-//     create means a brand-new topic is never briefly unencrypted.
-//  2. Always converge: read GetTopicAttributes and SetTopicAttributes only the
-//     keys whose value differs. This repairs a topic left behind by an older (or
+//  1. Probe the topic (GetTopicAttributes on its fixed ARN). SNS answers a
+//     CreateTopic for an existing topic with InvalidParameter when the tags it
+//     carries differ from the topic's, and the spore.host tags include the time
+//     lagotto first tagged it (lagotto#324), so CreateTopic is called only for
+//     a topic that is not there.
+//  2. CreateTopic, for an absent topic, with the attributes and every tag set
+//     at create time: a brand-new topic is never briefly unencrypted or
+//     untagged. A topic created by a racing deploy between the probe and the
+//     create is returned by CreateTopic all the same.
+//  3. Always converge the attributes: SetTopicAttributes only the keys whose
+//     value differs. This repairs a topic left behind by an older (or
 //     hand-rolled) path, and it is also the only mechanism a test can observe —
 //     substrate's createTopic reads a flat Params["DisplayName"] that the SDK
 //     never sends, so create-time attributes are invisible to it. In steady
-//     state this is one read and zero writes.
-//  3. TagResource, an idempotent upsert, so re-running with a different
-//     --environment actually retags an existing topic.
-//
-// There is deliberately no `created bool` return: CreateTopic gives no
-// create-vs-already-existed discriminator, and adding a speculative
-// GetTopicAttributes pre-check just to synthesize one would be an extra call
-// that buys nothing.
-func (d *Deployer) EnsureAlertsTopic(ctx context.Context, env string) (string, error) {
+//     state this is zero writes.
+//  4. Converge the tags: read them, and TagResource (an upsert) only the ones
+//     missing or different, so re-running with a different --environment
+//     retags an existing topic and a topic an older lagotto created gains the
+//     spore.host tags, while spore-host:created and spore-host:owner keep their
+//     first values (managedtags.Converge).
+func (d *Deployer) EnsureAlertsTopic(ctx context.Context, env, region, accountID string) (string, error) {
 	if env == "" {
 		env = "production"
 	}
-	out, err := d.sns.CreateTopic(ctx, &sns.CreateTopicInput{
-		Name: aws.String(AlertsTopicName),
-		Attributes: map[string]string{
-			"DisplayName":    alertsTopicDisplayName,
-			"KmsMasterKeyId": alertsTopicKMSKey,
-		},
-		Tags: alertsTopicTags(env),
-	})
-	if err != nil {
-		return "", fmt.Errorf("create SNS topic %s: %w", AlertsTopicName, err)
-	}
-	arn := aws.ToString(out.TopicArn)
-	if arn == "" {
-		return "", fmt.Errorf("create SNS topic %s: no ARN returned", AlertsTopicName)
+	want := d.alertsTopicTags(env, region)
+
+	arn := AlertsTopicARN(region, accountID)
+	cur, err := d.sns.GetTopicAttributes(ctx, &sns.GetTopicAttributesInput{TopicArn: aws.String(arn)}, inRegion(region))
+	switch {
+	case err == nil:
+		if a := cur.Attributes["TopicArn"]; a != "" {
+			arn = a
+		}
+	case isSNSNotFound(err):
+		out, cErr := d.sns.CreateTopic(ctx, &sns.CreateTopicInput{
+			Name: aws.String(AlertsTopicName),
+			Attributes: map[string]string{
+				"DisplayName":    alertsTopicDisplayName,
+				"KmsMasterKeyId": alertsTopicKMSKey,
+			},
+			Tags: snstags.FromMap(want),
+		}, inRegion(region))
+		if cErr != nil {
+			return "", fmt.Errorf("create SNS topic %s: %w", AlertsTopicName, cErr)
+		}
+		arn = aws.ToString(out.TopicArn)
+		if arn == "" {
+			return "", fmt.Errorf("create SNS topic %s: no ARN returned", AlertsTopicName)
+		}
+		cur = nil // read the new topic's attributes below
+	default:
+		return "", fmt.Errorf("check whether SNS topic %s exists: %w", AlertsTopicName, err)
 	}
 
-	if err := d.convergeTopicAttributes(ctx, arn); err != nil {
+	if err := d.convergeTopicAttributes(ctx, arn, region, cur); err != nil {
 		return "", err
 	}
-
-	if _, err := d.sns.TagResource(ctx, &sns.TagResourceInput{
-		ResourceArn: aws.String(arn),
-		Tags:        alertsTopicTags(env),
-	}); err != nil {
-		return "", fmt.Errorf("tag SNS topic %s: %w", arn, err)
+	if err := d.convergeTopicTags(ctx, arn, region, want); err != nil {
+		return "", err
 	}
 	return arn, nil
 }
 
-// alertsTopicTags mirrors the template's topic tags exactly.
-func alertsTopicTags(env string) []snstypes.Tag {
-	return []snstypes.Tag{
-		{Key: aws.String("Environment"), Value: aws.String(env)},
-		{Key: aws.String("Application"), Value: aws.String("lagotto")},
-		{Key: aws.String("Component"), Value: aws.String("alerts")},
+// alertsTopicTags are the topic's tags: the template's three, plus the
+// spore.host service tags (lagotto#324).
+func (d *Deployer) alertsTopicTags(env, region string) map[string]string {
+	return managedtags.With(map[string]string{
+		"Environment": env,
+		"Application": "lagotto",
+		"Component":   "alerts",
+	}, d.serviceTags(region, managedtags.ComponentAlerts))
+}
+
+// convergeTopicTags writes the desired tags the topic lacks or has with
+// another value, and nothing when it has them all.
+func (d *Deployer) convergeTopicTags(ctx context.Context, arn, region string, want map[string]string) error {
+	cur, err := d.sns.ListTagsForResource(ctx, &sns.ListTagsForResourceInput{ResourceArn: aws.String(arn)}, inRegion(region))
+	if err != nil {
+		return fmt.Errorf("read tags of SNS topic %s: %w", arn, err)
 	}
+	add := managedtags.Converge(snstags.ToMap(cur.Tags), want)
+	if len(add) == 0 {
+		return nil
+	}
+	if _, err := d.sns.TagResource(ctx, &sns.TagResourceInput{
+		ResourceArn: aws.String(arn),
+		Tags:        snstags.FromMap(add),
+	}, inRegion(region)); err != nil {
+		return fmt.Errorf("tag SNS topic %s: %w", arn, err)
+	}
+	return nil
 }
 
 // convergeTopicAttributes issues a SetTopicAttributes for each desired attribute
 // whose current value differs — and none when they all match.
-func (d *Deployer) convergeTopicAttributes(ctx context.Context, arn string) error {
-	cur, err := d.sns.GetTopicAttributes(ctx, &sns.GetTopicAttributesInput{TopicArn: aws.String(arn)})
-	if err != nil {
-		return fmt.Errorf("read attributes of SNS topic %s: %w", arn, err)
+//
+// cur is the topic's attributes when the caller has just read them, nil to
+// read them here.
+func (d *Deployer) convergeTopicAttributes(ctx context.Context, arn, region string, cur *sns.GetTopicAttributesOutput) error {
+	if cur == nil {
+		var err error
+		if cur, err = d.sns.GetTopicAttributes(ctx, &sns.GetTopicAttributesInput{TopicArn: aws.String(arn)}, inRegion(region)); err != nil {
+			return fmt.Errorf("read attributes of SNS topic %s: %w", arn, err)
+		}
 	}
 	// Iterate a fixed slice, not a map, so the call order is deterministic and a
 	// test can assert on it.

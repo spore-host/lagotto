@@ -7,6 +7,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
+	"github.com/spore-host/libs/tags/iamtags"
+
+	"github.com/spore-host/lagotto/pkg/managedtags"
 )
 
 // ManagedProfileTagKey / ManagedProfileTagValue mark an instance profile (and
@@ -22,6 +25,88 @@ const (
 // for an instance role (spawn adds its own spawn:* tags).
 func ManagedProfileTags() map[string]string {
 	return map[string]string{ManagedProfileTagKey: ManagedProfileTagValue}
+}
+
+// InstanceProfileTags are [ManagedProfileTags] plus the spore.host service tags
+// (#324, scope "global"): what `setup` puts on lagotto's instance role, its
+// profile, and the profile it creates for an authorized role.
+func InstanceProfileTags(stamp ...managedtags.Stamp) map[string]string {
+	return managedtags.With(ManagedProfileTags(),
+		managedtags.FirstStamp(stamp).Service(managedtags.ScopeGlobal, managedtags.ComponentInstanceRole))
+}
+
+// InstanceRoleTagAPI is the slice of IAM [EnsureInstanceRoleTags] needs.
+// *iam.Client satisfies it.
+type InstanceRoleTagAPI interface {
+	GetRole(ctx context.Context, in *iam.GetRoleInput, optFns ...func(*iam.Options)) (*iam.GetRoleOutput, error)
+	TagRole(ctx context.Context, in *iam.TagRoleInput, optFns ...func(*iam.Options)) (*iam.TagRoleOutput, error)
+	ListInstanceProfileTags(ctx context.Context, in *iam.ListInstanceProfileTagsInput, optFns ...func(*iam.Options)) (*iam.ListInstanceProfileTagsOutput, error)
+	TagInstanceProfile(ctx context.Context, in *iam.TagInstanceProfileInput, optFns ...func(*iam.Options)) (*iam.TagInstanceProfileOutput, error)
+}
+
+// EnsureInstanceRoleTags adds [InstanceProfileTags] to what `setup` made for
+// the instance role name but an older lagotto left without them (#324): the
+// tags each lacks are added, and a spore-host:created already there is kept.
+// It runs after the role and profile were ensured, so a missing one is an
+// error.
+//
+// Only what is lagotto's is tagged. For lagotto's own [InstanceRoleName] that is
+// the role and its profile. For an administrator's authorized role it is the
+// profile alone, and only when it carries [ManagedProfileTagKey] (setup
+// created it); the role is the administrator's and is never tagged.
+func EnsureInstanceRoleTags(ctx context.Context, client InstanceRoleTagAPI, name string, stamp ...managedtags.Stamp) error {
+	desired := InstanceProfileTags(stamp...)
+	if name == InstanceRoleName {
+		out, err := client.GetRole(ctx, &iam.GetRoleInput{RoleName: aws.String(name)})
+		if err != nil {
+			return fmt.Errorf("runtimeiam: read role %s: %w", name, err)
+		}
+		var have map[string]string
+		if out.Role != nil {
+			have = iamtags.ToMap(out.Role.Tags)
+		}
+		if add := managedtags.Converge(have, desired); len(add) > 0 {
+			if _, err := client.TagRole(ctx, &iam.TagRoleInput{RoleName: aws.String(name), Tags: iamtags.FromMap(add)}); err != nil {
+				return fmt.Errorf("runtimeiam: tag role %s: %w", name, err)
+			}
+		}
+	}
+	have, err := profileTags(ctx, client, name)
+	if err != nil {
+		return err
+	}
+	if name != InstanceRoleName && have[ManagedProfileTagKey] != ManagedProfileTagValue {
+		return nil // not created by setup: not lagotto's to tag
+	}
+	if add := managedtags.Converge(have, desired); len(add) > 0 {
+		if _, err := client.TagInstanceProfile(ctx, &iam.TagInstanceProfileInput{
+			InstanceProfileName: aws.String(name), Tags: iamtags.FromMap(add),
+		}); err != nil {
+			return fmt.Errorf("runtimeiam: tag instance profile %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+// profileTags reads every tag of the named instance profile.
+func profileTags(ctx context.Context, client interface {
+	ListInstanceProfileTags(ctx context.Context, in *iam.ListInstanceProfileTagsInput, optFns ...func(*iam.Options)) (*iam.ListInstanceProfileTagsOutput, error)
+}, name string) (map[string]string, error) {
+	tags := map[string]string{}
+	in := &iam.ListInstanceProfileTagsInput{InstanceProfileName: aws.String(name)}
+	for {
+		page, err := client.ListInstanceProfileTags(ctx, in)
+		if err != nil {
+			return nil, fmt.Errorf("runtimeiam: read tags of instance profile %s: %w", name, err)
+		}
+		for k, v := range iamtags.ToMap(page.Tags) {
+			tags[k] = v
+		}
+		if !page.IsTruncated || page.Marker == nil {
+			return tags, nil
+		}
+		in.Marker = page.Marker
+	}
 }
 
 // InstanceRoleDeleteAPI is the slice of IAM the instance-role deleters need.
