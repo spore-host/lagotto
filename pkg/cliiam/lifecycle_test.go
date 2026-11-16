@@ -8,6 +8,10 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
+	"github.com/spore-host/libs/tags"
+	"github.com/spore-host/libs/tags/iamtags"
+
+	"github.com/spore-host/lagotto/pkg/managedtags"
 )
 
 func doc(t *testing.T, buckets ...string) string {
@@ -173,5 +177,35 @@ func TestDeletePolicyStopsBeforeDeletingOnAListFailure(t *testing.T) {
 	}
 	if len(f.calls) != 0 {
 		t.Errorf("deleted after failing to list attachments: %v", f.calls)
+	}
+}
+
+// A policy an older lagotto created gains the spore.host tags (#324), with no
+// new version when the document is unchanged; a TagPolicy failure is an error.
+func TestEnsurePolicy_BackfillsTags(t *testing.T) {
+	doc, err := PolicyDocument(testAccount, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := withPolicy(1, doc)
+	out, err := EnsurePolicy(context.Background(), f, testAccount, doc, managedtags.Stamp{Owner: "AIDAADMIN"})
+	if err != nil || out.Created || out.Updated {
+		t.Fatalf("EnsurePolicy = %+v, %v", out, err)
+	}
+	if len(f.tagCalls) != 1 {
+		t.Fatalf("TagPolicy calls = %d, want 1", len(f.tagCalls))
+	}
+	got := iamtags.ToMap(f.tags)
+	if !tags.IsManagedBy(got, tags.ToolLagotto) || got[ManagedTagKey] != ManagedTagValue || got[tags.Owner] != "AIDAADMIN" {
+		t.Errorf("policy tags = %v", got)
+	}
+	if _, err := EnsurePolicy(context.Background(), f, testAccount, doc); err != nil || len(f.tagCalls) != 1 {
+		t.Errorf("re-run: err %v, TagPolicy calls %d; want no new call", err, len(f.tagCalls))
+	}
+
+	f = withPolicy(1, doc)
+	f.errs = map[string]error{"TagPolicy": errors.New("AccessDenied")}
+	if _, err := EnsurePolicy(context.Background(), f, testAccount, doc); err == nil || !strings.Contains(err.Error(), "tag policy") {
+		t.Errorf("TagPolicy failure = %v", err)
 	}
 }

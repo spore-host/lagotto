@@ -3,6 +3,7 @@ package runtimeiam
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -121,4 +122,18 @@ func TestEnsureRoles_TagsRoles(t *testing.T) {
 	if err := EnsureRoles(context.Background(), f, "us-east-1", "123456789012"); err != nil || len(f.tagged) != 0 {
 		t.Errorf("re-run: err %v, TagRole on %v; want none", err, f.tagged)
 	}
+}
+
+// A TagRole failure on an existing poller role is an error naming it.
+func TestEnsureRoles_TagFailure(t *testing.T) {
+	f := &tagFailIAM{fakeIAM: &fakeIAM{existing: map[string]bool{RoleName: true}}}
+	if err := EnsureRoles(context.Background(), f, "us-east-1", "123456789012"); err == nil || !strings.Contains(err.Error(), "tag role "+RoleName) {
+		t.Errorf("err = %v", err)
+	}
+}
+
+type tagFailIAM struct{ *fakeIAM }
+
+func (tagFailIAM) TagRole(context.Context, *iam.TagRoleInput, ...func(*iam.Options)) (*iam.TagRoleOutput, error) {
+	return nil, errors.New("AccessDenied")
 }
