@@ -59,13 +59,13 @@ func PollerLogGroupARN(region, accountID string) string {
 // pollerLogGroupTags are the tags on the poller's log group: the managed tag
 // that names lagotto as its owner, the function's Application/Component pair,
 // so the group sorts with the function in a tag-based view, and the
-// spore.host service tags (#324).
+// spore.host infrastructure tags (#324).
 func (d *Deployer) pollerLogGroupTags(region string) map[string]string {
 	return managedtags.With(map[string]string{
 		ManagedTagKey: ManagedTagValue,
 		"Application": "lagotto",
 		"Component":   "capacity-poller",
-	}, d.serviceTags(region, managedtags.ComponentPoller))
+	}, d.infraTags(region, managedtags.ComponentPoller))
 }
 
 // ensurePollerLogGroup creates the poller's log group, tagged and with

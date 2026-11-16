@@ -27,7 +27,7 @@ const ScheduleGroupName = schedgroup.Name
 // returns what it did. An existing group is adopted: the spore.host tags it
 // lacks are added (managedtags.Converge).
 func (d *Deployer) ensureScheduleGroup(ctx context.Context, region, accountID string) (string, error) {
-	want := d.serviceTags(region, managedtags.ComponentPoller)
+	want := d.infraTags(region, managedtags.ComponentPoller)
 	_, err := d.sched.CreateScheduleGroup(ctx, &scheduler.CreateScheduleGroupInput{
 		Name: aws.String(ScheduleGroupName),
 		Tags: schedulertags.FromMap(want),

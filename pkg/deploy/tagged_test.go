@@ -85,8 +85,8 @@ func TestDeploy_TagsEverythingItCreates(t *testing.T) {
 	for name, m := range map[string]map[string]string{
 		"function": fn.createCalls[0].Tags, "log group": fl.tags, "schedule group": sc.groupTags, "topic": fs.tags,
 	} {
-		if !tags.IsService(m) || m[tags.Owner] != "AIDAEXAMPLE" || m[tags.Scope] != testRegion {
-			t.Errorf("%s tags = %v, want role=service, owner and scope", name, m)
+		if (m[tags.Role] != "" || m[tags.Component] == "") || m[tags.Owner] != "AIDAEXAMPLE" || m[tags.Scope] != testRegion {
+			t.Errorf("%s tags = %v, want a component and no role, owner and scope", name, m)
 		}
 	}
 }

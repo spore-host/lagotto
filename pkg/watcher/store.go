@@ -109,11 +109,11 @@ func (s *Store) SetTagStamp(stamp managedtags.Stamp) {
 }
 
 // tableTags are the tags lagotto's tables are created with: managedTag, which
-// the deleters are gated on, and the spore.host service tags (#324).
+// the deleters are gated on, and the spore.host infrastructure tags (#324).
 func (s *Store) tableTags() map[string]string {
 	return managedtags.With(
 		map[string]string{aws.ToString(managedTag.Key): aws.ToString(managedTag.Value)},
-		s.stamp.Service(s.region, managedtags.ComponentStore))
+		s.stamp.Infrastructure(s.region, managedtags.ComponentStore))
 }
 
 // EnsureTableTags adds the spore.host tags (#324) to lagotto's existing
@@ -127,7 +127,7 @@ func (s *Store) tableTags() map[string]string {
 // is one a CloudFormation stack created. A scheduled-launches table without it
 // is not lagotto's (see DeleteTables) and is left untagged.
 func (s *Store) EnsureTableTags(ctx context.Context) ([]string, error) {
-	want := s.stamp.Service(s.region, managedtags.ComponentStore)
+	want := s.stamp.Infrastructure(s.region, managedtags.ComponentStore)
 	var tagged []string
 	for _, name := range s.tableNames() {
 		desc, err := s.client.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: aws.String(name)})

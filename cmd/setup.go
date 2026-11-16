@@ -72,7 +72,7 @@ are carried forward on later runs. 'lagotto teardown --iam-roles' detaches and
 deletes the policy.
 
 Everything setup creates is tagged spore-host:managed-by=lagotto (with
-spore-host:scope, :created, :schema, :role=service and :owner, your aws:userid),
+spore-host:scope, :created, :schema, :component and :owner, your aws:userid),
 and the tables, roles, instance profiles and policy an older lagotto created
 without those tags gain them. An administrator's own role authorized with
 --instance-role is never tagged.`,

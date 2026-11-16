@@ -141,10 +141,10 @@ func (d *Deployer) tagManagedBucket(ctx context.Context, bucket, region, account
 
 // artifactBucketTags are the tags deploy puts on the default artifact bucket:
 // ManagedTagKey=ManagedTagValue, which teardown's deletion is gated on, and
-// the spore.host service tags.
+// the spore.host infrastructure tags.
 func (d *Deployer) artifactBucketTags(region string) map[string]string {
 	return managedtags.With(map[string]string{ManagedTagKey: ManagedTagValue},
-		d.serviceTags(region, managedtags.ComponentArtifacts))
+		d.infraTags(region, managedtags.ComponentArtifacts))
 }
 
 // bucketTags returns the bucket's tags; a bucket with none is an empty map.

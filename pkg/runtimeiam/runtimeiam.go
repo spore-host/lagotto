@@ -127,12 +127,12 @@ func getRole(ctx context.Context, client IAMAPI, name string) (*iamtypes.Role, e
 
 // roleTags are the tags on one of the two CLI-owned poller roles: the
 // Application/Component pair the poller role always had, and the spore.host
-// service tags with scope "global" (#324).
+// infrastructure tags with scope "global" (#324).
 func roleTags(stamp managedtags.Stamp) map[string]string {
 	return managedtags.With(map[string]string{
 		"Application": "lagotto",
 		"Component":   "capacity-poller",
-	}, stamp.Service(managedtags.ScopeGlobal, managedtags.ComponentPoller))
+	}, stamp.Infrastructure(managedtags.ScopeGlobal, managedtags.ComponentPoller))
 }
 
 // ensureRoleTags adds to an existing role the desired tags it lacks

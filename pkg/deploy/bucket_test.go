@@ -191,8 +191,8 @@ func TestEnsureBucket_NewDefaultBucketIsCreatedTagged(t *testing.T) {
 	if act != "created" || f.called("CreateBucket") != 1 || len(f.puts) != 1 {
 		t.Fatalf("action %q, calls %v", act, f.calls)
 	}
-	if f.tags[ManagedTagKey] != ManagedTagValue || !tags.IsManagedBy(f.tags, tags.ToolLagotto) || !tags.IsService(f.tags) {
-		t.Errorf("tags after create = %v, want %s=%s and the spore.host service tags", f.tags, ManagedTagKey, ManagedTagValue)
+	if f.tags[ManagedTagKey] != ManagedTagValue || !tags.IsManagedBy(f.tags, tags.ToolLagotto) || (f.tags[tags.Role] != "" || f.tags[tags.Component] == "") {
+		t.Errorf("tags after create = %v, want %s=%s and the spore.host infrastructure tags", f.tags, ManagedTagKey, ManagedTagValue)
 	}
 	f.assertOwnerOnEvery(t, "HeadBucket", "GetBucketTagging", "PutBucketTagging")
 }
@@ -253,7 +253,10 @@ func TestEnsureBucket_MergesSporeHostTagsIntoExistingTags(t *testing.T) {
 	want := map[string]string{
 		ManagedTagKey: ManagedTagValue, "CostCenter": "42", "Name": "mine",
 		tags.ManagedBy: "lagotto", tags.Scope: bRegion, tags.Schema: tags.SchemaVersion,
-		tags.Owner: "AIDAOWNER", tags.Role: tags.RoleService, tags.Component: "artifacts",
+		tags.Owner: "AIDAOWNER", tags.Component: "artifacts",
+	}
+	if _, ok := f.tags[tags.Role]; ok {
+		t.Errorf("the bucket carries %s, which only spore.host's own service may: %v", tags.Role, f.tags)
 	}
 	for k, v := range want {
 		if f.tags[k] != v {

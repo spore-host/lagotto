@@ -29,7 +29,7 @@ and the lagotto:managed=cli tag, so Lambda never creates an unowned one. A group
 that already exists is tagged, and given the retention only if it has none.
 
 Everything deploy creates is tagged spore-host:managed-by=lagotto (with
-spore-host:scope, :created, :schema, :role=service and :owner, your aws:userid),
+spore-host:scope, :created, :schema, :component and :owner, your aws:userid),
 and resources an older lagotto created without those tags gain them. Schedules
 cannot be tagged, so the poller schedule lives in the tagged EventBridge
 Scheduler schedule group "lagotto", which deploy creates. A schedule an older

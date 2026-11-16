@@ -7,23 +7,23 @@ import (
 	"github.com/spore-host/libs/tags"
 )
 
-func TestServiceAndWorkload(t *testing.T) {
+func TestInfrastructureAndWorkload(t *testing.T) {
 	now := time.Date(2026, 11, 16, 1, 2, 3, 0, time.UTC)
-	s := Service("us-east-1", "AIDAEXAMPLE", ComponentPoller, now)
+	s := Infrastructure("us-east-1", "AIDAEXAMPLE", ComponentPoller, now)
 	want := map[string]string{
 		tags.ManagedBy: "lagotto", tags.Scope: "us-east-1", tags.Created: "2026-11-16T01:02:03Z",
-		tags.Schema: "1", tags.Owner: "AIDAEXAMPLE", tags.Role: "service", tags.Component: "capacity-poller",
+		tags.Schema: "1", tags.Owner: "AIDAEXAMPLE", tags.Component: "capacity-poller",
 	}
 	if len(s) != len(want) {
-		t.Fatalf("Service = %v, want %v", s, want)
+		t.Fatalf("Infrastructure = %v, want %v (and no %s: it is reserved for spore.host's own service)", s, want, tags.Role)
 	}
 	for k, v := range want {
 		if s[k] != v {
-			t.Errorf("Service[%q] = %q, want %q", k, s[k], v)
+			t.Errorf("Infrastructure[%q] = %q, want %q", k, s[k], v)
 		}
 	}
 	w := Workload("eu-west-1", "", now)
-	if tags.IsService(w) || w[tags.ManagedBy] != "lagotto" || w[tags.Scope] != "eu-west-1" {
+	if w[tags.Role] != "" || w[tags.ManagedBy] != "lagotto" || w[tags.Scope] != "eu-west-1" {
 		t.Errorf("Workload = %v", w)
 	}
 	if _, ok := w[tags.Owner]; ok {
@@ -32,7 +32,7 @@ func TestServiceAndWorkload(t *testing.T) {
 }
 
 func TestConverge(t *testing.T) {
-	desired := Service("us-east-1", "AIDANEW", ComponentAlerts, time.Unix(2000, 0))
+	desired := Infrastructure("us-east-1", "AIDANEW", ComponentAlerts, time.Unix(2000, 0))
 	desired["Environment"] = "staging"
 
 	// A resource with none of the tags gets all of them.
@@ -41,7 +41,7 @@ func TestConverge(t *testing.T) {
 	}
 
 	// created and owner already set are kept; a changed Environment is written.
-	existing := Service("us-east-1", "AIDAOLD", ComponentAlerts, time.Unix(1000, 0))
+	existing := Infrastructure("us-east-1", "AIDAOLD", ComponentAlerts, time.Unix(1000, 0))
 	existing["Environment"] = "production"
 	existing["unrelated"] = "x"
 	got := Converge(existing, desired)
@@ -73,10 +73,10 @@ func TestWithDoesNotModifyArguments(t *testing.T) {
 func TestStamp(t *testing.T) {
 	at := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
 	s := Stamp{Owner: "AIDAX", Now: func() time.Time { return at }}
-	if got := s.Service("global", ComponentCLIPolicy); got[tags.Created] != "2026-03-04T05:06:07Z" || got[tags.Owner] != "AIDAX" || !tags.IsService(got) {
-		t.Errorf("Service = %v", got)
+	if got := s.Infrastructure("global", ComponentCLIPolicy); got[tags.Created] != "2026-03-04T05:06:07Z" || got[tags.Owner] != "AIDAX" || (got[tags.Role] != "" || got[tags.Component] == "") {
+		t.Errorf("Infrastructure = %v", got)
 	}
-	if got := s.Workload("us-east-1"); tags.IsService(got) || got[tags.Scope] != "us-east-1" {
+	if got := s.Workload("us-east-1"); got[tags.Role] != "" || got[tags.Scope] != "us-east-1" {
 		t.Errorf("Workload = %v", got)
 	}
 	if FirstStamp(nil).Owner != "" || FirstStamp([]Stamp{s}).Owner != "AIDAX" {

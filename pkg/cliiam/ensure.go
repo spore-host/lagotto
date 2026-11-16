@@ -98,13 +98,13 @@ func readPolicy(ctx context.Context, client PolicyAPI, accountID string) (doc st
 }
 
 // PolicyTags are the tags on the CLI-user policy: Application, the managed tag
-// its deleter is gated on, and the spore.host service tags (#324, scope
+// its deleter is gated on, and the spore.host infrastructure tags (#324, scope
 // "global").
 func PolicyTags(stamp ...managedtags.Stamp) map[string]string {
 	return managedtags.With(map[string]string{
 		"Application": "lagotto",
 		ManagedTagKey: ManagedTagValue,
-	}, managedtags.FirstStamp(stamp).Service(managedtags.ScopeGlobal, managedtags.ComponentCLIPolicy))
+	}, managedtags.FirstStamp(stamp).Infrastructure(managedtags.ScopeGlobal, managedtags.ComponentCLIPolicy))
 }
 
 // EnsurePolicy creates [PolicyName] with doc, or, when it exists with a

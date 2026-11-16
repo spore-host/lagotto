@@ -173,7 +173,7 @@ func TestEnsureScheduleGroup(t *testing.T) {
 		t.Fatalf("action %q err %v", action, err)
 	}
 	tg := sc.groupTags
-	if !sporetags.IsManagedBy(tg, sporetags.ToolLagotto) || !sporetags.IsService(tg) || tg[sporetags.Scope] != testRegion ||
+	if !sporetags.IsManagedBy(tg, sporetags.ToolLagotto) || (tg[sporetags.Role] != "" || tg[sporetags.Component] == "") || tg[sporetags.Scope] != testRegion ||
 		tg[sporetags.Owner] != "AIDAOWNER" || tg[sporetags.Created] != "2026-02-03T04:05:06Z" {
 		t.Errorf("group tags = %v", tg)
 	}

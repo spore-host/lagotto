@@ -45,12 +45,19 @@ can find what lagotto made and nothing else:
 | `spore-host:created` | when lagotto created it, or first tagged it (RFC 3339, UTC) |
 | `spore-host:schema` | `1` |
 | `spore-host:owner` | the `aws:userid` of whoever created it, when known |
-| `spore-host:role` | `service` on the deployment's own machinery (everything in the table above, the instance role and the CLI-user policy) |
-| `spore-host:component` | the part it belongs to: `capacity-poller`, `alerts`, `store`, `artifacts`, `instance-role`, `cli-policy` |
+| `spore-host:component` | on the deployment's infrastructure (everything in the table above, the instance role and the CLI-user policy), the part it belongs to: `capacity-poller`, `alerts`, `store`, `artifacts`, `instance-role`, `cli-policy` |
 
 What the poller creates for a watch (instances launched through spawn, capacity
-reservations, SageMaker training jobs) carries the first five and no role, next
-to its `lagotto:watch-id` tag.
+reservations, SageMaker training jobs) carries the first five and no component,
+next to its `lagotto:watch-id` tag.
+
+lagotto never sets `spore-host:role`. Its value `service` is reserved for
+spore.host's own live service in the spore.host infra account
+([spore-host#750](https://github.com/spore-host/spore-host/issues/750)): cleanup
+is denied on anything carrying it. A lagotto deployment is tool infrastructure
+in your account, which lagotto's own idle teardown
+([lagotto#326](https://github.com/spore-host/lagotto/issues/326)) must be able
+to remove.
 
 Resources are tagged when they are created. `lagotto setup` and `lagotto deploy`
 also add the tags to anything an older lagotto created without them, keeping

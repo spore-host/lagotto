@@ -124,7 +124,7 @@ func TestLaunchConfigs_CarryTheSporeHostTags(t *testing.T) {
 	for i, want := range []struct{ region, owner string }{{"us-east-1", "AIDAOWNER"}, {"us-west-2", "AIDAOTHER"}} {
 		got := cfgs[i].Tags
 		if got[tags.ManagedBy] != "lagotto" || got[tags.Scope] != want.region || got[tags.Owner] != want.owner ||
-			got[tags.Created] != "2026-11-16T00:00:00Z" || tags.IsService(got) {
+			got[tags.Created] != "2026-11-16T00:00:00Z" || got[tags.Role] != "" {
 			t.Errorf("launch %d tags = %v, want managed-by=lagotto, scope %s, owner %s, no role", i, got, want.region, want.owner)
 		}
 	}
@@ -160,7 +160,7 @@ func TestStore_TablesAreTagged(t *testing.T) {
 	}
 	for _, name := range s.tableNames() {
 		got := tableTags(t, s, name)
-		if !tags.IsManagedBy(got, tags.ToolLagotto) || !tags.IsService(got) || got[tags.Owner] != "AIDAOWNER" ||
+		if !tags.IsManagedBy(got, tags.ToolLagotto) || (got[tags.Role] != "" || got[tags.Component] == "") || got[tags.Owner] != "AIDAOWNER" ||
 			got[tags.Scope] != "us-east-1" || got["lagotto:managed"] != "cli" {
 			t.Errorf("table %s tags = %v", name, got)
 		}

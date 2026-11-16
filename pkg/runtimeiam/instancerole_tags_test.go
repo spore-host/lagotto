@@ -98,7 +98,7 @@ func TestEnsureInstanceRoleTags(t *testing.T) {
 
 func TestInstanceProfileTagsKeepTheManagedMarker(t *testing.T) {
 	m := InstanceProfileTags()
-	if m[ManagedProfileTagKey] != ManagedProfileTagValue || !tags.IsService(m) || m[tags.Component] != managedtags.ComponentInstanceRole {
+	if m[ManagedProfileTagKey] != ManagedProfileTagValue || (m[tags.Role] != "" || m[tags.Component] == "") || m[tags.Component] != managedtags.ComponentInstanceRole {
 		t.Errorf("InstanceProfileTags = %v", m)
 	}
 }

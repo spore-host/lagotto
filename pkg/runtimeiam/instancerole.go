@@ -27,12 +27,12 @@ func ManagedProfileTags() map[string]string {
 	return map[string]string{ManagedProfileTagKey: ManagedProfileTagValue}
 }
 
-// InstanceProfileTags are [ManagedProfileTags] plus the spore.host service tags
+// InstanceProfileTags are [ManagedProfileTags] plus the spore.host infrastructure tags
 // (#324, scope "global"): what `setup` puts on lagotto's instance role, its
 // profile, and the profile it creates for an authorized role.
 func InstanceProfileTags(stamp ...managedtags.Stamp) map[string]string {
 	return managedtags.With(ManagedProfileTags(),
-		managedtags.FirstStamp(stamp).Service(managedtags.ScopeGlobal, managedtags.ComponentInstanceRole))
+		managedtags.FirstStamp(stamp).Infrastructure(managedtags.ScopeGlobal, managedtags.ComponentInstanceRole))
 }
 
 // InstanceRoleTagAPI is the slice of IAM [EnsureInstanceRoleTags] needs.

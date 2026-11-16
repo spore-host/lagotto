@@ -11,12 +11,20 @@
 // spore-host:owner. Scope is the region for a regional resource and "global"
 // for an IAM one ([ScopeGlobal]).
 //
-// The long-lived machinery a deployment runs on (the poller Lambda, its log
-// group, roles, topic, schedule group, tables, artifact bucket, the CLI-user
-// policy and lagotto's instance role) also carries spore-host:role=service and
-// a spore-host:component naming its part ([Service]). What the poller makes
-// for a user's watch (an instance, a capacity reservation, a SageMaker job)
-// carries no role ([Workload]).
+// The infrastructure a deployment runs on (the poller Lambda, its log group,
+// roles, topic, schedule group, tables, artifact bucket, the CLI-user policy
+// and lagotto's instance role) also carries a spore-host:component naming its
+// part ([Infrastructure]). What the poller makes for a user's watch (an
+// instance, a capacity reservation, a SageMaker job) carries none ([Workload]).
+//
+// # No spore-host:role
+//
+// lagotto never writes spore-host:role. Its value "service" is reserved for
+// spore.host's own live service in the infra account (spore-host#750): every
+// automated cleanup role is denied on resources carrying it and teardown
+// refuses them. lagotto's deployment is tool infrastructure in the user's
+// account that lagotto's own idle teardown (lagotto#326) must be able to
+// delete, so it must not carry it.
 //
 // # lagotto:managed
 //
@@ -65,12 +73,11 @@ func Workload(scope, owner string, now time.Time) map[string]string {
 	return tags.For(tags.ToolLagotto, scope, now, owner)
 }
 
-// Service is the spore.host tag set for a piece of lagotto's own long-lived
-// machinery: [Workload]'s tags plus spore-host:role=service and
-// spore-host:component=component.
-func Service(scope, owner, component string, now time.Time) map[string]string {
+// Infrastructure is the spore.host tag set for a piece of a lagotto
+// deployment: [Workload]'s tags plus spore-host:component=component. It never
+// carries spore-host:role (see the package documentation).
+func Infrastructure(scope, owner, component string, now time.Time) map[string]string {
 	m := Workload(scope, owner, now)
-	m[tags.Role] = tags.RoleService
 	if component != "" {
 		m[tags.Component] = component
 	}
@@ -145,9 +152,9 @@ func (s Stamp) now() time.Time {
 	return time.Now()
 }
 
-// Service is [Service] with the stamp's owner and time.
-func (s Stamp) Service(scope, component string) map[string]string {
-	return Service(scope, s.Owner, component, s.now())
+// Infrastructure is [Infrastructure] with the stamp's owner and time.
+func (s Stamp) Infrastructure(scope, component string) map[string]string {
+	return Infrastructure(scope, s.Owner, component, s.now())
 }
 
 // Workload is [Workload] with the stamp's owner and time.

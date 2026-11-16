@@ -50,9 +50,9 @@ func TestEnsureAlertsTopic_CreatePathSetsAttributes(t *testing.T) {
 		t.Errorf("create tags = %v", tags)
 	}
 	// The spore.host tags are on the create itself (#324): no window untagged.
-	if !sporetags.IsManagedBy(tags, sporetags.ToolLagotto) || !sporetags.IsService(tags) ||
+	if !sporetags.IsManagedBy(tags, sporetags.ToolLagotto) || (tags[sporetags.Role] != "" || tags[sporetags.Component] == "") ||
 		tags[sporetags.Scope] != testRegion || tags[sporetags.Component] != "alerts" {
-		t.Errorf("create tags = %v, want the spore.host service tags", tags)
+		t.Errorf("create tags = %v, want the spore.host infrastructure tags", tags)
 	}
 	// Convergence then sets both attributes, since the (new) topic reports neither.
 	if len(fs.setCalls) != 2 {

@@ -97,13 +97,13 @@ func (d *Deployer) EnsureAlertsTopic(ctx context.Context, env, region, accountID
 }
 
 // alertsTopicTags are the topic's tags: the template's three, plus the
-// spore.host service tags (lagotto#324).
+// spore.host infrastructure tags (lagotto#324).
 func (d *Deployer) alertsTopicTags(env, region string) map[string]string {
 	return managedtags.With(map[string]string{
 		"Environment": env,
 		"Application": "lagotto",
 		"Component":   "alerts",
-	}, d.serviceTags(region, managedtags.ComponentAlerts))
+	}, d.infraTags(region, managedtags.ComponentAlerts))
 }
 
 // convergeTopicTags writes the desired tags the topic lacks or has with

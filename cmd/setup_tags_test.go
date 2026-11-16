@@ -218,8 +218,8 @@ func TestSetup_TagsEverythingItCreates(t *testing.T) {
 		"instance profile " + runtimeiam.InstanceRoleName: m.profiles[runtimeiam.InstanceRoleName],
 		"policy " + cliiam.PolicyName:                     m.policy,
 	} {
-		if !tags.IsManagedBy(tg, tags.ToolLagotto) || !tags.IsService(tg) || tg[tags.Scope] != managedtags.ScopeGlobal || tg[tags.Owner] != "AIDAADMIN" {
-			t.Errorf("%s tags = %v, want the spore.host service tags, scope global, owner AIDAADMIN", name, tg)
+		if !tags.IsManagedBy(tg, tags.ToolLagotto) || (tg[tags.Role] != "" || tg[tags.Component] == "") || tg[tags.Scope] != managedtags.ScopeGlobal || tg[tags.Owner] != "AIDAADMIN" {
+			t.Errorf("%s tags = %v, want the spore.host infrastructure tags, scope global, owner AIDAADMIN", name, tg)
 		}
 	}
 	// The legacy markers the deleters are gated on are still there.

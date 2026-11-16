@@ -177,14 +177,14 @@ func New(cfg aws.Config) *Deployer {
 	}
 }
 
-// serviceTags are the spore.host tags of a deployment resource in region
-// (#324): spore-host:managed-by=lagotto, role=service and component.
-func (d *Deployer) serviceTags(region, component string) map[string]string {
+// infraTags are the spore.host tags of a deployment resource in region
+// (#324): spore-host:managed-by=lagotto and a component, never a role.
+func (d *Deployer) infraTags(region, component string) map[string]string {
 	now := time.Now
 	if d.now != nil {
 		now = d.now
 	}
-	return managedtags.Service(region, d.owner, component, now())
+	return managedtags.Infrastructure(region, d.owner, component, now())
 }
 
 // Deploy provisions the hosted poller with direct SDK calls (#154) and returns the
@@ -271,7 +271,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) (*Result, error) {
 		CodeSHA256: digest,
 		EnvVars: PollerEnvVars(opts.Region, opts.AccountID,
 			opts.WatchesTable, opts.HistoryTable, opts.ScheduledTable, topicARN),
-		Tags: managedtags.With(PollerTags(env, opts.Version), d.serviceTags(opts.Region, managedtags.ComponentPoller)),
+		Tags: managedtags.With(PollerTags(env, opts.Version), d.infraTags(opts.Region, managedtags.ComponentPoller)),
 	})
 	if err != nil {
 		return nil, err
