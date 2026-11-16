@@ -211,3 +211,12 @@ func tableTags(t *testing.T, s *Store, name string) map[string]string {
 	}
 	return dynamodbtags.ToMap(out.Tags)
 }
+
+// With no tables there is nothing to tag, and no error.
+func TestStore_EnsureTableTagsSkipsAbsentTables(t *testing.T) {
+	env := testutil.SubstrateServer(t)
+	s := NewStore(env.AWSConfig, "lagotto-watches", "lagotto-match-history")
+	if tagged, err := s.EnsureTableTags(context.Background()); err != nil || len(tagged) != 0 {
+		t.Errorf("EnsureTableTags = %v, %v", tagged, err)
+	}
+}

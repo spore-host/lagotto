@@ -221,3 +221,85 @@ func notFoundLambda() error {
 }
 
 func notFoundSNS() error { return &snstypes.NotFoundException{Message: aws.String("Topic not found")} }
+
+// A racing deploy that already created the copy in lagotto's group: the move
+// converges it and still deletes the old one.
+func TestEnsurePollerSchedule_MoveRaceConverges(t *testing.T) {
+	sc := &fakeScheduler{schedules: map[string]*scheduler.GetScheduleOutput{"default": preGroupSchedule()}}
+	d, _ := testDeployer(nil, nil, sc)
+	// The other deploy's copy appears between our reads and our create.
+	racer := &raceScheduler{fakeScheduler: sc}
+	d.sched = racer
+	if _, err := d.EnsurePollerSchedule(context.Background(), testFnARN, testRoleARN); err != nil {
+		t.Fatalf("EnsurePollerSchedule: %v", err)
+	}
+	if sc.schedules["default"] != nil || sc.schedules["lagotto"] == nil {
+		t.Errorf("after a raced move: %v", sc.schedules)
+	}
+}
+
+// raceScheduler creates lagotto's copy itself just before the first create,
+// as a concurrent deploy would.
+type raceScheduler struct {
+	*fakeScheduler
+	raced bool
+}
+
+func (r *raceScheduler) CreateSchedule(ctx context.Context, in *scheduler.CreateScheduleInput, o ...func(*scheduler.Options)) (*scheduler.CreateScheduleOutput, error) {
+	if !r.raced {
+		r.raced = true
+		r.schedules["lagotto"] = preGroupSchedule()
+	}
+	return r.fakeScheduler.CreateSchedule(ctx, in, o...)
+}
+
+// Errors stop the deploy and name what failed; nothing is deleted.
+func TestScheduleGroupErrors(t *testing.T) {
+	ctx := context.Background()
+	denied := &smithyAccessDenied{}
+
+	sc := &fakeScheduler{groupCreateErr: denied}
+	d, _ := testDeployer(nil, nil, sc)
+	if _, err := d.ensureScheduleGroup(ctx, testRegion, testAccount); err == nil || !strings.Contains(err.Error(), "create schedule group") {
+		t.Errorf("CreateScheduleGroup error = %v", err)
+	}
+
+	sc = &fakeScheduler{groupExists: true, listErr: denied}
+	d, _ = testDeployer(nil, nil, sc)
+	if _, err := d.deleteScheduleGroupIfEmpty(ctx); err == nil || sc.groupDeletes != 0 {
+		t.Errorf("a list failure must keep the group: err %v, deletes %d", err, sc.groupDeletes)
+	}
+	if _, err := d.ListLaunchSchedules(ctx); err == nil {
+		t.Error("a list failure was swallowed")
+	}
+
+	sc = &fakeScheduler{schedules: map[string]*scheduler.GetScheduleOutput{}, getErr: denied}
+	d, _ = testDeployer(nil, nil, sc)
+	if _, err := d.getPollerSchedule(ctx, "default"); err == nil || !strings.Contains(err.Error(), "schedule group default") {
+		t.Errorf("GetSchedule error = %v", err)
+	}
+	if _, err := d.pollerScheduleExists(ctx, "lagotto"); err == nil {
+		t.Error("an AccessDenied probe read as absent")
+	}
+
+	sc = &fakeScheduler{schedules: map[string]*scheduler.GetScheduleOutput{"lagotto": preGroupSchedule()}, deleteErr: denied}
+	d, _ = testDeployer(nil, nil, sc)
+	if err := d.deletePollerSchedule(ctx, "lagotto"); err == nil {
+		t.Error("a DeleteSchedule failure was swallowed")
+	}
+	// A failed delete of the duplicate fails the deploy, so the re-run retries it.
+	sc.schedules["default"] = preGroupSchedule()
+	if _, err := d.EnsurePollerSchedule(ctx, testFnARN, testRoleARN); err == nil {
+		t.Error("a failed duplicate delete was swallowed")
+	}
+}
+
+// The topic probe and tag read fail the deploy rather than being read as
+// "absent" or "untagged".
+func TestEnsureAlertsTopic_ProbeAndTagErrors(t *testing.T) {
+	fs := &fakeSNS{arn: testTopicARN, getErr: &smithyAccessDenied{}}
+	d, _ := testDeployer(nil, fs, nil)
+	if _, err := d.EnsureAlertsTopic(context.Background(), "production", testRegion, testAccount); err == nil || len(fs.createCalls) != 0 {
+		t.Errorf("probe error: err %v, creates %d", err, len(fs.createCalls))
+	}
+}
