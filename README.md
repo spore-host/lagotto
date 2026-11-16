@@ -658,6 +658,9 @@ region's three DynamoDB tables and the per-launch `lagotto-launch-sl-*` schedule
 `lagotto teardown --iam-roles` the two account-wide IAM roles once no region
 runs a poller. [DEPLOYMENT.md](DEPLOYMENT.md#teardown) has what each one deletes
 and what it leaves.
+`lagotto footprint --all-regions` lists everything lagotto has in the account and
+what of it may be removed, and `lagotto teardown --plan` reports (and, later,
+reaps) that plan (#325).
 
 ## Go Library
 

@@ -27,9 +27,12 @@ func (f *fakeArtifactProbe) PollerExists(_ context.Context, r string) (bool, err
 	return f.pollers[r], nil
 }
 
-func (f *fakeArtifactProbe) Managed(_ context.Context, r, _ string) (bool, error) {
+func (f *fakeArtifactProbe) BucketTags(_ context.Context, r, _ string) (map[string]string, error) {
 	f.tagAsks = append(f.tagAsks, r)
-	return f.managed[r], nil
+	if f.managed[r] {
+		return map[string]string{"lagotto:managed": "cli"}, nil
+	}
+	return map[string]string{}, nil
 }
 
 func TestAppendArtifactBucketCheck(t *testing.T) {

@@ -1073,32 +1073,68 @@ type TableTeardown struct {
 func (s *Store) DeleteTables(ctx context.Context) (TableTeardown, error) {
 	var res TableTeardown
 	for _, name := range s.tableNames() {
-		if name == s.scheduledTable {
-			present, managed, err := s.tableOwnership(ctx, name)
-			if err != nil {
-				return res, err
-			}
-			if !present {
-				res.Absent = append(res.Absent, name)
-				continue
-			}
-			if !managed {
-				res.Unmanaged = append(res.Unmanaged, name)
-				continue
-			}
-		}
-		_, err := s.client.DeleteTable(ctx, &dynamodb.DeleteTableInput{TableName: aws.String(name)})
+		outcome, err := s.deleteTable(ctx, name)
 		if err != nil {
-			var notFound *types.ResourceNotFoundException
-			if errors.As(err, &notFound) || tableBeingDeleted(err) {
-				res.Absent = append(res.Absent, name)
-				continue
-			}
-			return res, fmt.Errorf("delete table %q: %w", name, err)
+			return res, err
 		}
-		res.Deleted = append(res.Deleted, name)
+		switch outcome {
+		case TableDeleted:
+			res.Deleted = append(res.Deleted, name)
+		case TableAbsent:
+			res.Absent = append(res.Absent, name)
+		case TableUnmanaged:
+			res.Unmanaged = append(res.Unmanaged, name)
+		}
 	}
 	return res, nil
+}
+
+// TableOutcome is what DeleteTable did with one table.
+type TableOutcome string
+
+// TableOutcome values, as in TableTeardown.
+const (
+	TableDeleted   TableOutcome = "deleted"
+	TableAbsent    TableOutcome = "absent"
+	TableUnmanaged TableOutcome = "unmanaged"
+)
+
+// DeleteTable deletes one of lagotto's tables (`lagotto teardown --plan`,
+// #325), with the rules DeleteTables applies to it: the scheduled-launches
+// table only when it carries the lagotto:managed=cli tag, and an absent table
+// (or one already being deleted) is TableAbsent. A name that is not one of
+// this store's three tables is an error: it is not lagotto's to delete.
+func (s *Store) DeleteTable(ctx context.Context, name string) (TableOutcome, error) {
+	for _, n := range s.tableNames() {
+		if n == name {
+			return s.deleteTable(ctx, name)
+		}
+	}
+	return "", fmt.Errorf("delete table %q: not one of lagotto's tables (%s)", name, strings.Join(s.tableNames(), ", "))
+}
+
+func (s *Store) deleteTable(ctx context.Context, name string) (TableOutcome, error) {
+	if name == s.scheduledTable {
+		present, managed, err := s.tableOwnership(ctx, name)
+		if err != nil {
+			return "", err
+		}
+		if !present {
+			return TableAbsent, nil
+		}
+		if !managed {
+			return TableUnmanaged, nil
+		}
+	}
+	_, err := s.client.DeleteTable(ctx, &dynamodb.DeleteTableInput{TableName: aws.String(name)})
+	if err != nil {
+		var notFound *types.ResourceNotFoundException
+		if errors.As(err, &notFound) || tableBeingDeleted(err) {
+			return TableAbsent, nil
+		}
+		return "", fmt.Errorf("delete table %q: %w", name, err)
+	}
+	return TableDeleted, nil
 }
 
 // DeleteManagedTables deletes only tables tagged as CLI-managed

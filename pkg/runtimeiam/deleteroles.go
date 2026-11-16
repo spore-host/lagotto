@@ -105,3 +105,22 @@ func deleteRole(ctx context.Context, client RoleDeleteAPI, name string) (deleted
 	}
 	return true, nil
 }
+
+// LagottoRoles are every IAM role lagotto creates: [CLIOwnedRoles] and the
+// instance role ([InstanceRoleName]).
+var LagottoRoles = append(append([]string{}, CLIOwnedRoles...), InstanceRoleName)
+
+// DeleteRole is the per-role deleter of `lagotto teardown --plan` (#325): it
+// empties and deletes one of [LagottoRoles] as [DeleteRoles] does, and reports
+// whether it existed. Any other name is an error: an administrator's role is
+// never lagotto's to delete. The caller orders it after the instance profiles
+// that hold it (the plan does) and must establish that nothing still runs as
+// it.
+func DeleteRole(ctx context.Context, client RoleDeleteAPI, name string) (bool, error) {
+	for _, n := range LagottoRoles {
+		if n == name {
+			return deleteRole(ctx, client, name)
+		}
+	}
+	return false, fmt.Errorf("runtimeiam: delete role %s: not one of lagotto's roles", name)
+}

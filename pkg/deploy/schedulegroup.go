@@ -64,26 +64,41 @@ func (d *Deployer) ensureScheduleGroup(ctx context.Context, region, accountID st
 // per-launch schedule, or the poller schedule of a poller still deployed) is
 // kept. An absent group is (false, nil).
 func (d *Deployer) deleteScheduleGroupIfEmpty(ctx context.Context) (bool, error) {
+	gone, err := d.deleteGroupIfEmpty(ctx, ScheduleGroupName)
+	if errors.Is(err, ErrScheduleGroupNotEmpty) {
+		return false, nil
+	}
+	return gone, err
+}
+
+// ErrScheduleGroupNotEmpty is what deleting a schedule group that still holds
+// a schedule returns: DeleteScheduleGroup would delete them all with it.
+var ErrScheduleGroupNotEmpty = errors.New("the schedule group still holds a schedule")
+
+// deleteGroupIfEmpty deletes the named schedule group if no schedule is left
+// in it. A non-empty group is ErrScheduleGroupNotEmpty and is kept; an absent
+// one is (false, nil).
+func (d *Deployer) deleteGroupIfEmpty(ctx context.Context, name string) (bool, error) {
 	out, err := d.sched.ListSchedules(ctx, &scheduler.ListSchedulesInput{
-		GroupName:  aws.String(ScheduleGroupName),
+		GroupName:  aws.String(name),
 		MaxResults: aws.Int32(1),
 	})
 	if err != nil {
 		if schedgroup.IsNotFound(err) {
 			return false, nil
 		}
-		return false, fmt.Errorf("list the schedules in schedule group %s: %w", ScheduleGroupName, err)
+		return false, fmt.Errorf("list the schedules in schedule group %s: %w", name, err)
 	}
 	if len(out.Schedules) > 0 || aws.ToString(out.NextToken) != "" {
-		return false, nil
+		return false, fmt.Errorf("schedule group %s: %w", name, ErrScheduleGroupNotEmpty)
 	}
 	if _, err := d.sched.DeleteScheduleGroup(ctx, &scheduler.DeleteScheduleGroupInput{
-		Name: aws.String(ScheduleGroupName),
+		Name: aws.String(name),
 	}); err != nil {
 		if schedgroup.IsNotFound(err) {
 			return false, nil
 		}
-		return false, fmt.Errorf("delete schedule group %s: %w", ScheduleGroupName, err)
+		return false, fmt.Errorf("delete schedule group %s: %w", name, err)
 	}
 	return true, nil
 }

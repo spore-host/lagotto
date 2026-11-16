@@ -51,6 +51,12 @@
       "--ttl": "advanced"
     }
   },
+  "lagotto footprint": {
+    "level": "advanced",
+    "flags": {
+      "--all-regions": "advanced"
+    }
+  },
   "lagotto history": {
     "level": "basic",
     "flags": {
@@ -119,7 +125,10 @@
     "level": "advanced",
     "flags": {
       "--force": "advanced",
-      "--iam-roles": "advanced"
+      "--iam-roles": "advanced",
+      "--mode": "advanced",
+      "--plan": "advanced",
+      "--yes": "advanced"
     }
   },
   "lagotto update": {

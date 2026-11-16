@@ -124,3 +124,31 @@ func TestDeleteManagedInstanceProfile(t *testing.T) {
 		}
 	}
 }
+
+// TestDeleteRoleOnlyLagottos: the per-role deleter of `teardown --plan`
+// (#325) refuses any role that is not lagotto's, before any IAM call.
+func TestDeleteRoleOnlyLagottos(t *testing.T) {
+	if _, err := DeleteRole(context.Background(), nil, "team-gpu"); err == nil {
+		t.Error("DeleteRole accepted an administrator's role")
+	}
+}
+
+// TestDeleteInstanceProfilePerProfile: lagotto's own profile is deleted
+// without its tag being consulted; any other only when setup created it.
+func TestDeleteInstanceProfilePerProfile(t *testing.T) {
+	ctx := context.Background()
+	f := newFakeProfiles()
+	f.tags[InstanceRoleName] = nil // an untagged profile of lagotto's own name
+	if gone, err := DeleteInstanceProfile(ctx, f, InstanceRoleName); !gone || err != nil {
+		t.Errorf("lagotto's profile: %v, %v", gone, err)
+	}
+	if gone, err := DeleteInstanceProfile(ctx, f, "theirs"); gone || err != nil || f.profiles["theirs"] == nil {
+		t.Errorf("someone else's profile: %v, %v (profiles %v)", gone, err, f.profiles)
+	}
+	if gone, err := DeleteInstanceProfile(ctx, f, "gpu-role"); !gone || err != nil {
+		t.Errorf("setup's profile for an authorized role: %v, %v", gone, err)
+	}
+	if gone, err := DeleteRole(ctx, f, InstanceRoleName); !gone || err != nil {
+		t.Errorf("DeleteRole(%s) = %v, %v", InstanceRoleName, gone, err)
+	}
+}

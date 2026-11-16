@@ -7,44 +7,25 @@ import (
 
 	"github.com/spore-host/lagotto/pkg/deploy"
 	"github.com/spore-host/lagotto/pkg/doctor"
+	"github.com/spore-host/lagotto/pkg/inventory"
 )
-
-// artifactBucketLister lists the regions of the account's default-named
-// artifact buckets; *deploy.Deployer satisfies it.
-type artifactBucketLister interface {
-	ArtifactBucketRegions(ctx context.Context, accountID string) ([]string, error)
-}
-
-// artifactBucketProbe reports, for one region, whether the poller exists and
-// (asked only when it does not) whether that region's bucket is lagotto-managed.
-type artifactBucketProbe interface {
-	PollerExists(ctx context.Context, region string) (bool, error)
-	Managed(ctx context.Context, region, accountID string) (bool, error)
-}
 
 // appendArtifactBucketCheck adds doctor's orphan artifact bucket check (#264)
 // to report. It looks in every region, not just the current one: an orphan
-// bucket is by definition in a region nobody is using any more.
+// bucket is by definition in a region nobody is using any more. The buckets
+// are read by the footprint's reader (inventory.GatherArtifactBuckets, #325),
+// asking a bucket's tags only when it is an orphan.
 func appendArtifactBucketCheck(ctx context.Context, report *doctor.Report, accountID string,
-	lister artifactBucketLister, probe artifactBucketProbe) {
-	regions, listErr := lister.ArtifactBucketRegions(ctx, accountID)
-	var buckets []doctor.ArtifactBucket
-	for _, r := range regions {
-		b := doctor.ArtifactBucket{Region: r, Name: deploy.DefaultBucketName(accountID, r)}
-		b.Poller, b.Err = probe.PollerExists(ctx, r)
-		if b.Err == nil && !b.Poller {
-			b.Managed, b.Err = probe.Managed(ctx, r, accountID)
-		}
-		buckets = append(buckets, b)
-	}
+	lister inventory.ArtifactBucketLister, probe inventory.ArtifactBucketProbe) {
+	buckets, listErr := inventory.GatherArtifactBuckets(ctx, accountID, lister, probe, false)
 	if c, ok := doctor.EvalArtifactBuckets(buckets, listErr); ok {
 		report.Checks = append(report.Checks, c)
 	}
 }
 
-// regionalArtifactProbe answers artifactBucketProbe with a Deployer built for
-// the bucket's region: the poller is a regional Lambda, and S3 answers a
-// bucket's tagging only from the bucket's own region.
+// regionalArtifactProbe answers inventory.ArtifactBucketProbe with a Deployer
+// built for the bucket's region: the poller is a regional Lambda, and S3
+// answers a bucket's tagging only from the bucket's own region.
 type regionalArtifactProbe struct{ cfg aws.Config }
 
 func (p regionalArtifactProbe) deployer(region string) *deploy.Deployer {
@@ -58,6 +39,6 @@ func (p regionalArtifactProbe) PollerExists(ctx context.Context, region string) 
 	return info.Exists, err
 }
 
-func (p regionalArtifactProbe) Managed(ctx context.Context, region, accountID string) (bool, error) {
-	return p.deployer(region).ArtifactBucketManaged(ctx, region, accountID)
+func (p regionalArtifactProbe) BucketTags(ctx context.Context, region, accountID string) (map[string]string, error) {
+	return p.deployer(region).ArtifactBucketTags(ctx, region, accountID)
 }
