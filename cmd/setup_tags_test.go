@@ -343,3 +343,49 @@ type legacyStack struct {
 func (l legacyStack) LegacyStackState(context.Context, string) (bool, string, error) {
 	return l.exists, "", l.err
 }
+
+// A policy that cannot be read holds the move: it cannot be told whether it
+// grants the group.
+func TestScheduleMoveHold_ReadErrorsHold(t *testing.T) {
+	ctx := context.Background()
+	for op, want := range map[string]string{
+		"GetRolePolicy": "could not read the poller's runtime policy",
+		"GetPolicy":     "could not read the " + cliiam.PolicyName + " policy",
+	} {
+		m := newMemIAM()
+		m.roles[runtimeiam.RoleName] = map[string]string{}
+		doc, _ := runtimeiam.PolicyDocument("123456789012", nil)
+		m.inline[runtimeiam.RoleName+"/"+runtimeiam.PolicyName] = doc
+		f := failingIAM{memIAM: m, op: op}
+		got := scheduleMoveHold(ctx, legacyStack{}, iam.NewFromConfig(aws.Config{Region: "us-west-2",
+			APIOptions: []func(*middleware.Stack) error{testutil.AnswerFrom(f)}}), "123456789012", "")
+		if !strings.Contains(got, want) {
+			t.Errorf("%s failing: hold = %q, want %q", op, got, want)
+		}
+	}
+	if grantsScheduleGroup("not json") {
+		t.Error("an unparsable policy grants the group")
+	}
+}
+
+// failingIAM is memIAM with one operation failing AccessDenied.
+type failingIAM struct {
+	*memIAM
+	op string
+}
+
+var errAccessDenied = errors.New("AccessDenied")
+
+func (f failingIAM) GetRolePolicy(ctx context.Context, in *iam.GetRolePolicyInput, o ...func(*iam.Options)) (*iam.GetRolePolicyOutput, error) {
+	if f.op == "GetRolePolicy" {
+		return nil, errAccessDenied
+	}
+	return f.memIAM.GetRolePolicy(ctx, in, o...)
+}
+
+func (f failingIAM) GetPolicy(ctx context.Context, in *iam.GetPolicyInput, o ...func(*iam.Options)) (*iam.GetPolicyOutput, error) {
+	if f.op == "GetPolicy" {
+		return nil, errAccessDenied
+	}
+	return f.memIAM.GetPolicy(ctx, in, o...)
+}
