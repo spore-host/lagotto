@@ -27,7 +27,12 @@ var ErrSelfDelete = errors.New("the poller never deletes this from inside itself
 // only lagotto's own instance role and profile. The poller's function, log
 // group and role, the invoke role and the lagotto-cli-user policy are
 // refused (ErrSelfDelete).
+//
+// Empty table names are lagotto's defaults, as in the poller's environment.
 func PollerDeleters(cfg aws.Config, accountID, watchesTable, historyTable, scheduledTable string) inventory.Deleters {
+	o := inventory.Options{WatchesTable: watchesTable, HistoryTable: historyTable, ScheduledTable: scheduledTable}
+	names := o.Tables()
+	watchesTable, historyTable, scheduledTable = names[0], names[1], names[2]
 	regions := map[string]pollerRegion{}
 	return inventory.Deleters{
 		AccountID: accountID,

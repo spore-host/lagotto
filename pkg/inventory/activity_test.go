@@ -73,3 +73,16 @@ func TestLastRegion(t *testing.T) {
 		t.Error("RegionFacts")
 	}
 }
+
+// TestActiveReasons names every live signal, one phrase each, and nothing for
+// an idle region.
+func TestActiveReasons(t *testing.T) {
+	r := Region{ActiveWatches: 2, ArmedLaunches: 1, Holds: []Item{{}}, Jobs: []Item{{}, {}}}
+	want := "2 active watch(es); 1 pending or retrying scheduled launch(es); 1 capacity reservation(s) held; 2 SageMaker training job(s) running"
+	if got := strings.Join(r.ActiveReasons(), "; "); got != want || !r.Active() {
+		t.Errorf("reasons %q, want %q", got, want)
+	}
+	if idle := (Region{}); idle.Active() || len(idle.ActiveReasons()) != 0 {
+		t.Errorf("an idle region: %v", idle.ActiveReasons())
+	}
+}

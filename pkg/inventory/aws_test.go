@@ -262,6 +262,9 @@ func TestAWSAccount(t *testing.T) {
 	if err != nil || len(profiles) != 1 || len(profiles[0].Roles) != 1 || !tags.IsManagedBy(profiles[0].Tags, Tool) {
 		t.Errorf("profiles = %+v, %v", profiles, err)
 	}
+	if p, err := a.InstanceProfile(ctx, "team-gpu"); err != nil || p == nil || p.Name != "team-gpu" {
+		t.Errorf("authorized profile = %+v, %v", p, err)
+	}
 }
 
 // TestPollerAWSAccount: the poller's account reader reads lagotto's own roles
