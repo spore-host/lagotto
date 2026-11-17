@@ -101,10 +101,11 @@ foreign one, a capacity reservation, a training job or the legacy stack. When
 one is not removed, nothing it depends on is tried.
 
 --mode report, the default, deletes nothing and says what reap would delete.
---mode reap deletes and needs --yes. Until the teardown lease of lagotto#326
-exists, which stops one user's teardown racing another's setup in a shared
-account, reap also refuses unless a hidden --i-understand-no-lease is passed.
-Use -o json for the outcome of every step.`,
+--mode reap deletes and needs --yes. It first takes the teardown lease
+(lagotto#326) in every region it deletes in, so another user's deploy, watch or
+launch there waits for it, or stops it before its next delete. A region where
+something is in use, or another teardown holds the lease, refuses the whole
+run before anything is deleted. Use -o json for the outcome of every step.`,
 	RunE: runTeardown,
 }
 

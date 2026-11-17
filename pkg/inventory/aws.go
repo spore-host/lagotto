@@ -101,11 +101,21 @@ type AWSSource struct {
 	ec2       ec2Reader
 	iam       iamReader
 	buckets   pollerReader
+	// account builds the account-wide reader: the full one, or the poller's.
+	account func(*AWSSource) AccountSource
 }
 
 // NewAWSSource reads with cfg, whose region lists the account's regions.
 func NewAWSSource(cfg aws.Config, accountID string) *AWSSource {
-	s := &AWSSource{cfg: cfg, accountID: accountID, ec2: ec2.NewFromConfig(cfg), iam: iam.NewFromConfig(cfg), buckets: deploy.New(cfg)}
+	return newAWSSource(cfg, accountID, newFullAccount)
+}
+
+func newFullAccount(s *AWSSource) AccountSource {
+	return &awsAccount{iam: s.iam, accountID: s.accountID}
+}
+
+func newAWSSource(cfg aws.Config, accountID string, account func(*AWSSource) AccountSource) *AWSSource {
+	s := &AWSSource{cfg: cfg, accountID: accountID, ec2: ec2.NewFromConfig(cfg), iam: iam.NewFromConfig(cfg), buckets: deploy.New(cfg), account: account}
 	s.newRegion = func(region string) *awsRegion {
 		c := cfg.Copy()
 		c.Region = region
@@ -146,7 +156,7 @@ func (s *AWSSource) ArtifactBucketRegions(ctx context.Context, accountID string)
 func (s *AWSSource) Region(region string) RegionSource { return s.newRegion(region) }
 
 // Account reads the account-wide resources.
-func (s *AWSSource) Account() AccountSource { return &awsAccount{iam: s.iam, accountID: s.accountID} }
+func (s *AWSSource) Account() AccountSource { return s.account(s) }
 
 type awsRegion struct {
 	region, accountID string
@@ -511,8 +521,48 @@ type awsAccount struct {
 	accountID string
 }
 
+// NewPollerAWSSource is the footprint as the capacity poller reads it for its
+// idle teardown (lagotto#326): [NewAWSSource], without the account-wide
+// resources the poller neither deletes nor must keep alive. Those are the
+// administrator's authorized instance roles and their profiles, the invoke
+// role its own one-shot jobs run as, and the lagotto-cli-user policy, all
+// left to `lagotto teardown`. Not reading them keeps the poller's runtime
+// policy to what its teardown uses. The poller program never builds the full
+// account reader (newFullAccount is not reachable from it), so the IAM
+// coverage gate sees exactly these reads.
+func NewPollerAWSSource(cfg aws.Config, accountID string) *AWSSource {
+	return newAWSSource(cfg, accountID, newPollerAccount)
+}
+
+func newPollerAccount(s *AWSSource) AccountSource { return pollerAWSAccount{iam: s.iam} }
+
+type pollerAWSAccount struct{ iam iamReader }
+
+func (a pollerAWSAccount) Role(ctx context.Context, name string) (*Item, error) {
+	if name == runtimeiam.SchedulerInvokeRoleName {
+		return nil, nil
+	}
+	return readRole(ctx, a.iam, name)
+}
+
+func (a pollerAWSAccount) InstanceProfilesForRole(ctx context.Context, role string) ([]Profile, error) {
+	return readProfilesForRole(ctx, a.iam, role)
+}
+
+func (a pollerAWSAccount) InstanceProfile(ctx context.Context, name string) (*Profile, error) {
+	return readInstanceProfile(ctx, a.iam, name)
+}
+
+func (pollerAWSAccount) AuthorizedRoles(context.Context) ([]string, error) { return nil, nil }
+
+func (pollerAWSAccount) CLIPolicy(context.Context) (*Item, int32, error) { return nil, 0, nil }
+
 func (a *awsAccount) Role(ctx context.Context, name string) (*Item, error) {
-	out, err := a.iam.GetRole(ctx, &iam.GetRoleInput{RoleName: aws.String(name)})
+	return readRole(ctx, a.iam, name)
+}
+
+func readRole(ctx context.Context, client iamReader, name string) (*Item, error) {
+	out, err := client.GetRole(ctx, &iam.GetRoleInput{RoleName: aws.String(name)})
 	if isNotFound(err) {
 		return nil, nil
 	}
@@ -523,8 +573,12 @@ func (a *awsAccount) Role(ctx context.Context, name string) (*Item, error) {
 }
 
 func (a *awsAccount) InstanceProfilesForRole(ctx context.Context, role string) ([]Profile, error) {
+	return readProfilesForRole(ctx, a.iam, role)
+}
+
+func readProfilesForRole(ctx context.Context, client iamReader, role string) ([]Profile, error) {
 	var names []string
-	for p := iam.NewListInstanceProfilesForRolePaginator(a.iam, &iam.ListInstanceProfilesForRoleInput{RoleName: aws.String(role)}); p.HasMorePages(); {
+	for p := iam.NewListInstanceProfilesForRolePaginator(client, &iam.ListInstanceProfilesForRoleInput{RoleName: aws.String(role)}); p.HasMorePages(); {
 		page, err := p.NextPage(ctx)
 		if isNotFound(err) {
 			return nil, nil
@@ -539,7 +593,7 @@ func (a *awsAccount) InstanceProfilesForRole(ctx context.Context, role string) (
 	var out []Profile
 	for _, n := range names {
 		// The list does not carry tags; GetInstanceProfile does.
-		p, err := a.InstanceProfile(ctx, n)
+		p, err := readInstanceProfile(ctx, client, n)
 		if err != nil {
 			return out, err
 		}
@@ -551,7 +605,11 @@ func (a *awsAccount) InstanceProfilesForRole(ctx context.Context, role string) (
 }
 
 func (a *awsAccount) InstanceProfile(ctx context.Context, name string) (*Profile, error) {
-	out, err := a.iam.GetInstanceProfile(ctx, &iam.GetInstanceProfileInput{InstanceProfileName: aws.String(name)})
+	return readInstanceProfile(ctx, a.iam, name)
+}
+
+func readInstanceProfile(ctx context.Context, client iamReader, name string) (*Profile, error) {
+	out, err := client.GetInstanceProfile(ctx, &iam.GetInstanceProfileInput{InstanceProfileName: aws.String(name)})
 	if isNotFound(err) {
 		return nil, nil
 	}

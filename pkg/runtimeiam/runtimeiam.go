@@ -58,6 +58,11 @@ const (
 	lambdaBasicExecutionARN = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 )
 
+// BasicExecutionPolicyARN is the AWS-managed policy attached to the poller
+// role, which the idle teardown's one-shot jobs detach before deleting the
+// role (lagotto#326).
+const BasicExecutionPolicyARN = lambdaBasicExecutionARN
+
 // RoleARN returns the constructed ARN of the poller execution role (RoleName).
 // IAM is global, so no region is needed. Exported here — next to the name it is
 // derived from — so pkg/deploy has a single source of truth for it rather than
@@ -668,6 +673,12 @@ func PolicyDocumentFor(accountID string, auth Authorizations) (string, error) {
 			// decides whether the cap is reported at all. (ec2:DescribeInstances,
 			// which GetQuotas also needs for current usage, is already granted above.)
 			"servicequotas:GetServiceQuota", "servicequotas:ListServiceQuotas",
+			// The idle teardown's footprint (lagotto#326, pkg/inventory): reads
+			// with no resource-level permissions. The poller log group's
+			// listing, every region's artifact bucket, the SageMaker jobs
+			// running for a watch (part of the idle verdict), and the
+			// schedules in lagotto's groups.
+			"logs:DescribeLogGroups", "s3:ListAllMyBuckets", "sagemaker:Search", "scheduler:ListSchedules",
 		}, Resource: "*"},
 		// Scheduler: manage this poller's schedule + the #62 per-launch schedules.
 		{Effect: "Allow", Action: []string{"scheduler:UpdateSchedule", "scheduler:GetSchedule"},
@@ -756,13 +767,35 @@ func PolicyDocumentFor(accountID string, auth Authorizations) (string, error) {
 			"dynamodb:CreateTable", "dynamodb:DeleteTable", "dynamodb:TagResource", "dynamodb:ListTagsOfResource",
 		}, Resource: RegionalARN("dynamodb", accountID, "table/"+LifecycleTableName)},
 		// The artifact bucket `lagotto deploy` creates (lagotto-lambda-<account>-<region>),
-		// emptied of every version and then deleted.
-		{Effect: "Allow", Action: []string{"s3:ListBucketVersions", "s3:DeleteBucket"},
+		// its tags read for the delete guard, emptied of every version and
+		// then deleted.
+		{Effect: "Allow", Action: []string{"s3:GetBucketTagging", "s3:ListBucketVersions", "s3:DeleteBucket"},
 			Resource: ArtifactBucketARN(accountID)},
 		{Effect: "Allow", Action: []string{"s3:DeleteObject", "s3:DeleteObjectVersion"},
 			Resource: ArtifactBucketARN(accountID) + "/*"},
-		{Effect: "Allow", Action: []string{"sns:DeleteTopic"},
+		{Effect: "Allow", Action: []string{"sns:GetTopicAttributes", "sns:ListTagsForResource", "sns:DeleteTopic"},
 			Resource: RegionalARN("sns", accountID, "lagotto-capacity-alerts")},
+		// The footprint's reads of the rest of a region's deployment
+		// (lagotto#326): the poller function, its log group's tags, lagotto's
+		// two schedule groups (lagotto, lagotto-teardown) and their tags, and
+		// the legacy CloudFormation stack (a region a stack still owns is
+		// reported, never torn down), and the poller's own role, read (never
+		// written) for the last region's plan, whose one-shot jobs delete it.
+		// One statement to stay well inside the role's inline-policy limit:
+		// each action belongs to one service, so it matches only the resource
+		// of that service. GetFunction returns the function's tags only to a
+		// caller with an explicit lambda:ListTags allow (Lambda API reference,
+		// GetFunction), and the delete guard reads those tags.
+		{Effect: "Allow", Action: []string{
+			"lambda:GetFunction", "lambda:ListTags", "logs:ListTagsForResource", "scheduler:GetScheduleGroup",
+			"scheduler:ListTagsForResource", "cloudformation:DescribeStacks", "iam:GetRole",
+		}, Resource: []string{
+			RoleARN(accountID),
+			RegionalARN("lambda", accountID, "function:"+pollerFunctionName),
+			RegionalARN("logs", accountID, "log-group:"+pollerLogGroupName+"*"),
+			RegionalARN("scheduler", accountID, "schedule-group/"+schedgroup.Name+"*"),
+			RegionalARN("cloudformation", accountID, "stack/lagotto/*"),
+		}},
 		// Every schedule in lagotto's group, the poller's own included, then the
 		// group itself.
 		{Effect: "Allow", Action: []string{"scheduler:DeleteSchedule"},
@@ -778,10 +811,12 @@ func PolicyDocumentFor(accountID string, auth Authorizations) (string, error) {
 			Resource: RegionalARN("scheduler", accountID, "schedule/"+TeardownScheduleGroup+"/*")},
 		{Effect: "Allow", Action: []string{"scheduler:CreateScheduleGroup", "scheduler:TagResource"},
 			Resource: RegionalARN("scheduler", accountID, "schedule-group/"+TeardownScheduleGroup)},
-		// lagotto's own instance role and its profile, deleted in the last region.
-		// Only those: never the poller's role (the invoke role's teardown job
-		// deletes it) and never the invoke role.
+		// lagotto's own instance role and its profile, read for the footprint
+		// and deleted in the last region. Only those: never the poller's role
+		// (the invoke role's teardown job deletes it) and never the invoke role.
 		{Effect: "Allow", Action: []string{
+			"iam:GetRole", "iam:ListRolePolicies", "iam:ListAttachedRolePolicies", "iam:ListInstanceProfilesForRole",
+			"iam:GetInstanceProfile", "iam:ListInstanceProfileTags",
 			"iam:DeleteRole", "iam:DeleteRolePolicy", "iam:DetachRolePolicy",
 			"iam:RemoveRoleFromInstanceProfile", "iam:DeleteInstanceProfile",
 		}, Resource: []string{

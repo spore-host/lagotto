@@ -66,11 +66,26 @@ func TestPollerAuthorsNoIAM(t *testing.T) {
 		"arn:aws:iam::" + irAccount + ":role/" + InstanceRoleName:             true,
 		"arn:aws:iam::" + irAccount + ":instance-profile/" + InstanceRoleName: true,
 	}
+	// The idle teardown's footprint (#326) reads lagotto's own instance role
+	// and profile, and the poller's own role (GetRole only): read-only, and
+	// never another principal's.
+	reads := map[string]bool{"iam:getrole": true, "iam:listrolepolicies": true, "iam:listattachedrolepolicies": true,
+		"iam:listinstanceprofilesforrole": true, "iam:getinstanceprofile": true, "iam:listinstanceprofiletags": true}
+	pollerRole := "arn:aws:iam::" + irAccount + ":role/" + RoleName
 	for _, g := range mustGrants(t, doc) {
 		if strings.EqualFold(g.Effect, "Deny") {
 			continue // the #325 guards restrict; they grant nothing
 		}
 		a := strings.ToLower(g.Action)
+		if reads[a] {
+			// A statement mixing services lists other services' ARNs too; an
+			// IAM action never matches those.
+			allowed := own[g.Resource] || (a == "iam:getrole" && g.Resource == pollerRole)
+			if !allowed && strings.HasPrefix(g.Resource, "arn:aws:iam:") {
+				t.Errorf("footprint IAM read beyond lagotto's own roles: %s", g)
+			}
+			continue
+		}
 		if teardown[a] {
 			if !own[g.Resource] {
 				t.Errorf("teardown IAM grant beyond lagotto's own instance role: %s", g)

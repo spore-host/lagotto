@@ -38,6 +38,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/spore-host/libs/lifecycle"
+
 	"github.com/spore-host/lagotto/pkg/runtimeiam"
 	"github.com/spore-host/lagotto/pkg/schedgroup"
 	"github.com/spore-host/lagotto/pkg/watcher"
@@ -155,10 +157,12 @@ type statement struct {
 	// the caller check simulates them with the caller's principal id and a key
 	// under it as context.
 	ownerScoped bool
-	// pinnedKey statements are conditioned on one exact partition key and a
-	// set of attributes ([pollerControl]); the caller check simulates them with
-	// that key and those attributes as context.
-	pinnedKey bool
+	// pinnedKey statements are conditioned on one exact partition key, and
+	// pinnedAttrs on a set of attributes too ([pollerControl], [leaseSentinel]);
+	// the caller check simulates them with that key and those attributes as
+	// context.
+	pinnedKey   string
+	pinnedAttrs []string
 	// simSkip are actions of this statement the caller check does not
 	// simulate, because the IAM policy simulator denies them for a principal
 	// that real IAM allows (see [SimulatorBlindSpot]). They are reported as
@@ -207,6 +211,12 @@ var (
 	}
 )
 
+// leaseSentinel is the lifecycle table's closing sentinel and nothing else.
+var leaseSentinel = map[string]interface{}{
+	"ForAllValues:StringEquals": map[string][]string{"dynamodb:LeadingKeys": {lifecycle.SentinelKey}},
+	"Null":                      map[string]string{"dynamodb:LeadingKeys": "false"},
+}
+
 // PollerControlAttributes are the attributes the PollerControl statement lets
 // a CLI user write on the poller-control item: its key, and the epoch that
 // watch/extend/update increment (watcher.Store.BumpPollerEpoch).
@@ -221,6 +231,7 @@ func statements(accountID string, configBuckets []string) []statement {
 		tableARNs = append(tableARNs, regional("dynamodb", "table/"+t))
 	}
 	topicARN := regional("sns", alertsTopicName)
+	lifecycleARN := regional("dynamodb", "table/"+runtimeiam.LifecycleTableName)
 
 	sts := []statement{
 		// lagotto's own tables, table-level. watch and launch create a missing
@@ -256,7 +267,28 @@ func statements(accountID string, configBuckets []string) []statement {
 		// ${aws:userid}), so OwnItems cannot cover it: this grants UpdateItem on
 		// that key alone, writing only the epoch.
 		{Sid: "PollerControl", Action: []string{"dynamodb:UpdateItem"},
-			Resource: tableARNs[0], Condition: pollerControl, pinnedKey: true},
+			Resource: tableARNs[0], Condition: pollerControl, pinnedKey: watcher.PollerControlKey, pinnedAttrs: PollerControlAttributes},
+
+		// The spore-host-lifecycle lease table (lagotto#326, libs/lifecycle).
+		// watch and launch mark lagotto active in the region before they create
+		// anything: one transaction that checks the closing sentinel
+		// (ConditionCheckItem) and updates lagotto's item (UpdateItem). The
+		// first spore.host tool in a region creates the table, tagged
+		// (CreateTable, TagResource), and waits for it (DescribeTable); a
+		// closing sentinel abandoned by a crashed closer is removed
+		// (DeleteItem). No GetItem, PutItem or Scan: marking active neither
+		// reads an item nor writes a whole one. Item-level, like the poller's
+		// grant on the same table: the item keys are tool and region, not the
+		// caller, so they cannot be owner-scoped.
+		{Sid: "TeardownLease", Action: []string{
+			"dynamodb:ConditionCheckItem", "dynamodb:CreateTable",
+			"dynamodb:DescribeTable", "dynamodb:TagResource", "dynamodb:UpdateItem",
+		}, Resource: lifecycleARN},
+		// The one delete: the closing sentinel, by its exact key, so a CLI user
+		// can clear one a crashed closer abandoned and nothing else (no tool's
+		// lease item, and never the table).
+		{Sid: "TeardownLeaseSentinel", Action: []string{"dynamodb:DeleteItem"},
+			Resource: lifecycleARN, Condition: leaseSentinel, pinnedKey: lifecycle.SentinelKey},
 
 		// The poller's schedule: watch, update, ack and extend set it back to
 		// every 5 minutes when an idle poller slowed it to hourly (or an older

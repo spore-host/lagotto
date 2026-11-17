@@ -285,6 +285,45 @@ second inline policy, `LagottoTeardown` (written by both `setup` and `deploy`),
 lets them delete the poller function, its log group and the poller's execution
 role, and nothing else.
 
+To plan that teardown the poller also reads its region's footprint (#326),
+read-only and again on lagotto's own resources: its function and its tags
+(`lambda:ListTags`: GetFunction returns them only with it), the tags of its
+topic, log group and two schedule groups, the legacy stack `lagotto`, the
+artifact buckets' tags, the poller role and `lagotto-instance-role` with its
+profile; plus, on `*` because they have no resource-level permissions,
+`logs:DescribeLogGroups`, `s3:ListAllMyBuckets`, `sagemaker:Search` (the
+training jobs running for a watch, part of the idle verdict) and
+`scheduler:ListSchedules`. It does not read the authorized instance roles, the
+invoke role or `lagotto-cli-user`, which it leaves to `lagotto teardown`.
+
+**Report mode.** In this release the poller's idle teardown only reports. On
+every run it judges its region: active while a watch is active, a scheduled
+launch is pending or retrying, a hold watch holds a capacity reservation, or a
+SageMaker job runs for a watch; any read that fails counts as active. It
+records the verdict in `spore-host-lifecycle` and never touches its schedule's
+cadence. Once the region has been idle for `LAGOTTO_IDLE_GRACE` (24 h unless
+that variable is set on the function, as a Go duration such as `30m`), it
+claims the teardown lease, re-reads the region, builds the whole teardown plan,
+re-checks every step against the live account and logs it, and gives the lease
+back. It deletes nothing. The log lines start `idle-verdict` and
+`idle-teardown REPORT`; the last one of a report is
+`idle-teardown REPORT region=<r> would_delete=<n> kept=<m> failed=<f> one_shots=<k> last_region=<bool> lease=released`.
+The plan names, as `phase=one-shot`, the jobs that would remove what the poller
+cannot remove from inside itself: its function at +2 min, its log group at
++15 min (deleted earlier, Lambda's last log flush recreates it untagged), and,
+in the last region with lagotto's tables or poller, its role at +5 min.
+`lagotto deploy` does not set `LAGOTTO_IDLE_GRACE`, and a deploy that changes
+the function's configuration drops a variable set by hand.
+
+**The lease.** `lagotto deploy`, `watch` (and `watch --local`) and `launch`,
+and the poller before it fires a scheduled launch, first mark lagotto active in
+the region's `spore-host-lifecycle` table. While a teardown holds the lease
+there they wait (the CLI up to 10 minutes), then exit non-zero, having created
+nothing. `lagotto-cli-user` grants this on that table only
+(`UpdateItem`, `ConditionCheckItem`, `DescribeTable`, `CreateTable`,
+`TagResource`, and `DeleteItem` of the closing sentinel's key only). A caller
+whose policy predates it gets a warning and carries on: re-run `lagotto setup`.
+
 Both roles also carry two explicit Denies, which no Allow can outweigh: every
 action on a resource tagged `spore-host:role=service` (spore.host's own live
 service; lagotto never writes that tag), and every IAM write on the
@@ -513,9 +552,11 @@ orphan-schedule checks use the same reader and rule.
 --plan plan.json` (report mode, the default) says what would be deleted:
 everything not active and not depended on by something active, dependents
 first, each re-checked against a fresh footprint. `--mode reap --yes` deletes it
-with the same deleters as the steps above. Until the teardown lease of #326
-exists, which keeps one user's teardown from racing another's setup in a shared
-account, reap refuses without a hidden acknowledgement flag; use the steps above.
+with the same deleters as the steps above, under the teardown lease (#326) of
+every region it deletes in: a deploy, watch or launch there waits for it, or,
+taking a lease that went stale, stops it before its next delete. A region where
+something is in use, or another teardown holds the lease, refuses the run
+before anything is deleted.
 
 ## Alternate: deploy via CloudFormation (IaC / enterprise)
 

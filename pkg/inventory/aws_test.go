@@ -263,3 +263,34 @@ func TestAWSAccount(t *testing.T) {
 		t.Errorf("profiles = %+v, %v", profiles, err)
 	}
 }
+
+// TestPollerAWSAccount: the poller's account reader reads lagotto's own roles
+// and instance profile, and skips what only `lagotto teardown` removes: the
+// invoke role, the authorized instance roles and the lagotto-cli-user policy
+// (lagotto#326).
+func TestPollerAWSAccount(t *testing.T) {
+	s := NewPollerAWSSource(aws.Config{Region: "us-east-1"}, acct)
+	if _, ok := s.Account().(pollerAWSAccount); !ok {
+		t.Fatalf("account source %T", s.Account())
+	}
+	a := pollerAWSAccount{iam: fakeIAM{}}
+	ctx := context.Background()
+	if r, err := a.Role(ctx, runtimeiam.InstanceRoleName); r == nil || err != nil {
+		t.Errorf("instance role = %+v, %v", r, err)
+	}
+	if r, err := a.Role(ctx, runtimeiam.SchedulerInvokeRoleName); r != nil || err != nil {
+		t.Errorf("invoke role read: %+v, %v", r, err)
+	}
+	if roles, err := a.AuthorizedRoles(ctx); roles != nil || err != nil {
+		t.Errorf("authorized roles read: %v, %v", roles, err)
+	}
+	if p, n, err := a.CLIPolicy(ctx); p != nil || n != 0 || err != nil {
+		t.Errorf("policy read: %+v", p)
+	}
+	if profiles, err := a.InstanceProfilesForRole(ctx, runtimeiam.InstanceRoleName); err != nil || len(profiles) != 1 {
+		t.Errorf("profiles = %+v, %v", profiles, err)
+	}
+	if p, err := a.InstanceProfile(ctx, runtimeiam.InstanceRoleName); err != nil || p == nil {
+		t.Errorf("profile = %+v, %v", p, err)
+	}
+}

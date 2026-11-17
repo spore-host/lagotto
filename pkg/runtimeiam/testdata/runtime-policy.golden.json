@@ -62,7 +62,11 @@
         "pricing:GetProducts",
         "pricing:GetAttributeValues",
         "servicequotas:GetServiceQuota",
-        "servicequotas:ListServiceQuotas"
+        "servicequotas:ListServiceQuotas",
+        "logs:DescribeLogGroups",
+        "s3:ListAllMyBuckets",
+        "sagemaker:Search",
+        "scheduler:ListSchedules"
       ],
       "Resource": "*"
     },
@@ -253,6 +257,7 @@
     {
       "Effect": "Allow",
       "Action": [
+        "s3:GetBucketTagging",
         "s3:ListBucketVersions",
         "s3:DeleteBucket"
       ],
@@ -269,9 +274,30 @@
     {
       "Effect": "Allow",
       "Action": [
+        "sns:GetTopicAttributes",
+        "sns:ListTagsForResource",
         "sns:DeleteTopic"
       ],
       "Resource": "arn:aws:sns:*:123456789012:lagotto-capacity-alerts"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "lambda:GetFunction",
+        "lambda:ListTags",
+        "logs:ListTagsForResource",
+        "scheduler:GetScheduleGroup",
+        "scheduler:ListTagsForResource",
+        "cloudformation:DescribeStacks",
+        "iam:GetRole"
+      ],
+      "Resource": [
+        "arn:aws:iam::123456789012:role/lagotto-capacity-poller-role",
+        "arn:aws:lambda:*:123456789012:function:lagotto-capacity-poller",
+        "arn:aws:logs:*:123456789012:log-group:/aws/lambda/lagotto-capacity-poller*",
+        "arn:aws:scheduler:*:123456789012:schedule-group/lagotto*",
+        "arn:aws:cloudformation:*:123456789012:stack/lagotto/*"
+      ]
     },
     {
       "Effect": "Allow",
@@ -306,6 +332,12 @@
     {
       "Effect": "Allow",
       "Action": [
+        "iam:GetRole",
+        "iam:ListRolePolicies",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListInstanceProfilesForRole",
+        "iam:GetInstanceProfile",
+        "iam:ListInstanceProfileTags",
         "iam:DeleteRole",
         "iam:DeleteRolePolicy",
         "iam:DetachRolePolicy",

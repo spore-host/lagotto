@@ -150,9 +150,9 @@ func TestConditionKeysMatchActionService(t *testing.T) {
 			}
 		}
 	}
-	if n != 9 {
-		t.Errorf("found %d condition keys, want 9 (PassRole, Subscribe, CancelCapacityReservation, LeadingKeys x3, "+
-			"and PollerControl's LeadingKeys x2 and Attributes)", n)
+	if n != 11 {
+		t.Errorf("found %d condition keys, want 11 (PassRole, Subscribe, CancelCapacityReservation, LeadingKeys x3, "+
+			"PollerControl's LeadingKeys x2 and Attributes, and TeardownLeaseSentinel's LeadingKeys x2)", n)
 	}
 }
 
@@ -204,6 +204,14 @@ func TestNoPrivilegeEscalation(t *testing.T) {
 	for _, g := range grants {
 		if strings.Contains(g.Action, "*") {
 			t.Errorf("wildcard action %s", g.Action)
+		}
+		// The one delete (lagotto#326): the lifecycle table's closing
+		// sentinel, by its exact key, so a CLI user can clear one a crashed
+		// closer abandoned. Never a table, never another item.
+		if g.Action == "dynamodb:DeleteItem" && strings.HasSuffix(g.Resource, ":table/"+runtimeiam.LifecycleTableName) &&
+			strings.Contains(g.Condition, `"dynamodb:LeadingKeys":["table#closing"]`) && strings.Contains(g.Condition, "ForAllValues:StringEquals") &&
+			strings.Contains(g.Condition, `"Null"`) {
+			continue
 		}
 		for _, f := range forbidden {
 			if strings.HasPrefix(g.Action, f) {

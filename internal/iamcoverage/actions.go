@@ -92,6 +92,13 @@ var opActions = map[string][]string{
 	"s3:GetBucketNotificationConfiguration": {"s3:GetBucketNotification"},
 	"s3:PutBucketNotificationConfiguration": {"s3:PutBucketNotification"},
 
+	// DynamoDB has no TransactWriteItems action: a transaction is authorized
+	// item by item, as the action of each element (ConditionCheck, Put,
+	// Update, Delete). Which elements a call holds is not traced, so all four
+	// are listed (the safe direction). TransactGetItems is GetItem.
+	"dynamodb:TransactWriteItems": {"dynamodb:ConditionCheckItem", "dynamodb:DeleteItem", "dynamodb:PutItem", "dynamodb:UpdateItem"},
+	"dynamodb:TransactGetItems":   {"dynamodb:GetItem"},
+
 	// Lambda's Invoke family is all lambda:InvokeFunction.
 	"lambda:Invoke":                   {"lambda:InvokeFunction"},
 	"lambda:InvokeAsync":              {"lambda:InvokeFunction"},

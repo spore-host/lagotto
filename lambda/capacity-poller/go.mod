@@ -11,7 +11,7 @@ require (
 	github.com/spore-host/truffle v0.63.0
 )
 
-require github.com/spore-host/libs v0.53.0 // indirect
+require github.com/spore-host/libs v0.53.0
 
 require (
 	github.com/BurntSushi/toml v1.4.0 // indirect
@@ -26,6 +26,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.8.6 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/v4a v1.5.6 // indirect
 	github.com/aws/aws-sdk-go-v2/service/account v1.32.4 // indirect
+	github.com/aws/aws-sdk-go-v2/service/cloudformation v1.82.1 // indirect
 	github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs v1.73.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.70.3 // indirect
 	github.com/aws/aws-sdk-go-v2/service/dynamodbstreams v1.46.0 // indirect
