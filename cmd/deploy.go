@@ -120,11 +120,12 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no AWS region set; pass --region or configure one")
 	}
 
-	acctID, owner := "", ""
+	acctID, owner, callerARN := "", "", ""
 	if id, ierr := sts.NewFromConfig(cfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{}); ierr == nil && id.Account != nil {
 		acctID = *id.Account
 		// spore-host:owner on what this deploy creates (#324).
 		owner = aws.ToString(id.UserId)
+		callerARN = aws.ToString(id.Arn)
 	}
 	stamp := managedtags.Stamp{Owner: owner}
 
@@ -185,6 +186,13 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	if !confirm(fmt.Sprintf("Deploy the lagotto poller (v%s) into account %s / %s?", deployVersion, acctID, region)) {
 		_, _ = fmt.Fprintln(out, "Aborted.")
 		return nil
+	}
+
+	// Mark lagotto active in the region before anything is created or
+	// changed (lagotto#326): a teardown holding the lease there is waited
+	// out, and refuses the deploy if it does not finish.
+	if err := markActive(ctx, cfg, callerARN, region, "deploy the poller", os.Stderr); err != nil {
+		return err
 	}
 
 	// Migration runs BEFORE the deploy, deliberately. The retain-update carries the

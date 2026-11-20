@@ -42,12 +42,14 @@ var pollerNotGranted = map[string]string{
 	// both created by `lagotto setup`). Never granting these is the point: a
 	// poller that can write a role's policy and pass the role launches with
 	// any permissions a stored watch asks for.
-	"iam:GetRole":                  "spawn SetupSporedIAMRole only; the poller always names an instance profile setup created",
+	// iam:GetRole and iam:GetInstanceProfile used to be here too. They are
+	// granted now, read-only and on lagotto's own roles and instance profile
+	// only, for the idle teardown's footprint (lagotto#326); spawn's
+	// SetupSporedIAMRole reads other names, which stay denied.
 	"iam:CreateRole":               "spawn SetupSporedIAMRole only; the poller authors no IAM",
 	"iam:TagRole":                  "spawn SetupSporedIAMRole only (tag-on-create); the poller authors no IAM",
 	"iam:PutRolePolicy":            "spawn SetupSporedIAMRole only; the poller authors no IAM",
 	"iam:AttachRolePolicy":         "spawn SetupSporedIAMRole only; the poller authors no IAM",
-	"iam:GetInstanceProfile":       "spawn SetupSporedIAMRole only; the poller always names an instance profile setup created",
 	"iam:CreateInstanceProfile":    "spawn SetupSporedIAMRole only; the poller authors no IAM",
 	"iam:TagInstanceProfile":       "spawn SetupSporedIAMRole only (tag-on-create); the poller authors no IAM",
 	"iam:AddRoleToInstanceProfile": "spawn SetupSporedIAMRole only; the poller authors no IAM",

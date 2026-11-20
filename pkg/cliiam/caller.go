@@ -11,7 +11,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
 	"github.com/aws/smithy-go"
-	"github.com/spore-host/lagotto/pkg/watcher"
 )
 
 // SimulateAPI is the slice of the IAM API [CheckCaller] needs. *iam.Client
@@ -179,13 +178,16 @@ func simPlan(accountID, region string) ([]simRequest, []string) {
 				iamtypes.ContextEntry{ContextKeyName: aws.String("dynamodb:LeadingKeys"), ContextKeyType: iamtypes.ContextKeyTypeEnumStringList,
 					ContextKeyValues: []string{probeLeadingKey(st.Sid)}})
 		}
-		if st.pinnedKey {
-			// The one key and the attributes the statement allows (#323).
+		if st.pinnedKey != "" {
+			// The one key, and the attributes, the statement allows (#323, #326).
 			req.context = append(req.context,
 				iamtypes.ContextEntry{ContextKeyName: aws.String("dynamodb:LeadingKeys"), ContextKeyType: iamtypes.ContextKeyTypeEnumStringList,
-					ContextKeyValues: []string{watcher.PollerControlKey}},
-				iamtypes.ContextEntry{ContextKeyName: aws.String("dynamodb:Attributes"), ContextKeyType: iamtypes.ContextKeyTypeEnumStringList,
-					ContextKeyValues: PollerControlAttributes})
+					ContextKeyValues: []string{st.pinnedKey}})
+			if len(st.pinnedAttrs) > 0 {
+				req.context = append(req.context,
+					iamtypes.ContextEntry{ContextKeyName: aws.String("dynamodb:Attributes"), ContextKeyType: iamtypes.ContextKeyTypeEnumStringList,
+						ContextKeyValues: st.pinnedAttrs})
+			}
 		}
 		if cond, ok := st.Condition.(map[string]map[string]string); ok {
 			keys := make([]string, 0, len(cond["StringEquals"]))

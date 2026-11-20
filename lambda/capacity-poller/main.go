@@ -15,6 +15,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/scheduler"
 	schedulertypes "github.com/aws/aws-sdk-go-v2/service/scheduler/types"
+	"github.com/spore-host/libs/lifecycle"
+
+	"github.com/spore-host/lagotto/pkg/idle"
+	"github.com/spore-host/lagotto/pkg/inventory"
 	"github.com/spore-host/lagotto/pkg/pollcadence"
 	"github.com/spore-host/lagotto/pkg/schedgroup"
 	"github.com/spore-host/lagotto/pkg/watcher"
@@ -34,7 +38,27 @@ var (
 	// stack passes its own CapacityPollerFunctionArn / SchedulerInvokeRoleArn).
 	pollerFunctionArn      string
 	schedulerInvokeRoleArn string
+
+	// leases is the spore-host-lifecycle client (lagotto#326): the poller
+	// marks lagotto active before it fires a scheduled launch, and owns the
+	// region's idle verdict. idleCfg/idleDeps are the idle teardown; nil
+	// idleDeps means it is off (no account ID to address anything with).
+	leases   *lifecycle.Client
+	idleCfg  idle.Config
+	idleDeps *idle.Deps
 )
+
+// reapIdle is the idle teardown's mode. false is report mode: the poller
+// takes the lease, plans and re-checks the whole teardown (its own removal
+// included) and logs it, and deletes nothing. lagotto#328 turns reap on, after
+// the report has been read on real accounts. It is a constant on purpose: no
+// environment variable or flag turns deletion on in this release.
+const reapIdle = false
+
+// leaseWaitTimeout bounds how long the poller waits on a teardown's lease
+// before it gives up firing a scheduled launch (the CLI waits 10 minutes; a
+// Lambda invocation should not).
+const leaseWaitTimeout = 2 * time.Minute
 
 // nowUTC returns the current time in UTC (wrapped for testability/consistency).
 func nowUTC() time.Time { return time.Now().UTC() }
@@ -104,6 +128,55 @@ func setup() {
 	})
 
 	schedulerClient = scheduler.NewFromConfig(cfg)
+
+	region := cfg.Region
+	leases, err = idle.NewClient(cfg, "lagotto-poller/"+region, func(o *lifecycle.Options) { o.WaitTimeout = leaseWaitTimeout })
+	if err != nil {
+		log.Printf("Warning: idle teardown and the teardown lease are off: %v", err)
+		return
+	}
+	acct := accountFromARN(pollerFunctionArn)
+	if acct == "" || region == "" {
+		log.Printf("Warning: idle teardown is off: no account ID in POLLER_FUNCTION_ARN %q, or no region", pollerFunctionArn)
+		return
+	}
+	grace, warn := idle.GraceFrom(os.Getenv)
+	if warn != "" {
+		log.Printf("Warning: %s", warn)
+	}
+	opts := inventory.Options{WatchesTable: watchesTable, HistoryTable: historyTable, ScheduledTable: scheduledTable}
+	idleCfg = idle.Config{Region: region, AccountID: acct, Grace: grace, Reap: reapIdle, Options: opts, Logf: log.Printf}
+	idleDeps = &idle.Deps{
+		Lifecycle: leases,
+		Source:    inventory.NewPollerAWSSource(cfg, acct),
+		Deleters:  idle.PollerDeleters(cfg, acct, watchesTable, historyTable, scheduledTable),
+		Scheduler: schedulerClient,
+	}
+}
+
+// accountFromARN is the account field of an ARN, or "".
+func accountFromARN(arn string) string {
+	parts := strings.Split(arn, ":")
+	if len(parts) < 6 || parts[0] != "arn" {
+		return ""
+	}
+	return parts[4]
+}
+
+// markActive records, before the poller creates anything (a scheduled
+// launch's instance, its boundary-retry schedule), that lagotto is active in
+// this region, waiting out a teardown that holds the lease (lagotto#326). A
+// runtime policy that predates the lease table is a warning, not a refusal.
+func markActive(ctx context.Context, what string) error {
+	if leases == nil {
+		return nil
+	}
+	err := idle.MarkActive(ctx, leases, cfg.Region, what)
+	if errors.Is(err, idle.ErrLeaseUnavailable) {
+		log.Printf("%s", idle.LeaseWarning(err))
+		return nil
+	}
+	return err
 }
 
 // event is the Lambda invocation payload. The recurring capacity-poll schedule
@@ -147,6 +220,13 @@ func handleScheduledLaunch(ctx context.Context, id string) error {
 	}
 	if spawner == nil {
 		return fmt.Errorf("scheduled launch %s: spawner unavailable", id)
+	}
+	// The launch, and any boundary retry it re-arms below, create resources:
+	// mark lagotto active first (lagotto#326). Refused only while a teardown
+	// holds the lease, which needs the region idle, so never while this
+	// launch is armed.
+	if err := markActive(ctx, "fire scheduled launch "+id); err != nil {
+		return err
 	}
 
 	outcome, instanceID, lerr := spawner.RunScheduled(ctx, sl)
@@ -288,6 +368,10 @@ func handlePoll(ctx context.Context) error {
 	if err != nil {
 		log.Printf("Warning: %v", err)
 	}
+	// The idle verdict and, after the grace period, the report-mode teardown
+	// (lagotto#326). It never touches the schedule's cadence, and never fails
+	// the poll: everything it does is logged.
+	runIdleCheck(ctx)
 	if res.Outcome != pollcadence.Idle {
 		return nil
 	}
@@ -362,6 +446,14 @@ func reconcileCadence(ctx context.Context, sched pollcadence.ScheduleAPI, name s
 		}
 	}
 	return res, err
+}
+
+// runIdleCheck runs one idle-teardown tick when it is configured.
+func runIdleCheck(ctx context.Context) {
+	if idleDeps == nil {
+		return
+	}
+	idle.Tick(ctx, idleCfg, *idleDeps)
 }
 
 func getEnv(key, fallback string) string {

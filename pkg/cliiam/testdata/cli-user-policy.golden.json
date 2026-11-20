@@ -80,6 +80,36 @@
       }
     },
     {
+      "Sid": "TeardownLease",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:CreateTable",
+        "dynamodb:DescribeTable",
+        "dynamodb:TagResource",
+        "dynamodb:UpdateItem"
+      ],
+      "Resource": "arn:aws:dynamodb:*:123456789012:table/spore-host-lifecycle"
+    },
+    {
+      "Sid": "TeardownLeaseSentinel",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:DeleteItem"
+      ],
+      "Resource": "arn:aws:dynamodb:*:123456789012:table/spore-host-lifecycle",
+      "Condition": {
+        "ForAllValues:StringEquals": {
+          "dynamodb:LeadingKeys": [
+            "table#closing"
+          ]
+        },
+        "Null": {
+          "dynamodb:LeadingKeys": "false"
+        }
+      }
+    },
+    {
       "Sid": "PollerSchedule",
       "Effect": "Allow",
       "Action": [

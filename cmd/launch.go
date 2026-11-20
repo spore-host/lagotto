@@ -221,6 +221,11 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 	if err := deploy.New(cfg).RequirePollerDeployed(ctx, region, acctID); err != nil {
 		return err
 	}
+	// Mark lagotto active in the region before the record and its schedule
+	// are created (lagotto#326).
+	if err := markActive(ctx, cfg, userID, region, "arm a scheduled launch", os.Stderr); err != nil {
+		return err
+	}
 
 	// Persist the scheduled launch, then arm the schedule. Store first so the
 	// Lambda can always resolve the id the schedule will send.

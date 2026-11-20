@@ -225,9 +225,36 @@ type Region struct {
 	Stack *Item
 }
 
-// active reports whether anything lagotto manages in the region is in use.
-func (r *Region) active() bool {
+// Active reports whether anything lagotto manages in the region is in use: an
+// active watch, a scheduled launch that can still fire (pending or retrying),
+// a capacity reservation a hold watch holds, a training job running for a
+// watch, or activity that could not be read. It is the one definition of a
+// region in use: the footprint classes by it, and the poller's idle verdict
+// (lagotto#326, [GatherActivity]) is it.
+func (r *Region) Active() bool {
 	return r.ActivityUnknown || r.ActiveWatches > 0 || r.ArmedLaunches > 0 || len(r.Holds) > 0 || len(r.Jobs) > 0
+}
+
+// ActiveReasons says why [Region.Active] is true, one phrase per signal, or
+// nothing when the region is idle.
+func (r *Region) ActiveReasons() []string {
+	var out []string
+	if r.ActivityUnknown {
+		out = append(out, "activity could not be read")
+	}
+	if r.ActiveWatches > 0 {
+		out = append(out, fmt.Sprintf("%d active watch(es)", r.ActiveWatches))
+	}
+	if r.ArmedLaunches > 0 {
+		out = append(out, fmt.Sprintf("%d pending or retrying scheduled launch(es)", r.ArmedLaunches))
+	}
+	if len(r.Holds) > 0 {
+		out = append(out, fmt.Sprintf("%d capacity reservation(s) held", len(r.Holds)))
+	}
+	if len(r.Jobs) > 0 {
+		out = append(out, fmt.Sprintf("%d SageMaker training job(s) running", len(r.Jobs)))
+	}
+	return out
 }
 
 // Profile is an instance profile and the roles in it.
@@ -368,7 +395,7 @@ func Classify(f Facts, o Options, now time.Time) *fp.Report {
 	for i := range f.Regions {
 		r := &f.Regions[i]
 		reg := r.Region
-		active := r.active()
+		active := r.Active()
 		anyActive = anyActive || active
 		if r.Function != nil && active {
 			pollerRoleActive = true

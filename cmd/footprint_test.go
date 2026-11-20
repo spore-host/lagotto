@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/spore-host/libs/lifecycle"
+	"github.com/spore-host/libs/lifecycle/lifecycletest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -204,6 +206,7 @@ func (d recAccount) DeletePolicy(context.Context) (cliiam.Deletion, error) {
 func stubPlanTeardown(t *testing.T, facts func() inventory.Facts) (string, *recordingDeleters, *[]inventory.Scope) {
 	t.Helper()
 	scopes := stubFootprint(t, facts)
+	installFakeLeases(t, lifecycletest.New())
 	rep := inventory.Classify(facts(), inventory.Options{}, time.Now())
 	b, err := json.Marshal(rep)
 	if err != nil {
@@ -282,17 +285,12 @@ func TestTeardownPlanReap(t *testing.T) {
 	}
 }
 
-// TestTeardownPlanReapGuards: reap needs --yes, and, until the lease of
-// lagotto#326, the hidden acknowledgement; neither refusal deletes anything.
+// TestTeardownPlanReapGuards: reap needs --yes; refusals delete nothing.
 func TestTeardownPlanReapGuards(t *testing.T) {
 	_, rec, scopes := stubPlanTeardown(t, fpFacts)
 	teardownMode = "reap"
 	if _, err := runTeardownPlanForTest(t, ""); err == nil || !strings.Contains(err.Error(), "--yes") {
 		t.Errorf("reap without --yes: %v", err)
-	}
-	teardownYes = true
-	if _, err := runTeardownPlanForTest(t, ""); err == nil || !strings.Contains(err.Error(), "lease") {
-		t.Errorf("reap without a lease: %v", err)
 	}
 	teardownMode = "delete"
 	if _, err := runTeardownPlanForTest(t, ""); err == nil {
@@ -350,5 +348,77 @@ func TestTeardownFlagsOfTheOtherPath(t *testing.T) {
 	}
 	if err := checkTeardownFlags(newCmd("mode", "yes")); err != nil {
 		t.Errorf("--mode --yes with --plan: %v", err)
+	}
+}
+
+// TestTeardownPlanReapTakesTheRealLease (lagotto#326): with --yes and no
+// acknowledgement, reap claims the teardown lease in the region it deletes in
+// (eu-west-1), deletes under it, and, the region being cleared, finishes it
+// and closes the lifecycle table. The active region is not leased.
+func TestTeardownPlanReapTakesTheRealLease(t *testing.T) {
+	_, rec, _ := stubPlanTeardown(t, fpFacts)
+	table := lifecycletest.New()
+	var steps []string
+	table.Hook = func(_ context.Context, op string) {
+		if op == "UpdateItem" {
+			steps = append(steps, op)
+		}
+	}
+	installFakeLeases(t, table)
+	teardownMode, teardownYes = "reap", true
+	out, err := runTeardownPlanForTest(t, "")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if len(rec.calls) != 4 {
+		t.Errorf("deleted %v, want the three eu-west-1 tables and the policy", rec.calls)
+	}
+	// Claim, then a heartbeat before each of the four deletes.
+	if len(steps) < 5 {
+		t.Errorf("%d lease writes, want the claim and a heartbeat per delete", len(steps))
+	}
+	if n := table.Calls("DeleteTable"); n != 1 {
+		t.Errorf("the lifecycle table was deleted %d times, want 1 (cleared region, lease finished)", n)
+	}
+	if table.Item(lifecycle.TableName, "tool#lagotto#us-east-1") != nil {
+		t.Error("the active region was leased")
+	}
+}
+
+// TestTeardownPlanReapRefusesAHeldLease: another teardown holds the lease in
+// eu-west-1. Without the acknowledgement reap refuses before deleting
+// anything; with it, it falls back to the stand-in, warns, and deletes.
+func TestTeardownPlanReapRefusesAHeldLease(t *testing.T) {
+	_, rec, _ := stubPlanTeardown(t, fpFacts)
+	table := lifecycletest.New()
+	installFakeLeases(t, table)
+	other, err := newLifecycleClient(aws.Config{}, "lagotto-poller/eu-west-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, _, err := other.Observe(ctx, inventory.Tool, "eu-west-1", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := other.Claim(ctx, inventory.Tool, "eu-west-1", 0); err != nil {
+		t.Fatal(err)
+	}
+	teardownMode, teardownYes = "reap", true
+	_, err = runTeardownPlanForTest(t, "")
+	if err == nil || !strings.Contains(err.Error(), "could not take the teardown lease in eu-west-1") ||
+		!strings.Contains(err.Error(), "lagotto-poller/eu-west-1") {
+		t.Fatalf("err = %v, want the refusal naming the holder", err)
+	}
+	if len(rec.calls) != 0 {
+		t.Fatalf("a refused reap deleted %v", rec.calls)
+	}
+
+	teardownNoLease = true
+	out, err := runTeardownPlanForTest(t, "")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if len(rec.calls) != 4 {
+		t.Errorf("with the acknowledgement: deleted %v, want 4", rec.calls)
 	}
 }

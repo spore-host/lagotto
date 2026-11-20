@@ -195,12 +195,21 @@ func TestS3GrantsAreScopedToTheFSxPrefix(t *testing.T) {
 		"s3:DeleteObject":        ArtifactBucketARN("123456789012") + "/*",
 		"s3:DeleteObjectVersion": ArtifactBucketARN("123456789012") + "/*",
 	}
+	// The idle teardown's footprint (#326) also reads the artifact bucket's
+	// tags, and lists the account's buckets (no resource-level permission).
+	alsoOn := map[string]string{
+		"s3:GetBucketTagging": ArtifactBucketARN("123456789012"),
+		"s3:ListAllMyBuckets": "*",
+	}
 	seen := map[string]bool{}
 	for _, g := range grants {
 		if !strings.HasPrefix(g.Action, "s3:") || !strings.EqualFold(g.Effect, "Allow") {
 			continue
 		}
 		seen[g.Action] = true
+		if r, ok := alsoOn[g.Action]; ok && g.Resource == r {
+			continue
+		}
 		if a, ok := artifact[g.Action]; ok {
 			if g.Resource != a {
 				t.Errorf("%s is granted on %q; the teardown S3 grants must be on %q only", g.Action, g.Resource, a)
@@ -220,5 +229,31 @@ func TestS3GrantsAreScopedToTheFSxPrefix(t *testing.T) {
 		if !seen[a] {
 			t.Errorf("the fsx_create bucket action %s is not granted", a)
 		}
+	}
+}
+
+// TestPollerReadsItsFunctionsTags: Lambda's GetFunction returns the
+// function's tags only to a caller explicitly allowed lambda:ListTags (Lambda
+// API reference), and the idle teardown's delete guard needs them (#326). The
+// coverage gate cannot see this: no code calls ListTags.
+func TestPollerReadsItsFunctionsTags(t *testing.T) {
+	doc, err := PolicyDocument("123456789012", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grants, err := ParsePolicy(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fn := "arn:aws:lambda:*:123456789012:function:" + pollerFunctionName
+	var get, list bool
+	for _, g := range grants {
+		if strings.EqualFold(g.Effect, "Allow") && g.Resource == fn {
+			get = get || g.Action == "lambda:GetFunction"
+			list = list || g.Action == "lambda:ListTags"
+		}
+	}
+	if !get || !list {
+		t.Errorf("on %s: lambda:GetFunction %v, lambda:ListTags %v; want both", fn, get, list)
 	}
 }

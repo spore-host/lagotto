@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/spore-host/libs/lifecycle"
+	"github.com/spore-host/libs/lifecycle/lifecycletest"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -60,6 +62,22 @@ type fakeAWS struct {
 	updates   []string                    // UpdateItem UpdateExpression + values, raw (not the epoch's)
 	bumps     int                         // poller-epoch UpdateItems (#323)
 	schedPuts []map[string]any            // UpdateSchedule bodies
+
+	// leases is the spore-host-lifecycle table the commands mark lagotto
+	// active in (lagotto#326); nil means a fresh one per installFakeAWS.
+	leases *lifecycletest.Fake
+	// leaseOpts adjust the commands' lifecycle client (a clock, say).
+	leaseOpts []func(*lifecycle.Options)
+}
+
+// leaseTable is f's lifecycle table, made on first use.
+func (f *fakeAWS) leaseTable() *lifecycletest.Fake {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.leases == nil {
+		f.leases = lifecycletest.New()
+	}
+	return f.leases
 }
 
 const fakeCallerARN = "arn:aws:iam::123456789012:user/alice"
@@ -267,6 +285,7 @@ func (f *fakeAWS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func installFakeAWS(t *testing.T, f *fakeAWS) {
 	t.Helper()
 	f.t = t
+	installFakeLeases(t, f.leaseTable(), f.leaseOpts...)
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
 	awscfg.SetLoaderForTest(t, func(context.Context, ...func(*awsconfig.LoadOptions) error) (aws.Config, error) {
