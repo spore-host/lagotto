@@ -542,7 +542,7 @@ it), `residue` (lagotto's own machinery: the shared Scheduler invoke role, and a
 poller log group whose function is gone), `permanent` (only what is tagged
 `spore-host:permanent=true`), `user-data` and `litter` (removable now). Nothing
 lagotto makes is user data: **the match history is deleted with the teardown**,
-by owner decision; export it with `lagotto history` first. `lagotto-cli-user` is
+by owner decision; keep it with [`lagotto history export`](#keep-the-match-history-lagotto-history-export) first. `lagotto-cli-user` is
 litter only once nothing is attached to it. A resource matched by name alone
 (made before #324 tagged everything) is reported and never deleted. `-o json` is
 the shared spore.host footprint schema, and doctor's orphan-bucket and
@@ -557,6 +557,171 @@ every region it deletes in: a deploy, watch or launch there waits for it, or,
 taking a lease that went stale, stops it before its next delete. A region where
 something is in use, or another teardown holds the lease, refuses the run
 before anything is deleted.
+
+## Idle teardown: what lagotto removes when nothing is active
+
+lagotto follows the spore.host rule (leave no trace,
+[spore-host#752](https://github.com/spore-host/spore-host/issues/752)): once
+nothing it manages has been active for a grace period, what it created is
+removed. lagotto keeps nothing permanent of its own. The only things
+spore.host keeps in an account while it is set up are exactly two pieces of
+spawn's account setup: the permissions boundary
+`spore-host/spawn-instance-boundary` and the user lifecycle policy
+`spore-host/spawn-user-lifecycle`, both removed only by
+`spawn setup-account --remove`. This section is the whole path, end to end. **In this release the poller only reports it; nothing is deleted**
+(lagotto#328 turns deletion on).
+
+### Who decides that a region is idle
+
+Only the deployed poller, in its own region: it is the one component that sees
+every user's watches there. On every run it judges the region **active** while
+a watch is active, a scheduled launch is pending or retrying, a hold watch holds
+a capacity reservation, or a SageMaker training job runs for a watch. A read
+that fails counts as active. It records the verdict in the region's
+`spore-host-lifecycle` table (the shared lease, libs#77), which is also where
+`lagotto deploy`, `watch`, `watch --local` and `launch`, and the poller before
+it fires a scheduled launch, mark lagotto active first (see
+[The lease](#runtime-permissions-lagotto-setup)). The CLI never judges lagotto
+idle, because it cannot see other users' watches.
+
+A region with no poller (one where you only ran `watch --local`) is never judged
+idle, so nothing removes lagotto there automatically; use `lagotto teardown
+--plan` (below).
+
+### The grace period
+
+The region must stay idle for **24 h**. `LAGOTTO_IDLE_GRACE` on the poller
+function overrides it, as a Go duration (`30m`, `72h`); an invalid or
+non-positive value is ignored with a warning and 24 h is used. `lagotto deploy`
+does not set the variable, and a deploy that changes the function's
+configuration drops one you set by hand. Any activity restarts the clock.
+
+### What happens once the grace has passed
+
+1. **The lease.** The poller claims the region's teardown lease. While it holds
+   it, a `deploy`, `watch` or `launch` in that region waits (the CLI up to 10
+   minutes) and then exits non-zero having created nothing; a creator that
+   takes over a lease gone stale stops the teardown before its next delete.
+2. **The re-check.** With the lease held it reads the footprint of every
+   enabled region again. If anything in this region is active now, or the
+   footprint cannot be read in full, it gives the lease back and stops.
+3. **The plan.** It plans with the same rules as `lagotto footprint` and
+   `lagotto teardown --plan`: only a resource tagged
+   `spore-host:managed-by=lagotto` with lagotto's name, never one tagged
+   `spore-host:role=service` or `spore-host:permanent=true`, never a
+   legacy-name or foreign one; dependents before what they depend on. The
+   account-wide IAM is in the plan only in the **last region** with lagotto's
+   tables or poller.
+4. **Direct deletes**, by the poller, in dependency order: the per-launch
+   `lagotto-launch-sl-*` schedules, then the three tables
+   (`lagotto-watches`, **`lagotto-match-history`**, `lagotto-scheduled-launches`,
+   whatever they hold), the artifact bucket `lagotto-lambda-<account>-<region>`
+   and the alerts topic `lagotto-capacity-alerts`; in the last region also
+   `lagotto-instance-role` and its instance profile.
+5. **Self-removal jobs.** The poller never deletes its own function, log group
+   or role from inside itself. It creates one-shot EventBridge Scheduler jobs in
+   the schedule group `lagotto-teardown`, which run as the Scheduler invoke role
+   (its `LagottoTeardown` policy allows exactly these deletes) and delete
+   themselves after they run:
+
+   | Job | At | Deletes |
+   |---|---|---|
+   | `lagotto-teardown-function` | +2 min | the poller function `lagotto-capacity-poller` |
+   | `lagotto-teardown-role-inline`, `lagotto-teardown-role-managed` | +4 min | the poller role's `lagotto-runtime-policy` and its `AWSLambdaBasicExecutionRole` attachment (last region only) |
+   | `lagotto-teardown-role` | +5 min | the poller role `lagotto-capacity-poller-role` (last region only) |
+   | `lagotto-teardown-log-group` | +15 min | the log group `/aws/lambda/lagotto-capacity-poller` |
+
+   The log group goes last, and late, on purpose: while the function is still
+   flushing its last logs, Lambda recreates a deleted log group within seconds,
+   untagged and with no retention (seen live, lagotto#326). Fifteen minutes is
+   well after the function's last flush, so nothing recreates it.
+6. **Final deletes**, once the jobs exist: the poller's own schedule
+   `lagotto-capacity-poller` and the schedule group `lagotto`.
+7. The poller finishes the lease, and the region's `spore-host-lifecycle` table
+   is closed if no spore.host tool's items are left in it.
+
+A failed step gives the lease back and nothing that depends on it is tried; the
+next grace period tries again.
+
+### Report mode (this release)
+
+The poller runs steps 1 to 6 as a report: it claims the lease, re-checks,
+plans, re-checks every step against the live account, logs each one, and gives
+the lease back. It creates no job and deletes nothing, and it never finishes the
+lease or closes the table, so the next report is a grace period later. The lines
+start `idle-verdict` and `idle-teardown REPORT`; each job is a `phase=one-shot`
+line with its `offset=` and `at=`, and the last line of a report is
+
+```text
+idle-teardown REPORT region=<r> would_delete=<n> kept=<m> failed=<f> one_shots=<k> last_region=<bool> lease=released last_region_why="..."
+```
+
+Read them in the poller's log group, `/aws/lambda/lagotto-capacity-poller`.
+
+### What stays
+
+The poller's teardown leaves, and logs as `phase=kept`:
+
+- **The Scheduler invoke role** `lagotto-capacity-poller-scheduler-invoke`: the
+  one-shot jobs run as it.
+- **The `lagotto-teardown` schedule group**, in each region where a teardown
+  ran: it holds the jobs until they have run.
+- **`lagotto-cli-user`**: the poller has no grant on IAM policies.
+- The instance profile `lagotto setup` made for each role authorized with
+  `--instance-role` (the role itself is yours), capacity reservations, training
+  jobs, the legacy CloudFormation stack `lagotto`, and anything matched by name
+  only (made before lagotto#324 tagged everything).
+
+The invoke role and the `lagotto-teardown` groups are lagotto's **residue**, the
+last mile no backstop can remove. The CLI's **lazy last mile** (libs#78) checks
+for it after a command succeeds, at most every 6 h per account and within a
+30 s budget, with your own credentials: once no lagotto item is left in any
+region's `spore-host-lifecycle` table, it reports the invoke role and each
+`lagotto-teardown` group as removable, along with a stale lease and an empty
+lifecycle table. **It only reports, and only with `--verbose`** (lines prefixed
+`debug: lastmile:` on stderr): it writes and deletes nothing, and
+`SPORE_LASTMILE=reap` still reports until libs#79. Until then remove the
+residue with `lagotto teardown --iam-roles` (the invoke role and
+`lagotto-cli-user`) and `lagotto teardown --plan` (the groups, once their jobs
+have run).
+
+### Keep the match history: `lagotto history export`
+
+**The match history is deleted with the teardown**, by owner decision: it is
+not kept as user data. Keep it first:
+
+```bash
+lagotto history export --region <region> > lagotto-match-history.jsonl
+lagotto history export --region <region> --out lagotto-match-history.jsonl
+```
+
+It writes every row of `lagotto-match-history` in that region, every owner's,
+as JSON Lines (one object per row, every attribute, numbers with DynamoDB's
+exact digits), to stdout or to a new file created with mode 0600 (an existing
+file is never overwritten). The row count goes to stderr. It is read-only: one
+call, `dynamodb:Scan` on the history table. `lagotto-cli-user` does not grant
+it (item access is owner-scoped, and a Scan reads every owner's rows), so run it
+as an administrator. To save only your own rows, use `lagotto history -o json`.
+Run it in each region that has a poller or tables.
+
+### Inspect and tear down by hand
+
+- `lagotto footprint --all-regions` lists everything lagotto has in the
+  account, with its class (`active`, `residue`, `permanent`, `user-data`,
+  `litter`) and whether teardown may delete it.
+- `lagotto footprint --all-regions -o json > plan.json` and then
+  `lagotto teardown --plan plan.json` reports what would be deleted (the
+  default `--mode report`); `--mode reap --yes` deletes it under the lease. See
+  [Footprint and the plan-driven teardown](#footprint-and-the-plan-driven-teardown).
+
+### Opting out
+
+- **The CLI last mile:** `SPORE_LASTMILE=off` stops it running at all (it is
+  report-only either way).
+- **The poller's idle teardown:** there is no off switch. It needs nothing
+  lagotto manages to be active for the whole grace period, so a lagotto in use
+  is never torn down; to wait longer, set `LAGOTTO_IDLE_GRACE` on the function
+  (and set it again after a deploy that changes the function's configuration).
 
 ## Alternate: deploy via CloudFormation (IaC / enterprise)
 

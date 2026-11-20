@@ -126,6 +126,7 @@ Not everyday use:
 
 - `lagotto deploy`: administrator: creates the poller's Lambda, topic, schedule, tables and IAM roles.
 - `lagotto footprint`: administrator: reads every lagotto resource in the account, IAM included, to classify it for teardown (#325).
+- `lagotto history export`: administrator: Scans the whole match-history table, every owner's rows, to keep it before a teardown deletes it (#327); lagotto-cli-user's item access is owner-scoped and grants no Scan.
 - `lagotto poll`: runs the poller locally, so it needs what the hosted poller's role has, including writing and passing instance roles; lagotto-cli-user deliberately does not cover it.
 - `lagotto setup`: administrator: creates both IAM roles, writes their policies, and writes the lagotto-cli-user policy (it creates no table, #325).
 - `lagotto teardown`: administrator: deletes lagotto's DynamoDB tables and, with --iam-roles, its IAM roles and the lagotto-cli-user policy; with --plan, any of lagotto's resources.
@@ -141,6 +142,7 @@ Not everyday use:
 | `lagotto extend` | `dynamodb:GetItem`, `dynamodb:UpdateItem`, `iam:PassRole`, `lambda:GetFunction`, `scheduler:GetSchedule`, `scheduler:UpdateSchedule`, `sns:GetSubscriptionAttributes`, `sns:ListSubscriptionsByTopic`, `sns:Subscribe` |
 | `lagotto footprint` | `cloudformation:DescribeStacks`, `dynamodb:DescribeTable`, `dynamodb:ListTagsOfResource`, `dynamodb:Query`, `dynamodb:Scan`, `ec2:DescribeCapacityReservations`, `ec2:DescribeRegions`, `iam:GetInstanceProfile`, `iam:GetPolicy`, `iam:GetRole`, `iam:GetRolePolicy`, `iam:ListInstanceProfilesForRole`, `lambda:GetFunction`, `logs:DescribeLogGroups`, `logs:ListTagsForResource`, `s3:GetBucketTagging`, `s3:ListAllMyBuckets`, `sagemaker:Search`, `scheduler:GetScheduleGroup`, `scheduler:ListSchedules`, `scheduler:ListTagsForResource`, `sns:GetTopicAttributes`, `sns:ListTagsForResource` |
 | `lagotto history` | `dynamodb:BatchGetItem`, `dynamodb:GetItem`, `dynamodb:Query` |
+| `lagotto history export` | `dynamodb:Scan` |
 | `lagotto launch` | `dynamodb:ConditionCheckItem`, `dynamodb:CreateTable`, `dynamodb:DeleteItem`, `dynamodb:DescribeTable`, `dynamodb:DescribeTimeToLive`, `dynamodb:PutItem`, `dynamodb:TagResource`, `dynamodb:UpdateItem`, `dynamodb:UpdateTimeToLive`, `ec2:DescribeCapacityReservations`, `iam:PassRole`, `lambda:GetFunction`, `s3:GetObject`, `scheduler:CreateSchedule` |
 | `lagotto list` | `dynamodb:BatchGetItem`, `dynamodb:Query`, `iam:GetRole`, `iam:GetRolePolicy`, `sns:GetSubscriptionAttributes`, `sns:ListSubscriptionsByTopic` |
 | `lagotto notify-gc` | `dynamodb:Query`, `iam:PassRole`, `sns:GetSubscriptionAttributes`, `sns:GetTopicAttributes`, `sns:ListSubscriptionsByTopic`, `sns:Subscribe`, `sns:Unsubscribe` |
@@ -180,7 +182,7 @@ Not everyday use:
 | `dynamodb:ListTagsOfResource` | `lagotto deploy`, `lagotto footprint`, `lagotto setup`, `lagotto teardown` |
 | `dynamodb:PutItem` | `lagotto deploy`, `lagotto launch`, `lagotto poll`, `lagotto setup`, `lagotto teardown`, `lagotto update`, `lagotto watch` |
 | `dynamodb:Query` | `lagotto cancel`, `lagotto doctor`, `lagotto footprint`, `lagotto history`, `lagotto list`, `lagotto notify-gc`, `lagotto poll`, `lagotto teardown`, `lagotto update` |
-| `dynamodb:Scan` | `lagotto doctor`, `lagotto footprint`, `lagotto setup`, `lagotto teardown` |
+| `dynamodb:Scan` | `lagotto doctor`, `lagotto footprint`, `lagotto history export`, `lagotto setup`, `lagotto teardown` |
 | `dynamodb:TagResource` | `lagotto deploy`, `lagotto launch`, `lagotto setup`, `lagotto teardown`, `lagotto watch` |
 | `dynamodb:UpdateItem` | `lagotto ack`, `lagotto cancel`, `lagotto deploy`, `lagotto extend`, `lagotto launch`, `lagotto poll`, `lagotto setup`, `lagotto teardown`, `lagotto update`, `lagotto watch` |
 | `dynamodb:UpdateTable` | `lagotto setup` |

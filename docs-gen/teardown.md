@@ -7,15 +7,17 @@ lagotto-scheduled-launches. 'lagotto deploy' creates all three with the poller;
 local 'lagotto poll --daemon'). 'watch', 'launch' and 'setup' create none in a
 region with no poller (lagotto#325).
 
-Nothing deletes these tables automatically yet: a deployed poller does not
-delete them, and once no watch is active it only slows its schedule to once an
-hour. A poller whose function has AUTO_DELETE_TABLES=true set by hand deletes
-them once they are empty, provided 'lagotto setup' has been re-run with a lagotto
-that includes lagotto#325, which grants the poller dynamodb:DeleteTable (before
-that the poller was denied and only logged a warning); 'lagotto deploy' never
-sets it.
-Automatic idle teardown, after a grace period, is lagotto#326. Until then, run
-this to remove them.
+Nothing deletes these tables automatically yet. A deployed poller's idle
+teardown (lagotto#326) plans their removal once nothing lagotto manages has been
+active in its region for 24 h, but in this release it only reports
+(lagotto#328 turns deletion on), and once no watch is active the poller only
+slows its schedule to once an hour. A poller whose function has
+AUTO_DELETE_TABLES=true set by hand deletes them once they are empty, provided
+'lagotto setup' has been re-run with a lagotto that includes lagotto#325, which
+grants the poller dynamodb:DeleteTable (before that the poller was denied and
+only logged a warning); 'lagotto deploy' never sets it. Until then, run this to
+remove them. The match history is deleted with them: keep it with 'lagotto
+history export' first.
 
 By default it refuses to delete tables that still hold records, so you don't lose
 match history or a pending scheduled launch; pass --force to delete regardless.

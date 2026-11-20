@@ -621,7 +621,8 @@ aws iam attach-group-policy --group-name <group> \
 
 It covers `watch`, `update`, `ack`, `extend`, `cancel`, `list`, `status`,
 `history`, `launch`, `notify-gc` and `doctor`, not `poll` or the administrator
-commands. `iam:PassRole` is granted only on
+commands. `history export` reads every owner's match history (`dynamodb:Scan`),
+which the policy does not grant: an administrator runs it. `iam:PassRole` is granted only on
 `lagotto-capacity-poller-scheduler-invoke` and only to EventBridge Scheduler;
 `ec2:CancelCapacityReservation` only on reservations tagged `lagotto:managed=true`.
 s3:// spawn configs are readable only from buckets named with
@@ -632,6 +633,29 @@ against the policy (`iam:SimulatePrincipalPolicy`) and lists what you lack.
 Without the Scheduler permissions a watch is refused rather than stored for a
 poller that may not run (lagotto#231); `lagotto doctor` reports a schedule left
 DISABLED (by a poller older than lagotto#323) while watches are active.
+
+### When lagotto is idle: teardown, and keeping your match history
+
+lagotto removes what it created once nothing it manages has been active for
+24 h (leave no trace, [spore-host#752](https://github.com/spore-host/spore-host/issues/752)).
+The deployed poller judges its own region; once it has been idle for the grace
+period (`LAGOTTO_IDLE_GRACE` on the function, default 24 h) the poller plans the
+removal of its tables, bucket, topic and schedules, and hands its own function,
+role and log group to one-shot EventBridge Scheduler jobs in the
+`lagotto-teardown` group. **In this release it only reports** (lagotto#328 turns
+deletion on). **The match history goes with the tables**, so keep it first:
+
+```bash
+lagotto history export --out lagotto-match-history.jsonl   # every owner's rows, JSON Lines
+lagotto footprint --all-regions                            # what lagotto has, and what teardown may delete
+```
+
+[DEPLOYMENT.md](DEPLOYMENT.md#idle-teardown-what-lagotto-removes-when-nothing-is-active)
+has the whole path: the lease, the order things are removed in, the
+self-removal jobs and their offsets, what stays (the Scheduler invoke role and
+the `lagotto-teardown` groups, which the CLI's lazy last mile reports;
+`SPORE_LASTMILE=off` turns it off), and how to tear down by hand with
+`lagotto teardown --plan`.
 
 ### Checking a deployment
 

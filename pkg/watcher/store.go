@@ -895,6 +895,28 @@ func (s *Store) ListMatchHistoryByUser(ctx context.Context, userID string) ([]Ma
 	return unmarshalMatches(items)
 }
 
+// ScanMatchHistory reads every row of the match-history table, every owner's,
+// a page at a time, and hands each raw item to fn in the order DynamoDB
+// returns them; an error from fn stops the scan. It is read-only (dynamodb:Scan
+// alone) and is what `lagotto history export` writes out before an idle
+// teardown deletes the table (lagotto#327). A missing table is an error that
+// wraps the ResourceNotFoundException.
+func (s *Store) ScanMatchHistory(ctx context.Context, fn func(map[string]types.AttributeValue) error) error {
+	p := dynamodb.NewScanPaginator(s.client, &dynamodb.ScanInput{TableName: &s.historyTable})
+	for p.HasMorePages() {
+		page, err := p.NextPage(ctx)
+		if err != nil {
+			return fmt.Errorf("scan match history %s: %w", s.historyTable, err)
+		}
+		for _, item := range page.Items {
+			if err := fn(item); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // EnsureTables creates the watches and match-history tables if they don't yet
 // exist, then waits until both are ACTIVE. It is idempotent: existing tables are
 // left untouched. This lets lagotto own its backend with zero manual setup (#12).
