@@ -37,7 +37,7 @@ CLASS is:
              whose function is gone (Lambda recreated it).
   permanent  tagged spore-host:permanent=true. lagotto owns nothing permanent.
   user-data  nothing: the match history is deleted with the teardown, by owner
-             decision. Export it first with 'lagotto history'.
+             decision. Export it first with 'lagotto history export'.
   litter     everything else, removable now.
 The account-wide resources serve every region, so they are classified only with
 --all-regions; from one region they are classed active, with a warning.

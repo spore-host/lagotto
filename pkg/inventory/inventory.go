@@ -53,7 +53,7 @@
 //   - permanent: only what is tagged spore-host:permanent=true. lagotto owns
 //     nothing permanent of its own.
 //   - user-data: nothing. The match history is deleted with the teardown (an
-//     owner decision, spore-host/spore-host#752); `lagotto history` exports it
+//     owner decision, spore-host/spore-host#752); `lagotto history export` keeps it
 //     first.
 //   - litter: everything else.
 //

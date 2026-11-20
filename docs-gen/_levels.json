@@ -63,6 +63,12 @@
       "--watch-id": "advanced"
     }
   },
+  "lagotto history export": {
+    "level": "advanced",
+    "flags": {
+      "--out": "advanced"
+    }
+  },
   "lagotto launch": {
     "level": "advanced",
     "flags": {

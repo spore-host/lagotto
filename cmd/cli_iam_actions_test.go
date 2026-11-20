@@ -197,6 +197,8 @@ var nonEverydayCommands = map[string]string{
 	"lagotto setup":     "administrator: creates both IAM roles, writes their policies, and writes the lagotto-cli-user policy (it creates no table, #325)",
 	"lagotto teardown":  "administrator: deletes lagotto's DynamoDB tables and, with --iam-roles, its IAM roles and the lagotto-cli-user policy; with --plan, any of lagotto's resources",
 	"lagotto footprint": "administrator: reads every lagotto resource in the account, IAM included, to classify it for teardown (#325)",
+	"lagotto history export": "administrator: Scans the whole match-history table, every owner's rows, to keep it before a teardown " +
+		"deletes it (#327); lagotto-cli-user's item access is owner-scoped and grants no Scan",
 	"lagotto poll": "runs the poller locally, so it needs what the hosted poller's role has, including writing and passing " +
 		"instance roles; lagotto-cli-user deliberately does not cover it",
 }
