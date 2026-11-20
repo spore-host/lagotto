@@ -563,8 +563,12 @@ before anything is deleted.
 lagotto follows the spore.host rule (leave no trace,
 [spore-host#752](https://github.com/spore-host/spore-host/issues/752)): once
 nothing it manages has been active for a grace period, what it created is
-removed, and nothing is kept on purpose. This section is the whole path, end
-to end. **In this release the poller only reports it; nothing is deleted**
+removed. lagotto keeps nothing permanent of its own. The only things
+spore.host keeps in an account while it is set up are exactly two pieces of
+spawn's account setup: the permissions boundary
+`spore-host/spawn-instance-boundary` and the user lifecycle policy
+`spore-host/spawn-user-lifecycle`, both removed only by
+`spawn setup-account --remove`. This section is the whole path, end to end. **In this release the poller only reports it; nothing is deleted**
 (lagotto#328 turns deletion on).
 
 ### Who decides that a region is idle
