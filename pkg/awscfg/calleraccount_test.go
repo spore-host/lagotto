@@ -2,6 +2,7 @@ package awscfg
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -103,5 +104,29 @@ func TestObserveCallerIdentityAddsOnce(t *testing.T) {
 	}
 	if got := CallerAccount(); got != "111122223333" {
 		t.Errorf("CallerAccount = %q", got)
+	}
+}
+
+// TestLoadErrorAddsNothing: a loader error is returned as is.
+func TestLoadErrorAddsNothing(t *testing.T) {
+	want := errors.New("no credentials")
+	SetLoaderForTest(t, func(context.Context, ...func(*awsconfig.LoadOptions) error) (aws.Config, error) {
+		return aws.Config{}, want
+	})
+	cfg, err := Load(context.Background(), "")
+	if !errors.Is(err, want) || len(cfg.APIOptions) != 0 {
+		t.Errorf("Load = %d APIOptions, %v; want none and the loader's error", len(cfg.APIOptions), err)
+	}
+}
+
+// TestCallerIdentityWithoutAccount: a response naming no account records
+// nothing.
+func TestCallerIdentityWithoutAccount(t *testing.T) {
+	ResetCallerAccountForTest(t)
+	account, _ := stsServer(t)
+	account.Store("")
+	callerIdentity(t)
+	if got := CallerAccount(); got != "" {
+		t.Errorf("CallerAccount = %q, want empty", got)
 	}
 }

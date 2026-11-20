@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -972,4 +973,244 @@ func (s slowLifecycle) GetItem(context.Context, *dynamodb.GetItemInput, ...func(
 func (s slowLifecycle) Scan(context.Context, *dynamodb.ScanInput, ...func(*dynamodb.Options)) (*dynamodb.ScanOutput, error) {
 	<-s.release
 	return &dynamodb.ScanOutput{}, nil
+}
+
+// ---- the edges: what the last mile does when a step cannot go on -----------
+
+// The production seams, as built, before any test replaces them.
+var (
+	lmDefaultRegions      = lastMileRegions
+	lmDefaultLifecycleAPI = lastMileLifecycleAPI
+	lmDefaultPollerExists = lastMilePollerExists
+)
+
+// TestLastMileSkipsWhenAStepFails: each step before lastmile.Run that cannot
+// go on (no state path, no AWS config, no region listing, no budget left)
+// skips the run with one debug line, prints nothing at default verbosity,
+// and leaves the command alone.
+func TestLastMileSkipsWhenAStepFails(t *testing.T) {
+	cases := map[string]struct {
+		setup func(t *testing.T, w *lmWorld)
+		line  string
+	}{
+		"no state path": {func(_ *testing.T, _ *lmWorld) {
+			lastMileStatePath = func() (string, error) { return "", errors.New("no home directory") }
+		}, "debug: lastmile: skipped: no home directory"},
+		"no AWS config": {func(t *testing.T, _ *lmWorld) {
+			awscfg.SetLoaderForTest(t, func(context.Context, ...func(*awsconfig.LoadOptions) error) (aws.Config, error) {
+				return aws.Config{}, errors.New("no credentials")
+			})
+		}, "debug: lastmile: skipped: load AWS config: no credentials"},
+		"region listing refused": {func(_ *testing.T, _ *lmWorld) {
+			lastMileRegions = func(context.Context, aws.Config, string) ([]string, error) {
+				return nil, &smithy.GenericAPIError{Code: "UnauthorizedOperation", Message: "not authorized to perform: ec2:DescribeRegions"}
+			}
+		}, "debug: lastmile: skipped: list the account's regions: api error UnauthorizedOperation"},
+		"no budget left": {func(_ *testing.T, _ *lmWorld) {
+			lastMileBudget = time.Nanosecond
+		}, "debug: lastmile: skipped: no budget left"},
+	}
+	for name, tc := range cases {
+		for _, v := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/verbose=%v", name, v), func(t *testing.T) {
+				w := newLMWorld(t)
+				tc.setup(t, w)
+				probeCmd(t, "lm-probe", "out\n", nil)
+				args := []string{"lm-probe"}
+				if v {
+					args = append(args, "-v")
+				}
+				stdout, stderr, err := execRoot(t, args...)
+				if err != nil || stdout != "out\n" {
+					t.Fatalf("the command became %q, %v", stdout, err)
+				}
+				if w.runCount() != 0 {
+					t.Errorf("lastmile.Run ran %d time(s) after the step failed", w.runCount())
+				}
+				switch {
+				case !v && stderr != "":
+					t.Errorf("stderr at default verbosity = %q", stderr)
+				case v && !strings.Contains(stderr, tc.line):
+					t.Errorf("verbose stderr lacks %q:\n%s", tc.line, stderr)
+				}
+			})
+		}
+	}
+}
+
+// TestLastMileNoRegionUsesControlRegion: with no region configured the
+// regions are listed from the control region.
+func TestLastMileNoRegionUsesControlRegion(t *testing.T) {
+	newLMWorld(t)
+	awscfg.SetLoaderForTest(t, func(context.Context, ...func(*awsconfig.LoadOptions) error) (aws.Config, error) {
+		return aws.Config{HTTPClient: refusingHTTP{}, Credentials: aws.AnonymousCredentials{}}, nil
+	})
+	var listedFrom string
+	lastMileRegions = func(_ context.Context, cfg aws.Config, _ string) ([]string, error) {
+		listedFrom = cfg.Region
+		return []string{lmEast}, nil
+	}
+	runLastMile(listCmdForTest(t))
+	if listedFrom != lmEast {
+		t.Errorf("regions listed from %q, want the control region %s", listedFrom, lmEast)
+	}
+}
+
+// TestLastMileUnreachableTable: a region whose lifecycle client cannot be
+// built is a warning in the run, not a failure of it.
+func TestLastMileUnreachableTable(t *testing.T) {
+	w := newLMWorld(t)
+	lastMileLifecycleAPI = func(_ aws.Config, region string) (lifecycle.API, error) {
+		if region == lmWest {
+			return nil, errors.New("no endpoint for us-west-2")
+		}
+		return w.fake(region), nil
+	}
+	runLastMile(listCmdForTest(t))
+	if !w.result.Ran {
+		t.Fatalf("did not run: %s", w.result.Summary())
+	}
+	var warned bool
+	for _, wn := range w.result.Warnings {
+		warned = warned || strings.Contains(wn, "no endpoint for us-west-2")
+	}
+	if !warned {
+		t.Errorf("no warning for the unreachable table: %v", w.result.Warnings)
+	}
+}
+
+// TestLastMileFootprintFails: with no lagotto item left, the residue is
+// planned; when the footprint cannot be read its re-check fails, so nothing
+// is reported removable.
+func TestLastMileFootprintFails(t *testing.T) {
+	w := newLMWorld(t)
+	gatherFootprint = func(context.Context, aws.Config, string, inventory.Scope) (inventory.Facts, error) {
+		return inventory.Facts{}, errors.New("cannot list the account's regions")
+	}
+	runLastMile(listCmdForTest(t))
+	for _, a := range w.result.WouldDo {
+		if a.Kind == lastmile.KindDelete {
+			t.Errorf("would delete %s without a footprint to re-check it against", a.Target)
+		}
+	}
+	var failed bool
+	for _, wn := range w.result.Warnings {
+		failed = failed || strings.Contains(wn, "cannot list the account's regions")
+	}
+	if !failed {
+		t.Errorf("the footprint failure is not in the warnings: %v", w.result.Warnings)
+	}
+}
+
+// TestLastMilePollerCheckFails: where it cannot tell whether a poller runs,
+// it says so and does not call the region poller-less.
+func TestLastMilePollerCheckFails(t *testing.T) {
+	w := newLMWorld(t)
+	if err := w.participant("watch --local").MarkActive(context.Background(), tags.ToolLagotto, lmWest); err != nil {
+		t.Fatal(err)
+	}
+	lastMilePollerExists = func(context.Context, aws.Config, string, string) (bool, error) {
+		return false, &smithy.GenericAPIError{Code: "AccessDeniedException", Message: "not authorized to perform: lambda:GetFunction"}
+	}
+	probeCmd(t, "lm-probe", "", nil)
+	stdout, stderr, err := execRoot(t, "lm-probe", "-v")
+	if err != nil || stdout != "" {
+		t.Fatalf("stdout %q, err %v", stdout, err)
+	}
+	if !strings.Contains(stderr, "debug: lastmile: tool#lagotto#us-west-2: could not tell whether lagotto's poller runs in us-west-2") {
+		t.Errorf("no could-not-tell line:\n%s", stderr)
+	}
+	if strings.Contains(stderr, "no lagotto poller in") {
+		t.Errorf("an unreadable poller was reported absent:\n%s", stderr)
+	}
+}
+
+// TestReadOnlyLifecycle: every write is refused before it reaches the table;
+// reads pass through, and after one refused by IAM the rest are answered
+// without asking.
+func TestReadOnlyLifecycle(t *testing.T) {
+	ctx := context.Background()
+	inner := lifecycletest.New()
+	seen := &lagottoItemRegions{}
+	r := readOnlyLifecycle{API: inner, region: lmWest, seen: seen}
+	writes := map[string]func() error{
+		"PutItem":            func() error { _, err := r.PutItem(ctx, &dynamodb.PutItemInput{}); return err },
+		"UpdateItem":         func() error { _, err := r.UpdateItem(ctx, &dynamodb.UpdateItemInput{}); return err },
+		"DeleteItem":         func() error { _, err := r.DeleteItem(ctx, &dynamodb.DeleteItemInput{}); return err },
+		"TransactWriteItems": func() error { _, err := r.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{}); return err },
+		"CreateTable":        func() error { _, err := r.CreateTable(ctx, &dynamodb.CreateTableInput{}); return err },
+		"DeleteTable":        func() error { _, err := r.DeleteTable(ctx, &dynamodb.DeleteTableInput{}); return err },
+	}
+	for op, call := range writes {
+		if err := call(); !errors.Is(err, errLastMileReportOnly) {
+			t.Errorf("%s = %v, want the report-only refusal", op, err)
+		}
+		if n := inner.Calls(op); n != 0 {
+			t.Errorf("%s reached the table %d time(s)", op, n)
+		}
+	}
+
+	// DescribeTable passes through (the table does not exist: not found).
+	if _, err := r.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: aws.String(lifecycle.TableName)}); err == nil {
+		t.Error("DescribeTable of a missing table succeeded")
+	}
+	if inner.Calls("DescribeTable") != 1 {
+		t.Errorf("DescribeTable reached the table %d time(s), want 1", inner.Calls("DescribeTable"))
+	}
+
+	// One refusal by IAM, then no more requests.
+	denied := &deniedLifecycle{}
+	d := readOnlyLifecycle{API: denied, region: lmWest, seen: &lagottoItemRegions{}}
+	if _, err := d.DescribeTable(ctx, &dynamodb.DescribeTableInput{}); err == nil {
+		t.Fatal("a denied DescribeTable succeeded")
+	}
+	_, gerr := d.GetItem(ctx, &dynamodb.GetItemInput{})
+	_, serr := d.Scan(ctx, &dynamodb.ScanInput{})
+	_, derr := d.DescribeTable(ctx, &dynamodb.DescribeTableInput{})
+	for _, err := range []error{gerr, serr, derr} {
+		if err == nil || !strings.Contains(err.Error(), lastMileNotAsked) || !lastMileNotPermitted(err.Error()) {
+			t.Errorf("after a refusal: %v, want the not-asked answer naming the refusal", err)
+		}
+	}
+	if n := denied.requests(); n != 1 {
+		t.Errorf("%d request(s) reached DynamoDB after one refusal, want 1", n)
+	}
+	// An error that is not a refusal does not stop the asking.
+	other := readOnlyLifecycle{API: failingLifecycle{err: errors.New("throttled")}, region: lmWest, seen: &lagottoItemRegions{}}
+	_, _ = other.Scan(ctx, &dynamodb.ScanInput{})
+	if err := other.seen.deniedErr(); err != nil {
+		t.Errorf("a throttle latched the refusal: %v", err)
+	}
+}
+
+// TestLastMileMaybeDueUnreadable: a state path that cannot be read as a file
+// (a directory) is due.
+func TestLastMileMaybeDueUnreadable(t *testing.T) {
+	if !lastMileMaybeDue(t.TempDir(), lmAccount, lmT0) {
+		t.Error("an unreadable state file is not due")
+	}
+}
+
+// TestLastMileDefaultSeams: the production readers, against a config whose
+// HTTP client refuses every request, fail fast with an error and never
+// claim a poller exists.
+func TestLastMileDefaultSeams(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cfg := aws.Config{Region: lmEast, HTTPClient: refusingHTTP{}, Credentials: aws.AnonymousCredentials{}, RetryMaxAttempts: 1}
+	if _, err := lmDefaultRegions(ctx, cfg, lmAccount); err == nil {
+		t.Error("listing regions through a refusing client succeeded")
+	}
+	api, err := lmDefaultLifecycleAPI(cfg, lmWest)
+	if err != nil || api == nil {
+		t.Fatalf("lifecycle API = %v, %v", api, err)
+	}
+	if c, ok := api.(*dynamodb.Client); !ok {
+		t.Errorf("lifecycle API is %T, want a DynamoDB client", api)
+	} else if r := c.Options().Region; r != lmWest {
+		t.Errorf("lifecycle API for region %q, want %s", r, lmWest)
+	}
+	if ok, _ := lmDefaultPollerExists(ctx, cfg, lmAccount, lmWest); ok {
+		t.Error("a poller reported present through a refusing client")
+	}
 }
