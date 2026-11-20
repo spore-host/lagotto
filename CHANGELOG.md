@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.72.0] - 2026-11-20
+
 ### Added
 
 - **Everything lagotto creates is tagged `spore-host:managed-by=lagotto`** (#324, part of spore-host/spore-host#752 "leave no trace"), with `spore-host:scope` (the region, or `global` for IAM), `spore-host:created`, `spore-host:schema=1` and, where the creator is known, `spore-host:owner` (its `aws:userid`). The deployment's infrastructure also carries a `spore-host:component`: the three DynamoDB tables, the artifact bucket, the SNS topic `lagotto-capacity-alerts` and the Lambda `lagotto-capacity-poller` (both had no ownership tag before), its log group, the roles `lagotto-capacity-poller-role` and `lagotto-capacity-poller-scheduler-invoke` (which was untagged), `lagotto-instance-role` and its instance profile, and the `lagotto-cli-user` policy. What the poller creates for a watch (instances launched through spawn, capacity reservations, SageMaker jobs) gets the tags without a component. lagotto never sets `spore-host:role`: `role=service` is reserved for spore.host's own live service (spore-host#750), which cleanup is denied on, and lagotto's idle teardown (#326) must be able to remove a lagotto deployment. The existing `lagotto:*` tags are kept; DEPLOYMENT.md documents what each `lagotto:managed` value means and who reads it.
@@ -2530,7 +2532,8 @@ Initial tagged release from the standalone `spore-host/lagotto` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/lagotto/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.71.0...HEAD
+[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.72.0...HEAD
+[0.72.0]: https://github.com/spore-host/lagotto/compare/v0.71.0...v0.72.0
 [0.71.0]: https://github.com/spore-host/lagotto/compare/v0.70.0...v0.71.0
 [0.70.0]: https://github.com/spore-host/lagotto/compare/v0.69.2...v0.70.0
 [0.69.2]: https://github.com/spore-host/lagotto/compare/v0.69.1...v0.69.2
