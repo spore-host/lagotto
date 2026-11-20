@@ -50,7 +50,9 @@ import (
 //   - It makes no STS call: the account is the one the command's own
 //     GetCallerIdentity reported (awscfg.CallerAccount); a command that made
 //     none skips it. And between checks (every 6 h per account) it makes no
-//     AWS call at all: lastMileMaybeDue reads the rate-limit state first.
+//     AWS call at all: lastMileMaybeDue reads the rate-limit state first. A
+//     check the budget cut off resumes an hour later, not on the next
+//     command (lastMileRetryAfter).
 //
 // Regions are every region enabled for the account (ec2:DescribeRegions,
 // which lagotto-cli-user grants): the residue may be judged removable only
@@ -62,7 +64,7 @@ import (
 // (the lagotto item, a scan of the table, the residue re-read), plus one
 // footprint of every region, only when a stale lease is found or no lagotto
 // item is left anywhere; all of it inside the budget, and a region the budget
-// cuts off is checked on the next invocation.
+// cuts off is checked an hour later.
 
 // lastMileSkip are the top-level commands after which the last mile does not
 // run, and why.
@@ -183,7 +185,8 @@ func lastMile(ctx context.Context, mode lastmile.Mode, logf func(string, ...any)
 		return
 	}
 	if !lastMileMaybeDue(statePath, account, lastMileNow()) {
-		logf("lastmile: skipped: rate-limited (checked within the last %s)", lastmile.DefaultMinInterval)
+		logf("lastmile: skipped: rate-limited (checked within the last %s, or cut off by its budget within the last %s)",
+			lastmile.DefaultMinInterval, lastMileRetryAfter)
 		return
 	}
 	cfg, err := awscfg.Load(ctx, "")
@@ -487,14 +490,23 @@ func lastMilePollerless(ctx context.Context, cfg aws.Config, account string, reg
 	}
 }
 
+// lastMileRetryAfter is how long after a run the budget cut off the next one
+// waits. lastmile.Run alone would retry on the very next invocation, so an
+// account whose check never fits the budget would hold every command for the
+// whole budget; this bounds that to one wait an hour.
+const lastMileRetryAfter = time.Hour
+
 // lastMileMaybeDue reports whether lastmile.Run could have anything to check
 // for lagotto in account, from the rate-limit state file alone, so that a run
 // that is not due costs no AWS call (not even the DescribeRegions Regions
-// needs). It reads the format libs/lastmile documents (version 1) and is due
-// unless the global scope, which every run checks last, was checked to the
-// end within the minimum interval. A region that falls due before it waits
-// at most until then; anything it cannot read is due, and lastmile.Run makes
-// the exact decision.
+// needs). It reads the format libs/lastmile documents (version 1).
+//
+// It is not due within lastMileRetryAfter of a run the budget cut off (the
+// scope it was in is marked incomplete, with the attempt's time). Otherwise
+// it is due unless the global scope, which every run checks last, was checked
+// to the end within the minimum interval; a region that falls due before it
+// waits at most until then. Anything it cannot read is due, and lastmile.Run
+// makes the exact decision.
 func lastMileMaybeDue(path, account string, now time.Time) bool {
 	f, err := os.Open(path) // #nosec G304 -- the caller's own lastmile state file
 	if err != nil {
@@ -508,14 +520,22 @@ func lastMileMaybeDue(path, account string, now time.Time) bool {
 	var st struct {
 		Version int `json:"version"`
 		Runs    map[string]struct {
-			LastRun    time.Time `json:"last_run"`
-			Incomplete string    `json:"incomplete"`
+			LastRun     time.Time `json:"last_run"`
+			LastAttempt time.Time `json:"last_attempt"`
+			Incomplete  string    `json:"incomplete"`
 		} `json:"runs"`
 	}
 	if json.Unmarshal(b, &st) != nil || st.Version != 1 {
 		return true
 	}
-	rec, ok := st.Runs[string(tags.ToolLagotto)+"/"+account+"/"+lifecycle.ScopeGlobal]
+	prefix := string(tags.ToolLagotto) + "/" + account + "/"
+	for key, rec := range st.Runs {
+		if strings.HasPrefix(key, prefix) && rec.Incomplete != "" &&
+			!rec.LastAttempt.After(now) && now.Sub(rec.LastAttempt) < lastMileRetryAfter {
+			return false
+		}
+	}
+	rec, ok := st.Runs[prefix+lifecycle.ScopeGlobal]
 	if !ok || rec.Incomplete != "" || rec.LastRun.IsZero() || rec.LastRun.After(now) {
 		return true
 	}

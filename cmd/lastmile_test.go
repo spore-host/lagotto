@@ -810,6 +810,38 @@ func TestLastMileRateLimitCostsNoAWSCall(t *testing.T) {
 	}
 }
 
+// TestLastMileCutOffBacksOff: a run the budget cut off is not retried on the
+// next invocation (lastmile.Run alone would retry it, and an account whose
+// check never fits would hold every command for the whole budget), but is
+// after lastMileRetryAfter.
+func TestLastMileCutOffBacksOff(t *testing.T) {
+	w := newLMWorld(t)
+	lastMileBudget = 300 * time.Millisecond
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	slow := slowLifecycle{release: release}
+	w.api = func(region string) lifecycle.API {
+		if region == lmWest {
+			return slow // never answers: us-west-2 is cut off
+		}
+		return w.fake(region)
+	}
+	runLastMile(listCmdForTest(t))
+	if w.runCount() != 1 || len(w.result.Warnings) == 0 {
+		t.Fatalf("first run: %d run(s), warnings %v; want one run cut off by its budget", w.runCount(), w.result.Warnings)
+	}
+	w.advance(30 * time.Minute)
+	runLastMile(listCmdForTest(t))
+	if w.runCount() != 1 {
+		t.Errorf("retried %s after a cut-off run; want a wait of %s", 30*time.Minute, lastMileRetryAfter)
+	}
+	w.advance(lastMileRetryAfter)
+	runLastMile(listCmdForTest(t))
+	if w.runCount() != 2 {
+		t.Errorf("not retried %s after a cut-off run", lastMileRetryAfter+30*time.Minute)
+	}
+}
+
 // TestLastMileMaybeDue pins the pre-check's reading of the state file.
 func TestLastMileMaybeDue(t *testing.T) {
 	dir := t.TempDir()
@@ -828,6 +860,9 @@ func TestLastMileMaybeDue(t *testing.T) {
 		}
 		return s + "}"
 	}
+	cut := func(key, lastAttempt string) string {
+		return `"` + key + `":{"last_attempt":"` + lastAttempt + `","incomplete":"budget exceeded"}`
+	}
 	global := "lagotto/" + lmAccount + "/global"
 	fresh := now.Add(-time.Hour).Format(time.RFC3339)
 	stale := now.Add(-7 * time.Hour).Format(time.RFC3339)
@@ -844,6 +879,9 @@ func TestLastMileMaybeDue(t *testing.T) {
 		{"another tool", `{"version":1,"runs":{` + rec("spawn/"+lmAccount+"/global", fresh, "") + `}}`, true},
 		{"unknown version", `{"version":2,"runs":{` + rec(global, fresh, "") + `}}`, true},
 		{"corrupt", `{not json`, true},
+		{"cut off just now", `{"version":1,"runs":{` + cut("lagotto/"+lmAccount+"/us-west-2", now.Add(-10*time.Minute).Format(time.RFC3339)) + `}}`, false},
+		{"cut off over an hour ago", `{"version":1,"runs":{` + cut("lagotto/"+lmAccount+"/us-west-2", now.Add(-61*time.Minute).Format(time.RFC3339)) + `}}`, true},
+		{"another account cut off", `{"version":1,"runs":{` + cut("lagotto/999999999999/us-west-2", now.Add(-10*time.Minute).Format(time.RFC3339)) + `}}`, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
