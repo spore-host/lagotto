@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	fp "github.com/spore-host/libs/footprint"
 	"github.com/spore-host/libs/lifecycle"
@@ -475,5 +476,34 @@ func TestDeleterOutcomes(t *testing.T) {
 				t.Errorf("policy %+v: %v", c.d, err)
 			}
 		}
+	}
+}
+
+// TestRecheckMatchesTheDeleter: Recheck is the Deleter's re-check without its
+// deleters: the same live resource, not-found and in-use answers.
+func TestRecheckMatchesTheDeleter(t *testing.T) {
+	live := fp.NewReport(Tool, "123456789012", time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC))
+	tagged := map[string]string{tags.ManagedBy: string(Tool)}
+	live.Resources = []fp.Resource{
+		{ARN: "arn:aws:iam::123456789012:role/lagotto-capacity-poller-scheduler-invoke", Type: TypeRole, Region: Global,
+			Name: runtimeiam.SchedulerInvokeRoleName, Ownership: fp.OwnershipTagged, Class: fp.ClassResidue, Tags: tagged},
+		{ARN: "arn:aws:dynamodb:us-west-2:123456789012:table/lagotto-watches", Type: TypeTable, Region: "us-west-2",
+			Name: "lagotto-watches", Ownership: fp.OwnershipTagged, Class: fp.ClassActive, Tags: tagged},
+	}
+	d := NewDeleter(live, Deleters{AccountID: "123456789012"})
+	gone := fp.Resource{ARN: "arn:aws:scheduler:us-west-2:123456789012:schedule-group/lagotto-teardown", Type: TypeScheduleGroup}
+	for _, r := range append(append([]fp.Resource(nil), live.Resources...), gone) {
+		got, err := Recheck(live, r)
+		want, werr := d.Describe(context.Background(), r)
+		if got.ARN != want.ARN || got.Class != want.Class || (err == nil) != (werr == nil) ||
+			errors.Is(err, fp.ErrNotFound) != errors.Is(werr, fp.ErrNotFound) || errors.Is(err, ErrInUse) != errors.Is(werr, ErrInUse) {
+			t.Errorf("%s: Recheck = %+v, %v; the Deleter's Describe = %+v, %v", r.ARN, got, err, want, werr)
+		}
+	}
+	if _, err := Recheck(live, gone); !errors.Is(err, fp.ErrNotFound) {
+		t.Errorf("a resource live does not list: %v, want not found", err)
+	}
+	if _, err := Recheck(nil, gone); !errors.Is(err, fp.ErrNotFound) {
+		t.Errorf("no live footprint: %v, want not found", err)
 	}
 }

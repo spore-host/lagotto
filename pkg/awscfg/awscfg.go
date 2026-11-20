@@ -16,6 +16,8 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
+	"github.com/aws/smithy-go/middleware"
 	"github.com/spore-host/libs/sporeconfig"
 )
 
@@ -66,7 +68,83 @@ const ErrHermetic = "lagotto hermetic guard (#214): awscfg.Load was called from 
 // SetLoaderForTest (#214): every CLI command loads its AWS config here, so this
 // one seam makes every command path unable to reach a real account from a test.
 func Load(ctx context.Context, regionOverride string) (aws.Config, error) {
-	return loader()(ctx, loadOptions(regionOverride)...)
+	cfg, err := loader()(ctx, loadOptions(regionOverride)...)
+	if err != nil {
+		return cfg, err
+	}
+	cfg.APIOptions = append(cfg.APIOptions, observeCallerIdentity)
+	return cfg, nil
+}
+
+// The account the command's own sts:GetCallerIdentity calls reported, recorded
+// passively (lagotto's last mile, libs#78, reads it so it makes no STS call
+// of its own). Guarded by observedMu.
+var (
+	observedMu       sync.Mutex
+	observedAccount  string
+	observedConflict bool
+)
+
+// observeCallerIdentityID names the middleware on each client's stack.
+const observeCallerIdentityID = "lagotto/awscfg/observe-caller-identity"
+
+// observeCallerIdentity is an APIOptions entry: after every successful
+// GetCallerIdentity made with a config from Load, it records the account the
+// response named. It reads the response and changes nothing, and adds itself
+// only once to a stack.
+func observeCallerIdentity(stack *middleware.Stack) error {
+	if _, ok := stack.Initialize.Get(observeCallerIdentityID); ok {
+		return nil
+	}
+	return stack.Initialize.Add(middleware.InitializeMiddlewareFunc(observeCallerIdentityID,
+		func(ctx context.Context, in middleware.InitializeInput, next middleware.InitializeHandler) (middleware.InitializeOutput, middleware.Metadata, error) {
+			out, md, err := next.HandleInitialize(ctx, in)
+			if err == nil {
+				if id, ok := out.Result.(*sts.GetCallerIdentityOutput); ok && id != nil {
+					recordAccount(aws.ToString(id.Account))
+				}
+			}
+			return out, md, err
+		}), middleware.After)
+}
+
+func recordAccount(account string) {
+	if account == "" {
+		return
+	}
+	observedMu.Lock()
+	defer observedMu.Unlock()
+	switch {
+	case observedAccount == "":
+		observedAccount = account
+	case observedAccount != account:
+		observedConflict = true
+	}
+}
+
+// CallerAccount is the AWS account this process's sts:GetCallerIdentity calls
+// reported, through any config Load built, or "" when none has been made or
+// two of them named different accounts. It makes no call itself.
+func CallerAccount() string {
+	observedMu.Lock()
+	defer observedMu.Unlock()
+	if observedConflict {
+		return ""
+	}
+	return observedAccount
+}
+
+// ResetCallerAccountForTest forgets the recorded account, and does again at
+// t's cleanup.
+func ResetCallerAccountForTest(t testing.TB) {
+	t.Helper()
+	reset := func() {
+		observedMu.Lock()
+		observedAccount, observedConflict = "", false
+		observedMu.Unlock()
+	}
+	reset()
+	t.Cleanup(reset)
 }
 
 // loader returns the installed test loader, else the real one. Under a test
