@@ -28,10 +28,69 @@ How to read it:
 
 ## Outside any command
 
-What runs outside every command's own code: startup and the root command's
-persistent pre-run (the `--account` guard):
+What runs outside every command's own code: startup, the root command's
+persistent pre-run (the `--account` guard) and its post-run, the last mile
+(libs#78), which after a command succeeds reports what lagotto left behind.
+The last mile only reads, and a read your identity is not allowed is skipped
+silently (one debug line under `--verbose`), so none of these is needed for
+any command to work. `lagotto-cli-user` deliberately does not grant its reads
+of the `spore-host-lifecycle` table or of the footprint: they serve an
+administrator's report. The delete and write actions below are the static
+over-approximation of the shared teardown executor (`footprint.Execute`), which
+the last mile runs in report mode only, with no lease; its lifecycle client
+and deleter also refuse every write, so it never makes one of them.
 
-None.
+- `cloudformation:DescribeStacks`
+- `dynamodb:DeleteItem`
+- `dynamodb:DeleteTable`
+- `dynamodb:DescribeTable`
+- `dynamodb:GetItem`
+- `dynamodb:ListTagsOfResource`
+- `dynamodb:Query`
+- `dynamodb:Scan`
+- `dynamodb:UpdateItem`
+- `ec2:DescribeCapacityReservations`
+- `ec2:DescribeRegions`
+- `iam:DeleteInstanceProfile`
+- `iam:DeletePolicy`
+- `iam:DeletePolicyVersion`
+- `iam:DeleteRole`
+- `iam:DeleteRolePolicy`
+- `iam:DetachGroupPolicy`
+- `iam:DetachRolePolicy`
+- `iam:DetachUserPolicy`
+- `iam:GetInstanceProfile`
+- `iam:GetPolicy`
+- `iam:GetRole`
+- `iam:GetRolePolicy`
+- `iam:ListAttachedRolePolicies`
+- `iam:ListEntitiesForPolicy`
+- `iam:ListInstanceProfileTags`
+- `iam:ListInstanceProfilesForRole`
+- `iam:ListPolicyVersions`
+- `iam:ListRolePolicies`
+- `iam:RemoveRoleFromInstanceProfile`
+- `lambda:DeleteFunction`
+- `lambda:GetFunction`
+- `logs:DeleteLogGroup`
+- `logs:DescribeLogGroups`
+- `logs:ListTagsForResource`
+- `s3:DeleteBucket`
+- `s3:DeleteObject`
+- `s3:DeleteObjectVersion`
+- `s3:GetBucketTagging`
+- `s3:ListAllMyBuckets`
+- `s3:ListBucket`
+- `s3:ListBucketVersions`
+- `sagemaker:Search`
+- `scheduler:DeleteSchedule`
+- `scheduler:DeleteScheduleGroup`
+- `scheduler:GetScheduleGroup`
+- `scheduler:ListSchedules`
+- `scheduler:ListTagsForResource`
+- `sns:DeleteTopic`
+- `sns:GetTopicAttributes`
+- `sns:ListTagsForResource`
 
 ## Everyday commands: what they need beyond lagotto's tables
 

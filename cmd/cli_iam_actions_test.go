@@ -36,16 +36,16 @@ type cliIAMCommand struct {
 }
 
 // cliIAMCommands walks the live command tree. Hidden commands (gen-docs) are
-// plumbing and left out. rootPre are the root's persistent pre-runs, which
-// every command inherits.
+// plumbing and left out. rootPre are the root's persistent pre- and post-runs
+// (the --account guard and the last mile, libs#78), which every command
+// inherits.
 func cliIAMCommands() (rootPre []any, runnable []cliIAMCommand) {
 	persistentOf := func(c *cobra.Command) []any {
 		var out []any
-		if c.PersistentPreRunE != nil {
-			out = append(out, c.PersistentPreRunE)
-		}
-		if c.PersistentPreRun != nil {
-			out = append(out, c.PersistentPreRun)
+		for _, fn := range []any{c.PersistentPreRunE, c.PersistentPreRun, c.PersistentPostRunE, c.PersistentPostRun} {
+			if !reflect.ValueOf(fn).IsNil() {
+				out = append(out, fn)
+			}
 		}
 		return out
 	}
@@ -277,8 +277,17 @@ func renderCLIIAMInventory(every map[string]bool, byCommand map[string]map[strin
 		"  roles, not on `*`.\n" +
 		"- `sts:GetCallerIdentity` needs no permission and is omitted.\n\n" +
 		"## Outside any command\n\n" +
-		"What runs outside every command's own code: startup and the root command's\n" +
-		"persistent pre-run (the `--account` guard):\n\n")
+		"What runs outside every command's own code: startup, the root command's\n" +
+		"persistent pre-run (the `--account` guard) and its post-run, the last mile\n" +
+		"(libs#78), which after a command succeeds reports what lagotto left behind.\n" +
+		"The last mile only reads, and a read your identity is not allowed is skipped\n" +
+		"silently (one debug line under `--verbose`), so none of these is needed for\n" +
+		"any command to work. `lagotto-cli-user` deliberately does not grant its reads\n" +
+		"of the `spore-host-lifecycle` table or of the footprint: they serve an\n" +
+		"administrator's report. The delete and write actions below are the static\n" +
+		"over-approximation of the shared teardown executor (`footprint.Execute`), which\n" +
+		"the last mile runs in report mode only, with no lease; its lifecycle client\n" +
+		"and deleter also refuse every write, so it never makes one of them.\n\n")
 	if len(every) == 0 {
 		b.WriteString("None.\n")
 	} else {

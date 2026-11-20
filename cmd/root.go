@@ -86,6 +86,10 @@ func init() {
 		}
 		return nil
 	}
+	// The lazy CLI last mile (libs#78): after a command succeeds, report what
+	// lagotto left behind, to --verbose stderr only. It never fails the
+	// command, writes nothing to stdout and is bounded (lastmile.go).
+	rootCmd.PersistentPostRunE = lastMileHook
 
 	rootCmd.PersistentFlags().StringVar(&flagLang, "lang", "", "Language for output (en, es, fr, de, ja, pt)")
 	rootCmd.PersistentFlags().BoolVar(&flagNoEmoji, "no-emoji", false, "Disable emoji in output")

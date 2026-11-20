@@ -163,6 +163,22 @@ func scheduleOf(arn string) (group, name string, ok bool) {
 	return parts[0], parts[1], true
 }
 
+// Recheck re-checks r against live, a footprint taken now, exactly as the
+// Deleter NewDeleter returns does before a delete: it returns the resource as
+// live lists it, an error wrapping footprint.ErrNotFound when live does not
+// list it, and one wrapping ErrInUse when live classes it active. It is that
+// Deleter's read half alone, for a caller that must never delete (the CLI's
+// last mile, libs#78).
+func Recheck(live *fp.Report, r fp.Resource) (fp.Resource, error) {
+	byARN := map[string]fp.Resource{}
+	if live != nil {
+		for _, res := range live.Resources {
+			byARN[res.ARN] = res
+		}
+	}
+	return liveDescriber{byARN: byARN}.Describe(context.Background(), r)
+}
+
 type liveDescriber struct{ byARN map[string]fp.Resource }
 
 func (l liveDescriber) Describe(_ context.Context, r fp.Resource) (fp.Resource, error) {
