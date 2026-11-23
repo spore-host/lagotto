@@ -1395,7 +1395,9 @@ func modelScenarios(long bool) []scenario {
 	p2 := 1
 	one, two := 1, 2 // kinds of perturbation per schedule, in the default run
 	if long {
-		p2, one, two = 2, 0, 0
+		// Two kinds per schedule: all three together did not finish in an
+		// hour on the starting-state sweep.
+		p2, one, two = 2, 2, 2
 	}
 	roleJobs := []string{"lagotto-teardown-role-inline", "lagotto-teardown-role-managed", "lagotto-teardown-role"}
 	allJobs := append(append([]string{}, roleJobs...), "lagotto-teardown-log-group", FunctionJobName)
@@ -1449,9 +1451,11 @@ func modelScenarios(long bool) []scenario {
 		return scenario{name: name, reap: true, specs: specs, maxPreempt: 1, maxFail: 1, kinds: one,
 			actors: func(m *mworld) []*actor { return []*actor{m.tick(a), extra(m)} }}
 	}
+	deployElsewhere := withActor("a deploy and a watch elsewhere", func(m *mworld) *actor { return m.deployActor(b) }, idle(a),
+		regionSpec{name: b, item: "none"})
+	deployElsewhere.kinds = two // a deploy between the jobs, then an error on the way back (the long run found it)
 	out = append(out,
-		withActor("a deploy and a watch elsewhere", func(m *mworld) *actor { return m.deployActor(b) }, idle(a),
-			regionSpec{name: b, item: "none"}),
+		deployElsewhere,
 		withActor("a deploy and a watch into a finished region", func(m *mworld) *actor { return m.deployActor(b) }, idle(a),
 			regionSpec{name: b, enabled: false, item: "absent"}),
 		withActor("a watch here", func(m *mworld) *actor { return m.watchActor(a) }, idle(a)),

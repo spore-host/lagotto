@@ -806,7 +806,9 @@ func (t *run) reap(ctx context.Context, res Result) Result {
 		// Rolling the commit back is this region's to do only while the
 		// decision still is: another region that took the global lease over
 		// (it went stale) has judged this one committed, and acts on that.
-		if err := gl.Step(ctx, "roll the commit back"); err == nil {
+		// Only a lost lease shows that; a heartbeat that merely fails is
+		// tried again, and the commit is rolled back.
+		if err := t.retry(ctx, func() error { return gl.Step(ctx, "roll the commit back") }); !errors.Is(err, lifecycle.ErrLeaseLost) {
 			plan.Last = false // Global keeps what ran
 			if rerr := t.rollback(ctx, created); rerr != nil {
 				return t.strand(&res, plan, GlobalHeld, rerr, "rolling the one-shot jobs back")
