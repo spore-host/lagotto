@@ -378,15 +378,20 @@ func reapAccountWide(ctx context.Context, cfg aws.Config, acct string, plan *fp.
 		}
 	}
 	err := accountWideError(r)
-	outcome := fp.OutcomeNotRun
-	if r.Outcome == idle.AccountWideBlocked {
+	outcome, reason := fp.OutcomeNotRun, accountWideWhy(r)
+	switch r.Outcome {
+	case idle.AccountWideBlocked:
 		// In use, as far as the account-wide teardown can tell: kept, like
 		// any active resource of the plan, and not a failure.
 		outcome, err = fp.OutcomeKept, nil
+	case idle.AccountWideRemoved, idle.AccountWideNothing:
+		// What the run did not delete it kept: in use (lagotto-cli-user while
+		// something is attached to it) or not lagotto's to delete.
+		outcome, reason = fp.OutcomeKept, "the account-wide teardown kept it: it is in use (lagotto-cli-user, while anything is attached to it) or not removable"
 	}
 	for _, g := range global {
-		if _, ok := byARN[g.ARN]; !ok && r.Outcome != idle.AccountWideRemoved && r.Outcome != idle.AccountWideNothing {
-			byARN[g.ARN] = fp.Action{ARN: g.ARN, Type: g.Type, Name: g.Name, Outcome: outcome, Reason: accountWideWhy(r)}
+		if _, ok := byARN[g.ARN]; !ok {
+			byARN[g.ARN] = fp.Action{ARN: g.ARN, Type: g.Type, Name: g.Name, Outcome: outcome, Reason: reason}
 		}
 	}
 	return err

@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/scheduler"
+	schedulertypes "github.com/aws/aws-sdk-go-v2/service/scheduler/types"
 	"github.com/aws/smithy-go"
 	fp "github.com/spore-host/libs/footprint"
 	"github.com/spore-host/libs/lastmile"
@@ -220,5 +222,98 @@ func TestTeardownFinishesTheRegionItem(t *testing.T) {
 				t.Errorf("no warning:\n%s", out)
 			}
 		})
+	}
+}
+
+// TestCancelTeardownJobs (lagotto#340): deploy deletes a region's pending
+// teardown jobs always, a watch or launch only while the poller's schedule
+// is there; an old policy warns, any other failure refuses.
+func TestCancelTeardownJobs(t *testing.T) {
+	ctx := context.Background()
+	var out bytes.Buffer
+	f := &fakeTeardownJobs{jobs: []string{"lagotto-teardown-log-group", "lagotto-teardown-function"}}
+	if err := cancelTeardownJobs(ctx, f, "us-west-2", "deploy the poller", true, &out); err != nil || len(f.deleted) != 2 || f.pages != 2 ||
+		!strings.Contains(out.String(), "Deleted the pending teardown job lagotto-teardown-function in us-west-2") {
+		t.Errorf("deploy: %v %v (%d pages)\n%s", err, f.deleted, f.pages, out.String())
+	}
+	f = &fakeTeardownJobs{jobs: []string{"lagotto-teardown-function"}}
+	if err := cancelTeardownJobs(ctx, f, "us-west-2", "create watch w-1", false, &out); err != nil || len(f.deleted) != 0 {
+		t.Errorf("a watch with the region's teardown finished: %v %v", err, f.deleted)
+	}
+	f.schedule = true
+	if err := cancelTeardownJobs(ctx, f, "us-west-2", "create watch w-1", false, &out); err != nil || len(f.deleted) != 1 {
+		t.Errorf("a watch with the poller's schedule there: %v %v", err, f.deleted)
+	}
+	if err := cancelTeardownJobs(ctx, &fakeTeardownJobs{}, "us-west-2", "deploy", true, &out); err != nil {
+		t.Errorf("no group: %v", err)
+	}
+	denied := &smithy.GenericAPIError{Code: "AccessDeniedException", Message: "no"}
+	for _, deploying := range []bool{true, false} {
+		out.Reset()
+		if err := cancelTeardownJobs(ctx, &fakeTeardownJobs{err: denied}, "us-west-2", "x", deploying, &out); err != nil ||
+			!strings.Contains(out.String(), "warning: could not delete the pending lagotto-teardown jobs") {
+			t.Errorf("denied (deploying %t): %v %q", deploying, err, out.String())
+		}
+		if err := cancelTeardownJobs(ctx, &fakeTeardownJobs{err: errors.New("network down")}, "us-west-2", "x", deploying, &out); err == nil ||
+			!strings.Contains(err.Error(), "Nothing was created") {
+			t.Errorf("failing (deploying %t): %v", deploying, err)
+		}
+	}
+	// A delete that fails, or is denied, after the listing.
+	d := &deleteFails{fakeTeardownJobs: fakeTeardownJobs{jobs: []string{"lagotto-teardown-function"}}}
+	for _, err := range []error{&schedulertypes.ResourceNotFoundException{Message: aws.String("gone")}, denied, errors.New("boom")} {
+		d.err = err
+		got := cancelTeardownJobs(ctx, d, "us-west-2", "x", true, &bytes.Buffer{})
+		if (got != nil) != (err.Error() == "boom") {
+			t.Errorf("delete %v: %v", err, got)
+		}
+	}
+
+	// markCreating: the marks, then the jobs.
+	installFakeLeases(t, lifecycletest.New())
+	f = &fakeTeardownJobs{jobs: []string{"lagotto-teardown-function"}}
+	newTeardownJobAPI = func(aws.Config, string) teardownJobAPI { return f }
+	if err := markCreating(ctx, aws.Config{}, "alice", "us-west-2", "deploy", true, &bytes.Buffer{}); err != nil || len(f.deleted) != 1 {
+		t.Errorf("markCreating: %v %v", err, f.deleted)
+	}
+}
+
+// deleteFails fails each DeleteSchedule with err.
+type deleteFails struct {
+	fakeTeardownJobs
+	err error
+}
+
+func (d *deleteFails) DeleteSchedule(context.Context, *scheduler.DeleteScheduleInput, ...func(*scheduler.Options)) (*scheduler.DeleteScheduleOutput, error) {
+	return nil, d.err
+}
+
+// TestRunOwnerIsUnique: two runs never share a lease owner.
+func TestRunOwnerIsUnique(t *testing.T) {
+	a, b := runOwner(teardownOwner), runOwner(teardownOwner)
+	if a == b || !strings.HasPrefix(a, teardownOwner+"/") {
+		t.Errorf("%q %q", a, b)
+	}
+}
+
+// TestTeardownPlanReapKeptAccountWide: a plan's account-wide step the
+// account-wide teardown did not delete (the policy was attached since the
+// plan) is reported kept, with the reason.
+func TestTeardownPlanReapKeptAccountWide(t *testing.T) {
+	calls := 0
+	facts := func() inventory.Facts {
+		f := orphanFacts()
+		f.Regions = []inventory.Region{{Region: "us-east-1"}}
+		if calls++; calls > 2 {
+			f.Account.PolicyAttachments = 1
+		}
+		return f
+	}
+	_, rec, _ := stubPlanTeardown(t, facts)
+	installFakeLeases(t, lifecycletest.New())
+	teardownMode, teardownYes = "reap", true
+	out, err := runTeardownPlanForTest(t, "")
+	if err != nil || len(rec.calls) != 0 || !strings.Contains(out, "the account-wide teardown kept it") {
+		t.Errorf("%v %v\n%s", err, rec.calls, out)
 	}
 }

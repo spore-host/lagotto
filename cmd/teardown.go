@@ -363,7 +363,7 @@ func finishRegionItem(ctx context.Context, cfg aws.Config, out io.Writer) {
 		warn(fmt.Errorf("could not tell whether the poller is still deployed: %w", err))
 		return
 	}
-	c, err := newLifecycleClient(cfg, teardownOwner)
+	c, err := newLifecycleClient(cfg, runOwner(teardownOwner))
 	if err != nil {
 		warn(err)
 		return

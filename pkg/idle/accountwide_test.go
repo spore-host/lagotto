@@ -368,7 +368,8 @@ func TestAccountWideCreatorFences(t *testing.T) {
 
 // TestAccountWideRecheckBeforeEachDelete: a poller deployed mid-run (a
 // creator that never marked the global scope: an older lagotto) is seen
-// before the next delete: the poller role stays while its function exists.
+// before the next delete: the poller role stays while its function exists,
+// and the global lease goes back at once.
 func TestAccountWideRecheckBeforeEachDelete(t *testing.T) {
 	for _, appear := range []struct {
 		name string
@@ -390,7 +391,7 @@ func TestAccountWideRecheckBeforeEachDelete(t *testing.T) {
 				}
 			}
 			r := w.run(true, 0)
-			if r.Outcome != AccountWideHeld || !errors.Is(r.Err, errAccountWideBlocked) {
+			if r.Outcome != AccountWideBlocked || len(r.Blockers) != 1 || !strings.Contains(r.Blockers[0], "us-west-2") {
 				t.Fatalf("%+v\n%s", r, w.log())
 			}
 			// The hook runs inside the second delete; the third's re-check
@@ -398,8 +399,13 @@ func TestAccountWideRecheckBeforeEachDelete(t *testing.T) {
 			if len(w.ev.list()) != 2 || strings.Contains(strings.Join(w.ev.list(), ","), runtimeiam.RoleName) {
 				t.Errorf("deletes %v", w.ev.list())
 			}
-			if g, ok := w.global(); !ok || g.Lease == nil {
-				t.Errorf("the global lease was not left held: %+v", g)
+			// The lease goes back at once (ACTIVE), so a creator's global
+			// mark is not kept waiting for 20 min.
+			if g, ok := w.global(); !ok || g.Lease != nil || g.State != lifecycle.StateActive {
+				t.Errorf("the global lease was not given back: %+v", g)
+			}
+			if err := MarkActive(context.Background(), w.client("bob"), lifecycle.ScopeGlobal, "deploy"); err != nil {
+				t.Errorf("a creator after it: %v", err)
 			}
 		})
 	}

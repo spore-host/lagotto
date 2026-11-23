@@ -230,8 +230,10 @@ func TestNoPrivilegeEscalation(t *testing.T) {
 		if strings.HasPrefix(g.Action, "scheduler:Delete") &&
 			(g.Action != "scheduler:DeleteSchedule" ||
 				(g.Resource != "arn:aws:scheduler:*:"+testAccount+":schedule/default/"+launchSchedulePrefix+"*" &&
-					g.Resource != "arn:aws:scheduler:*:"+testAccount+":schedule/lagotto/"+launchSchedulePrefix+"*")) {
-			t.Errorf("the CLI-user policy grants %s on %s; only DeleteSchedule on the per-launch schedules is allowed", g.Action, g.Resource)
+					g.Resource != "arn:aws:scheduler:*:"+testAccount+":schedule/lagotto/"+launchSchedulePrefix+"*" &&
+					// The one-shot teardown jobs a creator cancels (lagotto#340).
+					g.Resource != "arn:aws:scheduler:*:"+testAccount+":schedule/lagotto-teardown/*")) {
+			t.Errorf("the CLI-user policy grants %s on %s; only DeleteSchedule on the per-launch schedules and the teardown jobs is allowed", g.Action, g.Resource)
 		}
 		if g.Action == "ec2:CancelCapacityReservation" && !strings.Contains(g.Condition, "ec2:ResourceTag/lagotto:managed") {
 			t.Errorf("ec2:CancelCapacityReservation is not gated on lagotto's tag: %q", g.Condition)

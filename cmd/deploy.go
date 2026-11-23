@@ -191,7 +191,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	// Mark lagotto active in the region before anything is created or
 	// changed (lagotto#326): a teardown holding the lease there is waited
 	// out, and refuses the deploy if it does not finish.
-	if err := markActive(ctx, cfg, callerARN, region, "deploy the poller", os.Stderr); err != nil {
+	if err := markCreating(ctx, cfg, callerARN, region, "deploy the poller", true, os.Stderr); err != nil {
 		return err
 	}
 

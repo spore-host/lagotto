@@ -30,12 +30,18 @@ import (
 //   - no region has a poller function;
 //   - no lagotto-teardown one-shot job is pending in any region (they run as
 //     the Scheduler invoke role);
-//   - no region's lagotto lifecycle item is ACTIVE or held (a live lease),
-//     and none is IDLE where something of lagotto's is left;
+//   - no region's lagotto lifecycle item is ACTIVE, held, or under a live
+//     lease; a dead one (below) is finished first, and then none may be left;
 //   - the global item's epoch has not moved since the decision: every
 //     creator of something account-wide (setup, deploy, watch, launch)
-//     marks the global scope active first (MarkActive), which takes the
-//     actor's lease away, so its next heartbeat fails and it stops.
+//     marks the global scope active first (MarkActive). A mark before the
+//     claim is seen by reading the global item again once it is claimed
+//     (its epoch against the decision's); one after it takes the actor's
+//     lease away, so its next heartbeat fails and it stops.
+//
+// A creator that arrives mid-run (the re-check before a delete finds it)
+// gets the global lease back at once, as ACTIVE, so its own mark is not kept
+// waiting.
 //
 // A read that fails, or a footprint that is not complete, means "don't". Any
 // failure while deleting leaves the global lease held: it goes stale in
@@ -50,11 +56,13 @@ import (
 // explicit `lagotto teardown` uses no grace.
 //
 // A regional item whose lease went stale (its poller died, or the CLI's
-// teardown did) or that is IDLE, in a region with no poller and no job left,
-// is dead: nothing will carry it on. In reap mode the actor finishes it and
-// closes that region's table; anything else of lagotto's left there (a
-// teardown that stopped partway) needs nothing account-wide, and is
-// 'lagotto teardown --plan''s to remove.
+// teardown did) or that is IDLE, in a region with no poller function and no
+// job left, is dead: nothing will carry it on. In reap mode the actor
+// finishes it and closes that region's table, and the deletes go ahead.
+// Anything else of lagotto's left there (tables, a bucket, a schedule group:
+// a regional teardown that stopped partway) needs nothing account-wide, and
+// is 'lagotto teardown --plan''s to remove. A function left there is a
+// poller, and blocks.
 
 // AccountWideConfig is one run of the account-wide teardown.
 type AccountWideConfig struct {
@@ -193,6 +201,7 @@ func TearDownAccountWide(ctx context.Context, cfg AccountWideConfig, d AccountWi
 	if err != nil {
 		return log(AccountWideResult{Outcome: AccountWideFailed, Why: "could not read the global item", Err: err})
 	}
+	decided := g.Epoch // the epoch the decision is made at (0: no item yet)
 	if gok && g.Lease != nil && !lc.LeaseStale(g) {
 		return log(AccountWideResult{Outcome: AccountWideWaiting, Why: "an account-wide teardown holds the global lease (" + g.Lease.Owner + ")"})
 	}
@@ -284,6 +293,24 @@ func TearDownAccountWide(ctx context.Context, cfg AccountWideConfig, d AccountWi
 		return log(AccountWideResult{Outcome: out, Why: "the global lease was not taken", Err: err})
 	}
 	cfg.Logf("account-wide %s claim=ok lease=%s scope=%s", cfg.label(), shortToken(gl.Token()), lifecycle.ScopeGlobal)
+	giveBack := func(why string, blockers []string) AccountWideResult {
+		if err := gl.Release(ctx); err != nil && !errors.Is(err, lifecycle.ErrLeaseLost) {
+			cfg.Logf("account-wide %s lease=release-failed error=%q", cfg.label(), err.Error())
+			return log(AccountWideResult{Outcome: AccountWideHeld, Why: why + "; the global lease could not be given back", Blockers: blockers, Err: err})
+		}
+		return log(AccountWideResult{Outcome: AccountWideBlocked, Why: why, Blockers: blockers})
+	}
+	// A creator that marked the global scope after the decision was read,
+	// but before the claim: Observe set the item IDLE again, and the claim
+	// took it at the new epoch, so the lease's fence would never see the
+	// move. The epoch read now does.
+	if now, ok, err := lc.Get(ctx, Tool, lifecycle.ScopeGlobal); err != nil || !ok || now.Epoch != decided {
+		why := "a creator marked lagotto active since the decision"
+		if err != nil || !ok {
+			why = "could not read the global item again after the claim"
+		}
+		return giveBack(why, nil)
+	}
 	held := func(why string, err error, plan *fp.Plan, res *fp.Result) AccountWideResult {
 		if errors.Is(err, lifecycle.ErrLeaseLost) {
 			return log(AccountWideResult{Outcome: AccountWideLeaseLost, Why: why + ": a creator marked lagotto active; stopped", Err: err, Plan: plan, Result: res})
@@ -298,10 +325,7 @@ func TearDownAccountWide(ctx context.Context, cfg AccountWideConfig, d AccountWi
 	if blockers, dead = accountWideBlockers(ctx, cfg, d, facts); len(blockers) > 0 {
 		// Something appeared since: the lease goes back (ACTIVE), and the
 		// grace starts over.
-		if err := gl.Release(ctx); err != nil {
-			return held("could not give the global lease back", err, nil, nil)
-		}
-		return log(AccountWideResult{Outcome: AccountWideBlocked, Why: "the account-wide resources are needed again", Blockers: blockers})
+		return giveBack("the account-wide resources are needed again", blockers)
 	}
 	for _, r := range dead {
 		if err := finishDeadRegion(ctx, cfg, lc, r); err != nil {
@@ -309,7 +333,14 @@ func TearDownAccountWide(ctx context.Context, cfg AccountWideConfig, d AccountWi
 		}
 	}
 	plan, res, err := accountWidePlan(ctx, cfg, d, facts, accountWideResources(facts, cfg), gl)
-	if err != nil || res.Count(fp.OutcomeFailed)+res.Count(fp.OutcomeStopped)+res.Count(fp.OutcomeNotRun) > 0 {
+	if errors.Is(err, errAccountWideBlocked) {
+		// A creator arrived mid-run: the lease goes back at once, so its
+		// global mark is not kept waiting for a lease nothing heartbeats.
+		r := giveBack("the account-wide resources are needed again", []string{err.Error()})
+		r.Plan, r.Result = plan, res
+		return r
+	}
+	if err != nil || count(res, fp.OutcomeFailed)+count(res, fp.OutcomeStopped)+count(res, fp.OutcomeNotRun) > 0 {
 		if err == nil {
 			err = errors.New("a delete did not complete")
 		}
@@ -588,7 +619,10 @@ func accountWidePlan(ctx context.Context, cfg AccountWideConfig, d AccountWideDe
 			return nil
 		}}
 	}
-	res, err := fp.Execute(ctx, plan, mode, deleter, gl)
+	res, err := execute(ctx, plan, mode, deleter, gl)
+	if res == nil {
+		return plan, nil, err
+	}
 	for _, a := range res.Actions {
 		row := fmt.Sprintf("account-wide %s outcome=%s type=%s name=%q arn=%s", cfg.label(), a.Outcome, a.Type, a.Name, a.ARN)
 		if a.Reason != "" {
@@ -600,6 +634,19 @@ func accountWidePlan(ctx context.Context, cfg AccountWideConfig, d AccountWideDe
 		cfg.Logf("%s", row)
 	}
 	return plan, res, err
+}
+
+// execute is footprint.Execute, which returns a nil Result with an error
+// for a plan it cannot run at all (a nil plan or deleter, reap with no
+// lease). A seam for tests.
+var execute = fp.Execute
+
+// count is r.Count(o), and 0 for a nil r.
+func count(r *fp.Result, o fp.Outcome) int {
+	if r == nil {
+		return 0
+	}
+	return r.Count(o)
 }
 
 // errAccountWideBlocked is a re-check's refusal before a delete.

@@ -284,9 +284,29 @@ func Tick(ctx context.Context, cfg Config, d Deps) Result {
 	return res
 }
 
-// cancelUncommittedJobs deletes the region's one-shot jobs. A read or delete
-// that fails is only logged: the next run tries again.
+// cancelUncommittedJobs deletes the region's one-shot jobs, unless another
+// run holds the region's lease: its jobs may be a commit of its own (a run
+// that is finishing, or stranded after its commit), which this run must not
+// undo. A read or delete that fails is only logged: the next run tries again.
 func cancelUncommittedJobs(ctx context.Context, cfg Config, d Deps) {
+	var (
+		it lifecycle.Item
+		ok bool
+	)
+	err := retryOp(ctx, cfg, func() error {
+		var err error
+		it, ok, err = d.Lifecycle.Get(ctx, Tool, cfg.Region)
+		return err
+	})
+	switch {
+	case err != nil:
+		cfg.Logf("idle-teardown %s region=%s phase=one-shot cancel=skipped error=%q", cfg.label(), cfg.Region, err.Error())
+		return
+	case ok && it.Lease != nil && !d.Lifecycle.LeaseStale(it):
+		cfg.Logf("idle-teardown %s region=%s phase=one-shot cancel=skipped reason=%q", cfg.label(), cfg.Region,
+			"another run holds the region's lease ("+it.Lease.Owner+"); its jobs are its own")
+		return
+	}
 	ss, err := d.Source.Region(cfg.Region).Schedules(ctx)
 	if err != nil {
 		cfg.Logf("idle-teardown %s region=%s phase=one-shot cancel=failed error=%q", cfg.label(), cfg.Region, err.Error())
@@ -517,7 +537,7 @@ func (t *run) summary(plan *Plan, res *Result, lease string) {
 func teardown(ctx context.Context, cfg Config, d Deps, lease *lifecycle.Lease, res Result) Result {
 	// The post-claim re-check, and the footprint the plan is made from, read
 	// now that the lease keeps creators out of this region.
-	facts, err := inventory.Gather(ctx, d.Source, cfg.AccountID, inventory.Scope{Regions: []string{cfg.Region}}, cfg.Options)
+	facts, err := gatherFacts(ctx, d.Source, cfg.AccountID, inventory.Scope{Regions: []string{cfg.Region}}, cfg.Options)
 	if err != nil {
 		res.Outcome, res.Err = OutcomeReleased, err
 		_ = release(ctx, cfg, lease, "could not read the footprint: "+err.Error())
@@ -527,6 +547,12 @@ func teardown(ctx context.Context, cfg Config, d Deps, lease *lifecycle.Lease, r
 	// and the account-wide resources, to say they are left for the CLI.
 	here := facts.RegionFacts(cfg.Region)
 	switch {
+	case here == nil:
+		// Gather read exactly this region, so it is there; a footprint
+		// without it is one this run cannot judge.
+		res.Outcome = OutcomeReleased
+		_ = release(ctx, cfg, lease, "the footprint has no "+cfg.Region)
+		return res
 	case here.Active():
 		res.Outcome = OutcomeReleased
 		why := strings.Join(here.ActiveReasons(), "; ")
@@ -587,15 +613,21 @@ func teardown(ctx context.Context, cfg Config, d Deps, lease *lifecycle.Lease, r
 	}
 
 	// 1. What the poller deletes directly.
-	plan.Direct, err = fp.Execute(ctx, plan.Phases[PhaseDirect], mode, deleter, lease)
+	plan.Direct, err = execute(ctx, plan.Phases[PhaseDirect], mode, deleter, lease)
 	t.logRow(string(PhaseDirect), plan.Phases[PhaseDirect], plan.Direct)
+	if plan.Direct == nil {
+		return t.unrun(ctx, &res, plan, err, "the direct deletes")
+	}
 	if t.stop(ctx, &res, plan, err, "the direct deletes") {
 		return res
 	}
 	// 2. Its own function and log group: always report mode, only to apply
 	// the delete guard; what passes becomes a one-shot job.
-	plan.Self, err = fp.Execute(ctx, plan.Phases[PhaseSelf], fp.ModeReport, deleter, lease)
+	plan.Self, err = execute(ctx, plan.Phases[PhaseSelf], fp.ModeReport, deleter, lease)
 	t.logRow(string(PhaseSelf), plan.Phases[PhaseSelf], plan.Self)
+	if plan.Self == nil {
+		return t.unrun(ctx, &res, plan, err, "the self-removal check")
+	}
 	if t.stop(ctx, &res, plan, err, "the self-removal check") {
 		return res
 	}
@@ -621,7 +653,7 @@ func teardown(ctx context.Context, cfg Config, d Deps, lease *lifecycle.Lease, r
 		// 3. Its own rate schedule and lagotto's group, re-checked. Report
 		// mode never finishes the lease or closes the table: the grace
 		// period starts over, and the next report is a grace period away.
-		plan.Final, err = fp.Execute(ctx, plan.Phases[PhaseFinal], mode, deleter, lease)
+		plan.Final, err = execute(ctx, plan.Phases[PhaseFinal], mode, deleter, lease)
 		t.logRow(string(PhaseFinal), plan.Phases[PhaseFinal], plan.Final)
 		if t.stop(ctx, &res, plan, err, "the final deletes") {
 			return res
@@ -667,10 +699,10 @@ func teardown(ctx context.Context, cfg Config, d Deps, lease *lifecycle.Lease, r
 		return res
 	}
 	// 4. Its own rate schedule and lagotto's group, last.
-	plan.Final, err = fp.Execute(ctx, plan.Phases[PhaseFinal], mode, deleter, lease)
+	plan.Final, err = execute(ctx, plan.Phases[PhaseFinal], mode, deleter, lease)
 	t.logRow(string(PhaseFinal), plan.Phases[PhaseFinal], plan.Final)
 	if err != nil {
-		if plan.Final.Count(fp.OutcomeDeleted) == 0 {
+		if count(plan.Final, fp.OutcomeDeleted) == 0 {
 			// Nothing of its own schedule is gone (a creator took the lease
 			// over, or a delete failed): its jobs go, and its poller stays.
 			// Nothing account-wide depends on this region's commit, so the
@@ -699,6 +731,18 @@ func teardown(ctx context.Context, cfg Config, d Deps, lease *lifecycle.Lease, r
 	res.Outcome = OutcomeReaped
 	t.summary(plan, &res, "finished")
 	return res
+}
+
+// gatherFacts is inventory.Gather. A seam for tests.
+var gatherFacts = inventory.Gather
+
+// unrun ends a run whose phase footprint.Execute could not run at all (a nil
+// Result: nothing of it was tried), in either mode: the lease goes back.
+func (t *run) unrun(ctx context.Context, res *Result, plan *Plan, err error, what string) Result {
+	res.Outcome, res.Err = OutcomeFailed, errors.Join(res.Err, err)
+	_ = release(ctx, t.cfg, t.lease, what+" could not run: "+fmt.Sprint(err))
+	t.summary(plan, res, "released")
+	return *res
 }
 
 // stop handles a phase's error by stopped's rules, and logs the summary

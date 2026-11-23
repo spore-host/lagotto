@@ -2,9 +2,12 @@ package cmd
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	fp "github.com/spore-host/libs/footprint"
@@ -43,21 +46,33 @@ var (
 	teardownAccountWide = runAccountWide
 )
 
-// The lease owners the CLI's account-wide teardown writes.
+// The lease owners the CLI's account-wide teardown writes, each made unique
+// to its run (runOwner), so a run recognises only its own lease.
 const (
 	lastMileOwner = "lagotto last mile"
 	teardownOwner = "lagotto teardown"
 )
 
+// runOwner is base made unique to this run: a lease another CLI wrote, on
+// this machine or any other, never passes for this run's own.
+func runOwner(base string) string {
+	b := make([]byte, 6)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%s/%d", base, time.Now().UnixNano())
+	}
+	return base + "/" + hex.EncodeToString(b)
+}
+
 // runAccountWide is an explicit `lagotto teardown`'s account-wide teardown:
 // reap mode, no grace, limited to only when set. Its rows go to logf.
 func runAccountWide(ctx context.Context, cfg aws.Config, account string, only map[string]bool, logf func(string, ...any)) idle.AccountWideResult {
-	c, err := newLifecycleClient(cfg, teardownOwner)
+	owner := runOwner(teardownOwner)
+	c, err := newLifecycleClient(cfg, owner)
 	if err != nil {
 		return idle.AccountWideResult{Outcome: idle.AccountWideFailed, Why: "no lifecycle client", Err: err}
 	}
 	return idle.TearDownAccountWide(ctx, idle.AccountWideConfig{
-		AccountID: account, Owner: teardownOwner, Reap: true, Only: only,
+		AccountID: account, Owner: owner, Reap: true, Only: only,
 		Options: footprintOptions(), Now: footprintNow, Logf: logf,
 	}, idle.AccountWideDeps{Lifecycle: c, Source: accountWideSource(cfg, account), Deleters: newTeardownDeleters(cfg, account)})
 }
@@ -72,12 +87,13 @@ func lastMileAccountWide(ctx context.Context, mode lastmile.Mode, cfg aws.Config
 		Logf: func(f string, a ...any) { logf("lastmile: "+f, a...) }}
 	deps := idle.AccountWideDeps{Lifecycle: lc, Regions: regions, Gather: live.factsOf}
 	if mode == lastmile.ModeReap && lastMileAccountWideReap {
-		c, err := newLifecycleClient(cfg, lastMileOwner)
+		owner := runOwner(lastMileOwner)
+		c, err := newLifecycleClient(cfg, owner)
 		if err != nil {
 			logf("lastmile: account-wide skipped: %v", err)
 			return idle.AccountWideResult{Outcome: idle.AccountWideFailed, Why: "no lifecycle client", Err: err}
 		}
-		acfg.Reap, acfg.Owner = true, lastMileOwner
+		acfg.Reap, acfg.Owner = true, owner
 		deps = idle.AccountWideDeps{Lifecycle: c, Regions: regions, Gather: live.factsOf,
 			Source: accountWideSource(cfg, account), Deleters: newTeardownDeleters(cfg, account)}
 	}

@@ -57,6 +57,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`lagotto teardown` finishes its region's lifecycle item** once the tables
   are gone and no poller is left there (#340): `deploy` and `watch` leave it
   ACTIVE, and an ACTIVE item keeps the account-wide resources.
+- **`deploy` deletes a region's pending one-shot teardown jobs before it
+  creates or changes anything there, and `watch` and `launch` do while the
+  poller's schedule is still there** (#340): a job due after a redeploy would
+  delete the new poller, whichever mode it runs in. `lagotto-cli-user` gains
+  `scheduler:DeleteSchedule` on the `lagotto-teardown` group's schedules.
+  **Re-run `lagotto setup` after upgrading.**
 
 ### Fixed
 
@@ -64,6 +70,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (#340, #347): no global lease, and no account-wide teardown, in GovCloud,
   China, the ISO partitions (`eu-isoe-west-1` included) or the European
   Sovereign Cloud, where the last mile still runs its regional checks.
+- The account-wide teardown gives the global lease back at once when a
+  creator arrives mid-run, instead of leaving it held (which kept every
+  `setup`, `deploy`, `watch` and `launch` waiting for 20 minutes); it reads the
+  global item again after its claim, and stops if a creator marked it since
+  the decision (with no grace, Observe and Claim would otherwise take the new
+  epoch, so `setup`'s fresh IAM could be deleted); and each run writes a lease
+  owner of its own, so it never takes another CLI's lease for its own (#340).
+- A poller run that cannot claim because another run holds the region's live
+  lease no longer deletes that run's one-shot jobs, and a run whose footprint
+  lacks its region, or whose deletes footprint.Execute cannot run at all,
+  gives the lease back (#340).
+- `lagotto teardown --plan --mode reap` reports a plan step the account-wide
+  teardown kept (an attached `lagotto-cli-user`) as kept, with the reason.
 - A poller's claim that fails with anything but a throttle is not tried again
   (it may have been applied), and a lease then found in the claimant's own name
   is reported as its own (#340). The account-wide teardown's wait for the
