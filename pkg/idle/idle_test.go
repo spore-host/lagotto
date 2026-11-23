@@ -150,9 +150,10 @@ func newHarness(t *testing.T, regions ...string) *harness {
 	h.src.SetRegion(inventorytest.Deployed(region, acct)).SetAccount(inventorytest.Account(acct))
 	h.sched = &fakeScheduler{e: h.ev, conflict: map[string]bool{}}
 	c, err := lifecycle.New(lifecycle.Options{
-		DynamoDB: func(string) (lifecycle.API, error) { return h.table, nil },
-		Owner:    "lagotto-poller/" + region,
-		Now:      h.clock,
+		DynamoDB:      func(string) (lifecycle.API, error) { return h.table, nil },
+		ControlRegion: region,
+		Owner:         "lagotto-poller/" + region,
+		Now:           h.clock,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -370,18 +371,22 @@ func TestReportDeletesNothingAndLogsThePlan(t *testing.T) {
 		"phase=direct outcome=would-delete type=AWS::DynamoDB::Table resource_region=us-east-1 name=\"lagotto-match-history\"",
 		"phase=direct outcome=would-delete type=AWS::S3::Bucket",
 		"phase=direct outcome=would-delete type=AWS::SNS::Topic",
-		"phase=direct outcome=would-delete type=AWS::IAM::InstanceProfile resource_region=global name=\"lagotto-instance-role\"",
-		"phase=direct outcome=would-delete type=AWS::IAM::Role resource_region=global name=\"lagotto-instance-role\"",
+		// global-direct (the last region's): lagotto's instance role and
+		// profile.
+		"phase=global-direct outcome=would-delete type=AWS::IAM::InstanceProfile resource_region=global name=\"lagotto-instance-role\"",
+		"phase=global-direct outcome=would-delete type=AWS::IAM::Role resource_region=global name=\"lagotto-instance-role\"",
 		// self: checked by the guard, removed by jobs.
 		"phase=self outcome=would-delete type=AWS::Lambda::Function",
 		"phase=self outcome=would-delete type=AWS::Logs::LogGroup",
-		"phase=self outcome=would-delete type=AWS::IAM::Role resource_region=global name=\"lagotto-capacity-poller-role\"",
+		"phase=global-self outcome=would-delete type=AWS::IAM::Role resource_region=global name=\"lagotto-capacity-poller-role\"",
 		// final: its own rate schedule, then lagotto's group.
 		"phase=final outcome=would-delete type=AWS::Scheduler::Schedule resource_region=us-east-1 name=\"lagotto-capacity-poller\"",
 		"phase=final outcome=would-delete type=AWS::Scheduler::ScheduleGroup resource_region=us-east-1 name=\"lagotto\"",
 		// left for the CLI.
-		"phase=kept outcome=kept type=AWS::IAM::Role resource_region=global name=\"lagotto-capacity-poller-scheduler-invoke\"",
-		"phase=kept outcome=kept type=AWS::IAM::ManagedPolicy",
+		"phase=global-kept outcome=kept type=AWS::IAM::Role resource_region=global name=\"lagotto-capacity-poller-scheduler-invoke\"",
+		"phase=global-kept outcome=kept type=AWS::IAM::ManagedPolicy",
+		// the other region, judged.
+		`phase=global other_region=us-west-2 standing=done why="no lifecycle item"`,
 		// the jobs, with their offsets.
 		"phase=one-shot name=lagotto-teardown-function offset=+2m0s at=2026-11-17T12:03:00Z group=lagotto-teardown target=arn:aws:scheduler:::aws-sdk:lambda:deleteFunction input={\"FunctionName\":\"lagotto-capacity-poller\"}",
 		"phase=one-shot name=lagotto-teardown-role-inline offset=+4m0s",
@@ -395,14 +400,16 @@ func TestReportDeletesNothingAndLogsThePlan(t *testing.T) {
 			t.Errorf("log lacks %q", want)
 		}
 	}
-	// Order: direct, self, one-shots, final, summary.
+	// Order: direct, self, one-shots, final, then the global step: the
+	// other regions, what stays, the direct deletes, the poller role and
+	// its jobs.
 	var phases []string
 	for _, l := range strings.Split(log, "\n") {
 		if m := rowRE.FindStringSubmatch(l); m != nil && (len(phases) == 0 || phases[len(phases)-1] != m[1]) {
 			phases = append(phases, m[1])
 		}
 	}
-	if got := strings.Join(phases, ","); got != "kept,direct,self,one-shot,final" {
+	if got := strings.Join(phases, ","); got != "direct,self,one-shot,final,global,global-kept,global-direct,global-self,one-shot" {
 		t.Errorf("phases logged in order %s", got)
 	}
 	if t.Failed() {
@@ -410,13 +417,16 @@ func TestReportDeletesNothingAndLogsThePlan(t *testing.T) {
 	}
 }
 
-// TestReportNotLastRegion: another region still has lagotto's tables, so the
+// TestReportNotLastRegion: another region's poller is in use, so the
 // account-wide IAM is not in the plan, and no role job is planned.
 func TestReportNotLastRegion(t *testing.T) {
 	h := newHarness(t)
-	h.src.SetRegion(inventory.Region{Region: "us-west-2", Tables: inventorytest.Deployed("us-west-2", acct).Tables})
+	h.src.SetRegion(inventorytest.Deployed("us-west-2", acct))
+	if err := h.client.MarkActive(context.Background(), Tool, "us-west-2"); err != nil {
+		t.Fatal(err)
+	}
 	r := h.tickPastGrace(t, false)
-	if r.Outcome != OutcomeReported || r.Plan.Last {
+	if r.Outcome != OutcomeReported || r.Plan.Last || r.Plan.Global != nil {
 		t.Fatalf("result %+v", r)
 	}
 	log := h.log()
@@ -424,10 +434,22 @@ func TestReportNotLastRegion(t *testing.T) {
 		t.Errorf("not the last region, but the plan names IAM:\n%s", log)
 	}
 	for _, want := range []string{"one_shots=2 last_region=false",
-		`last_region_why="lagotto's tables or poller are also in us-west-2"`} {
+		`last_region_why="still active: us-west-2 (state ACTIVE)"`} {
 		if !strings.Contains(log, want) {
 			t.Errorf("log lacks %q:\n%s", want, log)
 		}
+	}
+}
+
+// TestReportTablesOnlyRegionDoesNotBlock: lagotto's tables in a region with
+// no poller and no lifecycle item (left by a lagotto from before #325) need
+// none of the account-wide resources: they no longer keep them (#340).
+func TestReportTablesOnlyRegionDoesNotBlock(t *testing.T) {
+	h := newHarness(t)
+	h.src.SetRegion(inventory.Region{Region: "us-west-2", Tables: inventorytest.Deployed("us-west-2", acct).Tables})
+	r := h.tickPastGrace(t, false)
+	if r.Outcome != OutcomeReported || !r.Plan.Last || r.Plan.Global == nil {
+		t.Fatalf("result %+v\n%s", r, h.log())
 	}
 }
 

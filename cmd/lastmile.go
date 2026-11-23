@@ -21,6 +21,7 @@ import (
 	"github.com/spore-host/libs/tags"
 
 	"github.com/spore-host/lagotto/pkg/awscfg"
+	"github.com/spore-host/lagotto/pkg/idle"
 	"github.com/spore-host/lagotto/pkg/inventory"
 	"github.com/spore-host/lagotto/pkg/runtimeiam"
 )
@@ -279,16 +280,9 @@ func lastMileResidue(account string, regions []string) []fp.Resource {
 
 // lastMileControlRegion is the region holding the global scope's lifecycle
 // items: the partition's IAM home region, so every invocation reads the same
-// one whatever --region says.
-func lastMileControlRegion(region string) string {
-	switch {
-	case strings.HasPrefix(region, "us-gov-"):
-		return "us-gov-west-1"
-	case strings.HasPrefix(region, "cn-"):
-		return "cn-north-1"
-	}
-	return "us-east-1"
-}
+// one whatever --region says. It is the poller's (idle.ControlRegion), whose
+// global teardown lease lives there (lagotto#340).
+func lastMileControlRegion(region string) string { return idle.ControlRegion(region) }
 
 // lastMileFootprint is lagotto's footprint of every region, read at most once
 // per run: lastmile's Footprint and the Deleter's re-checks share it.

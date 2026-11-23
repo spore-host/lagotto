@@ -41,6 +41,10 @@ const (
 	LogGroupOffset = 15 * time.Minute
 )
 
+// FunctionJobName is the one-shot job that deletes a region's poller
+// function. While it is waiting, that region's teardown has finished.
+const FunctionJobName = "lagotto-teardown-function"
+
 // OneShot is one teardown job: at At (Offset after planning), EventBridge
 // Scheduler calls the AWS API Target with Input, as the invoke role.
 type OneShot struct {
@@ -68,7 +72,8 @@ type SelfRemoval struct {
 	// delete guard. The log group is removed whenever the function is, since
 	// the function's last flush can recreate it.
 	Function, LogGroup bool
-	// Role: this is the last region and the poller role passes the guard.
+	// Role: the poller role passes the guard, in the run that tears down
+	// the account-wide resources (global.go).
 	Role bool
 }
 
@@ -88,7 +93,7 @@ func (s SelfRemoval) Plan(now time.Time) []OneShot {
 	var out []OneShot
 	if s.Function {
 		out = append(out, at(OneShot{
-			Name: "lagotto-teardown-function", Offset: FunctionOffset,
+			Name: FunctionJobName, Offset: FunctionOffset,
 			Target:   sdkTarget("lambda", "deleteFunction"),
 			Input:    input(map[string]string{"FunctionName": deploy.PollerFunctionName}),
 			Resource: deploy.PollerFunctionARN(s.Region, s.AccountID),

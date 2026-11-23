@@ -70,6 +70,11 @@ type Config struct {
 	Now func() time.Time
 	// Logf writes one log line. Default stderr.
 	Logf func(format string, args ...any)
+	// GlobalWait is how long the global step waits for another region to
+	// give the global teardown lease back. Default DefaultGlobalWait.
+	GlobalWait time.Duration
+	// Sleep waits for d or until ctx is done. Default a timer.
+	Sleep func(ctx context.Context, d time.Duration) error
 }
 
 func (c Config) withDefaults() Config {
@@ -82,7 +87,24 @@ func (c Config) withDefaults() Config {
 	if c.Logf == nil {
 		c.Logf = func(format string, args ...any) { _, _ = fmt.Fprintf(os.Stderr, format+"\n", args...) }
 	}
+	if c.GlobalWait <= 0 {
+		c.GlobalWait = DefaultGlobalWait
+	}
+	if c.Sleep == nil {
+		c.Sleep = sleep
+	}
 	return c
+}
+
+func sleep(ctx context.Context, d time.Duration) error {
+	tm := time.NewTimer(d)
+	defer tm.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-tm.C:
+		return nil
+	}
 }
 
 func (c Config) mode() fp.Mode {
@@ -197,27 +219,48 @@ func PhaseOf(r fp.Resource) (Phase, string) {
 
 // Plan is a teardown as planned and checked.
 type Plan struct {
-	// Last reports that this is the last region with lagotto's tables or
-	// poller, so the account-wide IAM is in the plan; LastWhy says why.
+	// Last reports that this region's run is the one that tears down the
+	// account-wide resources (global.go): every other region is done, or in
+	// report mode finishing too. LastWhy says why, or why not.
 	Last    bool
 	LastWhy string
+	// Others are the other enabled regions as the global step judged them.
+	Others []OtherRegion
 	// Kept are left in place: in use, depended on by something in use, or
 	// left for `lagotto teardown` (PhaseCLI).
 	Kept []inventory.Kept
-	// Direct, Self and Final are footprint.Execute's results for each phase.
-	// Self always runs in report mode: its outcome only decides the jobs.
+	// Direct, Self and Final are footprint.Execute's results for each phase
+	// of the region's own resources. Self always runs in report mode: its
+	// outcome only decides the jobs.
 	Direct, Self, Final *fp.Result
 	// Phases are the plans executed, by phase.
 	Phases map[Phase]*fp.Plan
-	// OneShots are the self-removal jobs.
+	// OneShots are the region's self-removal jobs.
 	OneShots []OneShot
+	// Global is the account-wide teardown, set only when Last.
+	Global *GlobalPlan
+}
+
+func (p *Plan) results() []*fp.Result {
+	rs := []*fp.Result{p.Direct, p.Self, p.Final}
+	if p.Global != nil {
+		rs = append(rs, p.Global.Direct, p.Global.Self)
+	}
+	return rs
+}
+
+func (p *Plan) globalOneShots() int {
+	if p.Global == nil {
+		return 0
+	}
+	return len(p.Global.OneShots)
 }
 
 // WouldDelete counts the resources the teardown removes (or, in reap mode,
 // removed or handed to a job).
 func (p *Plan) WouldDelete() int {
 	n := 0
-	for _, r := range []*fp.Result{p.Direct, p.Self, p.Final} {
+	for _, r := range p.results() {
 		if r != nil {
 			n += r.Count(fp.OutcomeWouldDelete) + r.Count(fp.OutcomeDeleted)
 		}
@@ -229,7 +272,10 @@ func (p *Plan) WouldDelete() int {
 // by the delete guard.
 func (p *Plan) KeptCount() int {
 	n := len(p.Kept)
-	for _, r := range []*fp.Result{p.Direct, p.Self, p.Final} {
+	if p.Global != nil {
+		n += len(p.Global.Kept)
+	}
+	for _, r := range p.results() {
 		if r != nil {
 			n += r.Count(fp.OutcomeKept) + r.Count(fp.OutcomeRefused) + r.Count(fp.OutcomeSkipped)
 		}
@@ -240,7 +286,7 @@ func (p *Plan) KeptCount() int {
 // Failed counts the steps that failed or were stopped.
 func (p *Plan) Failed() int {
 	n := 0
-	for _, r := range []*fp.Result{p.Direct, p.Self, p.Final} {
+	for _, r := range p.results() {
 		if r != nil {
 			n += r.Count(fp.OutcomeFailed) + r.Count(fp.OutcomeStopped) + r.Count(fp.OutcomeNotRun)
 		}
@@ -331,12 +377,51 @@ func release(ctx context.Context, cfg Config, lease *lifecycle.Lease, why string
 	return err
 }
 
-// teardown runs with the lease held: re-check, plan, execute, hand off.
+// run is one teardown in progress: what Tick claimed, and the footprint the
+// plan was made from.
+type run struct {
+	cfg   Config
+	d     Deps
+	lease *lifecycle.Lease
+	facts inventory.Facts
+}
+
+// logRow logs each action of a phase's result.
+func (t *run) logRow(ph string, p *fp.Plan, r *fp.Result) {
+	if r == nil {
+		return
+	}
+	for i, a := range r.Actions {
+		region := ""
+		if i < len(p.Steps) {
+			region = p.Steps[i].Resource.Region
+		}
+		row := fmt.Sprintf("idle-teardown %s region=%s phase=%s outcome=%s type=%s resource_region=%s name=%q arn=%s",
+			t.cfg.label(), t.cfg.Region, ph, a.Outcome, a.Type, region, a.Name, a.ARN)
+		if a.Reason != "" {
+			row += fmt.Sprintf(" reason=%q", a.Reason)
+		}
+		if a.Err != nil {
+			row += fmt.Sprintf(" error=%q", a.Err.Error())
+		}
+		t.cfg.Logf("%s", row)
+	}
+}
+
+// logOneShots logs the self-removal jobs.
+func (t *run) logOneShots(jobs []OneShot) {
+	for _, o := range jobs {
+		t.cfg.Logf("idle-teardown %s region=%s phase=one-shot name=%s offset=+%s at=%s group=%s target=%s input=%s resource=%s",
+			t.cfg.label(), t.cfg.Region, o.Name, o.Offset, o.At.UTC().Format(time.RFC3339), runtimeiam.TeardownScheduleGroup, o.Target, o.Input, o.Resource)
+	}
+}
+
+// teardown runs with the lease held: re-check, plan, execute, hand off, and
+// the global step.
 func teardown(ctx context.Context, cfg Config, d Deps, lease *lifecycle.Lease, res Result) Result {
 	// The post-claim re-check, and the footprint the plan is made from: every
-	// enabled region (only that can say whether this is the last region, and
-	// classify the account-wide IAM), read now that the lease keeps creators
-	// out of this region.
+	// enabled region (the global step judges the others from it), read now
+	// that the lease keeps creators out of this region.
 	facts, err := inventory.Gather(ctx, d.Source, cfg.AccountID, inventory.Scope{AllRegions: true}, cfg.Options)
 	if err != nil {
 		res.Outcome, res.Err = OutcomeReleased, err
@@ -360,13 +445,15 @@ func teardown(ctx context.Context, cfg Config, d Deps, lease *lifecycle.Lease, r
 		_ = release(ctx, cfg, lease, "active after the claim: "+why)
 		return res
 	}
+	t := &run{cfg: cfg, d: d, lease: lease, facts: facts}
 
+	// The region's own resources. The account-wide ones are the global
+	// step's (global.go), at the end.
 	live := inventory.Classify(facts, cfg.Options, cfg.Now())
-	last, lastWhy := inventory.LastRegion(facts, cfg.Region)
 	scoped := *live
 	scoped.Resources = nil
 	for _, r := range live.Resources {
-		if r.Region == cfg.Region || (last && r.Region == inventory.Global) {
+		if r.Region == cfg.Region {
 			scoped.Resources = append(scoped.Resources, r)
 		}
 	}
@@ -376,7 +463,7 @@ func teardown(ctx context.Context, cfg Config, d Deps, lease *lifecycle.Lease, r
 		_ = release(ctx, cfg, lease, "could not plan: "+err.Error())
 		return res
 	}
-	plan := &Plan{Last: last, LastWhy: lastWhy, Kept: kept, Phases: map[Phase]*fp.Plan{}}
+	plan := &Plan{Kept: kept, Phases: map[Phase]*fp.Plan{}}
 	res.Plan = plan
 	byPhase := map[Phase][]fp.Resource{}
 	for _, st := range full.Steps {
@@ -399,23 +486,6 @@ func teardown(ctx context.Context, cfg Config, d Deps, lease *lifecycle.Lease, r
 
 	deleter := inventory.NewDeleter(live, d.Deleters)
 	mode := cfg.mode()
-	logRow := func(ph Phase, p *fp.Plan, r *fp.Result) {
-		for i, a := range r.Actions {
-			region := ""
-			if i < len(p.Steps) {
-				region = p.Steps[i].Resource.Region
-			}
-			row := fmt.Sprintf("idle-teardown %s region=%s phase=%s outcome=%s type=%s resource_region=%s name=%q arn=%s",
-				cfg.label(), cfg.Region, ph, a.Outcome, a.Type, region, a.Name, a.ARN)
-			if a.Reason != "" {
-				row += fmt.Sprintf(" reason=%q", a.Reason)
-			}
-			if a.Err != nil {
-				row += fmt.Sprintf(" error=%q", a.Err.Error())
-			}
-			cfg.Logf("%s", row)
-		}
-	}
 	for _, k := range plan.Kept {
 		cfg.Logf("idle-teardown %s region=%s phase=kept outcome=kept type=%s resource_region=%s name=%q arn=%s reason=%q",
 			cfg.label(), cfg.Region, k.Resource.Type, k.Resource.Region, k.Resource.Name, k.Resource.ARN, k.Reason)
@@ -423,14 +493,15 @@ func teardown(ctx context.Context, cfg Config, d Deps, lease *lifecycle.Lease, r
 
 	// 1. What the poller deletes directly.
 	plan.Direct, err = fp.Execute(ctx, plan.Phases[PhaseDirect], mode, deleter, lease)
-	logRow(PhaseDirect, plan.Phases[PhaseDirect], plan.Direct)
+	t.logRow(string(PhaseDirect), plan.Phases[PhaseDirect], plan.Direct)
 	if stop := stopped(ctx, cfg, lease, &res, err, "the direct deletes"); stop {
 		return res
 	}
-	// 2. Its own function, log group and role: always report mode, only to
-	// apply the delete guard; what passes becomes a one-shot job.
+	// 2. Its own function and log group: always report mode, only to apply
+	// the delete guard; what passes becomes a one-shot job. (Its role is
+	// account-wide: the global step's.)
 	plan.Self, err = fp.Execute(ctx, plan.Phases[PhaseSelf], fp.ModeReport, deleter, lease)
-	logRow(PhaseSelf, plan.Phases[PhaseSelf], plan.Self)
+	t.logRow(string(PhaseSelf), plan.Phases[PhaseSelf], plan.Self)
 	if stop := stopped(ctx, cfg, lease, &res, err, "the self-removal check"); stop {
 		return res
 	}
@@ -444,16 +515,11 @@ func teardown(ctx context.Context, cfg Config, d Deps, lease *lifecycle.Lease, r
 			sr.Function = true
 		case inventory.TypeLogGroup:
 			sr.LogGroup = true
-		case inventory.TypeRole:
-			sr.Role = last
 		}
 	}
 	now := cfg.Now()
 	plan.OneShots = sr.Plan(now)
-	for _, o := range plan.OneShots {
-		cfg.Logf("idle-teardown %s region=%s phase=one-shot name=%s offset=+%s at=%s group=%s target=%s input=%s resource=%s",
-			cfg.label(), cfg.Region, o.Name, o.Offset, o.At.UTC().Format(time.RFC3339), runtimeiam.TeardownScheduleGroup, o.Target, o.Input, o.Resource)
-	}
+	t.logOneShots(plan.OneShots)
 	if cfg.Reap {
 		if _, err := CreateOneShots(ctx, d.Scheduler, cfg.Region, cfg.AccountID, now, plan.OneShots, lease.Step); err != nil {
 			if stop := stopped(ctx, cfg, lease, &res, err, "creating the one-shot jobs"); stop {
@@ -461,46 +527,63 @@ func teardown(ctx context.Context, cfg Config, d Deps, lease *lifecycle.Lease, r
 			}
 		}
 	}
-	// 3. Last, its own rate schedule and lagotto's schedule group.
+	// 3. Its own rate schedule and lagotto's schedule group.
 	plan.Final, err = fp.Execute(ctx, plan.Phases[PhaseFinal], mode, deleter, lease)
-	logRow(PhaseFinal, plan.Phases[PhaseFinal], plan.Final)
+	t.logRow(string(PhaseFinal), plan.Phases[PhaseFinal], plan.Final)
 	if stop := stopped(ctx, cfg, lease, &res, err, "the final deletes"); stop {
 		return res
 	}
 
+	// 4. The global step: whether this is the last region, the account-wide
+	// teardown if it is, and the end of the regional lease. Report mode
+	// never finishes the regional lease or closes a table: it releases, the
+	// grace period starts over, and the next report is a grace period away.
+	g := t.global(ctx, plan)
+	if g.err != nil {
+		res.Err = errors.Join(res.Err, g.err)
+		cfg.Logf("idle-teardown %s region=%s phase=global error=%q", cfg.label(), cfg.Region, g.err.Error())
+	}
 	summary := func(lease string) {
 		cfg.Logf("idle-teardown %s region=%s would_delete=%d kept=%d failed=%d one_shots=%d last_region=%t lease=%s last_region_why=%q",
-			cfg.label(), cfg.Region, plan.WouldDelete(), plan.KeptCount(), plan.Failed(), len(plan.OneShots), last, lease, lastWhy)
+			cfg.label(), cfg.Region, plan.WouldDelete(), plan.KeptCount(), plan.Failed(), len(plan.OneShots)+plan.globalOneShots(), plan.Last, lease, plan.LastWhy)
 	}
-	if !cfg.Reap {
-		// Report mode never finishes the lease or closes the table: the grace
-		// period starts over, and the next report is a grace period away.
-		if err := lease.Release(ctx); err != nil {
-			res.Outcome, res.Err = OutcomeFailed, err
-			if errors.Is(err, lifecycle.ErrLeaseLost) {
-				res.Outcome = OutcomeLeaseLost
-			}
-			summary("release-failed")
-			return res
+	switch {
+	case g.held:
+		res.Outcome = OutcomeFailed
+		summary("held")
+		return res
+	case g.endErr != nil:
+		res.Outcome, res.Err = OutcomeFailed, errors.Join(res.Err, g.endErr)
+		if errors.Is(g.endErr, lifecycle.ErrLeaseLost) {
+			res.Outcome = OutcomeLeaseLost
 		}
+		if cfg.Reap {
+			summary("finish-failed")
+		} else {
+			summary("release-failed")
+		}
+		return res
+	case !cfg.Reap:
 		res.Outcome = OutcomeReported
 		summary("released")
 		return res
 	}
-	if err := lease.Finish(ctx); err != nil {
-		res.Outcome, res.Err = OutcomeFailed, err
-		if errors.Is(err, lifecycle.ErrLeaseLost) {
-			res.Outcome = OutcomeLeaseLost
-		}
-		summary("finish-failed")
-		return res
-	}
-	if _, err := d.Lifecycle.CloseTableIfEmpty(ctx, cfg.Region); err != nil {
-		cfg.Logf("idle-teardown %s region=%s close_table=failed error=%q", cfg.label(), cfg.Region, err.Error())
+	t.closeTable(ctx, cfg.Region)
+	if control := ControlRegion(cfg.Region); g.mutex && control != cfg.Region {
+		// The global item is gone: its table holds nothing of lagotto's.
+		t.closeTable(ctx, control)
 	}
 	res.Outcome = OutcomeReaped
 	summary("finished")
 	return res
+}
+
+// closeTable removes region's spore-host-lifecycle table if no spore.host
+// tool's item is left in it.
+func (t *run) closeTable(ctx context.Context, region string) {
+	if _, err := t.d.Lifecycle.CloseTableIfEmpty(ctx, region); err != nil {
+		t.cfg.Logf("idle-teardown %s region=%s close_table=failed table_region=%s error=%q", t.cfg.label(), t.cfg.Region, region, err.Error())
+	}
 }
 
 // stopped handles a phase's error. A lost lease stops the teardown at once,

@@ -3,8 +3,6 @@ package inventory
 import (
 	"context"
 	"fmt"
-	"sort"
-	"strings"
 )
 
 // GatherActivity reads only region's activity signals: its active watches and
@@ -39,48 +37,6 @@ func GatherActivity(ctx context.Context, rs RegionSource, region string, o Optio
 	r.Jobs, err = rs.Jobs(ctx)
 	fail("the SageMaker training jobs", err)
 	return r, warnings
-}
-
-// LastRegion reports whether region is the last one in the account with
-// lagotto's tables or poller, judged from a footprint of every enabled region
-// (Gather with Scope.AllRegions): only then may a teardown there remove the
-// account-wide IAM the pollers share. why says what decided it.
-//
-// It fails closed: facts that do not cover every region, or another region
-// that could not be read in full, mean it is not the last.
-func LastRegion(f Facts, region string) (last bool, why string) {
-	if !f.AllRegions {
-		return false, "the footprint did not read every enabled region"
-	}
-	if f.AccountIncomplete {
-		return false, "the account-wide resources could not all be read"
-	}
-	found := false
-	var others, unknown []string
-	for i := range f.Regions {
-		r := &f.Regions[i]
-		if r.Region == region {
-			found = true
-			continue
-		}
-		switch {
-		case r.ActivityUnknown:
-			unknown = append(unknown, r.Region)
-		case len(r.Tables) > 0 || r.Function != nil:
-			others = append(others, r.Region)
-		}
-	}
-	sort.Strings(others)
-	sort.Strings(unknown)
-	switch {
-	case !found:
-		return false, region + " is not among the account's enabled regions"
-	case len(unknown) > 0:
-		return false, "could not read every other region: " + strings.Join(unknown, ", ")
-	case len(others) > 0:
-		return false, "lagotto's tables or poller are also in " + strings.Join(others, ", ")
-	}
-	return true, "no other enabled region has lagotto's tables or poller"
 }
 
 // RegionFacts returns region's facts, or nil when f did not read it.
