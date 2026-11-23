@@ -109,13 +109,7 @@ func TestPollerDeletersReachTheRealDeleters(t *testing.T) {
 	if ok, err := rd.DeleteScheduleGroup(ctx, "lagotto"); ok || err != nil {
 		t.Errorf("group: %v, %v", ok, err)
 	}
-	if ok, err := d.Account.DeleteRole(ctx, runtimeiam.InstanceRoleName); ok || err != nil {
-		t.Errorf("instance role: %v, %v", ok, err)
-	}
-	if ok, err := d.Account.DeleteInstanceProfile(ctx, runtimeiam.InstanceRoleName); ok || err != nil {
-		t.Errorf("instance profile: %v, %v", ok, err)
-	}
-	if strings.Contains(strings.Join(fake.calls, ","), "DeleteFunction") {
+	if strings.Contains(strings.Join(fake.calls, ","), "DeleteFunction") || strings.Contains(strings.Join(fake.calls, ","), "Role") {
 		t.Errorf("calls %v", fake.calls)
 	}
 }
@@ -145,8 +139,6 @@ func TestTickLogsUnreadableSignals(t *testing.T) {
 	}
 }
 
-// TestTickObserveFailures: the lease table failing, or being deleted, ends
-// the run with nothing claimed.
 func TestTickObserveFailures(t *testing.T) {
 	h := newHarness(t)
 	h.table.Err = func(string, any) error { return errors.New("throttled") }
@@ -171,6 +163,39 @@ func TestTickObserveFailures(t *testing.T) {
 	h.src.Update(region, func(r *inventory.Region) { r.ActiveWatches = 1 })
 	if r := Tick(ctx, h.cfg(false), h.deps()); !errors.Is(r.Err, lifecycle.ErrTableClosing) || !strings.Contains(h.log(), "observe=skipped") {
 		t.Errorf("table closing: %+v\n%s", r, h.log())
+	}
+	// A live closer's sentinel is left alone; one gone stale (its closer
+	// died, libs#88) is cleared, in report mode too, and the next run
+	// observes.
+	if r := Tick(ctx, h.cfg(false), h.deps()); !errors.Is(r.Err, lifecycle.ErrTableClosing) {
+		t.Errorf("a live closer's sentinel was cleared: %+v", r)
+	}
+	h.advance(21 * time.Minute)
+	if r := Tick(ctx, h.cfg(false), h.deps()); !errors.Is(r.Err, lifecycle.ErrTableClosing) {
+		t.Errorf("the stale sentinel's run: %+v", r)
+	}
+	if r := Tick(ctx, h.cfg(false), h.deps()); r.Err != nil || r.Outcome != OutcomeActive {
+		t.Errorf("after the stale sentinel was cleared: %+v\n%s", r, h.log())
+	}
+	if n := h.table.Calls("DeleteTable"); n != 0 {
+		t.Errorf("report mode deleted the table (%d)", n)
+	}
+
+	// Reap mode clears it the same way.
+	h = newHarness(t)
+	if r := Tick(ctx, h.cfg(true), h.deps()); r.Outcome != OutcomeWaiting {
+		t.Fatalf("%+v", r)
+	}
+	if err := h.table.PutRaw(lifecycle.TableName, closing); err != nil {
+		t.Fatal(err)
+	}
+	h.src.Update(region, func(r *inventory.Region) { r.ActiveWatches = 1 })
+	h.advance(21 * time.Minute)
+	if r := Tick(ctx, h.cfg(true), h.deps()); !errors.Is(r.Err, lifecycle.ErrTableClosing) {
+		t.Errorf("reap, the stale sentinel's run: %+v", r)
+	}
+	if r := Tick(ctx, h.cfg(true), h.deps()); r.Err != nil || r.Outcome != OutcomeActive {
+		t.Errorf("reap, after the stale sentinel was cleared: %+v\n%s", r, h.log())
 	}
 }
 
@@ -207,11 +232,9 @@ func TestTickClaimRefused(t *testing.T) {
 }
 
 // TestTeardownFootprintFailures: after the claim, a footprint that cannot be
-// listed, a region that is not enabled, or one that cannot be planned gives
-// the lease back with nothing deleted.
+// planned gives the lease back with nothing deleted.
 func TestTeardownFootprintFailures(t *testing.T) {
 	cases := map[string]func(h *harness){
-		"regions unreadable": func(h *harness) { h.src.Fail("global EnabledRegions", errors.New("AccessDenied")) },
 		"duplicate resource": func(h *harness) {
 			h.src.Update(region, func(r *inventory.Region) { r.Tables = append(r.Tables, r.Tables[0]) })
 		},
@@ -233,13 +256,6 @@ func TestTeardownFootprintFailures(t *testing.T) {
 				t.Errorf("lease kept: %+v", it)
 			}
 		})
-	}
-
-	// The poller's own region is not among the enabled ones.
-	h := newHarness(t, "us-west-2")
-	r := h.tickPastGrace(t, false)
-	if r.Outcome != OutcomeReleased || !strings.Contains(h.log(), "us-east-1 is not among the account's enabled regions") {
-		t.Errorf("region not enabled: %+v\n%s", r, h.log())
 	}
 }
 
@@ -312,9 +328,9 @@ func TestReportLeaseLostAtRelease(t *testing.T) {
 	h.advance(25 * time.Hour)
 	updates := 0
 	h.table.Hook = func(ctx context.Context, op string) {
-		// The claim, 12 heartbeats, then the release.
+		// The claim, 9 heartbeats, then the release.
 		if op == "UpdateItem" {
-			if updates++; updates == 14 {
+			if updates++; updates == 11 {
 				if err := creator.MarkActive(ctx, Tool, region); err != nil {
 					t.Error(err)
 				}
@@ -327,8 +343,10 @@ func TestReportLeaseLostAtRelease(t *testing.T) {
 	}
 }
 
-// TestReapFinishAndCloseFailures: a lease that cannot be finished fails the
-// run; a lifecycle table that cannot be closed is only logged.
+// TestReapFinishAndCloseFailures: a lease that cannot be finished (tried
+// three times) fails the run and is left held, to go stale, since the
+// poller's schedule is gone; a lifecycle table that cannot be closed is only
+// logged.
 func TestReapFinishAndCloseFailures(t *testing.T) {
 	h := newHarness(t)
 	h.table.Err = func(op string, _ any) error {
@@ -337,8 +355,12 @@ func TestReapFinishAndCloseFailures(t *testing.T) {
 		}
 		return nil
 	}
-	if r := h.tickPastGrace(t, true); r.Outcome != OutcomeFailed || !strings.Contains(h.log(), "lease=finish-failed") {
-		t.Errorf("finish failing: %+v\n%s", r, h.log())
+	if r := h.tickPastGrace(t, true); r.Outcome != OutcomeFailed || !strings.Contains(h.log(), `lease=held during="finishing its lease"`) ||
+		h.table.Calls("DeleteItem") != 3 {
+		t.Errorf("finish failing: %+v (%d DeleteItem)\n%s", r, h.table.Calls("DeleteItem"), h.log())
+	}
+	if it := h.item(t); it.Lease == nil {
+		t.Errorf("the lease was not left held: %+v", it)
 	}
 
 	h = newHarness(t)
@@ -361,10 +383,11 @@ func TestPhaseOfEveryType(t *testing.T) {
 		{inventory.TypeScheduleGroup, "lagotto", PhaseFinal},
 		{inventory.TypeScheduleGroup, runtimeiam.TeardownScheduleGroup, PhaseCLI},
 		{inventory.TypeScheduleGroup, "other", PhaseCLI},
-		{inventory.TypeRole, runtimeiam.InstanceRoleName, PhaseDirect},
+		{inventory.TypeRole, runtimeiam.InstanceRoleName, PhaseCLI},
+		{inventory.TypeRole, runtimeiam.RoleName, PhaseCLI},
 		{inventory.TypeRole, runtimeiam.SchedulerInvokeRoleName, PhaseCLI},
 		{inventory.TypeRole, "team-gpu", PhaseCLI},
-		{inventory.TypeInstanceProfile, runtimeiam.InstanceRoleName, PhaseDirect},
+		{inventory.TypeInstanceProfile, runtimeiam.InstanceRoleName, PhaseCLI},
 		{inventory.TypeInstanceProfile, "team-gpu", PhaseCLI},
 		{inventory.TypePolicy, "lagotto-cli-user", PhaseCLI},
 		{inventory.TypeTable, "lagotto-watches", PhaseDirect},
@@ -400,6 +423,10 @@ func (g *groupFails) CreateScheduleGroup(context.Context, *scheduler.CreateSched
 func (g *groupFails) CreateSchedule(context.Context, *scheduler.CreateScheduleInput, ...func(*scheduler.Options)) (*scheduler.CreateScheduleOutput, error) {
 	g.schedules++
 	return &scheduler.CreateScheduleOutput{}, nil
+}
+
+func (g *groupFails) DeleteSchedule(context.Context, *scheduler.DeleteScheduleInput, ...func(*scheduler.Options)) (*scheduler.DeleteScheduleOutput, error) {
+	return &scheduler.DeleteScheduleOutput{}, nil
 }
 
 // TestNewClient: the lease client reaches each region's table with the

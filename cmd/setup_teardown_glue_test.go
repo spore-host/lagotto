@@ -19,8 +19,12 @@ import (
 	lambdatypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
 	"github.com/spf13/cobra"
 
+	fp "github.com/spore-host/libs/footprint"
+
 	"github.com/spore-host/lagotto/pkg/awscfg"
 	"github.com/spore-host/lagotto/pkg/deploy"
+	"github.com/spore-host/lagotto/pkg/idle"
+	"github.com/spore-host/lagotto/pkg/inventory"
 	"github.com/spore-host/lagotto/pkg/runtimeiam"
 	"github.com/spore-host/lagotto/pkg/watcher"
 )
@@ -289,23 +293,36 @@ func (f *fakeTables) DeleteTables(context.Context) (watcher.TableTeardown, error
 	return watcher.TableTeardown{Deleted: []string{"lagotto-watches", "lagotto-match-history", "lagotto-scheduled-launches"}}, nil
 }
 
-func stubTeardown(t *testing.T, tables *fakeTables, roles runtimeiam.RoleDeleteAPI, iamRoles, force bool) {
+func stubTeardown(t *testing.T, tables *fakeTables, roles runtimeiam.RoleDeleteAPI, iamRoles, force bool) *[]map[string]bool {
 	t.Helper()
 	stubLaunchSchedules(t, &fakeLaunchSchedules{})
 	awscfg.SetLoaderForTest(t, func(context.Context, ...func(*awsconfig.LoadOptions) error) (aws.Config, error) {
 		return aws.Config{Region: "us-west-2"}, nil
 	})
-	oldStore, oldDeleter, oldRoles, oldForce := newTeardownStore, newRoleDeleter, teardownIAMRoles, teardownForce
-	oldInstanceRoles := newInstanceRoleTeardown
+	oldStore, oldAW, oldRoles, oldForce, oldAcct := newTeardownStore, teardownAccountWide, teardownIAMRoles, teardownForce, setupCallerAccount
 	newTeardownStore = func(aws.Config) teardownTables { return tables }
-	newRoleDeleter = func(aws.Config) runtimeiam.RoleDeleteAPI { return roles }
-	newInstanceRoleTeardown = func(aws.Config) instanceRoleTeardown { return &fakeInstanceRoleTeardown{} }
+	// The account-wide teardown (idle.TearDownAccountWide, tested there):
+	// here it deletes the roles roles holds, and records each call's Only.
+	calls := &[]map[string]bool{}
+	teardownAccountWide = func(_ context.Context, _ aws.Config, _ string, only map[string]bool, _ func(string, ...any)) idle.AccountWideResult {
+		*calls = append(*calls, only)
+		res := &fp.Result{Mode: fp.ModeReap}
+		if rd, ok := roles.(*cmdRoleDeleter); ok {
+			for _, name := range runtimeiam.CLIOwnedRoles {
+				if rd.exists[name] {
+					delete(rd.exists, name)
+					res.Actions = append(res.Actions, fp.Action{Type: inventory.TypeRole, Name: name, Outcome: fp.OutcomeDeleted})
+				}
+			}
+		}
+		return idle.AccountWideResult{Outcome: idle.AccountWideRemoved, Result: res}
+	}
+	setupCallerAccount = func(context.Context, aws.Config) (string, error) { return "123456789012", nil }
 	teardownIAMRoles, teardownForce = iamRoles, force
 	t.Cleanup(func() {
-		newTeardownStore, newRoleDeleter, teardownIAMRoles, teardownForce = oldStore, oldDeleter, oldRoles, oldForce
-		newInstanceRoleTeardown = oldInstanceRoles
+		newTeardownStore, teardownAccountWide, teardownIAMRoles, teardownForce, setupCallerAccount = oldStore, oldAW, oldRoles, oldForce, oldAcct
 	})
-	stubPolicyDeleter(t, &fakePolicyDeleter{})
+	return calls
 }
 
 func stubLaunchSchedules(t *testing.T, f *fakeLaunchSchedules) {
@@ -428,7 +445,7 @@ func TestRunTeardown_NonEmptyScheduledTableNeedsForce(t *testing.T) {
 
 // The default seams build real clients without touching the network.
 func TestTeardownSeamDefaults(t *testing.T) {
-	if newRoleDeleter(aws.Config{Region: "us-east-1"}) == nil || newTeardownStore(aws.Config{Region: "us-east-1"}) == nil {
+	if accountWideSource(aws.Config{Region: "us-east-1"}, "123456789012") == nil || newTeardownStore(aws.Config{Region: "us-east-1"}) == nil {
 		t.Error("a default seam returned nil")
 	}
 }
@@ -456,19 +473,6 @@ func TestEnsureRuntimePolicy(t *testing.T) {
 	setupCallerAccount = func(context.Context, aws.Config) (string, error) { return "", errors.New("ExpiredToken") }
 	if err := ensureRuntimePolicy(context.Background(), aws.Config{Region: "us-west-2"}, &out); err == nil || !strings.Contains(err.Error(), "ExpiredToken") {
 		t.Errorf("an STS failure must fail setup: %v", err)
-	}
-}
-
-type failingDeleter struct{ *cmdRoleDeleter }
-
-func (failingDeleter) DeleteRole(context.Context, *iam.DeleteRoleInput, ...func(*iam.Options)) (*iam.DeleteRoleOutput, error) {
-	return nil, errors.New("AccessDenied")
-}
-
-func TestDeleteCLIOwnedRoles_Error(t *testing.T) {
-	f := failingDeleter{&cmdRoleDeleter{exists: map[string]bool{runtimeiam.RoleName: true, runtimeiam.SchedulerInvokeRoleName: true}}}
-	if err := deleteCLIOwnedRoles(context.Background(), f, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "AccessDenied") {
-		t.Errorf("err = %v, want the AccessDenied", err)
 	}
 }
 
@@ -568,29 +572,6 @@ func TestRunTeardown_ScheduleFailureKeepsTables(t *testing.T) {
 	}
 }
 
-type fakeInstanceRoleTeardown struct {
-	authorized []string
-	deleted    []string
-	delErr     map[string]error
-}
-
-func (f *fakeInstanceRoleTeardown) AuthorizedRoles(context.Context) ([]string, error) {
-	return f.authorized, nil
-}
-
-func (f *fakeInstanceRoleTeardown) DeleteInstanceRole(context.Context) (bool, error) {
-	f.deleted = append(f.deleted, runtimeiam.InstanceRoleName)
-	return true, nil
-}
-
-func (f *fakeInstanceRoleTeardown) DeleteManagedProfile(_ context.Context, name string) (bool, error) {
-	if err := f.delErr[name]; err != nil {
-		return false, err
-	}
-	f.deleted = append(f.deleted, "profile:"+name)
-	return true, nil
-}
-
 // TestApplySetupRoles_ProvisionsInstanceProfiles: setup provides every
 // instance profile the poller may launch with (it creates none itself),
 // refuses an authorized role that does not exist, and removes the profile it
@@ -649,40 +630,6 @@ func TestApplySetupRoles_SageMakerRoles(t *testing.T) {
 	setupSageMakerRoles = []string{"arn:aws:iam::999999999999:role/x"}
 	if err := applySetupRoles(context.Background(), newSetupIAM(), &fakeProfiles{}, "us-west-2", "123456789012", &bytes.Buffer{}); err == nil {
 		t.Error("a role in another account was authorized")
-	}
-}
-
-func TestDeleteInstanceRoles(t *testing.T) {
-	f := &fakeInstanceRoleTeardown{authorized: []string{"gpu-role"}}
-	var out bytes.Buffer
-	if err := deleteInstanceRoles(context.Background(), f, &out); err != nil {
-		t.Fatal(err)
-	}
-	if strings.Join(f.deleted, ",") != "profile:gpu-role,"+runtimeiam.InstanceRoleName {
-		t.Errorf("deleted = %v", f.deleted)
-	}
-}
-
-// TestDeleteInstanceRoles_LeavesAClaimedProfile: a profile another tool also
-// claims is reported and left, and the rest of the teardown goes on
-// (lagotto#341).
-func TestDeleteInstanceRoles_LeavesAClaimedProfile(t *testing.T) {
-	f := &fakeInstanceRoleTeardown{authorized: []string{"aws-realign-gpu-instance", "gpu-role"},
-		delErr: map[string]error{"aws-realign-gpu-instance": &runtimeiam.ClaimedError{Name: "aws-realign-gpu-instance", Tool: "spawn"}}}
-	var out bytes.Buffer
-	if err := deleteInstanceRoles(context.Background(), f, &out); err != nil {
-		t.Fatal(err)
-	}
-	if strings.Join(f.deleted, ",") != "profile:gpu-role,"+runtimeiam.InstanceRoleName {
-		t.Errorf("deleted = %v", f.deleted)
-	}
-	if !strings.Contains(out.String(), "warning: instance profile aws-realign-gpu-instance left in place: its tags say spawn manages it") {
-		t.Errorf("output:\n%s", out.String())
-	}
-	// Any other failure still stops it.
-	f = &fakeInstanceRoleTeardown{authorized: []string{"gpu-role"}, delErr: map[string]error{"gpu-role": errors.New("AccessDenied")}}
-	if err := deleteInstanceRoles(context.Background(), f, &bytes.Buffer{}); err == nil {
-		t.Error("an AccessDenied was swallowed")
 	}
 }
 

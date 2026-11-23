@@ -18,9 +18,10 @@ func installFakeLeases(t *testing.T, table *lifecycletest.Fake, opts ...func(*li
 	prev := newLifecycleClient
 	newLifecycleClient = func(_ aws.Config, owner string) (*lifecycle.Client, error) {
 		o := lifecycle.Options{
-			DynamoDB: func(string) (lifecycle.API, error) { return table, nil },
-			Owner:    owner,
-			Sleep:    func(context.Context, time.Duration) error { return nil },
+			DynamoDB:      func(string) (lifecycle.API, error) { return table, nil },
+			ControlRegion: "us-east-1",
+			Owner:         owner,
+			Sleep:         func(context.Context, time.Duration) error { return nil },
 		}
 		for _, f := range opts {
 			f(&o)

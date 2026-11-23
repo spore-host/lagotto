@@ -15,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/aws/smithy-go"
+
 	"github.com/spore-host/lagotto/pkg/runtimeiam"
 	"github.com/spore-host/lagotto/pkg/testutil"
 	"github.com/spore-host/lagotto/pkg/watcher"
@@ -125,19 +126,14 @@ func TestNotifyGCDeniedSaysWhy(t *testing.T) {
 	}
 }
 
-// The real IAM-backed seams, against the emulator's IAM.
+// The real IAM-backed seams, against the emulator's IAM: setup's profile
+// setup, and the account-wide teardown's deleters.
 func TestInstanceRoleSeamsAgainstEmulator(t *testing.T) {
 	env := testutil.SubstrateServer(t)
 	ctx := context.Background()
-	td := newInstanceRoleTeardown(env.AWSConfig)
-	if roles, err := td.AuthorizedRoles(ctx); err != nil || len(roles) != 0 {
-		t.Errorf("AuthorizedRoles with no poller role = %v, %v", roles, err)
-	}
-	if gone, err := td.DeleteInstanceRole(ctx); err != nil || gone {
-		t.Errorf("DeleteInstanceRole with none = %v, %v", gone, err)
-	}
-	if gone, err := td.DeleteManagedProfile(ctx, "x"); err != nil || gone {
-		t.Errorf("DeleteManagedProfile with none = %v, %v", gone, err)
+	td := newTeardownDeleters(env.AWSConfig, "123456789012").Account
+	if gone, err := td.DeleteInstanceProfile(ctx, runtimeiam.InstanceRoleName); err != nil || gone {
+		t.Errorf("DeleteInstanceProfile with none = %v, %v", gone, err)
 	}
 	ps := newInstanceProfileSetup(env.AWSConfig)
 	if gone, err := ps.DeleteManagedProfile(ctx, "x"); err != nil || gone {
@@ -146,8 +142,11 @@ func TestInstanceRoleSeamsAgainstEmulator(t *testing.T) {
 	if err := ps.EnsureInstanceProfile(ctx, runtimeiam.InstanceRoleName); err != nil {
 		t.Skipf("the emulator cannot run spawn's profile setup: %v", err)
 	}
-	if gone, err := td.DeleteInstanceRole(ctx); err != nil || !gone {
-		t.Errorf("DeleteInstanceRole after setup = %v, %v", gone, err)
+	if gone, err := td.DeleteInstanceProfile(ctx, runtimeiam.InstanceRoleName); err != nil || !gone {
+		t.Errorf("DeleteInstanceProfile after setup = %v, %v", gone, err)
+	}
+	if gone, err := td.DeleteRole(ctx, runtimeiam.InstanceRoleName); err != nil || !gone {
+		t.Errorf("DeleteRole after setup = %v, %v", gone, err)
 	}
 	if out, err := iam.NewFromConfig(env.AWSConfig).GetRole(ctx, &iam.GetRoleInput{RoleName: aws.String(runtimeiam.InstanceRoleName)}); err == nil {
 		t.Errorf("role still exists: %v", out)
@@ -304,40 +303,6 @@ func TestEnsureOwnerKeys_BuildsIndexFirst(t *testing.T) {
 	}
 	if _, err := ensureOwnerKeys(ctx, db, fakePrincipals{}, watcher.MigrateTables{Watches: "bi-watches", History: "absent-but-ok", Scheduled: "x"}, &bytes.Buffer{}); err != nil {
 		t.Errorf("absent optional tables: %v", err)
-	}
-}
-
-type failingInstanceRoleTeardown struct{ op string }
-
-func (f failingInstanceRoleTeardown) AuthorizedRoles(context.Context) ([]string, error) {
-	if f.op == "list" {
-		return nil, errors.New("AccessDenied")
-	}
-	return []string{"gpu-role"}, nil
-}
-
-func (f failingInstanceRoleTeardown) DeleteInstanceRole(context.Context) (bool, error) {
-	if f.op == "role" {
-		return false, errors.New("DeleteConflict")
-	}
-	return false, nil
-}
-
-func (f failingInstanceRoleTeardown) DeleteManagedProfile(context.Context, string) (bool, error) {
-	if f.op == "profile" {
-		return false, errors.New("AccessDenied")
-	}
-	return false, nil
-}
-
-func TestDeleteInstanceRoles_Errors(t *testing.T) {
-	for _, op := range []string{"list", "role", "profile"} {
-		if err := deleteInstanceRoles(context.Background(), failingInstanceRoleTeardown{op}, &bytes.Buffer{}); err == nil {
-			t.Errorf("%s failure was not reported", op)
-		}
-	}
-	if err := deleteInstanceRoles(context.Background(), failingInstanceRoleTeardown{}, &bytes.Buffer{}); err != nil {
-		t.Errorf("nothing to delete: %v", err)
 	}
 }
 

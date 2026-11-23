@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strings"
 
@@ -123,6 +124,13 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	// Everything setup creates or adopts carries the spore.host tags (#324),
 	// with the administrator running it as the spore-host:owner.
 	setupStamp = managedtags.Stamp{Owner: setupCallerOwner(ctx, cfg)}
+
+	// 0. The global scope, marked active before any account-wide create or
+	// change (lagotto#345): the CLI's account-wide teardown waits this out,
+	// or stops, and its grace period starts over.
+	if err := markGlobal(ctx, cfg, setupStamp.Owner, "set up lagotto's IAM", os.Stderr); err != nil {
+		return err
+	}
 
 	// 1. Tables (CLI-owned, #59): tagged where they exist, created nowhere
 	// (#325).

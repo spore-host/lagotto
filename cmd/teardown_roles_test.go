@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -10,8 +9,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
-
-	"github.com/spore-host/lagotto/pkg/runtimeiam"
 )
 
 func stubPollerRegions(t *testing.T, regions []string, err error) {
@@ -54,8 +51,8 @@ func TestTeardownIAMRolesProceedsWithNoPoller(t *testing.T) {
 	}
 }
 
-// cmdRoleDeleter is a minimal IAM for deleteCLIOwnedRoles: roles with no
-// policies, so only DeleteRole matters.
+// cmdRoleDeleter is a minimal IAM of lagotto's two poller roles: roles with
+// no policies, so only DeleteRole matters.
 type cmdRoleDeleter struct{ exists map[string]bool }
 
 func (f *cmdRoleDeleter) ListRolePolicies(_ context.Context, in *iam.ListRolePoliciesInput, _ ...func(*iam.Options)) (*iam.ListRolePoliciesOutput, error) {
@@ -80,27 +77,6 @@ func (f *cmdRoleDeleter) DetachRolePolicy(context.Context, *iam.DetachRolePolicy
 func (f *cmdRoleDeleter) DeleteRole(_ context.Context, in *iam.DeleteRoleInput, _ ...func(*iam.Options)) (*iam.DeleteRoleOutput, error) {
 	delete(f.exists, aws.ToString(in.RoleName))
 	return &iam.DeleteRoleOutput{}, nil
-}
-
-func TestDeleteCLIOwnedRolesReportsEach(t *testing.T) {
-	f := &cmdRoleDeleter{exists: map[string]bool{runtimeiam.RoleName: true, runtimeiam.SchedulerInvokeRoleName: true}}
-	var out bytes.Buffer
-	if err := deleteCLIOwnedRoles(context.Background(), f, &out); err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range runtimeiam.CLIOwnedRoles {
-		if !strings.Contains(out.String(), "Deleted IAM role "+name) {
-			t.Errorf("output does not report deleting %s:\n%s", name, out.String())
-		}
-	}
-
-	out.Reset()
-	if err := deleteCLIOwnedRoles(context.Background(), f, &out); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(out.String(), "No lagotto IAM roles to delete") {
-		t.Errorf("a re-run did not say there was nothing to delete:\n%s", out.String())
-	}
 }
 
 // TestTeardownHasIAMRolesFlag: the deleter is reachable from the CLI.

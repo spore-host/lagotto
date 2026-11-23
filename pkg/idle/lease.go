@@ -39,17 +39,52 @@ import (
 // Tool is the tool lagotto's lease items are kept under.
 const Tool = tags.ToolLagotto
 
+// ControlRegion is the region whose spore-host-lifecycle table holds lagotto's
+// global-scope lifecycle item (the account-wide teardown's lease, and the
+// creators' marks): the commercial partition's IAM home region, us-east-1, so
+// that every CLI reads the same one. An empty region is the commercial
+// partition's.
+//
+// Any other partition is an error, so the account-wide teardown fails closed
+// there: the ISO partitions and the European Sovereign Cloud cannot reach
+// us-east-1, and in aws-us-gov and aws-cn lagotto's IAM policies reach no
+// lifecycle table (runtimeiam.RegionalARN names the aws partition only;
+// lagotto#347).
+func ControlRegion(region string) (string, error) {
+	switch {
+	case region == "":
+		return "us-east-1", nil
+	case strings.Contains(region, "-iso"), strings.HasPrefix(region, "eusc-"):
+		return "", fmt.Errorf("no control region for %s: lagotto's account-wide lease works only in the aws partition", region)
+	case strings.HasPrefix(region, "us-gov-"), strings.HasPrefix(region, "cn-"):
+		return "", fmt.Errorf("no control region for %s: lagotto's IAM policies name only the aws partition's lifecycle tables (lagotto#347)", region)
+	}
+	for _, p := range []string{"us-", "eu-", "ap-", "ca-", "sa-", "me-", "af-", "il-", "mx-"} {
+		if strings.HasPrefix(region, p) {
+			return "us-east-1", nil
+		}
+	}
+	return "", fmt.Errorf("no control region for %s: lagotto's account-wide lease works only in the aws partition", region)
+}
+
+// PollerOwner is the lease owner a region's poller writes.
+func PollerOwner(region string) string { return "lagotto-poller/" + region }
+
 // NewClient returns a lifecycle client that reaches each region's
-// spore-host-lifecycle table with cfg's credentials. owner names the caller in
-// a lease ("lagotto-poller/us-east-1", or the CLI caller's ARN).
+// spore-host-lifecycle table with cfg's credentials, with lagotto's global
+// scope in ControlRegion(cfg.Region) (none outside the aws partition: every
+// use of the global scope then fails, closed). owner names the caller in a
+// lease (PollerOwner(region), or the CLI caller's ARN).
 func NewClient(cfg aws.Config, owner string, opts ...func(*lifecycle.Options)) (*lifecycle.Client, error) {
+	control, _ := ControlRegion(cfg.Region)
 	o := lifecycle.Options{
 		DynamoDB: func(region string) (lifecycle.API, error) {
 			c := cfg.Copy()
 			c.Region = region
 			return dynamodb.NewFromConfig(c), nil
 		},
-		Owner: owner,
+		ControlRegion: control,
+		Owner:         owner,
 	}
 	for _, f := range opts {
 		f(&o)
@@ -77,10 +112,14 @@ func (e *TeardownInProgressError) Error() string {
 	if e.Wait.Owner != "" {
 		holder = fmt.Sprintf(" (lease held by %s, last heartbeat %s)", e.Wait.Owner, e.Wait.Heartbeat.UTC().Format(time.RFC3339))
 	}
-	return fmt.Sprintf("refusing to %s: lagotto is being torn down in %s%s, and the teardown still held the "+
+	where, footprint := "in "+e.Region, "--region "+e.Region
+	if e.Region == lifecycle.ScopeGlobal {
+		where, footprint = "account-wide (its IAM roles and policy)", "--all-regions"
+	}
+	return fmt.Sprintf("refusing to %s: lagotto is being torn down %s%s, and the teardown still held the "+
 		"spore-host-lifecycle lease after %s (blocked by %s). Nothing was created. Run it again once the teardown "+
-		"has finished; 'lagotto footprint --region %s' shows what is left",
-		e.What, e.Region, holder, e.Wait.Waited.Round(time.Second), e.Wait.Blocker, e.Region)
+		"has finished; 'lagotto footprint %s' shows what is left",
+		e.What, where, holder, e.Wait.Waited.Round(time.Second), e.Wait.Blocker, footprint)
 }
 
 func (e *TeardownInProgressError) Unwrap() error { return e.Wait }

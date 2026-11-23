@@ -289,7 +289,9 @@ func renderCLIIAMInventory(every map[string]bool, byCommand map[string]map[strin
 		"administrator's report. The delete and write actions below are the static\n" +
 		"over-approximation of the shared teardown executor (`footprint.Execute`), which\n" +
 		"the last mile runs in report mode only, with no lease; its lifecycle client\n" +
-		"and deleter also refuse every write, so it never makes one of them.\n\n")
+		"and deleter also refuse every write, so it never makes one of them. The same\n" +
+		"holds for lagotto's account-wide teardown (lagotto#340), whose reap path is\n" +
+		"compiled in but switched off in this release.\n\n")
 	if len(every) == 0 {
 		b.WriteString("None.\n")
 	} else {

@@ -63,6 +63,16 @@ func TestInspectPoller_ReportsWhatIsDeployed(t *testing.T) {
 	if got.RoleARN != runtimeRoleARN(testAccount) {
 		t.Errorf("RoleARN = %q", got.RoleARN)
 	}
+	if got.IdleGrace != "" {
+		t.Errorf("IdleGrace = %q with no %s set", got.IdleGrace, IdleGraceEnv)
+	}
+	// The grace another region's idle teardown judges it by (lagotto#340).
+	cfg := liveConfig(testPollerInput())
+	cfg.Environment = &lambdatypes.EnvironmentResponse{Variables: map[string]string{IdleGraceEnv: "72h"}}
+	l.getOut = &lambda.GetFunctionOutput{Configuration: cfg}
+	if got, err := d.InspectPoller(context.Background()); err != nil || got.IdleGrace != "72h" {
+		t.Errorf("IdleGrace = %q, %v; want 72h", got.IdleGrace, err)
+	}
 }
 
 // TestInspectPoller_NoVersionTagIsEmptyNotAGuess: a poller deployed before the tag

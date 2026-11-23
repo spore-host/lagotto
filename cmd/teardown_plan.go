@@ -22,6 +22,7 @@ import (
 	"github.com/spore-host/lagotto/pkg/awscfg"
 	"github.com/spore-host/lagotto/pkg/cliiam"
 	"github.com/spore-host/lagotto/pkg/deploy"
+	"github.com/spore-host/lagotto/pkg/idle"
 	"github.com/spore-host/lagotto/pkg/inventory"
 	"github.com/spore-host/lagotto/pkg/runtimeiam"
 	"github.com/spore-host/lagotto/pkg/watcher"
@@ -167,7 +168,7 @@ func executePlan(ctx context.Context, out io.Writer, cfg aws.Config, acct string
 	var res *fp.Result
 	var execErr error
 	if mode == fp.ModeReap {
-		res, execErr = reapWithLeases(ctx, cfg, plan, live, deleter, os.Stderr)
+		res, execErr = reapWithLeases(ctx, cfg, acct, plan, live, deleter, os.Stderr)
 	} else {
 		res, execErr = fp.Execute(ctx, plan, mode, deleter, nil)
 	}
@@ -220,19 +221,21 @@ type regionLease struct {
 // reapWithLeases runs a reap plan under the real teardown lease (lagotto#326)
 // of every region it deletes in: each region's steps with that region's
 // lease, so a deploy, watch or launch there either waits for the teardown or
-// stops it at its next step. The account-wide (IAM) steps run under every one
-// of those leases at once (each is heartbeat before each re-check), and under
-// the caller's own region's when the plan deletes nothing regional; IAM has
-// no lease scope of its own, and only a footprint of every region (which
-// classifies them) puts them in a plan at all.
+// stops it at its next step. The account-wide (IAM) steps are not run under
+// those: once the regions are done, the CLI's account-wide teardown
+// (idle.TearDownAccountWide, lagotto#340 and #346) deletes them under the
+// global lease, the one actor that removes account-wide resources, only
+// while no region has a poller, a pending one-shot job or a live lifecycle
+// item, each re-checked before each delete.
 //
 // A region whose lease cannot be taken (something there is in use, or another
 // teardown holds it) refuses the whole run before anything is deleted, unless
-// --i-understand-no-lease, which falls back to the stand-in there. Once a
-// region's steps are done its lease is finished, and its lifecycle table
-// closed if no tool is left in it, when nothing of lagotto's is left there;
-// otherwise it is released, and the grace period starts over.
-func reapWithLeases(ctx context.Context, cfg aws.Config, plan *fp.Plan, live *fp.Report, deleter fp.Deleter, errOut io.Writer) (*fp.Result, error) {
+// --i-understand-no-lease, which falls back to the stand-in there (and, where
+// there is no global lease, outside the aws partition, for the account-wide
+// steps). Once a region's steps are done its lease is finished, and its
+// lifecycle table closed if no tool is left in it, when nothing of lagotto's
+// is left there; otherwise it is released, and the grace period starts over.
+func reapWithLeases(ctx context.Context, cfg aws.Config, acct string, plan *fp.Plan, live *fp.Report, deleter fp.Deleter, errOut io.Writer) (*fp.Result, error) {
 	byRegion := map[string][]fp.Resource{}
 	var regions []string
 	var global []fp.Resource
@@ -248,13 +251,6 @@ func reapWithLeases(ctx context.Context, cfg aws.Config, plan *fp.Plan, live *fp
 		byRegion[r.Region] = append(byRegion[r.Region], r)
 	}
 	sort.Strings(regions)
-	leaseRegions := regions
-	if len(regions) == 0 && len(global) > 0 {
-		if cfg.Region == "" {
-			return nil, fmt.Errorf("not deleting anything: the plan deletes only account-wide resources, and there is no region to take the teardown lease in; pass --region")
-		}
-		leaseRegions = []string{cfg.Region}
-	}
 	active := map[string]bool{}
 	for _, r := range live.Resources {
 		if r.Class == fp.ClassActive {
@@ -274,7 +270,7 @@ func reapWithLeases(ctx context.Context, cfg aws.Config, plan *fp.Plan, live *fp
 			}
 		}
 	}
-	for _, region := range leaseRegions {
+	for _, region := range regions {
 		l, err := claimRegion(ctx, c, region, active[region])
 		if err != nil {
 			if !teardownNoLease {
@@ -315,13 +311,6 @@ func reapWithLeases(ctx context.Context, cfg aws.Config, plan *fp.Plan, live *fp
 	for i, region := range regions {
 		run(byRegion[region], deleter, leases[i].lease)
 	}
-	if len(global) > 0 {
-		var others []*lifecycle.Lease
-		for _, l := range leases[1:] {
-			others = append(others, l.lease)
-		}
-		run(global, fencedDeleter{Deleter: deleter, leases: others}, leases[0].lease)
-	}
 
 	// Each region's lease: finished when nothing of lagotto's is left there.
 	for _, l := range leases {
@@ -343,6 +332,11 @@ func reapWithLeases(ctx context.Context, cfg aws.Config, plan *fp.Plan, live *fp
 		}
 	}
 
+	// The account-wide steps, by the one account-wide teardown.
+	if len(global) > 0 {
+		errs = append(errs, reapAccountWide(ctx, cfg, acct, plan, global, deleter, byARN, errOut, run))
+	}
+
 	res := &fp.Result{Mode: fp.ModeReap, Tool: string(plan.Tool), Actions: make([]fp.Action, len(plan.Steps))}
 	for i, st := range plan.Steps {
 		a, ok := byARN[st.Resource.ARN]
@@ -354,6 +348,50 @@ func reapWithLeases(ctx context.Context, cfg aws.Config, plan *fp.Plan, live *fp
 	return res, errors.Join(errs...)
 }
 
+// reapAccountWide runs the plan's account-wide steps through the CLI's
+// account-wide teardown, limited to them, and records each step's action in
+// byARN. Outside the aws partition, where there is no global lease, it runs
+// them under the stand-in only with --i-understand-no-lease.
+func reapAccountWide(ctx context.Context, cfg aws.Config, acct string, plan *fp.Plan, global []fp.Resource, deleter fp.Deleter,
+	byARN map[string]fp.Action, errOut io.Writer, run func([]fp.Resource, fp.Deleter, *lifecycle.Lease)) error {
+	only := map[string]bool{}
+	for _, r := range global {
+		only[r.ARN] = true
+	}
+	r := runAccountWide(ctx, cfg, acct, only, func(f string, a ...any) {
+		if verbose {
+			_, _ = fmt.Fprintf(errOut, "debug: "+f+"\n", a...)
+		}
+	})
+	if r.Outcome == idle.AccountWideSkipped && teardownNoLease {
+		_, _ = fmt.Fprintf(errOut, "warning: no global teardown lease (%s); --%s: deleting the account-wide resources without one\n", r.Why, noLeaseFlag)
+		l, err := unfencedLease(ctx)
+		if err != nil {
+			return err
+		}
+		run(global, deleter, l)
+		return nil
+	}
+	if r.Result != nil {
+		for _, a := range r.Result.Actions {
+			byARN[a.ARN] = a
+		}
+	}
+	err := accountWideError(r)
+	outcome := fp.OutcomeNotRun
+	if r.Outcome == idle.AccountWideBlocked {
+		// In use, as far as the account-wide teardown can tell: kept, like
+		// any active resource of the plan, and not a failure.
+		outcome, err = fp.OutcomeKept, nil
+	}
+	for _, g := range global {
+		if _, ok := byARN[g.ARN]; !ok && r.Outcome != idle.AccountWideRemoved && r.Outcome != idle.AccountWideNothing {
+			byARN[g.ARN] = fp.Action{ARN: g.ARN, Type: g.Type, Name: g.Name, Outcome: outcome, Reason: accountWideWhy(r)}
+		}
+	}
+	return err
+}
+
 // claimRegion takes the teardown lease in region: it records what the
 // footprint says (active or not), then claims with no grace period, the human
 // path's decision being the plan itself.
@@ -361,7 +399,17 @@ func claimRegion(ctx context.Context, c *lifecycle.Client, region string, active
 	if active {
 		return nil, fmt.Errorf("something of lagotto's in %s is in use", region)
 	}
-	if _, _, err := c.Observe(ctx, inventory.Tool, region, false); err != nil {
+	_, _, err := c.Observe(ctx, inventory.Tool, region, false)
+	if errors.Is(err, lifecycle.ErrTableClosing) {
+		// A closer that died left its sentinel, which Observe never clears
+		// (libs#88): CloseTableIfEmpty takes a stale one over (and drops it
+		// while items remain), and a live closer's it leaves alone.
+		if _, cerr := c.CloseTableIfEmpty(ctx, region); cerr != nil {
+			return nil, errors.Join(err, cerr)
+		}
+		_, _, err = c.Observe(ctx, inventory.Tool, region, false)
+	}
+	if err != nil {
 		return nil, err
 	}
 	return c.Claim(ctx, inventory.Tool, region, 0)
@@ -380,23 +428,6 @@ func regionCleared(live *fp.Report, region string, actions map[string]fp.Action)
 		}
 	}
 	return true
-}
-
-// fencedDeleter heartbeats every one of leases before each re-check, so an
-// account-wide delete stops when a creator marks lagotto active in any region
-// of the teardown (footprint.Execute heartbeats one lease itself).
-type fencedDeleter struct {
-	fp.Deleter
-	leases []*lifecycle.Lease
-}
-
-func (f fencedDeleter) Describe(ctx context.Context, r fp.Resource) (fp.Resource, error) {
-	for _, l := range f.leases {
-		if err := l.Step(ctx, "re-check "+r.Type+" "+r.ARN); err != nil {
-			return fp.Resource{}, err
-		}
-	}
-	return f.Deleter.Describe(ctx, r)
 }
 
 // regionDeleter is one region's deleters: deploy --teardown's (the Deployer)

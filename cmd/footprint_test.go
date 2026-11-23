@@ -5,14 +5,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/spore-host/libs/lifecycle"
-	"github.com/spore-host/libs/lifecycle/lifecycletest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/spore-host/libs/lifecycle"
+	"github.com/spore-host/libs/lifecycle/lifecycletest"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -24,6 +25,7 @@ import (
 	"github.com/spore-host/lagotto/pkg/cliiam"
 	"github.com/spore-host/lagotto/pkg/deploy"
 	"github.com/spore-host/lagotto/pkg/inventory"
+	"github.com/spore-host/lagotto/pkg/inventory/inventorytest"
 	"github.com/spore-host/lagotto/pkg/runtimeiam"
 	"github.com/spore-host/lagotto/pkg/watcher"
 )
@@ -217,6 +219,9 @@ func stubPlanTeardown(t *testing.T, facts func() inventory.Facts) (string, *reco
 		t.Fatal(err)
 	}
 	rec := &recordingDeleters{}
+	oldSource := accountWideSource
+	accountWideSource = func(aws.Config, string) inventory.Source { return sourceOf(facts()) }
+	t.Cleanup(func() { accountWideSource = oldSource })
 	old := newTeardownDeleters
 	oldPlan, oldMode, oldYes, oldNoLease := teardownPlan, teardownMode, teardownYes, teardownNoLease
 	newTeardownDeleters = func(aws.Config, string) inventory.Deleters {
@@ -263,8 +268,9 @@ func TestTeardownPlanReportDeletesNothing(t *testing.T) {
 }
 
 // TestTeardownPlanReap: with --yes and the no-lease acknowledgement, reap
-// deletes the orphan tables and the unattached policy, and nothing of the
-// active region or the role its poller runs as.
+// deletes the orphan tables, and nothing of the active region or the role
+// its poller runs as; the unattached policy is account-wide, and with a
+// poller in us-east-1 the account-wide teardown keeps it (lagotto#340).
 func TestTeardownPlanReap(t *testing.T) {
 	_, rec, _ := stubPlanTeardown(t, fpFacts)
 	teardownMode, teardownYes, teardownNoLease = "reap", true, true
@@ -273,7 +279,7 @@ func TestTeardownPlanReap(t *testing.T) {
 		t.Fatalf("%v\n%s", err, out)
 	}
 	want := map[string]bool{"eu-west-1 table lagotto-watches": true, "eu-west-1 table lagotto-match-history": true,
-		"eu-west-1 table lagotto-scheduled-launches": true, "global policy": true}
+		"eu-west-1 table lagotto-scheduled-launches": true}
 	for _, c := range rec.calls {
 		if !want[c] {
 			t.Errorf("deleted %q", c)
@@ -282,6 +288,9 @@ func TestTeardownPlanReap(t *testing.T) {
 	}
 	if len(want) != 0 {
 		t.Errorf("not deleted: %v", want)
+	}
+	if !strings.Contains(out, "us-east-1: a poller is deployed") {
+		t.Errorf("the kept policy does not say why:\n%s", out)
 	}
 }
 
@@ -370,11 +379,11 @@ func TestTeardownPlanReapTakesTheRealLease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}
-	if len(rec.calls) != 4 {
-		t.Errorf("deleted %v, want the three eu-west-1 tables and the policy", rec.calls)
+	if len(rec.calls) != 3 {
+		t.Errorf("deleted %v, want the three eu-west-1 tables (the policy waits for us-east-1's poller)", rec.calls)
 	}
-	// Claim, then a heartbeat before each of the four deletes.
-	if len(steps) < 5 {
+	// Claim, then a heartbeat before each of the three deletes.
+	if len(steps) < 4 {
 		t.Errorf("%d lease writes, want the claim and a heartbeat per delete", len(steps))
 	}
 	if n := table.Calls("DeleteTable"); n != 1 {
@@ -418,7 +427,25 @@ func TestTeardownPlanReapRefusesAHeldLease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}
-	if len(rec.calls) != 4 {
-		t.Errorf("with the acknowledgement: deleted %v, want 4", rec.calls)
+	if len(rec.calls) != 3 {
+		t.Errorf("with the acknowledgement: deleted %v, want the 3 tables (a teardown holds eu-west-1, so the policy stays)", rec.calls)
 	}
+}
+
+// sourceOf answers the account-wide teardown's reads (idle.TearDownAccountWide)
+// from f, as the footprint seam answers the plan's.
+func sourceOf(f inventory.Facts) inventory.Source {
+	names := make([]string, len(f.Regions))
+	for i, r := range f.Regions {
+		names[i] = r.Region
+	}
+	s := inventorytest.New(names...)
+	for _, r := range f.Regions {
+		s.SetRegion(r)
+	}
+	var authorized []string
+	for _, r := range f.Account.AuthorizedRoles {
+		authorized = append(authorized, r.Name)
+	}
+	return s.SetAccount(f.Account, authorized...)
 }

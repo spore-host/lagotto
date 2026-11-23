@@ -6,27 +6,24 @@ import (
 	"fmt"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/iam"
 
 	"github.com/spore-host/lagotto/pkg/cliiam"
 	"github.com/spore-host/lagotto/pkg/deploy"
 	"github.com/spore-host/lagotto/pkg/inventory"
-	"github.com/spore-host/lagotto/pkg/runtimeiam"
 	"github.com/spore-host/lagotto/pkg/watcher"
 )
 
 // ErrSelfDelete is what the poller's deleters answer for the poller's own
-// function, log group or role, and for what it has no business deleting.
-// Those are removed by the one-shot jobs (OneShot) or by `lagotto teardown`,
-// never from inside the poller.
+// function and log group, and for everything account-wide. Those are removed
+// by the one-shot jobs (OneShot) or by the CLI (accountwide.go), never from
+// inside the poller.
 var ErrSelfDelete = errors.New("the poller never deletes this from inside itself")
 
 // PollerDeleters are the deleters the poller's teardown runs with, built
 // from concrete types so that what they can reach is exactly what the
-// poller's runtime policy grants: lagotto's regional resources, and of IAM
-// only lagotto's own instance role and profile. The poller's function, log
-// group and role, the invoke role and the lagotto-cli-user policy are
-// refused (ErrSelfDelete).
+// poller's runtime policy grants: lagotto's regional resources only. The
+// poller's function and log group, and every account-wide resource (IAM),
+// are refused (ErrSelfDelete).
 //
 // Empty table names are lagotto's defaults, as in the poller's environment.
 func PollerDeleters(cfg aws.Config, accountID, watchesTable, historyTable, scheduledTable string) inventory.Deleters {
@@ -48,7 +45,7 @@ func PollerDeleters(cfg aws.Config, accountID, watchesTable, historyTable, sched
 			regions[region] = d
 			return d
 		},
-		Account: pollerAccount{iam: iam.NewFromConfig(cfg)},
+		Account: pollerAccount{},
 	}
 }
 
@@ -85,20 +82,16 @@ func (p pollerRegion) DeleteScheduleGroup(ctx context.Context, name string) (boo
 	return p.d.DeleteScheduleGroup(ctx, name)
 }
 
-type pollerAccount struct{ iam *iam.Client }
+// pollerAccount refuses every account-wide delete: those are the CLI's
+// (lagotto#340), and the poller's runtime policy grants none of them.
+type pollerAccount struct{}
 
-func (p pollerAccount) DeleteRole(ctx context.Context, name string) (bool, error) {
-	if name != runtimeiam.InstanceRoleName {
-		return false, fmt.Errorf("role %s: %w", name, ErrSelfDelete)
-	}
-	return runtimeiam.DeleteRole(ctx, p.iam, name)
+func (pollerAccount) DeleteRole(_ context.Context, name string) (bool, error) {
+	return false, fmt.Errorf("role %s: %w", name, ErrSelfDelete)
 }
 
-func (p pollerAccount) DeleteInstanceProfile(ctx context.Context, name string) (bool, error) {
-	if name != runtimeiam.InstanceRoleName {
-		return false, fmt.Errorf("instance profile %s: %w", name, ErrSelfDelete)
-	}
-	return runtimeiam.DeleteInstanceProfile(ctx, p.iam, name)
+func (pollerAccount) DeleteInstanceProfile(_ context.Context, name string) (bool, error) {
+	return false, fmt.Errorf("instance profile %s: %w", name, ErrSelfDelete)
 }
 
 func (p pollerAccount) DeletePolicy(context.Context) (cliiam.Deletion, error) {

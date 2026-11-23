@@ -50,11 +50,19 @@ deleting anything, while a poller still exists in any of them (remove each with
 --force does not override that check.
 
 --iam-roles also deletes the customer-managed policy lagotto-cli-user that
-'lagotto setup' writes for the people who run lagotto (lagotto#232). IAM refuses
-to delete an attached policy, so teardown first DETACHES it from every user,
-group and role it is attached to (each is printed; they lose those permissions),
-then deletes its non-default versions, then the policy. A policy of that name
-without lagotto's lagotto:managed=cli tag is left in place and reported.
+'lagotto setup' writes for the people who run lagotto (lagotto#232), once nothing
+is attached to it: while any user, group or role has it, it is kept and reported
+(detach it yourself first if you mean to remove it). A policy of that name without
+lagotto's lagotto:managed=cli tag is left in place and reported.
+
+The account-wide resources are removed by one code path, the same one the lazy
+last mile uses (lagotto#340, #346): under lagotto's global teardown lease
+(tool#lagotto#global in us-east-1's spore-host-lifecycle table), and only while
+no region has a poller, a pending one-shot teardown job, or a lagotto lifecycle
+item that is in use or held by a live teardown, all re-checked before each
+delete. A deploy, watch or setup that starts meanwhile stops it before its next
+delete. A failure leaves the global lease held: it goes stale in 20 minutes and
+the next run takes it over and carries on.
 
 --plan &lt;file|-&gt; takes the other path (lagotto#325): it executes a footprint,
 the JSON 'lagotto footprint -o json' writes, through the shared spore.host
@@ -77,7 +85,10 @@ one is not removed, nothing it depends on is tried.
 (lagotto#326) in every region it deletes in, so another user's deploy, watch or
 launch there waits for it, or stops it before its next delete. A region where
 something is in use, or another teardown holds the lease, refuses the whole
-run before anything is deleted. Use -o json for the outcome of every step.
+run before anything is deleted. The plan's account-wide steps run last, through
+the account-wide teardown described above for --iam-roles: while any region
+still has a poller, a pending one-shot job or a live lifecycle item they are
+kept, and reported as such. Use -o json for the outcome of every step.
 
 ```
 lagotto teardown [flags]
@@ -88,7 +99,7 @@ lagotto teardown [flags]
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
 | `--force` |  | bool |  | Delete even if the tables still contain records |
-| `--iam-roles` |  | bool |  | Also delete lagotto's account-global IAM roles (the poller's two and its instance role) and the lagotto-cli-user policy (detached from everyone first); refused while a poller exists in any region |
+| `--iam-roles` |  | bool |  | Also delete lagotto's account-global IAM roles (the poller's two and its instance role) and the lagotto-cli-user policy (once nothing is attached to it), under the global teardown lease; refused while a poller, a pending teardown job or a live lifecycle item exists in any region |
 | `--mode` |  | string | `report` | With --plan: report (say what would be deleted; the default) or reap (delete; needs --yes) |
 | `--plan` |  | string |  | Execute a footprint plan: the JSON 'lagotto footprint -o json' writes, from a file or - for stdin |
 | `--yes` |  | bool |  | With --plan --mode reap: confirm the deletion |

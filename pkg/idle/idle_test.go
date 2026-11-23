@@ -107,6 +107,7 @@ type fakeScheduler struct {
 	conflict map[string]bool
 	inputs   []*scheduler.CreateScheduleInput
 	err      error
+	delErr   error
 }
 
 func (f *fakeScheduler) CreateScheduleGroup(_ context.Context, in *scheduler.CreateScheduleGroupInput, _ ...func(*scheduler.Options)) (*scheduler.CreateScheduleGroupOutput, error) {
@@ -175,6 +176,7 @@ func (h *harness) advance(d time.Duration) {
 
 func (h *harness) cfg(reap bool) Config {
 	return Config{Region: region, AccountID: acct, Grace: 24 * time.Hour, Reap: reap, Now: h.clock,
+		Sleep: func(context.Context, time.Duration) error { return nil },
 		Logf: func(f string, a ...any) {
 			h.mu.Lock()
 			defer h.mu.Unlock()
@@ -346,7 +348,8 @@ var rowRE = regexp.MustCompile(`^idle-teardown REPORT region=us-east-1 phase=(\w
 // TestReportDeletesNothingAndLogsThePlan is the report-mode contract: zero
 // deletes, zero Scheduler calls, the lease taken and given back (never
 // finished, the table never closed), and every step of the plan logged,
-// the self-removal jobs with their offsets.
+// the self-removal jobs with their offsets. Nothing account-wide is in the
+// plan: each is listed as left for the CLI (lagotto#340).
 func TestReportDeletesNothingAndLogsThePlan(t *testing.T) {
 	h := newHarness(t)
 	r := h.tickPastGrace(t, false)
@@ -363,39 +366,40 @@ func TestReportDeletesNothingAndLogsThePlan(t *testing.T) {
 		t.Errorf("lease not given back: %+v", it)
 	}
 	log := h.log()
+	const cli = `reason="left for the CLI: account-wide: the CLI removes it once no poller is left (lagotto#340)"`
 	for _, want := range []string{
-		// direct: tables, bucket, topic; and in the last region lagotto's
-		// instance role and profile.
+		// direct: tables, bucket, topic.
 		"phase=direct outcome=would-delete type=AWS::DynamoDB::Table resource_region=us-east-1 name=\"lagotto-watches\"",
 		"phase=direct outcome=would-delete type=AWS::DynamoDB::Table resource_region=us-east-1 name=\"lagotto-match-history\"",
 		"phase=direct outcome=would-delete type=AWS::S3::Bucket",
 		"phase=direct outcome=would-delete type=AWS::SNS::Topic",
-		"phase=direct outcome=would-delete type=AWS::IAM::InstanceProfile resource_region=global name=\"lagotto-instance-role\"",
-		"phase=direct outcome=would-delete type=AWS::IAM::Role resource_region=global name=\"lagotto-instance-role\"",
 		// self: checked by the guard, removed by jobs.
 		"phase=self outcome=would-delete type=AWS::Lambda::Function",
 		"phase=self outcome=would-delete type=AWS::Logs::LogGroup",
-		"phase=self outcome=would-delete type=AWS::IAM::Role resource_region=global name=\"lagotto-capacity-poller-role\"",
 		// final: its own rate schedule, then lagotto's group.
 		"phase=final outcome=would-delete type=AWS::Scheduler::Schedule resource_region=us-east-1 name=\"lagotto-capacity-poller\"",
 		"phase=final outcome=would-delete type=AWS::Scheduler::ScheduleGroup resource_region=us-east-1 name=\"lagotto\"",
-		// left for the CLI.
+		// everything account-wide, left for the CLI.
+		"phase=kept outcome=kept type=AWS::IAM::Role resource_region=global name=\"lagotto-capacity-poller-role\" arn=arn:aws:iam::123456789012:role/lagotto-capacity-poller-role " + cli,
 		"phase=kept outcome=kept type=AWS::IAM::Role resource_region=global name=\"lagotto-capacity-poller-scheduler-invoke\"",
+		"phase=kept outcome=kept type=AWS::IAM::Role resource_region=global name=\"lagotto-instance-role\"",
+		"phase=kept outcome=kept type=AWS::IAM::InstanceProfile resource_region=global name=\"lagotto-instance-role\"",
 		"phase=kept outcome=kept type=AWS::IAM::ManagedPolicy",
-		// the jobs, with their offsets.
-		"phase=one-shot name=lagotto-teardown-function offset=+2m0s at=2026-11-17T12:03:00Z group=lagotto-teardown target=arn:aws:scheduler:::aws-sdk:lambda:deleteFunction input={\"FunctionName\":\"lagotto-capacity-poller\"}",
-		"phase=one-shot name=lagotto-teardown-role-inline offset=+4m0s",
-		"phase=one-shot name=lagotto-teardown-role-managed offset=+4m0s",
-		"phase=one-shot name=lagotto-teardown-role offset=+5m0s",
-		"phase=one-shot name=lagotto-teardown-log-group offset=+15m0s at=2026-11-17T12:16:00Z group=lagotto-teardown target=arn:aws:scheduler:::aws-sdk:cloudwatchlogs:deleteLogGroup input={\"LogGroupName\":\"/aws/lambda/lagotto-capacity-poller\"}",
+		// the jobs, the log group's first, the function's (the commit) last,
+		// both due after the poller's next hourly run.
+		"phase=one-shot name=lagotto-teardown-log-group offset=+1h47m0s at=2026-11-17T13:48:00Z group=lagotto-teardown target=arn:aws:scheduler:::aws-sdk:cloudwatchlogs:deleteLogGroup input={\"LogGroupName\":\"/aws/lambda/lagotto-capacity-poller\"}",
+		"phase=one-shot name=lagotto-teardown-function offset=+1h32m0s at=2026-11-17T13:33:00Z group=lagotto-teardown target=arn:aws:scheduler:::aws-sdk:lambda:deleteFunction input={\"FunctionName\":\"lagotto-capacity-poller\"}",
 		// the summary.
-		"idle-teardown REPORT region=us-east-1 would_delete=12 kept=2 failed=0 one_shots=5 last_region=true lease=released",
+		"idle-teardown REPORT region=us-east-1 would_delete=9 kept=5 failed=0 one_shots=2 lease=released",
 	} {
 		if !strings.Contains(log, want) {
 			t.Errorf("log lacks %q", want)
 		}
 	}
-	// Order: direct, self, one-shots, final, summary.
+	if strings.Contains(log, "outcome=would-delete type=AWS::IAM") || strings.Contains(log, "last_region") {
+		t.Error("the poller plans something account-wide")
+	}
+	// Order: kept, direct, self, one-shots, final, summary.
 	var phases []string
 	for _, l := range strings.Split(log, "\n") {
 		if m := rowRE.FindStringSubmatch(l); m != nil && (len(phases) == 0 || phases[len(phases)-1] != m[1]) {
@@ -410,30 +414,27 @@ func TestReportDeletesNothingAndLogsThePlan(t *testing.T) {
 	}
 }
 
-// TestReportNotLastRegion: another region still has lagotto's tables, so the
-// account-wide IAM is not in the plan, and no role job is planned.
-func TestReportNotLastRegion(t *testing.T) {
+// TestReportOtherRegionsDoNotMatter: another region's state changes nothing
+// in this region's plan; the poller reads only its own region.
+func TestReportOtherRegionsDoNotMatter(t *testing.T) {
 	h := newHarness(t)
-	h.src.SetRegion(inventory.Region{Region: "us-west-2", Tables: inventorytest.Deployed("us-west-2", acct).Tables})
+	h.src.SetRegion(inventorytest.Deployed("us-west-2", acct))
 	r := h.tickPastGrace(t, false)
-	if r.Outcome != OutcomeReported || r.Plan.Last {
+	if r.Outcome != OutcomeReported {
 		t.Fatalf("result %+v", r)
 	}
 	log := h.log()
-	if strings.Contains(log, "resource_region=global") || strings.Contains(log, "lagotto-teardown-role") {
-		t.Errorf("not the last region, but the plan names IAM:\n%s", log)
+	if strings.Contains(log, "us-west-2") || !strings.Contains(log, "would_delete=9 kept=5 failed=0 one_shots=2 lease=released") {
+		t.Errorf("log:\n%s", log)
 	}
-	for _, want := range []string{"one_shots=2 last_region=false",
-		`last_region_why="lagotto's tables or poller are also in us-west-2"`} {
-		if !strings.Contains(log, want) {
-			t.Errorf("log lacks %q:\n%s", want, log)
-		}
+	if n := h.src.Reads("global EnabledRegions") + h.src.Reads("us-west-2 Topic"); n != 0 {
+		t.Errorf("read other regions (%d reads)", n)
 	}
 }
 
 // TestReportGuardStillApplies: a log group recreated untagged (lagotto#326's
 // live evidence) is refused by the guard, and the function's job still
-// plans the log group's removal after it.
+// plans the log group's removal with it.
 func TestReportGuardStillApplies(t *testing.T) {
 	h := newHarness(t)
 	h.src.Update(region, func(r *inventory.Region) { r.LogGroup.Tags = nil })
@@ -443,7 +444,7 @@ func TestReportGuardStillApplies(t *testing.T) {
 	}
 	log := h.log()
 	if !strings.Contains(log, "phase=self outcome=kept type=AWS::Logs::LogGroup") ||
-		!strings.Contains(log, "name=lagotto-teardown-log-group offset=+15m0s") {
+		!strings.Contains(log, "name=lagotto-teardown-log-group offset=+1h47m0s") {
 		t.Errorf("log:\n%s", log)
 	}
 }
@@ -451,8 +452,9 @@ func TestReportGuardStillApplies(t *testing.T) {
 // ---- reap mode (lagotto#328; never enabled by this release's poller) --------
 
 // TestReapHandsOffItsOwnRemoval: deletes the direct phase, never its own
-// function, log group or role, creates the jobs, then deletes its own rate
-// schedule and group last, and finishes the lease and closes the table.
+// function or log group and nothing account-wide, creates the jobs (the
+// function's, the commit, last), then deletes its own rate schedule and
+// group last, and finishes the lease and closes the table.
 func TestReapHandsOffItsOwnRemoval(t *testing.T) {
 	h := newHarness(t)
 	r := h.tickPastGrace(t, true)
@@ -461,9 +463,9 @@ func TestReapHandsOffItsOwnRemoval(t *testing.T) {
 	}
 	ev := h.ev.list()
 	joined := strings.Join(ev, "\n")
-	for _, never := range []string{"function", "loggroup", "role " + runtimeiam.RoleName, "role " + runtimeiam.SchedulerInvokeRoleName, "policy"} {
-		if strings.Contains(joined, "delete "+region+" "+never) || strings.Contains(joined, "delete global "+never) {
-			t.Errorf("deleted %s directly:\n%s", never, joined)
+	for _, never := range []string{"delete " + region + " function", "delete " + region + " loggroup", "delete global"} {
+		if strings.Contains(joined, never) {
+			t.Errorf("%s:\n%s", never, joined)
 		}
 	}
 	idx := func(s string) int {
@@ -475,15 +477,13 @@ func TestReapHandsOffItsOwnRemoval(t *testing.T) {
 		t.Errorf("no event %q in\n%s", s, joined)
 		return -1
 	}
-	lastJob := idx("create one-shot lagotto-teardown/lagotto-teardown-log-group")
-	if idx("delete us-east-1 table lagotto-watches") > idx("create group lagotto-teardown tags=5") ||
-		lastJob > idx("delete us-east-1 schedule lagotto/lagotto-capacity-poller") ||
+	logJob, fnJob := idx("create one-shot lagotto-teardown/lagotto-teardown-log-group"), idx("create one-shot lagotto-teardown/lagotto-teardown-function")
+	if idx("delete us-east-1 table lagotto-watches") > idx("create group lagotto-teardown tags=5") || logJob > fnJob ||
+		fnJob > idx("delete us-east-1 schedule lagotto/lagotto-capacity-poller") ||
 		idx("delete us-east-1 schedule lagotto/lagotto-capacity-poller") > idx("delete us-east-1 group lagotto") {
 		t.Errorf("order:\n%s", joined)
 	}
-	idx("delete global profile lagotto-instance-role")
-	idx("delete global role lagotto-instance-role")
-	if len(h.sched.inputs) != 5 {
+	if len(h.sched.inputs) != 2 {
 		t.Fatalf("%d jobs", len(h.sched.inputs))
 	}
 	for _, in := range h.sched.inputs {
@@ -501,14 +501,19 @@ func TestReapHandsOffItsOwnRemoval(t *testing.T) {
 	}
 }
 
-// TestReapResumesOnConflict: a teardown that crashed after creating some
-// jobs runs again; the jobs (and the group) that exist answer
-// ConflictException, which is success.
+// TestReapResumesOnConflict: a teardown that crashed after creating its jobs
+// runs again; the group's ConflictException is success, and a job that is
+// there (with the earlier run's time) is deleted and created again at this
+// run's, so it still fires after the poller's next run.
 func TestReapResumesOnConflict(t *testing.T) {
 	h := newHarness(t)
-	h.sched.conflict = map[string]bool{"group": true, "lagotto-teardown-function": true, "lagotto-teardown-role": true}
+	h.sched.conflict = map[string]bool{"group": true, FunctionJobName: true}
 	if r := h.tickPastGrace(t, true); r.Outcome != OutcomeReaped || r.Err != nil {
 		t.Fatalf("result %+v\n%s", r, h.log())
+	}
+	joined := strings.Join(h.ev.list(), "\n")
+	if !strings.Contains(joined, "create one-shot lagotto-teardown/lagotto-teardown-function\ndelete one-shot lagotto-teardown/lagotto-teardown-function\ncreate one-shot lagotto-teardown/lagotto-teardown-function") {
+		t.Errorf("not recreated:\n%s", joined)
 	}
 }
 
@@ -564,13 +569,11 @@ func TestReapStopsOnLostLease(t *testing.T) {
 // ---- the self-removal plan ----------------------------------------------------
 
 func TestSelfRemovalPlanOffsets(t *testing.T) {
-	jobs := SelfRemoval{Region: region, AccountID: acct, Function: true, LogGroup: true, Role: true}.Plan(t0)
+	jobs := SelfRemoval{Region: region, AccountID: acct, Function: true, LogGroup: true}.Plan(t0)
 	want := []struct {
 		name string
 		off  time.Duration
-	}{{"lagotto-teardown-function", 2 * time.Minute}, {"lagotto-teardown-role-inline", 4 * time.Minute},
-		{"lagotto-teardown-role-managed", 4 * time.Minute}, {"lagotto-teardown-role", 5 * time.Minute},
-		{"lagotto-teardown-log-group", 15 * time.Minute}}
+	}{{"lagotto-teardown-log-group", 107 * time.Minute}, {FunctionJobName, 92 * time.Minute}}
 	if len(jobs) != len(want) {
 		t.Fatalf("%d jobs", len(jobs))
 	}
@@ -579,12 +582,18 @@ func TestSelfRemovalPlanOffsets(t *testing.T) {
 			t.Errorf("job %d = %+v, want %s at +%s", i, jobs[i], w.name, w.off)
 		}
 	}
-	if e := jobs[0].Expression(); e != "at(2026-11-16T12:02:00)" {
+	if FunctionOffset <= time.Hour {
+		t.Error("the function's job is due before the poller's next hourly run")
+	}
+	if e := jobs[1].Expression(); e != "at(2026-11-16T13:32:00)" {
 		t.Errorf("expression %s", e)
 	}
-	// The log group goes whenever the function does, after it.
-	if j := (SelfRemoval{Region: region, AccountID: acct, Function: true}).Plan(t0); len(j) != 2 || j[1].Name != "lagotto-teardown-log-group" {
+	// The log group goes whenever the function does.
+	if j := (SelfRemoval{Region: region, AccountID: acct, Function: true}).Plan(t0); len(j) != 2 || j[0].Name != "lagotto-teardown-log-group" {
 		t.Errorf("function only: %+v", j)
+	}
+	if j := (SelfRemoval{Region: region, AccountID: acct, LogGroup: true}).Plan(t0); len(j) != 1 || j[0].Name != "lagotto-teardown-log-group" {
+		t.Errorf("log group only: %+v", j)
 	}
 	if j := (SelfRemoval{Region: region, AccountID: acct}).Plan(t0); len(j) != 0 {
 		t.Errorf("nothing to remove: %+v", j)
@@ -593,21 +602,33 @@ func TestSelfRemovalPlanOffsets(t *testing.T) {
 
 func TestCreateOneShotsIdempotent(t *testing.T) {
 	ev := &events{}
-	f := &fakeScheduler{e: ev, conflict: map[string]bool{"group": true, "lagotto-teardown-function": true}}
+	f := &fakeScheduler{e: ev, conflict: map[string]bool{"group": true, FunctionJobName: true}}
 	jobs := SelfRemoval{Region: region, AccountID: acct, Function: true}.Plan(t0)
 	var steps []string
 	created, err := CreateOneShots(context.Background(), f, region, acct, t0, jobs, func(_ context.Context, s string) error {
 		steps = append(steps, s)
 		return nil
 	})
-	if err != nil || len(created) != 2 || len(steps) != 2 {
-		t.Fatalf("created %v steps %v err %v", created, steps, err)
+	if err != nil || len(created) != 2 || len(steps) != 2 || len(f.inputs) != 3 {
+		t.Fatalf("created %v steps %v err %v, %d creates", created, steps, err, len(f.inputs))
 	}
 	// A failed heartbeat stops before the next job.
 	f.inputs = nil
 	_, err = CreateOneShots(context.Background(), f, region, acct, t0, jobs, func(context.Context, string) error { return lifecycle.ErrLeaseLost })
 	if !errors.Is(err, lifecycle.ErrLeaseLost) || len(f.inputs) != 0 {
 		t.Errorf("err %v, %d jobs created", err, len(f.inputs))
+	}
+	// The earlier job cannot be deleted: the recreate fails, named.
+	f = &fakeScheduler{e: ev, conflict: map[string]bool{"lagotto-teardown-log-group": true}, delErr: errors.New("AccessDenied")}
+	created, err = CreateOneShots(context.Background(), f, region, acct, t0, jobs, nil)
+	if err == nil || !strings.Contains(err.Error(), "recreate one-shot teardown job lagotto-teardown-log-group") || len(created) != 0 {
+		t.Errorf("delete failing: %v %v", created, err)
+	}
+	// Gone already: the create is tried again.
+	f = &fakeScheduler{e: ev, conflict: map[string]bool{"lagotto-teardown-log-group": true},
+		delErr: &schedulertypes.ResourceNotFoundException{Message: aws.String("gone")}}
+	if _, err = CreateOneShots(context.Background(), f, region, acct, t0, jobs, nil); err == nil || !strings.Contains(err.Error(), "create one-shot teardown job lagotto-teardown-log-group") {
+		t.Errorf("still conflicting after a NotFound delete: %v", err)
 	}
 }
 
@@ -664,8 +685,8 @@ func TestMarkActive(t *testing.T) {
 // ---- the poller's deleters ----------------------------------------------------
 
 // TestPollerDeletersRefuseItself: the AWS deleters the poller runs with refuse
-// its own function, log group, role, the invoke role and the CLI policy,
-// before any AWS call.
+// its own function and log group, and everything account-wide (lagotto's
+// instance role and profile included, lagotto#340), before any AWS call.
 func TestPollerDeletersRefuseItself(t *testing.T) {
 	d := PollerDeleters(aws.Config{Region: region}, acct, "", "", "")
 	ctx := context.Background()
@@ -676,13 +697,15 @@ func TestPollerDeletersRefuseItself(t *testing.T) {
 	if _, err := rd.DeletePollerLogGroup(ctx, region); !errors.Is(err, ErrSelfDelete) {
 		t.Errorf("log group: %v", err)
 	}
-	for _, role := range []string{runtimeiam.RoleName, runtimeiam.SchedulerInvokeRoleName, "team-gpu"} {
+	for _, role := range []string{runtimeiam.RoleName, runtimeiam.SchedulerInvokeRoleName, runtimeiam.InstanceRoleName, "team-gpu"} {
 		if _, err := d.Account.DeleteRole(ctx, role); !errors.Is(err, ErrSelfDelete) {
 			t.Errorf("role %s: %v", role, err)
 		}
 	}
-	if _, err := d.Account.DeleteInstanceProfile(ctx, "team-gpu"); !errors.Is(err, ErrSelfDelete) {
-		t.Errorf("profile: %v", err)
+	for _, p := range []string{runtimeiam.InstanceRoleName, "team-gpu"} {
+		if _, err := d.Account.DeleteInstanceProfile(ctx, p); !errors.Is(err, ErrSelfDelete) {
+			t.Errorf("profile %s: %v", p, err)
+		}
 	}
 	if _, err := d.Account.DeletePolicy(ctx); !errors.Is(err, ErrSelfDelete) {
 		t.Errorf("policy: %v", err)
@@ -706,9 +729,9 @@ func TestPhaseOf(t *testing.T) {
 	if r(inventory.TypeSchedule, deploy.PollerScheduleName, inventory.ScheduleARN(region, acct, "lagotto", deploy.PollerScheduleName)) != PhaseFinal {
 		t.Error("the rate schedule is not final")
 	}
-	if r(inventory.TypeRole, runtimeiam.RoleName, "") != PhaseSelf || r(inventory.TypeFunction, "f", "") != PhaseSelf ||
+	if r(inventory.TypeRole, runtimeiam.RoleName, "") != PhaseCLI || r(inventory.TypeFunction, "f", "") != PhaseSelf ||
 		r(inventory.TypeLogGroup, "g", "") != PhaseSelf {
-		t.Error("its own function, log group or role is not a job's")
+		t.Error("its own function or log group is not a job's, or its role is not the CLI's")
 	}
 	if r(inventory.TypeStack, "lagotto", "") != PhaseCLI || r(inventory.TypeCapacityReservation, "cr", "") != PhaseCLI {
 		t.Error("the poller deletes a stack or a reservation")
@@ -717,4 +740,13 @@ func TestPhaseOf(t *testing.T) {
 
 func fpResource(typ, name, arn string) fp.Resource {
 	return fp.Resource{Type: typ, Name: name, ARN: arn}
+}
+
+func (f *fakeScheduler) DeleteSchedule(_ context.Context, in *scheduler.DeleteScheduleInput, _ ...func(*scheduler.Options)) (*scheduler.DeleteScheduleOutput, error) {
+	f.e.add("delete one-shot %s/%s", aws.ToString(in.GroupName), aws.ToString(in.Name))
+	if f.delErr != nil {
+		return nil, f.delErr
+	}
+	delete(f.conflict, aws.ToString(in.Name)) // gone: a create no longer conflicts
+	return &scheduler.DeleteScheduleOutput{}, nil
 }

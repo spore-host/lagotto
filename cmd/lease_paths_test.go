@@ -8,10 +8,8 @@ import (
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/smithy-go"
-	fp "github.com/spore-host/libs/footprint"
 	"github.com/spore-host/libs/lifecycle"
 	"github.com/spore-host/libs/lifecycle/lifecycletest"
 
@@ -164,7 +162,9 @@ func TestTeardownPlanReapActiveRegionRefused(t *testing.T) {
 }
 
 // TestTeardownPlanReapAccountOnly: a plan that deletes only account-wide
-// resources leases the caller's region, and refuses without one.
+// resources takes no region's lease: the account-wide teardown runs under
+// the global lease, and keeps them while a poller is left; with none, it
+// removes them, finishes the global item and closes the control table.
 func TestTeardownPlanReapAccountOnly(t *testing.T) {
 	facts := func() inventory.Facts {
 		f := fpFacts()
@@ -173,23 +173,26 @@ func TestTeardownPlanReapAccountOnly(t *testing.T) {
 	}
 	table := lifecycletest.New()
 	rec, out, err := reapPlan(t, facts, table)
+	if err != nil || len(rec.calls) != 0 || !strings.Contains(out, "kept") {
+		t.Fatalf("err %v, deleted %v\n%s", err, rec.calls, out)
+	}
+	if table.Calls("CreateTable") != 0 {
+		t.Errorf("a blocked run wrote (%d CreateTable)", table.Calls("CreateTable"))
+	}
+
+	idleFacts := func() inventory.Facts {
+		f := orphanFacts()
+		f.Regions = []inventory.Region{{Region: "us-east-1"}}
+		return f
+	}
+	table = lifecycletest.New()
+	rec, out, err = reapPlan(t, idleFacts, table)
 	if err != nil || len(rec.calls) != 1 || rec.calls[0] != "global policy" {
 		t.Fatalf("err %v, deleted %v\n%s", err, rec.calls, out)
 	}
-	if table.Item(lifecycle.TableName, "tool#lagotto#us-west-2") != nil {
-		t.Error("the caller's region's lease was not finished")
-	}
-	if table.Calls("CreateTable") != 1 {
-		t.Errorf("the lease was not taken in the caller's region (%d CreateTable)", table.Calls("CreateTable"))
-	}
-
-	_, rec, _ = stubPlanTeardown(t, facts)
-	awscfg.SetLoaderForTest(t, func(context.Context, ...func(*awsconfig.LoadOptions) error) (aws.Config, error) {
-		return aws.Config{}, nil
-	})
-	teardownMode, teardownYes = "reap", true
-	if _, err := runTeardownPlanForTest(t, ""); err == nil || !strings.Contains(err.Error(), "pass --region") || len(rec.calls) != 0 {
-		t.Errorf("no region: err %v, deleted %v", err, rec.calls)
+	if table.Item(lifecycle.TableName, "tool#lagotto#global") != nil || table.Calls("CreateTable") != 1 || table.Calls("DeleteTable") != 1 {
+		t.Errorf("global item %v, %d CreateTable, %d DeleteTable", table.Item(lifecycle.TableName, "tool#lagotto#global"),
+			table.Calls("CreateTable"), table.Calls("DeleteTable"))
 	}
 }
 
@@ -246,7 +249,7 @@ func TestTeardownPlanReapAfterwards(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reapWithLeases(context.Background(), cfg, plan, planned, inventory.NewDeleter(planned, newTeardownDeleters(cfg, fpAcct)), &stderr); err != nil {
+	if _, err := reapWithLeases(context.Background(), cfg, fpAcct, plan, planned, inventory.NewDeleter(planned, newTeardownDeleters(cfg, fpAcct)), &stderr); err != nil {
 		t.Errorf("a table that cannot be closed failed the run: %v", err)
 	}
 	if !strings.Contains(stderr.String(), "could not remove the empty spore-host-lifecycle table") || len(rec.calls) != 7 {
@@ -266,41 +269,3 @@ func TestTeardownPlanReapAfterwards(t *testing.T) {
 		t.Errorf("release failing: %v", err)
 	}
 }
-
-// TestFencedDeleterStopsOnAnyLostLease: an account-wide step is re-checked
-// only while every region's lease holds; one lost lease refuses it before
-// the re-check reads anything.
-func TestFencedDeleterStopsOnAnyLostLease(t *testing.T) {
-	table := lifecycletest.New()
-	c, _ := lifecycle.New(lifecycle.Options{DynamoDB: func(string) (lifecycle.API, error) { return table, nil }})
-	ctx := context.Background()
-	var leases []*lifecycle.Lease
-	for _, r := range []string{"eu-west-1", "ap-southeast-2"} {
-		l, err := claimRegion(ctx, c, r, false)
-		if err != nil {
-			t.Fatal(err)
-		}
-		leases = append(leases, l)
-	}
-	inner := &countingDescriber{}
-	d := fencedDeleter{Deleter: inner, leases: leases}
-	res := fp.Resource{ARN: cliiam.PolicyARN(fpAcct), Type: inventory.TypePolicy}
-	if _, err := d.Describe(ctx, res); err != nil || inner.n != 1 {
-		t.Fatalf("both leases held: %v (%d reads)", err, inner.n)
-	}
-	// A creator in ap-southeast-2: the activity removes that lease.
-	if _, _, err := c.Observe(ctx, inventory.Tool, "ap-southeast-2", true); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := d.Describe(ctx, res); !errors.Is(err, lifecycle.ErrLeaseLost) || inner.n != 1 {
-		t.Errorf("a lost lease: %v (%d reads)", err, inner.n)
-	}
-}
-
-type countingDescriber struct{ n int }
-
-func (c *countingDescriber) Describe(_ context.Context, r fp.Resource) (fp.Resource, error) {
-	c.n++
-	return r, nil
-}
-func (c *countingDescriber) Delete(context.Context, fp.Resource) error { return nil }

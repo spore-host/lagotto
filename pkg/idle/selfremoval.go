@@ -17,29 +17,33 @@ import (
 	"github.com/spore-host/lagotto/pkg/runtimeiam"
 )
 
-// The self-removal plan. The poller never deletes its own function, log group
-// or role from inside itself: deleting the function mid-run is the obvious
+// The self-removal plan. The poller never deletes its own function or log
+// group from inside itself: deleting the function mid-run is the obvious
 // failure, and its log group is worse, because Lambda's log delivery recreates
 // a deleted group, untagged and with no retention, within seconds of a
 // delete while the function is still flushing (seen live on 2026-11-16, dev
 // account, us-east-1; lagotto#326). Instead it hands those deletes to
 // one-shot EventBridge Scheduler jobs in the lagotto-teardown group, which
-// run as the Scheduler invoke role (its LagottoTeardown policy grants exactly
-// them) and delete themselves after they run.
+// run as the Scheduler invoke role (its LagottoTeardown policy grants them)
+// and delete themselves after they run. The poller role, like every
+// account-wide resource, is not the poller's to remove: the CLI's
+// account-wide teardown (accountwide.go) does that once no poller is left.
 
 // The offsets of the one-shot jobs from the moment the teardown plans them.
 const (
-	// FunctionOffset: the function goes once this run has long finished.
-	FunctionOffset = 2 * time.Minute
-	// RolePolicyOffset: the poller role is emptied after the function is
-	// gone (DeleteRole refuses a role that still has policies)...
-	RolePolicyOffset = 4 * time.Minute
-	// RoleOffset: ...and deleted a minute later.
-	RoleOffset = 5 * time.Minute
+	// FunctionOffset: the function goes after the poller's next run at its
+	// idle cadence (rate(1h)), so a teardown that stops after creating this
+	// job, but before deleting its own schedule, runs once more and finishes
+	// its region (lagotto#340).
+	FunctionOffset = 92 * time.Minute
 	// LogGroupOffset: the log group goes well after the function's last log
 	// flush, so nothing recreates it.
-	LogGroupOffset = 15 * time.Minute
+	LogGroupOffset = FunctionOffset + 15*time.Minute
 )
+
+// FunctionJobName is the one-shot job that deletes a region's poller
+// function. While it is waiting, that region's teardown has finished.
+const FunctionJobName = "lagotto-teardown-function"
 
 // OneShot is one teardown job: at At (Offset after planning), EventBridge
 // Scheduler calls the AWS API Target with Input, as the invoke role.
@@ -68,8 +72,6 @@ type SelfRemoval struct {
 	// delete guard. The log group is removed whenever the function is, since
 	// the function's last flush can recreate it.
 	Function, LogGroup bool
-	// Role: this is the last region and the poller role passes the guard.
-	Role bool
 }
 
 // sdkTarget is a Scheduler universal target.
@@ -82,44 +84,13 @@ func input(v map[string]string) string {
 	return string(b)
 }
 
-// Plan returns the one-shot jobs, in the order they run, planned at now.
+// Plan returns the one-shot jobs, planned at now, in the order they are
+// created: the log group's, then the function's. Creating the function's job
+// commits the poller's removal, so a run that stops before it leaves a
+// poller that still runs.
 func (s SelfRemoval) Plan(now time.Time) []OneShot {
 	at := func(o OneShot) OneShot { o.At = now.UTC().Add(o.Offset).Truncate(time.Second); return o }
 	var out []OneShot
-	if s.Function {
-		out = append(out, at(OneShot{
-			Name: "lagotto-teardown-function", Offset: FunctionOffset,
-			Target:   sdkTarget("lambda", "deleteFunction"),
-			Input:    input(map[string]string{"FunctionName": deploy.PollerFunctionName}),
-			Resource: deploy.PollerFunctionARN(s.Region, s.AccountID),
-			Why:      "the poller cannot delete the function it runs in",
-		}))
-	}
-	if s.Role {
-		role := runtimeiam.RoleName
-		out = append(out,
-			at(OneShot{
-				Name: "lagotto-teardown-role-inline", Offset: RolePolicyOffset,
-				Target:   sdkTarget("iam", "deleteRolePolicy"),
-				Input:    input(map[string]string{"RoleName": role, "PolicyName": runtimeiam.PolicyName}),
-				Resource: runtimeiam.RoleARN(s.AccountID),
-				Why:      "the poller role is emptied after the function that runs as it is gone",
-			}),
-			at(OneShot{
-				Name: "lagotto-teardown-role-managed", Offset: RolePolicyOffset,
-				Target:   sdkTarget("iam", "detachRolePolicy"),
-				Input:    input(map[string]string{"RoleName": role, "PolicyArn": runtimeiam.BasicExecutionPolicyARN}),
-				Resource: runtimeiam.RoleARN(s.AccountID),
-				Why:      "the poller role is emptied after the function that runs as it is gone",
-			}),
-			at(OneShot{
-				Name: "lagotto-teardown-role", Offset: RoleOffset,
-				Target:   sdkTarget("iam", "deleteRole"),
-				Input:    input(map[string]string{"RoleName": role}),
-				Resource: runtimeiam.RoleARN(s.AccountID),
-				Why:      "the poller cannot delete the role it runs as; this is the last region with a poller",
-			}))
-	}
 	if s.Function || s.LogGroup {
 		out = append(out, at(OneShot{
 			Name: "lagotto-teardown-log-group", Offset: LogGroupOffset,
@@ -127,6 +98,15 @@ func (s SelfRemoval) Plan(now time.Time) []OneShot {
 			Input:    input(map[string]string{"LogGroupName": deploy.PollerLogGroupName}),
 			Resource: deploy.PollerLogGroupARN(s.Region, s.AccountID),
 			Why:      "after the function's last log flush: deleted earlier, Lambda recreates it untagged",
+		}))
+	}
+	if s.Function {
+		out = append(out, at(OneShot{
+			Name: FunctionJobName, Offset: FunctionOffset,
+			Target:   sdkTarget("lambda", "deleteFunction"),
+			Input:    input(map[string]string{"FunctionName": deploy.PollerFunctionName}),
+			Resource: deploy.PollerFunctionARN(s.Region, s.AccountID),
+			Why:      "the poller cannot delete the function it runs in",
 		}))
 	}
 	return out
@@ -137,6 +117,8 @@ func (s SelfRemoval) Plan(now time.Time) []OneShot {
 type OneShotAPI interface {
 	CreateScheduleGroup(ctx context.Context, in *scheduler.CreateScheduleGroupInput, optFns ...func(*scheduler.Options)) (*scheduler.CreateScheduleGroupOutput, error)
 	CreateSchedule(ctx context.Context, in *scheduler.CreateScheduleInput, optFns ...func(*scheduler.Options)) (*scheduler.CreateScheduleOutput, error)
+	// DeleteSchedule rolls back the jobs of a commit that failed.
+	DeleteSchedule(ctx context.Context, in *scheduler.DeleteScheduleInput, optFns ...func(*scheduler.Options)) (*scheduler.DeleteScheduleOutput, error)
 }
 
 // ScheduleInput is the CreateSchedule request for one job.
@@ -161,10 +143,16 @@ func isConflict(err error) bool {
 	return errors.As(err, &c)
 }
 
+func isNotFound(err error) bool {
+	var nf *schedulertypes.ResourceNotFoundException
+	return errors.As(err, &nf)
+}
+
 // CreateOneShots creates the lagotto-teardown schedule group, tagged, and
-// then each job in it. Both are idempotent: a ConflictException (the group or
-// job already exists, from a teardown that crashed after creating it) counts
-// as success, so a resumed teardown carries on where it stopped. before, when
+// then each job in it. The group's ConflictException (it exists) is success.
+// A job's ConflictException means an earlier run's job of that name, which
+// keeps the time it was created with: it is deleted and created again at
+// this run's time, so every job fires after the poller's next run. before, when
 // set, runs before each job is created (the lease heartbeat); its error stops
 // the creation.
 func CreateOneShots(ctx context.Context, api OneShotAPI, region, accountID string, now time.Time, jobs []OneShot,
@@ -186,7 +174,18 @@ func CreateOneShots(ctx context.Context, api OneShotAPI, region, accountID strin
 				return created, err
 			}
 		}
-		if _, err := api.CreateSchedule(ctx, ScheduleInput(j, invoke)); err != nil && !isConflict(err) {
+		_, err := api.CreateSchedule(ctx, ScheduleInput(j, invoke))
+		if isConflict(err) {
+			// An earlier run's job of that name, with its own time: a job
+			// keeps the time it was created with (ConflictException), so it
+			// is recreated at this run's, after the poller's next run.
+			if _, derr := api.DeleteSchedule(ctx, &scheduler.DeleteScheduleInput{
+				Name: aws.String(j.Name), GroupName: aws.String(runtimeiam.TeardownScheduleGroup)}); derr != nil && !isNotFound(derr) {
+				return created, fmt.Errorf("recreate one-shot teardown job %s: delete the earlier one: %w", j.Name, derr)
+			}
+			_, err = api.CreateSchedule(ctx, ScheduleInput(j, invoke))
+		}
+		if err != nil {
 			return created, fmt.Errorf("create one-shot teardown job %s: %w", j.Name, err)
 		}
 		created = append(created, j.Name)
