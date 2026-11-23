@@ -423,3 +423,7 @@ func TestNewClient(t *testing.T) {
 	}
 	_ = lifecycletest.New
 }
+
+func (g *groupFails) DeleteSchedule(context.Context, *scheduler.DeleteScheduleInput, ...func(*scheduler.Options)) (*scheduler.DeleteScheduleOutput, error) {
+	return &scheduler.DeleteScheduleOutput{}, nil
+}

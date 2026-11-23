@@ -361,7 +361,17 @@ func claimRegion(ctx context.Context, c *lifecycle.Client, region string, active
 	if active {
 		return nil, fmt.Errorf("something of lagotto's in %s is in use", region)
 	}
-	if _, _, err := c.Observe(ctx, inventory.Tool, region, false); err != nil {
+	_, _, err := c.Observe(ctx, inventory.Tool, region, false)
+	if errors.Is(err, lifecycle.ErrTableClosing) {
+		// A closer that died left its sentinel, which Observe never clears
+		// (libs#88): CloseTableIfEmpty takes a stale one over (and drops it
+		// while items remain), and a live closer's it leaves alone.
+		if _, cerr := c.CloseTableIfEmpty(ctx, region); cerr != nil {
+			return nil, errors.Join(err, cerr)
+		}
+		_, _, err = c.Observe(ctx, inventory.Tool, region, false)
+	}
+	if err != nil {
 		return nil, err
 	}
 	return c.Claim(ctx, inventory.Tool, region, 0)

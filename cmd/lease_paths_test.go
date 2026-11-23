@@ -6,10 +6,12 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/smithy-go"
 	fp "github.com/spore-host/libs/footprint"
 	"github.com/spore-host/libs/lifecycle"
@@ -304,3 +306,37 @@ func (c *countingDescriber) Describe(_ context.Context, r fp.Resource) (fp.Resou
 	return r, nil
 }
 func (c *countingDescriber) Delete(context.Context, fp.Resource) error { return nil }
+
+// TestClaimRegionTakesOverAStaleSentinel: a CloseTableIfEmpty that died
+// left its closing sentinel, which Observe never clears (libs#88): the claim
+// takes the stale one over (the table holds an item, so it is dropped) and
+// claims. A live closer's sentinel still refuses.
+func TestClaimRegionTakesOverAStaleSentinel(t *testing.T) {
+	ctx := context.Background()
+	table := lifecycletest.New()
+	now := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+	at := now
+	c, _ := lifecycle.New(lifecycle.Options{DynamoDB: func(string) (lifecycle.API, error) { return table, nil },
+		Now: func() time.Time { return at }})
+	if err := c.MarkActive(ctx, inventory.Tool, "eu-west-1"); err != nil { // so the claim's Observe writes
+		t.Fatal(err)
+	}
+	put := func(since time.Time) {
+		_, err := table.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String(lifecycle.TableName), Item: map[string]ddbtypes.AttributeValue{
+			"pk": &ddbtypes.AttributeValueMemberS{Value: lifecycle.SentinelKey}, "token": &ddbtypes.AttributeValueMemberS{Value: "dead"},
+			"owner": &ddbtypes.AttributeValueMemberS{Value: "a poller"}, "since": &ddbtypes.AttributeValueMemberS{Value: since.UTC().Format("2006-01-02T15:04:05.000Z")},
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	put(now)
+	if _, err := claimRegion(ctx, c, "eu-west-1", false); !errors.Is(err, lifecycle.ErrTableClosing) {
+		t.Fatalf("a live closer's sentinel: %v", err)
+	}
+	at = now.Add(21 * time.Minute)
+	l, err := claimRegion(ctx, c, "eu-west-1", false)
+	if err != nil || l == nil {
+		t.Fatalf("a stale sentinel: %v", err)
+	}
+}

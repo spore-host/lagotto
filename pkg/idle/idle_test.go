@@ -389,11 +389,12 @@ func TestReportDeletesNothingAndLogsThePlan(t *testing.T) {
 		// the other region, judged.
 		`phase=global other_region=us-west-2 standing=done why="no lifecycle item"`,
 		// the jobs, with their offsets.
-		"phase=one-shot name=lagotto-teardown-function offset=+2m0s at=2026-11-17T12:03:00Z group=lagotto-teardown target=arn:aws:scheduler:::aws-sdk:lambda:deleteFunction input={\"FunctionName\":\"lagotto-capacity-poller\"}",
-		"phase=one-shot name=lagotto-teardown-role-inline offset=+4m0s",
-		"phase=one-shot name=lagotto-teardown-role-managed offset=+4m0s",
-		"phase=one-shot name=lagotto-teardown-role offset=+5m0s",
-		"phase=one-shot name=lagotto-teardown-log-group offset=+15m0s at=2026-11-17T12:16:00Z group=lagotto-teardown target=arn:aws:scheduler:::aws-sdk:cloudwatchlogs:deleteLogGroup input={\"LogGroupName\":\"/aws/lambda/lagotto-capacity-poller\"}",
+		// (each after the poller's next hourly run, lagotto#340).
+		"phase=one-shot name=lagotto-teardown-function offset=+1h32m0s at=2026-11-17T13:33:00Z group=lagotto-teardown target=arn:aws:scheduler:::aws-sdk:lambda:deleteFunction input={\"FunctionName\":\"lagotto-capacity-poller\"}",
+		"phase=one-shot name=lagotto-teardown-role-inline offset=+1h33m0s",
+		"phase=one-shot name=lagotto-teardown-role-managed offset=+1h33m0s",
+		"phase=one-shot name=lagotto-teardown-role offset=+1h34m0s",
+		"phase=one-shot name=lagotto-teardown-log-group offset=+1h47m0s at=2026-11-17T13:48:00Z group=lagotto-teardown target=arn:aws:scheduler:::aws-sdk:cloudwatchlogs:deleteLogGroup input={\"LogGroupName\":\"/aws/lambda/lagotto-capacity-poller\"}",
 		// the summary.
 		"idle-teardown REPORT region=us-east-1 would_delete=12 kept=2 failed=0 one_shots=5 last_region=true lease=released",
 	} {
@@ -466,7 +467,7 @@ func TestReportGuardStillApplies(t *testing.T) {
 	}
 	log := h.log()
 	if !strings.Contains(log, "phase=self outcome=kept type=AWS::Logs::LogGroup") ||
-		!strings.Contains(log, "name=lagotto-teardown-log-group offset=+15m0s") {
+		!strings.Contains(log, "name=lagotto-teardown-log-group offset=+1h47m0s") {
 		t.Errorf("log:\n%s", log)
 	}
 }
@@ -588,12 +589,16 @@ func TestReapStopsOnLostLease(t *testing.T) {
 
 func TestSelfRemovalPlanOffsets(t *testing.T) {
 	jobs := SelfRemoval{Region: region, AccountID: acct, Function: true, LogGroup: true, Role: true}.Plan(t0)
+	// In the order they are created: the poller role's first, the function's
+	// (the commit) last; and every one fires after the poller's next hourly
+	// run, so a teardown that stops after any of them runs once more and
+	// finishes (lagotto#340).
 	want := []struct {
 		name string
 		off  time.Duration
-	}{{"lagotto-teardown-function", 2 * time.Minute}, {"lagotto-teardown-role-inline", 4 * time.Minute},
-		{"lagotto-teardown-role-managed", 4 * time.Minute}, {"lagotto-teardown-role", 5 * time.Minute},
-		{"lagotto-teardown-log-group", 15 * time.Minute}}
+	}{{"lagotto-teardown-role-inline", 93 * time.Minute}, {"lagotto-teardown-role-managed", 93 * time.Minute},
+		{"lagotto-teardown-role", 94 * time.Minute}, {"lagotto-teardown-log-group", 107 * time.Minute},
+		{"lagotto-teardown-function", 92 * time.Minute}}
 	if len(jobs) != len(want) {
 		t.Fatalf("%d jobs", len(jobs))
 	}
@@ -601,16 +606,26 @@ func TestSelfRemovalPlanOffsets(t *testing.T) {
 		if jobs[i].Name != w.name || jobs[i].Offset != w.off || !jobs[i].At.Equal(t0.Add(w.off)) {
 			t.Errorf("job %d = %+v, want %s at +%s", i, jobs[i], w.name, w.off)
 		}
+		if w.off <= time.Hour {
+			t.Errorf("job %s fires before the poller's next hourly run", w.name)
+		}
 	}
-	if e := jobs[0].Expression(); e != "at(2026-11-16T12:02:00)" {
+	if e := jobs[4].Expression(); e != "at(2026-11-16T13:32:00)" {
 		t.Errorf("expression %s", e)
 	}
-	// The log group goes whenever the function does, after it.
-	if j := (SelfRemoval{Region: region, AccountID: acct, Function: true}).Plan(t0); len(j) != 2 || j[1].Name != "lagotto-teardown-log-group" {
+	// The function goes before its role, and the log group after the function.
+	if FunctionOffset >= RolePolicyOffset || RolePolicyOffset >= RoleOffset || FunctionOffset >= LogGroupOffset {
+		t.Error("offsets out of order")
+	}
+	// The log group goes whenever the function does; the function's job last.
+	if j := (SelfRemoval{Region: region, AccountID: acct, Function: true}).Plan(t0); len(j) != 2 || j[0].Name != "lagotto-teardown-log-group" || j[1].Name != FunctionJobName {
 		t.Errorf("function only: %+v", j)
 	}
 	if j := (SelfRemoval{Region: region, AccountID: acct}).Plan(t0); len(j) != 0 {
 		t.Errorf("nothing to remove: %+v", j)
+	}
+	if !strings.Contains(jobs[2].Why, "every other region is done") {
+		t.Errorf("the role job's description: %q", jobs[2].Why)
 	}
 }
 
@@ -740,4 +755,9 @@ func TestPhaseOf(t *testing.T) {
 
 func fpResource(typ, name, arn string) fp.Resource {
 	return fp.Resource{Type: typ, Name: name, ARN: arn}
+}
+
+func (f *fakeScheduler) DeleteSchedule(_ context.Context, in *scheduler.DeleteScheduleInput, _ ...func(*scheduler.Options)) (*scheduler.DeleteScheduleOutput, error) {
+	f.e.add("delete one-shot %s/%s", aws.ToString(in.GroupName), aws.ToString(in.Name))
+	return &scheduler.DeleteScheduleOutput{}, nil
 }

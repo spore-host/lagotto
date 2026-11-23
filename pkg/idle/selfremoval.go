@@ -29,16 +29,19 @@ import (
 
 // The offsets of the one-shot jobs from the moment the teardown plans them.
 const (
-	// FunctionOffset: the function goes once this run has long finished.
-	FunctionOffset = 2 * time.Minute
+	// FunctionOffset: the function goes after the poller's next run at its
+	// idle cadence (rate(1h)), so a teardown that stops after creating this
+	// job, but before deleting its own schedule, runs once more and finishes
+	// (lagotto#340).
+	FunctionOffset = 92 * time.Minute
 	// RolePolicyOffset: the poller role is emptied after the function is
 	// gone (DeleteRole refuses a role that still has policies)...
-	RolePolicyOffset = 4 * time.Minute
+	RolePolicyOffset = FunctionOffset + time.Minute
 	// RoleOffset: ...and deleted a minute later.
-	RoleOffset = 5 * time.Minute
+	RoleOffset = FunctionOffset + 2*time.Minute
 	// LogGroupOffset: the log group goes well after the function's last log
 	// flush, so nothing recreates it.
-	LogGroupOffset = 15 * time.Minute
+	LogGroupOffset = FunctionOffset + 15*time.Minute
 )
 
 // FunctionJobName is the one-shot job that deletes a region's poller
@@ -87,19 +90,13 @@ func input(v map[string]string) string {
 	return string(b)
 }
 
-// Plan returns the one-shot jobs, in the order they run, planned at now.
+// Plan returns the one-shot jobs, planned at now, in the order they are
+// created: the poller role's first, the function's last. Creating the
+// function's job commits the poller's removal, so a run that stops before it
+// leaves a poller that still runs.
 func (s SelfRemoval) Plan(now time.Time) []OneShot {
 	at := func(o OneShot) OneShot { o.At = now.UTC().Add(o.Offset).Truncate(time.Second); return o }
 	var out []OneShot
-	if s.Function {
-		out = append(out, at(OneShot{
-			Name: FunctionJobName, Offset: FunctionOffset,
-			Target:   sdkTarget("lambda", "deleteFunction"),
-			Input:    input(map[string]string{"FunctionName": deploy.PollerFunctionName}),
-			Resource: deploy.PollerFunctionARN(s.Region, s.AccountID),
-			Why:      "the poller cannot delete the function it runs in",
-		}))
-	}
 	if s.Role {
 		role := runtimeiam.RoleName
 		out = append(out,
@@ -122,7 +119,7 @@ func (s SelfRemoval) Plan(now time.Time) []OneShot {
 				Target:   sdkTarget("iam", "deleteRole"),
 				Input:    input(map[string]string{"RoleName": role}),
 				Resource: runtimeiam.RoleARN(s.AccountID),
-				Why:      "the poller cannot delete the role it runs as; this is the last region with a poller",
+				Why:      "the poller cannot delete the role it runs as; every other region is done, so this region removes the account-wide resources",
 			}))
 	}
 	if s.Function || s.LogGroup {
@@ -134,6 +131,15 @@ func (s SelfRemoval) Plan(now time.Time) []OneShot {
 			Why:      "after the function's last log flush: deleted earlier, Lambda recreates it untagged",
 		}))
 	}
+	if s.Function {
+		out = append(out, at(OneShot{
+			Name: FunctionJobName, Offset: FunctionOffset,
+			Target:   sdkTarget("lambda", "deleteFunction"),
+			Input:    input(map[string]string{"FunctionName": deploy.PollerFunctionName}),
+			Resource: deploy.PollerFunctionARN(s.Region, s.AccountID),
+			Why:      "the poller cannot delete the function it runs in",
+		}))
+	}
 	return out
 }
 
@@ -142,6 +148,8 @@ func (s SelfRemoval) Plan(now time.Time) []OneShot {
 type OneShotAPI interface {
 	CreateScheduleGroup(ctx context.Context, in *scheduler.CreateScheduleGroupInput, optFns ...func(*scheduler.Options)) (*scheduler.CreateScheduleGroupOutput, error)
 	CreateSchedule(ctx context.Context, in *scheduler.CreateScheduleInput, optFns ...func(*scheduler.Options)) (*scheduler.CreateScheduleOutput, error)
+	// DeleteSchedule rolls back the jobs of a commit that failed.
+	DeleteSchedule(ctx context.Context, in *scheduler.DeleteScheduleInput, optFns ...func(*scheduler.Options)) (*scheduler.DeleteScheduleOutput, error)
 }
 
 // ScheduleInput is the CreateSchedule request for one job.
@@ -164,6 +172,11 @@ func ScheduleInput(o OneShot, invokeRoleARN string) *scheduler.CreateScheduleInp
 func isConflict(err error) bool {
 	var c *schedulertypes.ConflictException
 	return errors.As(err, &c)
+}
+
+func isNotFound(err error) bool {
+	var nf *schedulertypes.ResourceNotFoundException
+	return errors.As(err, &nf)
 }
 
 // CreateOneShots creates the lagotto-teardown schedule group, tagged, and

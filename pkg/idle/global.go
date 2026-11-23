@@ -82,28 +82,30 @@ import (
 // last of them.
 
 // ControlRegion is the region whose spore-host-lifecycle table holds lagotto's
-// global-scope lifecycle item: the partition's IAM home region, so that every
-// region's poller and every CLI read the same one. An empty region is the
-// commercial partition's. A region of a partition lagotto does not know (the
-// ISO partitions, the European Sovereign Cloud, anything new) is an error:
-// guessing would put the lease where those regions cannot reach it.
+// global-scope lifecycle item: the commercial partition's IAM home region,
+// us-east-1, so that every region's poller and every CLI read the same one.
+// An empty region is the commercial partition's.
+//
+// Any other partition is an error, so the global teardown fails closed there:
+// the ISO partitions and the European Sovereign Cloud cannot reach us-east-1,
+// and in aws-us-gov and aws-cn lagotto's runtime policy cannot reach any
+// lifecycle table at all (runtimeiam.RegionalARN names the aws partition
+// only; lagotto#347).
 func ControlRegion(region string) (string, error) {
 	switch {
 	case region == "":
 		return "us-east-1", nil
-	case strings.HasPrefix(region, "us-gov-"):
-		return "us-gov-west-1", nil
-	case strings.HasPrefix(region, "cn-"):
-		return "cn-north-1", nil
-	case strings.HasPrefix(region, "us-iso"), strings.HasPrefix(region, "eusc-"):
-		return "", fmt.Errorf("no control region for %s: lagotto's global teardown lease knows only the aws, aws-us-gov and aws-cn partitions", region)
+	case strings.Contains(region, "-iso"), strings.HasPrefix(region, "eusc-"):
+		return "", fmt.Errorf("no control region for %s: lagotto's global teardown lease works only in the aws partition", region)
+	case strings.HasPrefix(region, "us-gov-"), strings.HasPrefix(region, "cn-"):
+		return "", fmt.Errorf("no control region for %s: lagotto's runtime policy names only the aws partition's lifecycle tables (lagotto#347)", region)
 	}
 	for _, p := range []string{"us-", "eu-", "ap-", "ca-", "sa-", "me-", "af-", "il-", "mx-"} {
 		if strings.HasPrefix(region, p) {
 			return "us-east-1", nil
 		}
 	}
-	return "", fmt.Errorf("no control region for %s: its partition is not one lagotto's global teardown lease knows (aws, aws-us-gov, aws-cn)", region)
+	return "", fmt.Errorf("no control region for %s: lagotto's global teardown lease works only in the aws partition", region)
 }
 
 // PollerOwner is the lease owner a region's poller writes: the only owner
@@ -143,6 +145,11 @@ type OtherRegion struct {
 	Region   string
 	Standing Standing
 	Why      string
+	// Exists, Epoch and State are its lifecycle item as read: the fence
+	// compares them.
+	Exists bool
+	Epoch  int64
+	State  lifecycle.State
 	// Owes: it is not done, and its own live poller will run the global
 	// step when it tears down (it has a lifecycle item, its activity was
 	// read, and no one but its poller holds its lease). Deferring to such a
@@ -185,7 +192,7 @@ func judgeOthers(ctx context.Context, lc *lifecycle.Client, f *inventory.Facts, 
 // lifecycle.Client.Get's answer; stale: its lease is stale) and its footprint
 // facts rf.
 func judge(rf *inventory.Region, it lifecycle.Item, ok bool, err error, stale bool, now time.Time) OtherRegion {
-	o := OtherRegion{Region: rf.Region, Standing: StandingActive}
+	o := OtherRegion{Region: rf.Region, Standing: StandingActive, Exists: ok, Epoch: it.Epoch, State: it.State}
 	live := pollerLive(rf)
 	owner := PollerOwner(rf.Region)
 	switch {
@@ -195,19 +202,29 @@ func judge(rf *inventory.Region, it lifecycle.Item, ok bool, err error, stale bo
 		o.Why = strings.Join(rf.ActiveReasons(), "; ")
 	case ok && len(it.Holds) > 0:
 		o.Why = fmt.Sprintf("held by %v", it.Holds)
-	case ok && it.Lease != nil && stale && live:
+	case ok && it.Lease != nil && live && stale:
 		o.Why = "its teardown stalled (a stale lease held by " + it.Lease.Owner + "); its poller resumes it at its next run"
+	case ok && it.Lease != nil && live && it.Lease.Owner == owner:
+		o.Standing, o.Why = StandingPending, "its poller is tearing it down"
+	case ok && it.Lease != nil && live:
+		o.Why = "a teardown by " + it.Lease.Owner + " holds its lease; only its own poller decides the account-wide resources"
+	case ok && it.Lease != nil && it.Lease.Owner == owner:
+		// Its poller is handed to its jobs: that run decided, and committed
+		// its removal; what is left of it the last mile reports.
+		o.Standing, o.Why = StandingDone, "its poller committed its own removal (lease held by "+it.Lease.Owner+")"
 	case ok && it.Lease != nil && stale:
 		o.Standing = StandingDone
 		o.Why = "its teardown stalled (a stale lease held by " + it.Lease.Owner + ") with no live poller left; the last mile reports it to resume"
-	case ok && it.Lease != nil && it.Lease.Owner == owner && live:
-		o.Standing, o.Why = StandingPending, "its poller is tearing it down"
 	case ok && it.Lease != nil:
 		o.Why = "a teardown by " + it.Lease.Owner + " holds its lease; only its own poller decides the account-wide resources"
+	case ok && it.State == lifecycle.StateActive:
+		// Whatever the footprint says: a creator marks a region active
+		// before it creates anything.
+		o.Why = "state ACTIVE"
 	case ok && !live && !lagottoLeft(rf):
 		o.Standing, o.Why = StandingDone, "a lifecycle item (state "+string(it.State)+"), and nothing of lagotto's left"
 	case ok && !live:
-		o.Why = "state " + string(it.State) + ", with no poller to tear it down ('lagotto teardown --plan' removes what is left)"
+		o.Why = "state " + string(it.State) + ", with no live poller to tear it down ('lagotto teardown --plan' removes what is left)"
 	case ok && it.State == lifecycle.StateIdle:
 		grace := graceOf(rf)
 		if idle := it.IdleFor(now); !it.IdleSince.IsZero() && idle >= grace {
@@ -231,14 +248,16 @@ func judge(rf *inventory.Region, it lifecycle.Item, ok bool, err error, stale bo
 }
 
 // pollerLive reports whether r has a poller that will run again: its
-// function, not yet handed to its one-shot delete job, and its rate
-// schedule.
+// function, not yet handed to its one-shot delete job, and its rate schedule
+// ENABLED. `lagotto deploy` creates the schedule DISABLED, and only a watch
+// enables it (idle mode keeps it ENABLED, at rate(1h)), so a region deployed
+// and never watched has no poller that will ever run.
 func pollerLive(r *inventory.Region) bool {
 	if r.Function == nil || functionJobPending(r) {
 		return false
 	}
 	for _, s := range r.Schedules {
-		if s.Name == deploy.PollerScheduleName {
+		if s.Name == deploy.PollerScheduleName && s.State == "ENABLED" {
 			return true
 		}
 	}
@@ -321,6 +340,14 @@ func acquireGlobal(ctx context.Context, cfg Config, lc *lifecycle.Client) (*life
 			}
 		}
 		_, _, err := lc.Observe(ctx, Tool, lifecycle.ScopeGlobal, false)
+		if errors.Is(err, lifecycle.ErrTableClosing) {
+			// A closer that died left its sentinel, which Observe never
+			// clears (libs#88): CloseTableIfEmpty takes a stale one over (and leaves
+			// a live closer's alone). The next try observes again.
+			if control, cerr := lc.RegionFor(lifecycle.ScopeGlobal); cerr == nil {
+				_, _ = lc.CloseTableIfEmpty(ctx, control)
+			}
+		}
 		if err == nil {
 			var l *lifecycle.Lease
 			if l, err = lc.Claim(ctx, Tool, lifecycle.ScopeGlobal, 0); err == nil {
@@ -348,6 +375,9 @@ type GlobalPlan struct {
 	Direct, Self *fp.Result
 	// OneShots are the poller role's removal jobs.
 	OneShots []OneShot
+
+	live    *fp.Report
+	deleter fp.Deleter
 }
 
 // GlobalLease is what became of the global lease.
@@ -355,81 +385,22 @@ type GlobalLease string
 
 // The global lease's fates, as the summary logs them (global_lease=).
 const (
-	// GlobalNone: not taken (report mode).
+	// GlobalNone: not taken (report mode, or no control region).
 	GlobalNone GlobalLease = "none"
-	// GlobalFinished: the decision was clean, and the item is gone.
+	// GlobalFinished: the item is gone.
 	GlobalFinished GlobalLease = "finished"
-	// GlobalHeld: left held, to go stale and be resumed.
+	// GlobalHeld: left held, to go stale and be taken over.
 	GlobalHeld GlobalLease = "held"
 )
 
-// globalOutcome is what the global step did.
-type globalOutcome struct {
-	// endErr is the regional lease's Finish (reap) or Release (report) error.
-	endErr error
-	// lease is what became of the global lease.
-	lease GlobalLease
-	// err is a failure of the global step itself.
-	err error
-}
-
-// global is the global step, run at the end of a region's teardown with its
-// regional lease held, and in reap mode the global lease gl too. It ends the
-// regional lease and records its decision in plan.
-func (t *run) global(ctx context.Context, plan *Plan, gl *lifecycle.Lease) globalOutcome {
-	cfg := t.cfg
-	g := globalOutcome{lease: GlobalNone}
-	if !cfg.Reap {
-		g.endErr = t.lease.Release(ctx)
-		if g.endErr != nil {
-			plan.LastWhy = "could not release this region's lease: " + g.endErr.Error()
-			return g
-		}
-		// Report mode only reads the global scope: a global teardown that
-		// holds or owes the lease is a reap-mode poller's.
-		it, ok, err := t.d.Lifecycle.Get(ctx, Tool, lifecycle.ScopeGlobal)
-		switch {
-		case err != nil:
-			plan.LastWhy = "could not read the global teardown lease: " + err.Error()
-		case ok && it.Lease != nil:
-			plan.LastWhy = "a global teardown holds or owes the global lease (" + it.Lease.Owner + ")"
-		default:
-			_, g.err = t.decide(ctx, plan, nil)
-		}
-		return g
-	}
-
-	// The region has committed its removal (its poller will not run again),
-	// so from here only a durable decision deletes the global item.
-	g.endErr = t.lease.Finish(ctx)
-	if g.endErr != nil {
-		plan.LastWhy = "could not finish this region's lease: " + g.endErr.Error()
-		g.lease = t.holdGlobal("this region's lease could not be finished after it committed its removal")
-		return g
-	}
-	durable, err := t.decide(ctx, plan, gl)
-	g.err = err
-	if durable {
-		g.lease = t.finishGlobal(ctx, gl)
-		return g
-	}
-	g.lease = t.holdGlobal("the account-wide decision is not durable: the resources are not all gone, and no region with a live poller owes them")
-	return g
-}
-
-// holdGlobal leaves the global lease held (the invariant's "every other
-// exit") and logs why.
-func (t *run) holdGlobal(why string) GlobalLease {
-	t.cfg.Logf("idle-teardown %s region=%s phase=global lease=held scope=%s reason=%q", t.cfg.label(), t.cfg.Region, lifecycle.ScopeGlobal,
-		why+"; the lease goes stale in 20 min, then the next region's teardown takes it over and the CLI's last mile reports it to resume")
-	return GlobalHeld
-}
-
 // finishGlobal finishes the global lease, which deletes the global item, and
 // closes the control region's lifecycle table if nothing is left in it
-// (acquireGlobal's Observe may have created it). Call it only where the
-// invariant allows.
+// (acquireGlobal's Observe may have created it). A lease another region took
+// over (it went stale) stays that region's.
 func (t *run) finishGlobal(ctx context.Context, gl *lifecycle.Lease) GlobalLease {
+	if gl == nil {
+		return GlobalNone
+	}
 	if err := gl.Finish(ctx); err != nil {
 		t.cfg.Logf("idle-teardown %s region=%s phase=global lease=finish-failed scope=%s error=%q", t.cfg.label(), t.cfg.Region, lifecycle.ScopeGlobal, err.Error())
 		return GlobalHeld
@@ -440,50 +411,73 @@ func (t *run) finishGlobal(ctx context.Context, gl *lifecycle.Lease) GlobalLease
 	return GlobalFinished
 }
 
-// decide reads the footprint again and the other regions' items, decides,
-// and if this region is the last plans (and in reap mode removes) the
-// account-wide resources under gl. durable: the invariant lets the global
-// item go (the resources are gone, or a region with a live poller owes them).
-func (t *run) decide(ctx context.Context, plan *Plan, gl *lifecycle.Lease) (durable bool, err error) {
-	cfg, d := t.cfg, t.d
-	fresh, err := inventory.Gather(ctx, d.Source, cfg.AccountID, inventory.Scope{AllRegions: true}, cfg.Options)
-	if err != nil {
-		plan.LastWhy = "could not read the footprint again: " + err.Error()
-		return false, err
+// judgeAll reads every other region's item, judges it with fresh's facts,
+// and logs each.
+func (t *run) judgeAll(ctx context.Context, fresh *inventory.Facts) []OtherRegion {
+	others := judgeOthers(ctx, t.d.Lifecycle, fresh, t.cfg.Region, t.cfg.Now(), t.cfg.Sleep)
+	for _, o := range others {
+		t.cfg.Logf("idle-teardown %s region=%s phase=global other_region=%s standing=%s why=%q",
+			t.cfg.label(), t.cfg.Region, o.Region, o.Standing, o.Why)
 	}
-	plan.Others = judgeOthers(ctx, d.Lifecycle, &fresh, cfg.Region, cfg.Now(), cfg.Sleep)
+	return others
+}
+
+// fence re-reads the other regions' items before a change that depends on
+// the decision, and reports whether every one is as it was judged: the same
+// standing, and the same item (present or not, at the same epoch). A deploy
+// or a watch since then (an epoch moved, an item appeared) stops it, even
+// before it has created anything the footprint would show; so does a
+// region whose standing changed.
+func (t *run) fence(ctx context.Context, plan *Plan, fresh *inventory.Facts, before string) bool {
+	was := map[string]OtherRegion{}
 	for _, o := range plan.Others {
-		cfg.Logf("idle-teardown %s region=%s phase=global other_region=%s standing=%s why=%q",
-			cfg.label(), cfg.Region, o.Region, o.Standing, o.Why)
+		was[o.Region] = o
 	}
-	last, why, owed := decideGlobal(&fresh, plan.Others, cfg.Reap)
-	plan.LastWhy = why
-	if !last {
-		return owed, nil
-	}
-	return t.globals(ctx, plan, &fresh, gl)
-}
-
-// fence re-reads the other regions' items before a change to the
-// account-wide resources: a region that is no longer done (a deploy or a
-// watch since the decision) stops it. durable: that region owes them.
-func (t *run) fence(ctx context.Context, plan *Plan, fresh *inventory.Facts, before string) (ok, durable bool) {
 	for _, o := range judgeOthers(ctx, t.d.Lifecycle, fresh, t.cfg.Region, t.cfg.Now(), t.cfg.Sleep) {
-		if o.Standing != StandingDone {
-			plan.Last = false
-			plan.LastWhy = fmt.Sprintf("%s is no longer done before %s: %s (%s)", o.Region, before, o.Standing, o.Why)
-			t.cfg.Logf("idle-teardown %s region=%s phase=global fence=stopped before=%q other_region=%s standing=%s why=%q",
-				t.cfg.label(), t.cfg.Region, before, o.Region, o.Standing, o.Why)
-			return false, o.Owes
+		w := was[o.Region]
+		if o.Standing == w.Standing && o.Exists == w.Exists && o.Epoch == w.Epoch {
+			continue // a pending region that has since claimed its lease is still pending
 		}
+		plan.LastWhy = fmt.Sprintf("%s changed before %s: %s (%s)", o.Region, before, o.Standing, o.Why)
+		t.cfg.Logf("idle-teardown %s region=%s phase=global fence=stopped before=%q other_region=%s standing=%s why=%q",
+			t.cfg.label(), t.cfg.Region, before, o.Region, o.Standing, o.Why)
+		return false
 	}
-	return true, true
+	return true
 }
 
-// globals plans the account-wide teardown from fresh, a footprint read after
-// this region's own deletes, and in reap mode executes it under gl. durable:
-// as for decide.
-func (t *run) globals(ctx context.Context, plan *Plan, fresh *inventory.Facts, gl *lifecycle.Lease) (durable bool, err error) {
+// fencedDeleter runs the fence (run.fence) before each account-wide
+// delete's re-check, and heartbeats the regional lease immediately before
+// the delete: a region that changed since the decision, or a creator that
+// took this region's lease over, stops the deletes at once. (footprint.Execute
+// heartbeats the global lease itself, between the two.)
+type fencedDeleter struct {
+	fp.Deleter
+	fence func(ctx context.Context) bool
+	lease *lifecycle.Lease
+}
+
+// errFenced is a fenced delete's refusal.
+var errFenced = errors.New("another region changed since the account-wide decision")
+
+func (f fencedDeleter) Describe(ctx context.Context, r fp.Resource) (fp.Resource, error) {
+	if !f.fence(ctx) {
+		return fp.Resource{}, errFenced
+	}
+	return f.Deleter.Describe(ctx, r)
+}
+
+// Delete heartbeats the regional lease last, immediately before the delete.
+func (f fencedDeleter) Delete(ctx context.Context, r fp.Resource) error {
+	if err := f.lease.Step(ctx, "delete "+r.Type+" "+r.ARN); err != nil {
+		return err
+	}
+	return f.Deleter.Delete(ctx, r)
+}
+
+// planGlobals plans the account-wide teardown from fresh, a footprint read
+// with the global lease held, and logs what it keeps.
+func (t *run) planGlobals(fresh *inventory.Facts) (*GlobalPlan, error) {
 	cfg, d := t.cfg, t.d
 	live := inventory.Classify(*fresh, cfg.Options, cfg.Now())
 	scoped := *live
@@ -495,10 +489,9 @@ func (t *run) globals(ctx context.Context, plan *Plan, fresh *inventory.Facts, g
 	}
 	full, kept, err := inventory.PlanTeardown(&scoped, live, cfg.Options)
 	if err != nil {
-		plan.LastWhy = "could not plan the account-wide teardown: " + err.Error()
-		return false, err
+		return nil, err
 	}
-	gp := &GlobalPlan{Kept: kept, Phases: map[Phase]*fp.Plan{}}
+	gp := &GlobalPlan{Kept: kept, Phases: map[Phase]*fp.Plan{}, live: live, deleter: inventory.NewDeleter(live, d.Deleters)}
 	byPhase := map[Phase][]fp.Resource{}
 	for _, st := range full.Steps {
 		ph, why := PhaseOf(st.Resource)
@@ -511,51 +504,75 @@ func (t *run) globals(ctx context.Context, plan *Plan, fresh *inventory.Facts, g
 	for _, ph := range []Phase{PhaseDirect, PhaseSelf} {
 		p, err := fp.NewPlan(full.Tool, full.Patterns, byPhase[ph])
 		if err != nil {
-			plan.LastWhy = "could not plan the account-wide teardown: " + err.Error()
-			return false, err
+			return nil, err
 		}
 		gp.Phases[ph] = p
 	}
-	// Planned: this run is the one that removes them.
-	plan.Last, plan.Global = true, gp
 	for _, k := range gp.Kept {
 		cfg.Logf("idle-teardown %s region=%s phase=global-kept outcome=kept type=%s resource_region=%s name=%q arn=%s reason=%q",
 			cfg.label(), cfg.Region, k.Resource.Type, k.Resource.Region, k.Resource.Name, k.Resource.ARN, k.Reason)
 	}
-	deleter := inventory.NewDeleter(live, d.Deleters)
-	if cfg.Reap {
-		if ok, durable := t.fence(ctx, plan, fresh, "the account-wide deletes"); !ok {
-			plan.Global = nil // nothing of it ran
-			return durable, nil
-		}
+	return gp, nil
+}
+
+// reportGlobal is report mode's account-wide step, after it has released its
+// regional lease: it reads the global item (and writes nothing there), the
+// footprint and the other regions, decides as reap mode would (a pending
+// region counting as done), and plans the account-wide teardown if this is
+// the region that removes it.
+func (t *run) reportGlobal(ctx context.Context, plan *Plan) error {
+	it, ok, err := t.d.Lifecycle.Get(ctx, Tool, lifecycle.ScopeGlobal)
+	switch {
+	case err != nil:
+		plan.LastWhy = "could not read the global teardown lease: " + err.Error()
+		return nil
+	case ok && it.Lease != nil:
+		plan.LastWhy = "a global teardown holds or owes the global lease (" + it.Lease.Owner + ")"
+		return nil
 	}
-	gp.Direct, err = fp.Execute(ctx, gp.Phases[PhaseDirect], cfg.mode(), deleter, gl)
+	fresh, err := inventory.Gather(ctx, t.d.Source, t.cfg.AccountID, inventory.Scope{AllRegions: true}, t.cfg.Options)
+	if err != nil {
+		plan.LastWhy = "could not read the footprint again: " + err.Error()
+		return err
+	}
+	plan.Others = t.judgeAll(ctx, &fresh)
+	last, why, _ := decideGlobal(&fresh, plan.Others, false)
+	plan.LastWhy = why
+	if !last {
+		return nil
+	}
+	gp, err := t.planGlobals(&fresh)
+	if err != nil {
+		plan.LastWhy = "could not plan the account-wide teardown: " + err.Error()
+		return err
+	}
+	plan.Last, plan.Global = true, gp
+	gp.Direct, err = fp.Execute(ctx, gp.Phases[PhaseDirect], fp.ModeReport, gp.deleter, nil)
 	t.logRow("global-direct", gp.Phases[PhaseDirect], gp.Direct)
-	if err != nil && (cfg.Reap || errors.Is(err, lifecycle.ErrLeaseLost)) {
-		return false, err
+	if err != nil {
+		return err
 	}
-	gp.Self, err = fp.Execute(ctx, gp.Phases[PhaseSelf], fp.ModeReport, deleter, gl)
+	gp.Self, err = fp.Execute(ctx, gp.Phases[PhaseSelf], fp.ModeReport, gp.deleter, nil)
 	t.logRow("global-self", gp.Phases[PhaseSelf], gp.Self)
-	if err != nil && (cfg.Reap || errors.Is(err, lifecycle.ErrLeaseLost)) {
-		return false, err
+	if err != nil {
+		return err
 	}
-	sr := SelfRemoval{Region: cfg.Region, AccountID: cfg.AccountID}
-	for _, a := range gp.Self.Actions {
+	if roleWouldGo(gp.Self) {
+		gp.OneShots = SelfRemoval{Region: t.cfg.Region, AccountID: t.cfg.AccountID, Role: true}.Plan(t.cfg.Now())
+		t.logOneShots(gp.OneShots)
+	}
+	return nil
+}
+
+// roleWouldGo reports whether the poller role passed the delete guard.
+func roleWouldGo(r *fp.Result) bool {
+	if r == nil {
+		return false
+	}
+	for _, a := range r.Actions {
 		if a.Outcome == fp.OutcomeWouldDelete && a.Type == inventory.TypeRole && a.Name == runtimeiam.RoleName {
-			sr.Role = true
+			return true
 		}
 	}
-	now := cfg.Now()
-	gp.OneShots = sr.Plan(now)
-	t.logOneShots(gp.OneShots)
-	if cfg.Reap && len(gp.OneShots) > 0 {
-		if ok, durable := t.fence(ctx, plan, fresh, "the poller role's jobs"); !ok {
-			gp.OneShots = nil // the deletes ran; Global keeps their results
-			return durable, nil
-		}
-		if _, err := CreateOneShots(ctx, d.Scheduler, cfg.Region, cfg.AccountID, now, gp.OneShots, gl.Step); err != nil {
-			return false, err
-		}
-	}
-	return true, nil
+	return false
 }
