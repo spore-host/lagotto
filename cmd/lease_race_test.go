@@ -35,7 +35,7 @@ func raceTeardown(t *testing.T, table *lifecycletest.Fake, watch func() error) (
 	now := time.Now()
 	clock := func() time.Time { clockMu.Lock(); defer clockMu.Unlock(); return now }
 	poller, err := lifecycle.New(lifecycle.Options{DynamoDB: func(string) (lifecycle.API, error) { return table, nil },
-		Owner: "lagotto-poller/us-east-1", Now: clock})
+		ControlRegion: idle.ControlRegion("us-east-1"), Owner: "lagotto-poller/us-east-1", Now: clock})
 	if err != nil {
 		t.Fatal(err)
 	}

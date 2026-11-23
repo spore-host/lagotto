@@ -675,3 +675,69 @@ func TestSleep(t *testing.T) {
 		t.Errorf("cancelled sleep: %v", err)
 	}
 }
+
+// hookSource runs before, once set, ahead of each EnabledRegions: the
+// start of every footprint read.
+type hookSource struct {
+	inventory.Source
+	before func()
+}
+
+func (h hookSource) EnabledRegions(ctx context.Context) ([]string, error) {
+	h.before()
+	return h.Source.EnabledRegions(ctx)
+}
+
+// TestGlobalDecidingRegionHoldsTheMutex is the interleaving CI found: region
+// A has finished its own lease under the global lease and is about to read
+// the footprint and the others, when region B reads the regional items,
+// finds A's gone, and would decide alone (then A would find B gone too, and
+// both would plan). B must see A's global lease and wait for it; then A
+// defers to B, and B, the last, plans the globals: exactly one.
+func TestGlobalDecidingRegionHoldsTheMutex(t *testing.T) {
+	ctx := context.Background()
+	w := newWorld(t, west, region)
+	w.idleTicks(true, west, region)
+	var bRes Result
+	bDone, bWaiting := make(chan struct{}), make(chan struct{})
+	finished, started := false, false
+	w.table(west).Hook = func(_ context.Context, op string) {
+		if op == "DeleteItem" { // A (us-west-2) finishes its regional lease
+			finished = true
+		}
+	}
+	runB := func() {
+		if !finished || started {
+			return
+		}
+		started = true
+		cfg := w.cfg(region, true)
+		var once sync.Once
+		cfg.Sleep = func(context.Context, time.Duration) error {
+			once.Do(func() { close(bWaiting) })
+			time.Sleep(time.Millisecond)
+			return nil
+		}
+		go func() {
+			defer close(bDone)
+			bRes = Tick(ctx, cfg, w.deps(region))
+		}()
+		select { // B has decided alone, or is waiting for A's global lease
+		case <-bDone:
+		case <-bWaiting:
+		}
+	}
+	d := w.deps(west)
+	d.Source = hookSource{Source: w.src, before: runB}
+	aRes := Tick(ctx, w.cfg(west, true), d)
+	if !started {
+		t.Fatal("the interleaving was not reached")
+	}
+	<-bDone
+	if got := planners(map[string]Result{west: aRes, region: bRes}); len(got) != 1 || got[0] != region {
+		t.Fatalf("planned the globals: %v, want [us-east-1]\n%s", got, w.log())
+	}
+	if w.count("delete global profile") != 1 {
+		t.Errorf("events:\n%s", strings.Join(w.ev.list(), "\n"))
+	}
+}

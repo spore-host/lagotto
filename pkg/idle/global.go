@@ -23,10 +23,13 @@ import (
 //
 // A region's teardown decides it at its very end, after its own deletes:
 //
-//  1. It reads every other enabled region's lagotto lifecycle item. If none
-//     has one, and none still has a poller of its own, no other region can be
-//     deciding at the same time (a deciding region holds its item until it
-//     has decided), so it decides under its own regional lease.
+//  1. It reads every other enabled region's lagotto lifecycle item, then the
+//     global item. If no other region has an item (or a poller of its own
+//     not yet handed to its job), and no region holds the global lease, no
+//     other region can be deciding at the same time, so it decides under its
+//     own regional lease. (The global item is read second: a region that has
+//     finished its own lease may still be deciding, but only while holding
+//     the global lease, which it took before its item went.)
 //  2. Otherwise it takes the lease on lagotto's global scope (the item
 //     tool#lagotto#global in ControlRegion's spore-host-lifecycle table), the
 //     mutex every region's decision runs under, waiting up to
@@ -50,7 +53,9 @@ import (
 // regions deciding in turn the first always sees the second's item and
 // defers, and the second always sees the first's gone: exactly one plans the
 // globals, however close together the two went idle. A region that skips the
-// mutex (step 1) saw no other item, so no other region can be deciding.
+// mutex (step 1) saw no other item and then a free global lease, so every
+// region that finished before it had also finished deciding, and saw this
+// region's item.
 //
 // Report mode cannot finish its regional lease: it releases it, which puts the
 // item back to ACTIVE and restarts the region's idle clock, and the lifecycle
@@ -288,6 +293,16 @@ func (t *run) global(ctx context.Context, plan *Plan) globalOutcome {
 	alone := true
 	for _, o := range pre {
 		if o.Standing != StandingDone {
+			alone = false
+		}
+	}
+	if alone {
+		// Read after the regional items: a region whose item is already
+		// gone may still be deciding, under the global lease (it finishes
+		// its own lease before reading the others). Taken, or unreadable,
+		// that lease means wait for it.
+		it, ok, err := d.Lifecycle.Get(ctx, Tool, lifecycle.ScopeGlobal)
+		if err != nil || (ok && it.Lease != nil && !d.Lifecycle.LeaseStale(it)) {
 			alone = false
 		}
 	}

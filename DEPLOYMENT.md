@@ -646,7 +646,8 @@ configuration drops one you set by hand. Any activity restarts the clock.
    deletes. Anything else keeps the account-wide resources: a region in use,
    within its grace, just deployed, held, a stalled teardown, a poller older
    than the lease, or a read that failed. Unless no other region has an item
-   at all, this step runs under the lease on lagotto's **global** scope (the
+   at all and no other region's step holds it, this step runs under the
+   lease on lagotto's **global** scope (the
    item `tool#lagotto#global` in the partition's IAM home region's table,
    `us-east-1` in the commercial partition), waiting up to 5 minutes for
    another region's step to give it back; under it the poller finishes its own
