@@ -1380,3 +1380,27 @@ func TestReview4(t *testing.T) {
 		}
 	})
 }
+
+// TestRetryOp: a transient failure is tried again; a *final one is not.
+func TestRetryOp(t *testing.T) {
+	cfg := Config{Sleep: func(context.Context, time.Duration) error { return nil }}
+	n := 0
+	if err := retryOp(context.Background(), cfg, func() error {
+		if n++; n < 3 {
+			return errors.New("throttled")
+		}
+		return nil
+	}); err != nil || n != 3 {
+		t.Errorf("transient: %v after %d tries", err, n)
+	}
+	n = 0
+	stop := errors.New("not claimable")
+	err := retryOp(context.Background(), cfg, func() error { n++; return &final{stop} })
+	if !errors.Is(err, stop) || n != 1 || (&final{stop}).Error() != "not claimable" {
+		t.Errorf("final: %v after %d tries", err, n)
+	}
+	cfg.Sleep = func(context.Context, time.Duration) error { return context.Canceled }
+	if err := retryOp(context.Background(), cfg, func() error { return errors.New("throttled") }); !errors.Is(err, context.Canceled) {
+		t.Errorf("cancelled: %v", err)
+	}
+}
