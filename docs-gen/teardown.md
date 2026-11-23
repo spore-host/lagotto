@@ -64,6 +64,11 @@ delete. A deploy, watch or setup that starts meanwhile stops it before its next
 delete. A failure leaves the global lease held: it goes stale in 20 minutes and
 the next run takes it over and carries on.
 
+Once the tables are gone, and no poller is left in the region, teardown also
+finishes lagotto's item in that region's spore-host-lifecycle table (left
+ACTIVE by deploy and watch), which would otherwise keep the account-wide
+resources.
+
 --plan &lt;file|-&gt; takes the other path (lagotto#325): it executes a footprint,
 the JSON 'lagotto footprint -o json' writes, through the shared spore.host
 teardown executor, and none of the above applies (--force and --iam-roles are

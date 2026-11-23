@@ -54,6 +54,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   region's jobs, so a job never removes a poller whose region is unfinished.
 - The last mile's residue no longer lists the invoke role: it is the
   account-wide teardown's.
+- **`lagotto teardown` finishes its region's lifecycle item** once the tables
+  are gone and no poller is left there (#340): `deploy` and `watch` leave it
+  ACTIVE, and an ACTIVE item keeps the account-wide resources.
 
 ### Fixed
 

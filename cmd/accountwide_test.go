@@ -147,3 +147,78 @@ func TestTeardownPlanReapNoGlobalScope(t *testing.T) {
 		t.Errorf("--i-understand-no-lease: %v, deleted %v\n%s", err, rec.calls, out)
 	}
 }
+
+// TestTeardownFinishesTheRegionItem: `lagotto teardown` finishes its region's
+// lifecycle item (an ACTIVE one, left by deploy and watch) once the tables are
+// gone and no poller is left, so it no longer keeps the account-wide
+// resources (lagotto#340); with a poller there, or when it cannot tell, the
+// item stays.
+func TestTeardownFinishesTheRegionItem(t *testing.T) {
+	ctx := context.Background()
+	mark := func(table *lifecycletest.Fake) *lifecycle.Client {
+		c, _ := lifecycle.New(lifecycle.Options{DynamoDB: func(string) (lifecycle.API, error) { return table, nil }, ControlRegion: "us-east-1"})
+		if err := c.MarkActive(ctx, inventory.Tool, "us-west-2"); err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	tables := &fakeTables{empty: true}
+	stubTeardown(t, tables, &cmdRoleDeleter{exists: map[string]bool{}}, false, false)
+	table := lifecycletest.New()
+	installFakeLeases(t, table)
+	c := mark(table)
+	out, err := runTeardownForTest(t)
+	if err != nil || !strings.Contains(out, "Finished lagotto's spore-host-lifecycle item in us-west-2") {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if _, ok, _ := c.Get(ctx, inventory.Tool, "us-west-2"); ok {
+		t.Error("the item is left")
+	}
+	// Nothing there: nothing written.
+	table = lifecycletest.New()
+	installFakeLeases(t, table)
+	if _, err := runTeardownForTest(t); err != nil || table.Calls("CreateTable") != 0 {
+		t.Errorf("no item: %v, %d CreateTable", err, table.Calls("CreateTable"))
+	}
+
+	for name, set := range map[string]func(){
+		"a poller": func() {
+			teardownPollerExists = func(context.Context, aws.Config) (bool, error) { return true, nil }
+		},
+		"unknown": func() {
+			teardownPollerExists = func(context.Context, aws.Config) (bool, error) { return false, errors.New("AccessDenied") }
+		},
+		"no client": func() {
+			newLifecycleClient = func(aws.Config, string) (*lifecycle.Client, error) { return nil, errors.New("no client") }
+		},
+		"a live lease": func() {
+			other, _ := newLifecycleClient(aws.Config{}, "lagotto-poller/us-west-2")
+			if _, _, err := other.Observe(ctx, inventory.Tool, "us-west-2", false); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := other.Claim(ctx, inventory.Tool, "us-west-2", 0); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			stubTeardown(t, tables, &cmdRoleDeleter{exists: map[string]bool{}}, false, false)
+			table := lifecycletest.New()
+			installFakeLeases(t, table)
+			c := mark(table)
+			prev := newLifecycleClient
+			t.Cleanup(func() { newLifecycleClient = prev })
+			set()
+			out, err := runTeardownForTest(t)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, ok, _ := c.Get(ctx, inventory.Tool, "us-west-2"); !ok {
+				t.Errorf("the item was finished:\n%s", out)
+			}
+			if name != "a poller" && !strings.Contains(out, "was left in place") {
+				t.Errorf("no warning:\n%s", out)
+			}
+		})
+	}
+}

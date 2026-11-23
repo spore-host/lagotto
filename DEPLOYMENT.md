@@ -528,7 +528,10 @@ To leave nothing behind in an account:
    versions created tables in regions with no poller too (`watch` and `setup`,
    before #325), so check regions you never deployed to.
    It stops before deleting any table if it cannot list or delete the
-   schedules.
+   schedules. Once the tables are gone, with no poller left in the region, it
+   also finishes lagotto's item in that region's `spore-host-lifecycle` table
+   (left ACTIVE by `deploy` and `watch`), which would otherwise keep the
+   account-wide resources (lagotto#340).
 3. `lagotto teardown --iam-roles`: the two IAM roles and their policies,
    `lagotto-instance-role` and its profile, the profiles setup made for authorized
    roles, and the `lagotto-cli-user` policy once nothing is attached to it (an

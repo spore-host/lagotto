@@ -456,7 +456,7 @@ func itemBlockers(checks []regionCheck) []string {
 		case len(c.item.Holds) > 0:
 			out = append(out, fmt.Sprintf("%s: held by %v", name, c.item.Holds))
 		case c.item.State == lifecycle.StateActive:
-			out = append(out, name+": its lifecycle item is ACTIVE")
+			out = append(out, name+": its lifecycle item is ACTIVE (lagotto is in use there; once it is not, 'lagotto teardown --region "+name+"' clears it)")
 		case c.item.Lease != nil && !c.stale():
 			out = append(out, name+": a teardown holds its lease ("+c.item.Lease.Owner+")")
 		}

@@ -20,6 +20,7 @@ import (
 	"github.com/spf13/cobra"
 
 	fp "github.com/spore-host/libs/footprint"
+	"github.com/spore-host/libs/lifecycle/lifecycletest"
 
 	"github.com/spore-host/lagotto/pkg/awscfg"
 	"github.com/spore-host/lagotto/pkg/deploy"
@@ -318,6 +319,10 @@ func stubTeardown(t *testing.T, tables *fakeTables, roles runtimeiam.RoleDeleteA
 		return idle.AccountWideResult{Outcome: idle.AccountWideRemoved, Result: res}
 	}
 	setupCallerAccount = func(context.Context, aws.Config) (string, error) { return "123456789012", nil }
+	oldPoller := teardownPollerExists
+	teardownPollerExists = func(context.Context, aws.Config) (bool, error) { return false, nil }
+	t.Cleanup(func() { teardownPollerExists = oldPoller })
+	installFakeLeases(t, lifecycletest.New())
 	teardownIAMRoles, teardownForce = iamRoles, force
 	t.Cleanup(func() {
 		newTeardownStore, teardownAccountWide, teardownIAMRoles, teardownForce, setupCallerAccount = oldStore, oldAW, oldRoles, oldForce, oldAcct

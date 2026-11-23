@@ -13,9 +13,12 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
 	lambdatypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
 	"github.com/spf13/cobra"
+	"github.com/spore-host/libs/lifecycle"
+
 	"github.com/spore-host/lagotto/pkg/awscfg"
 	"github.com/spore-host/lagotto/pkg/cliiam"
 	"github.com/spore-host/lagotto/pkg/deploy"
+	"github.com/spore-host/lagotto/pkg/inventory"
 	"github.com/spore-host/lagotto/pkg/watcher"
 )
 
@@ -91,6 +94,11 @@ item that is in use or held by a live teardown, all re-checked before each
 delete. A deploy, watch or setup that starts meanwhile stops it before its next
 delete. A failure leaves the global lease held: it goes stale in 20 minutes and
 the next run takes it over and carries on.
+
+Once the tables are gone, and no poller is left in the region, teardown also
+finishes lagotto's item in that region's spore-host-lifecycle table (left
+ACTIVE by deploy and watch), which would otherwise keep the account-wide
+resources.
 
 --plan <file|-> takes the other path (lagotto#325): it executes a footprint,
 the JSON 'lagotto footprint -o json' writes, through the shared spore.host
@@ -189,6 +197,10 @@ func runTeardown(cmd *cobra.Command, args []string) error {
 		_, _ = fmt.Fprintf(out, "Left table %s in place: it lacks the lagotto:managed=cli tag, so lagotto did not create it. "+
 			"Delete it yourself if it is yours.\n", name)
 	}
+	// The region's lagotto lifecycle item: with its tables gone and no poller
+	// left, nothing will ever carry it on, and while it is ACTIVE it keeps the
+	// account-wide resources (lagotto#340).
+	finishRegionItem(ctx, cfg, out)
 	if teardownIAMRoles {
 		// The one account-wide teardown (lagotto#340, #346): under the
 		// global lease, and only while no region has a poller, a pending
@@ -325,4 +337,54 @@ func checkNoPollerAnywhere(ctx context.Context, cfg aws.Config) error {
 			"Remove it first:\n  %s", deploy.PollerFunctionName, strings.Join(regions, ", "), strings.Join(fixes, "\n  "))
 	}
 	return nil
+}
+
+// teardownPollerExists reports whether the poller runs in cfg's region. A
+// seam for tests.
+var teardownPollerExists = func(ctx context.Context, cfg aws.Config) (bool, error) {
+	info, err := deploy.New(cfg).InspectPoller(ctx)
+	return info.Exists, err
+}
+
+// finishRegionItem finishes lagotto's lifecycle item in cfg's region (and
+// closes the region's table if no tool is left in it) once `lagotto
+// teardown` has deleted the tables, unless a poller is still there or it
+// cannot tell. Anything that fails is a warning: the item only keeps the
+// account-wide resources, and running teardown again finishes it.
+func finishRegionItem(ctx context.Context, cfg aws.Config, out io.Writer) {
+	warn := func(err error) {
+		_, _ = fmt.Fprintf(out, "warning: lagotto's %s item in %s was left in place: %v; it keeps the account-wide resources until 'lagotto teardown' runs here again\n",
+			lifecycle.TableName, cfg.Region, err)
+	}
+	if exists, err := teardownPollerExists(ctx, cfg); err != nil || exists {
+		if err == nil {
+			return // the poller carries it on
+		}
+		warn(fmt.Errorf("could not tell whether the poller is still deployed: %w", err))
+		return
+	}
+	c, err := newLifecycleClient(cfg, teardownOwner)
+	if err != nil {
+		warn(err)
+		return
+	}
+	if _, ok, err := c.Get(ctx, inventory.Tool, cfg.Region); err != nil || !ok {
+		if err != nil {
+			warn(err)
+		}
+		return
+	}
+	l, err := claimRegion(ctx, c, cfg.Region, false)
+	if err != nil {
+		warn(err)
+		return
+	}
+	if err := l.Finish(ctx); err != nil {
+		warn(err)
+		return
+	}
+	if _, err := c.CloseTableIfEmpty(ctx, cfg.Region); err != nil {
+		_, _ = fmt.Fprintf(out, "warning: could not remove the empty %s table in %s: %v\n", lifecycle.TableName, cfg.Region, err)
+	}
+	_, _ = fmt.Fprintf(out, "Finished lagotto's %s item in %s\n", lifecycle.TableName, cfg.Region)
 }
