@@ -48,7 +48,13 @@ const west = "us-west-2"
 func newWorld(t *testing.T, deployed ...string) *world {
 	t.Helper()
 	w := &world{t: t, ev: &events{}, now: t0, acct: inventorytest.Account(acct), tables: map[string]*lifecycletest.Fake{}}
-	w.src = inventorytest.New(append([]string{"eu-west-1"}, deployed...)...)
+	enabled := []string{"eu-west-1"}
+	for _, r := range deployed {
+		if r != "eu-west-1" {
+			enabled = append(enabled, r)
+		}
+	}
+	w.src = inventorytest.New(enabled...)
 	for _, r := range deployed {
 		w.src.SetRegion(inventorytest.Deployed(r, acct))
 	}
@@ -296,6 +302,24 @@ func (w *world) count(prefix string) int {
 	return n
 }
 
+// globalItem is the global-scope lifecycle item, if any.
+func (w *world) globalItem() (lifecycle.Item, bool) {
+	it, ok, err := w.client("test").Get(context.Background(), Tool, lifecycle.ScopeGlobal)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	return it, ok
+}
+
+// finished makes r a region whose teardown finished: no lifecycle item, its
+// function waiting for its one-shot job, its rate schedule gone.
+func (w *world) finished(r string) {
+	w.src.Update(r, func(x *inventory.Region) {
+		*x = inventory.Region{Region: r, Function: x.Function, LogGroup: x.LogGroup, FunctionRole: x.FunctionRole,
+			Schedules: []inventory.Schedule{{Group: runtimeiam.TeardownScheduleGroup, Name: FunctionJobName}}}
+	})
+}
+
 // TestGlobalTwoRegionsIdleTogether is lagotto#340: two regions cross the
 // grace two minutes apart (us-west-2 at 18:34, us-east-1 at 18:36 in the
 // report). Each used to defer the account-wide teardown to the other. Now
@@ -324,32 +348,38 @@ func TestGlobalTwoRegionsIdleTogether(t *testing.T) {
 					t.Errorf("%s: %+v", r, x)
 				}
 			}
-			if other := res[west]; reap && !strings.Contains(other.Plan.LastWhy, "finishing after this region") {
-				t.Errorf("us-west-2 why: %q", other.Plan.LastWhy)
+			if _, ok := w.globalItem(); ok {
+				t.Error("the global lease item was left behind")
 			}
-			if reap {
-				if w.count("delete global profile") != 1 || w.count("delete global role lagotto-instance-role") != 1 ||
-					w.count("create us-east-1 one-shot lagotto-teardown-role") != 3 || w.count("create us-west-2 one-shot lagotto-teardown-role") != 0 {
-					t.Errorf("events:\n%s", strings.Join(w.ev.list(), "\n"))
+			if !reap {
+				if n := len(w.ev.list()); n != 0 {
+					t.Errorf("report mode changed something: %v", w.ev.list())
 				}
-				for _, r := range []string{west, region} {
-					if _, ok := w.item(r); ok {
-						t.Errorf("%s: the regional lease was not finished", r)
-					}
+				return
+			}
+			if !strings.Contains(res[west].Plan.LastWhy, "finishing after this region") {
+				t.Errorf("us-west-2 why: %q", res[west].Plan.LastWhy)
+			}
+			if w.count("delete global profile") != 1 || w.count("delete global role lagotto-instance-role") != 1 ||
+				w.count("create us-east-1 one-shot lagotto-teardown-role") != 3 || w.count("create us-west-2 one-shot lagotto-teardown-role") != 0 {
+				t.Errorf("events:\n%s", strings.Join(w.ev.list(), "\n"))
+			}
+			for _, r := range []string{west, region} {
+				if _, ok := w.item(r); ok {
+					t.Errorf("%s: the regional lease was not finished", r)
 				}
-				if _, ok, _ := w.client("test").Get(context.Background(), Tool, lifecycle.ScopeGlobal); ok {
-					t.Error("the global lease item was left behind")
-				}
-			} else if n := len(w.ev.list()); n != 0 {
-				t.Errorf("report mode changed something: %v", w.ev.list())
+			}
+			if !strings.Contains(w.log(), "global_lease=finished") {
+				t.Errorf("log:\n%s", w.log())
 			}
 		})
 	}
 }
 
 // TestGlobalTwoRegionsConcurrent: the two regions' teardowns run at the same
-// moment, many times over; whatever the interleaving, exactly one plans the
-// account-wide teardown.
+// moment, many times over. In reap mode, whatever the interleaving, exactly
+// one plans the account-wide teardown; report mode, which takes no lock,
+// never plans it twice.
 func TestGlobalTwoRegionsConcurrent(t *testing.T) {
 	for _, reap := range []bool{true, false} {
 		for i := 0; i < 25; i++ {
@@ -369,7 +399,8 @@ func TestGlobalTwoRegionsConcurrent(t *testing.T) {
 				}(r)
 			}
 			wg.Wait()
-			if got := planners(res); len(got) != 1 {
+			got := planners(res)
+			if (reap && len(got) != 1) || len(got) > 1 {
 				t.Fatalf("reap=%t run %d: planned the globals: %v\n%s", reap, i, got, w.log())
 			}
 			if reap && (w.count("delete global profile") != 1 || w.count("create ") == 0) {
@@ -380,7 +411,9 @@ func TestGlobalTwoRegionsConcurrent(t *testing.T) {
 }
 
 // TestGlobalActiveRegionBlocks: a region still in use, in its grace, or
-// just deployed keeps the account-wide resources, in both modes.
+// just deployed keeps the account-wide resources, in both modes, and the
+// decision is final (the global lease is finished: that region decides
+// later).
 func TestGlobalActiveRegionBlocks(t *testing.T) {
 	cases := map[string]struct {
 		set func(w *world)
@@ -394,7 +427,16 @@ func TestGlobalActiveRegionBlocks(t *testing.T) {
 				w.t.Fatal(err)
 			}
 			w.advance(time.Hour)
-		}, "us-west-2 (idle for 1h0m0s of the 24h0m0s grace)"},
+		}, "us-west-2 (idle for 1h0m0s of its 24h0m0s grace)"},
+		"in its own longer grace": {func(w *world) {
+			// Idle 25 h, but its poller waits 72 h (LAGOTTO_IDLE_GRACE there).
+			w.src.Update(west, func(r *inventory.Region) { r.Function.IdleGrace = "72h" })
+			w.advance(-25 * time.Hour)
+			if _, _, err := w.client("p").Observe(context.Background(), Tool, west, false); err != nil {
+				w.t.Fatal(err)
+			}
+			w.advance(25 * time.Hour)
+		}, "us-west-2 (idle for 25h0m0s of its 72h0m0s grace)"},
 		"just deployed": {func(w *world) {
 			if err := w.client("alice").MarkActive(context.Background(), Tool, west); err != nil {
 				w.t.Fatal(err)
@@ -423,17 +465,23 @@ func TestGlobalActiveRegionBlocks(t *testing.T) {
 				if strings.Contains(strings.Join(w.ev.list(), "\n"), "global") || w.count("create us-east-1 one-shot lagotto-teardown-role") != 0 {
 					t.Errorf("events:\n%s", strings.Join(w.ev.list(), "\n"))
 				}
+				if _, ok := w.globalItem(); ok {
+					t.Error("a final deferral left the global item")
+				}
 			})
 		}
 	}
 }
 
-// TestGlobalLeaseReadErrorBlocks: another region's lifecycle item that cannot
-// be read counts as active (fail safe): nobody plans the globals.
-func TestGlobalLeaseReadErrorBlocks(t *testing.T) {
+// TestGlobalLeaseReadError: another region's lifecycle item that cannot be
+// read counts as active (fail safe): nobody plans the globals, and in reap
+// mode the global lease is left held, to be resumed, since that region may
+// in fact be done. A read that fails once and then succeeds is retried.
+func TestGlobalLeaseReadError(t *testing.T) {
 	for _, reap := range []bool{true, false} {
 		w := newWorld(t, west, region)
-		w.idleTicks(reap, west, region)
+		w.idleTicks(reap, region)
+		w.finished(west)
 		w.table(west).Err = func(op string, _ any) error {
 			if op == "GetItem" {
 				return errors.New("ThrottlingException: rate exceeded")
@@ -445,78 +493,234 @@ func TestGlobalLeaseReadErrorBlocks(t *testing.T) {
 			!strings.Contains(r.Plan.LastWhy, "us-west-2 (could not read its lifecycle item") {
 			t.Fatalf("reap=%t: %+v\n%s", reap, r, w.log())
 		}
-		if reap && (r.Outcome != OutcomeReaped || w.count("delete global") != 0) {
-			t.Errorf("reap: %+v %v", r, w.ev.list())
+		it, held := w.globalItem()
+		switch {
+		case reap && (r.Outcome != OutcomeReaped || w.count("delete global") != 0 || !held || it.Lease == nil):
+			t.Errorf("reap: %+v %v, global item %+v %v", r, w.ev.list(), it, held)
+		case !reap && held:
+			t.Error("report mode wrote the global item")
 		}
+	}
+	// Once only: retried, and the globals go.
+	w := newWorld(t, west, region)
+	w.idleTicks(true, region)
+	w.finished(west)
+	failed := false
+	w.table(west).Err = func(op string, _ any) error {
+		if op == "GetItem" && !failed {
+			failed = true
+			return errors.New("ThrottlingException: rate exceeded")
+		}
+		return nil
+	}
+	if r := Tick(context.Background(), w.cfg(region, true), w.deps(region)); !failed || r.Plan == nil || r.Plan.Global == nil {
+		t.Fatalf("a read that failed once: %+v\n%s", r, w.log())
 	}
 }
 
-// TestGlobalLeaseUnavailable: the global lease cannot be taken (another
-// region holds it for the whole wait, or its table fails). Nothing global is
-// planned; in reap mode the regional lease is left held, since ending it
-// could leave nobody to decide, and in report mode it is released.
+// TestGlobalLeaseUnavailable: in reap mode the global lease cannot be taken
+// (another region holds it for the whole wait, its table keeps failing, or
+// the wait is cancelled). The poller gives its regional lease back before it
+// commits anything of its own removal: no job, its rate schedule kept, so it
+// tries again a grace period later. A failure that clears is retried.
 func TestGlobalLeaseUnavailable(t *testing.T) {
-	for _, reap := range []bool{true, false} {
-		for _, how := range []string{"held", "broken"} {
-			w := newWorld(t, west, region)
-			w.idleTicks(reap, west, region)
-			ctx := context.Background()
-			switch how {
-			case "held":
-				other := w.client("lagotto-poller/eu-central-1")
-				if _, _, err := other.Observe(ctx, Tool, lifecycle.ScopeGlobal, false); err != nil {
-					t.Fatal(err)
-				}
-				if _, err := other.Claim(ctx, Tool, lifecycle.ScopeGlobal, 0); err != nil {
-					t.Fatal(err)
-				}
-			case "broken":
-				// The control region's table (us-east-1's own) fails.
-				w.table(ControlRegion(west)).Err = func(string, any) error { return errors.New("InternalServerError") }
+	ctx := context.Background()
+	for _, how := range []string{"held", "broken", "cancelled"} {
+		w := newWorld(t, west, region)
+		w.idleTicks(true, west, region)
+		cfg := w.cfg(west, true)
+		cfg.GlobalWait = 10 * time.Second
+		switch how {
+		case "held", "cancelled":
+			other := w.client("lagotto-poller/eu-central-1")
+			if _, _, err := other.Observe(ctx, Tool, lifecycle.ScopeGlobal, false); err != nil {
+				t.Fatal(err)
 			}
-			cfg := w.cfg(west, reap)
-			cfg.GlobalWait = 10 * time.Second
-			r := Tick(ctx, cfg, w.deps(west))
-			if r.Plan == nil || r.Plan.Last || !strings.Contains(r.Plan.LastWhy, "could not take the global teardown lease") || r.Err == nil {
-				t.Fatalf("reap=%t %s: %+v\n%s", reap, how, r, w.log())
+			if _, err := other.Claim(ctx, Tool, lifecycle.ScopeGlobal, 0); err != nil {
+				t.Fatal(err)
 			}
-			it, ok := w.item(west)
-			switch {
-			case reap && (r.Outcome != OutcomeFailed || !ok || it.Lease == nil):
-				t.Errorf("reap %s: %+v, item %+v %v", how, r, it, ok)
-			case !reap && (r.Outcome != OutcomeReported || it.Lease != nil):
-				t.Errorf("report %s: %+v, item %+v", how, r, it)
+			if how == "cancelled" {
+				cfg.Sleep = func(context.Context, time.Duration) error { return context.Canceled }
 			}
+		case "broken":
+			w.table(ControlRegion(west)).Err = func(string, any) error { return errors.New("InternalServerError") }
 		}
+		r := Tick(ctx, cfg, w.deps(west))
+		if r.Outcome != OutcomeFailed || r.Plan == nil || r.Plan.Last || !strings.Contains(r.Plan.LastWhy, "could not take the global teardown lease") {
+			t.Fatalf("%s: %+v\n%s", how, r, w.log())
+		}
+		if how == "cancelled" && !errors.Is(r.Err, context.Canceled) {
+			t.Errorf("cancelled: %v", r.Err)
+		}
+		if it, ok := w.item(west); !ok || it.Lease != nil || it.State != lifecycle.StateActive {
+			t.Errorf("%s: the regional lease was not given back: %+v", how, it)
+		}
+		if n := w.count("create us-west-2 one-shot") + w.count("delete us-west-2 schedule lagotto/lagotto-capacity-poller"); n != 0 {
+			t.Errorf("%s: committed its own removal: %v", how, w.ev.list())
+		}
+	}
+
+	// A control table that fails twice, then answers: retried in the wait.
+	w := newWorld(t, west, region)
+	w.idleTicks(true, west, region)
+	n := 0
+	w.table(ControlRegion(west)).Err = func(op string, _ any) error {
+		if op == "TransactWriteItems" && n < 2 {
+			n++
+			return errors.New("ThrottlingException: rate exceeded")
+		}
+		return nil
+	}
+	if r := Tick(ctx, w.cfg(west, true), w.deps(west)); r.Outcome != OutcomeReaped || r.Err != nil {
+		t.Fatalf("a transient failure: %+v\n%s", r, w.log())
+	}
+}
+
+// TestGlobalReportCreatesNothing: report mode takes no global lease and so
+// creates no table in the control region, even where lagotto has none
+// (deployed only in us-west-2 and eu-west-1), and leaves a held global
+// lease alone.
+func TestGlobalReportCreatesNothing(t *testing.T) {
+	ctx := context.Background()
+	w := newWorld(t, west, "eu-west-1")
+	w.src.Update("eu-west-1", func(r *inventory.Region) { r.ActiveWatches = 1 })
+	w.idleTicks(false, west)
+	r := Tick(ctx, w.cfg(west, false), w.deps(west))
+	if r.Outcome != OutcomeReported || r.Plan.Last {
+		t.Fatalf("%+v\n%s", r, w.log())
+	}
+	control := w.table(ControlRegion(west))
+	for _, op := range []string{"CreateTable", "PutItem", "UpdateItem", "TransactWriteItems", "DeleteItem"} {
+		if n := control.Calls(op); n != 0 {
+			t.Errorf("report mode called %s %d time(s) in the control region", op, n)
+		}
+	}
+
+	// A global lease held by a reap-mode poller: report mode leaves it.
+	w = newWorld(t, west, region)
+	w.idleTicks(false, west)
+	w.finished(region)
+	other := w.client("lagotto-poller/eu-central-1")
+	if _, _, err := other.Observe(ctx, Tool, lifecycle.ScopeGlobal, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := other.Claim(ctx, Tool, lifecycle.ScopeGlobal, 0); err != nil {
+		t.Fatal(err)
+	}
+	r = Tick(ctx, w.cfg(west, false), w.deps(west))
+	if r.Plan.Last || !strings.Contains(r.Plan.LastWhy, "holds or owes the global lease (lagotto-poller/eu-central-1)") {
+		t.Fatalf("%+v", r.Plan)
+	}
+	if it, ok := w.globalItem(); !ok || it.Lease == nil {
+		t.Error("report mode touched the held global lease")
+	}
+	// Unreadable: not the last.
+	w.table(ControlRegion(west)).Err = func(string, any) error { return errors.New("InternalServerError") }
+	w.advance(25 * time.Hour)
+	if res := Tick(ctx, w.cfg(west, false), w.deps(west)); res.Plan != nil && res.Plan.Last {
+		t.Fatalf("an unreadable global lease: %+v", res.Plan)
 	}
 }
 
 // TestGlobalAfterAFinishedRegion: us-west-2 finished hours ago (its item gone,
-// its function waiting for its job). us-east-1, the last, decides alone.
+// its function waiting for its job). us-east-1, the last, removes them.
 func TestGlobalAfterAFinishedRegion(t *testing.T) {
 	w := newWorld(t, west, region)
-	w.src.Update(west, func(r *inventory.Region) {
-		*r = inventory.Region{Region: west, Function: r.Function, LogGroup: r.LogGroup, FunctionRole: r.FunctionRole,
-			Schedules: []inventory.Schedule{{Group: runtimeiam.TeardownScheduleGroup, Name: FunctionJobName}}}
-	})
+	w.finished(west)
 	w.idleTicks(true, region)
 	r := Tick(context.Background(), w.cfg(region, true), w.deps(region))
 	if r.Outcome != OutcomeReaped || !r.Plan.Last || r.Plan.Global == nil {
 		t.Fatalf("%+v\n%s", r, w.log())
-	}
-	if strings.Contains(w.log(), "phase=global claim=ok") {
-		t.Error("took the global lease with no other region left to decide")
 	}
 	if !strings.Contains(w.log(), `other_region=us-west-2 standing=done why="no lifecycle item; its poller is handed to its one-shot job"`) {
 		t.Errorf("log:\n%s", w.log())
 	}
 }
 
+// TestGlobalTakesOverAStaleLease: a global lease left held (a failed step)
+// goes stale; the CLI's last mile then sees it as a teardown to resume, and
+// the next region's teardown takes it over, decides, and finishes it.
+func TestGlobalTakesOverAStaleLease(t *testing.T) {
+	ctx := context.Background()
+	w := newWorld(t, west, region)
+	w.finished(west)
+	w.failProfile = true
+	w.idleTicks(true, region)
+	r := Tick(ctx, w.cfg(region, true), w.deps(region))
+	if r.Err == nil || !strings.Contains(w.log(), "global_lease=held") {
+		t.Fatalf("%+v\n%s", r, w.log())
+	}
+	w.advance(21 * time.Minute)
+	lc := w.client("lagotto last mile")
+	if it, ok := w.globalItem(); !ok || !lc.LeaseStale(it) {
+		t.Fatalf("the held lease is not stale after 20 min: %+v %v", it, ok)
+	}
+	// A later region (redeployed in eu-west-1, now idle) takes it over.
+	w.failProfile = false
+	w.src.SetRegion(inventorytest.Deployed("eu-west-1", acct))
+	w.idleTicks(true, "eu-west-1")
+	if r := Tick(ctx, w.cfg("eu-west-1", true), w.deps("eu-west-1")); r.Outcome != OutcomeReaped || r.Plan.Global == nil {
+		t.Fatalf("takeover: %+v\n%s", r, w.log())
+	}
+	if _, ok := w.globalItem(); ok {
+		t.Error("the stale global lease was not taken over and finished")
+	}
+	if w.count("delete global profile") != 1 {
+		t.Errorf("events: %v", w.ev.list())
+	}
+}
+
+// TestGlobalFence: a region that stops being done after the decision (a
+// deploy there) stops the account-wide changes before the next one, and
+// the deferral is final.
+func TestGlobalFence(t *testing.T) {
+	for _, before := range []int{2, 3} { // the deletes; the role jobs
+		ctx := context.Background()
+		w := newWorld(t, west, region)
+		w.finished(west)
+		w.idleTicks(true, region)
+		reads, inHook := 0, false
+		w.table(west).Hook = func(ctx context.Context, op string) {
+			if op != "GetItem" || inHook {
+				return
+			}
+			if reads++; reads == before {
+				inHook = true
+				if err := w.client("alice").MarkActive(ctx, Tool, west); err != nil {
+					t.Errorf("deploy: %v", err)
+				}
+				inHook = false
+			}
+		}
+		r := Tick(ctx, w.cfg(region, true), w.deps(region))
+		if r.Outcome != OutcomeReaped || r.Plan.Last || !strings.Contains(r.Plan.LastWhy, "us-west-2 is no longer done") {
+			t.Fatalf("fence %d: %+v\n%s", before, r, w.log())
+		}
+		if n := w.count("create us-east-1 one-shot lagotto-teardown-role"); n != 0 {
+			t.Errorf("fence %d: created %d role jobs", before, n)
+		}
+		if deleted := w.count("delete global profile"); (before == 2) != (deleted == 0) {
+			t.Errorf("fence %d: profile deleted %d time(s)", before, deleted)
+		}
+		if _, ok := w.globalItem(); ok {
+			t.Errorf("fence %d: a final stop left the global item", before)
+		}
+	}
+}
+
 func TestJudge(t *testing.T) {
 	now := t0
-	grace := 24 * time.Hour
-	poller := &inventory.Item{Name: deploy.PollerFunctionName}
-	live := &lifecycle.LeaseInfo{Owner: "lagotto-poller/us-west-2", Heartbeat: now}
+	poller := func(grace string) *inventory.Item {
+		return &inventory.Item{Name: deploy.PollerFunctionName, IdleGrace: grace}
+	}
+	rate := []inventory.Schedule{{Group: "lagotto", Name: deploy.PollerScheduleName}}
+	job := []inventory.Schedule{{Group: runtimeiam.TeardownScheduleGroup, Name: FunctionJobName}}
+	livePoller := inventory.Region{Function: poller(""), Schedules: rate}
+	tables := inventory.Region{Tables: []inventory.Table{{Item: inventory.Item{Name: "lagotto-watches"}}}}
+	lease := &lifecycle.LeaseInfo{Owner: "lagotto-poller/us-west-2", Heartbeat: now}
+	idle := func(d time.Duration) lifecycle.Item {
+		return lifecycle.Item{State: lifecycle.StateIdle, IdleSince: now.Add(-d)}
+	}
 	for name, c := range map[string]struct {
 		rf    inventory.Region
 		it    lifecycle.Item
@@ -526,20 +730,28 @@ func TestJudge(t *testing.T) {
 		want  Standing
 		why   string
 	}{
-		"read error":            {err: errors.New("boom"), want: StandingActive, why: "could not read its lifecycle item: boom"},
-		"activity unknown":      {rf: inventory.Region{ActivityUnknown: true}, want: StandingActive, why: "activity could not be read"},
-		"tearing down":          {it: lifecycle.Item{State: lifecycle.StateTeardown, Lease: live}, ok: true, want: StandingPending},
-		"stalled teardown":      {it: lifecycle.Item{State: lifecycle.StateTeardown, Lease: live}, ok: true, stale: true, want: StandingActive, why: "stalled"},
-		"idle past the grace":   {it: lifecycle.Item{State: lifecycle.StateIdle, IdleSince: now.Add(-25 * time.Hour)}, ok: true, want: StandingPending, why: "past the 24h0m0s grace"},
-		"idle within the grace": {it: lifecycle.Item{State: lifecycle.StateIdle, IdleSince: now.Add(-time.Hour)}, ok: true, want: StandingActive, why: "of the 24h0m0s grace"},
-		"released or active":    {it: lifecycle.Item{State: lifecycle.StateActive}, ok: true, want: StandingActive, why: "state ACTIVE"},
-		"pre-#326 poller":       {rf: inventory.Region{Function: poller}, want: StandingActive, why: "no lifecycle item"},
-		"finished, going":       {rf: inventory.Region{Function: poller, Schedules: []inventory.Schedule{{Group: runtimeiam.TeardownScheduleGroup, Name: FunctionJobName}}}, want: StandingDone},
-		"nothing of lagotto's":  {want: StandingDone, why: "no lifecycle item"},
+		"read error":       {err: errors.New("boom"), want: StandingActive, why: "could not read its lifecycle item: boom"},
+		"activity unknown": {rf: inventory.Region{ActivityUnknown: true}, want: StandingActive, why: "activity could not be read"},
+		"tearing down":     {it: lifecycle.Item{State: lifecycle.StateTeardown, Lease: lease}, ok: true, want: StandingPending},
+		"stalled, poller live": {rf: livePoller, it: lifecycle.Item{State: lifecycle.StateTeardown, Lease: lease}, ok: true, stale: true,
+			want: StandingActive, why: "its poller resumes it"},
+		"stalled, poller gone": {rf: inventory.Region{Function: poller(""), Schedules: job}, it: lifecycle.Item{State: lifecycle.StateTeardown, Lease: lease},
+			ok: true, stale: true, want: StandingDone, why: "the last mile reports it"},
+		"idle past its grace":         {rf: livePoller, it: idle(25 * time.Hour), ok: true, want: StandingPending, why: "past its 24h0m0s grace"},
+		"idle within its grace":       {rf: livePoller, it: idle(time.Hour), ok: true, want: StandingActive, why: "of its 24h0m0s grace"},
+		"idle within its own grace":   {rf: inventory.Region{Function: poller("72h"), Schedules: rate}, it: idle(25 * time.Hour), ok: true, want: StandingActive, why: "of its 72h0m0s grace"},
+		"idle past, no poller":        {rf: tables, it: idle(25 * time.Hour), ok: true, want: StandingActive, why: "no poller to tear it down"},
+		"idle, no poller, nothing":    {it: idle(25 * time.Hour), ok: true, want: StandingDone, why: "nothing of lagotto's left"},
+		"idle, poller without a rate": {rf: inventory.Region{Function: poller("")}, it: idle(25 * time.Hour), ok: true, want: StandingActive, why: "no poller"},
+		"released or active":          {rf: livePoller, it: lifecycle.Item{State: lifecycle.StateActive}, ok: true, want: StandingActive, why: "state ACTIVE"},
+		"pre-#326 poller":             {rf: livePoller, want: StandingActive, why: "no lifecycle item"},
+		"finished, going":             {rf: inventory.Region{Function: poller(""), Schedules: append(job, rate...)}, want: StandingDone},
+		"tables only":                 {rf: tables, want: StandingDone, why: "no lifecycle item"},
+		"nothing of lagotto's":        {want: StandingDone, why: "no lifecycle item"},
 	} {
 		c.rf.Region = west
-		o := judge(&c.rf, c.it, c.ok, c.err, c.stale, grace, now)
-		if o.Standing != c.want || !strings.Contains(o.Why, c.why) || o.Region != west {
+		o := judge(&c.rf, c.it, c.ok, c.err, c.stale, now)
+		if o.Standing != c.want || !strings.Contains(o.Why, c.why) || o.Region != west || o.Unknown != (c.err != nil || c.rf.ActivityUnknown) {
 			t.Errorf("%s: %+v, want %s %q", name, o, c.want, c.why)
 		}
 	}
@@ -548,23 +760,29 @@ func TestJudge(t *testing.T) {
 func TestDecideGlobal(t *testing.T) {
 	all := &inventory.Facts{AllRegions: true}
 	pending := []OtherRegion{{Region: west, Standing: StandingPending}, {Region: "eu-west-1", Standing: StandingDone}}
+	unreadable := OtherRegion{Region: "ap-south-1", Standing: StandingActive, Why: "x", Unknown: true}
+	inUse := OtherRegion{Region: "ap-south-2", Standing: StandingActive, Why: "y"}
 	for name, c := range map[string]struct {
-		f      *inventory.Facts
-		others []OtherRegion
-		reap   bool
-		last   bool
-		why    string
+		f       *inventory.Facts
+		others  []OtherRegion
+		reap    bool
+		last    bool
+		unknown bool
+		why     string
 	}{
-		"one region read":  {f: &inventory.Facts{}, last: false, why: "did not read every enabled region"},
-		"account unread":   {f: &inventory.Facts{AllRegions: true, AccountIncomplete: true}, why: "could not all be read"},
-		"pending, reap":    {f: all, others: pending, reap: true, why: "finishing after this region"},
-		"pending, report":  {f: all, others: pending, last: true, why: "report mode"},
-		"active wins":      {f: all, others: append([]OtherRegion{{Region: "ap-south-1", Standing: StandingActive, Why: "x"}}, pending...), why: "still active: ap-south-1 (x)"},
-		"all done, report": {f: all, others: pending[1:], last: true, why: "no other enabled region"},
+		"one region read":     {f: &inventory.Facts{}, unknown: true, why: "did not read every enabled region"},
+		"account unread":      {f: &inventory.Facts{AllRegions: true, AccountIncomplete: true}, unknown: true, why: "could not all be read"},
+		"pending, reap":       {f: all, others: pending, reap: true, why: "finishing after this region"},
+		"pending, report":     {f: all, others: pending, last: true, why: "report mode"},
+		"in use wins":         {f: all, others: append([]OtherRegion{inUse}, pending...), why: "still active: ap-south-2 (y)"},
+		"unreadable only":     {f: all, others: []OtherRegion{unreadable}, reap: true, unknown: true, why: "ap-south-1 (x)"},
+		"unreadable, in use":  {f: all, others: []OtherRegion{unreadable, inUse}, reap: true, why: "ap-south-1 (x), ap-south-2 (y)"},
+		"unreadable, pending": {f: all, others: append([]OtherRegion{unreadable}, pending...), reap: true, why: "ap-south-1 (x)"},
+		"all done":            {f: all, others: pending[1:], last: true, why: "no other enabled region"},
 	} {
-		last, why := decideGlobal(c.f, c.others, c.reap)
-		if last != c.last || !strings.Contains(why, c.why) {
-			t.Errorf("%s: %v %q", name, last, why)
+		last, why, unknown := decideGlobal(c.f, c.others, c.reap)
+		if last != c.last || unknown != c.unknown || !strings.Contains(why, c.why) {
+			t.Errorf("%s: %v %v %q", name, last, unknown, why)
 		}
 	}
 }
@@ -578,91 +796,87 @@ func TestControlRegion(t *testing.T) {
 	}
 }
 
-// TestGlobalStepFailures: what the last region does when its account-wide
-// work fails. Its own region is torn down either way; the failure is in the
-// result and the log, and nothing after the failed step is tried.
+// TestGlobalStepFailures: the last region's account-wide work fails. Its own
+// region is torn down either way; the failure is in the result, nothing
+// after the failed step is tried, and the global lease is left held, to be
+// resumed (TestGlobalTakesOverAStaleLease).
 func TestGlobalStepFailures(t *testing.T) {
 	ctx := context.Background()
-	t.Run("the profile's delete fails", func(t *testing.T) {
-		w := newWorld(t, region)
-		w.failProfile = true
-		w.idleTicks(true, region)
-		r := Tick(ctx, w.cfg(region, true), w.deps(region))
-		if r.Outcome != OutcomeReaped || r.Err == nil || !r.Plan.Last || r.Plan.Failed() == 0 {
-			t.Fatalf("%+v\n%s", r, w.log())
-		}
-		if n := w.count("create us-east-1 one-shot lagotto-teardown-role"); n != 0 {
-			t.Errorf("created %d role jobs after a failed delete", n)
-		}
-	})
-	t.Run("the role jobs fail", func(t *testing.T) {
-		w := newWorld(t, region)
-		w.failRoleJobs = true
-		w.idleTicks(true, region)
-		r := Tick(ctx, w.cfg(region, true), w.deps(region))
-		if r.Outcome != OutcomeReaped || r.Err == nil || !strings.Contains(w.log(), `phase=global error="create one-shot teardown job lagotto-teardown-role-inline`) {
-			t.Fatalf("%+v\n%s", r, w.log())
-		}
-	})
-	t.Run("the footprint cannot be read again", func(t *testing.T) {
-		w := newWorld(t, region)
-		w.idleTicks(false, region)
-		// The global step's first read of the other region's item.
-		w.table("eu-west-1").Hook = func(_ context.Context, op string) {
-			if op == "GetItem" {
-				w.src.Fail("global EnabledRegions", errors.New("UnauthorizedOperation"))
-			}
-		}
-		r := Tick(ctx, w.cfg(region, false), w.deps(region))
-		if r.Outcome != OutcomeReported || r.Plan.Last || !strings.Contains(r.Plan.LastWhy, "could not read the footprint again") {
-			t.Fatalf("%+v\n%s", r, w.log())
-		}
-	})
-	t.Run("a creator takes the regional lease over", func(t *testing.T) {
-		w := newWorld(t, west, region)
-		w.idleTicks(true, west, region)
-		creator, err := lifecycle.New(lifecycle.Options{
-			DynamoDB: func(r string) (lifecycle.API, error) { return w.table(r), nil },
-			Owner:    "alice",
-			Now:      func() time.Time { return w.clock().Add(time.Hour) }, // west's lease looks stale to it
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		once := false
-		w.table(ControlRegion(west)).Hook = func(ctx context.Context, op string) {
-			if op == "UpdateItem" && !once { // the global claim
-				once = true
-				if err := creator.MarkActive(ctx, Tool, west); err != nil {
-					t.Errorf("creator: %v", err)
+	for name, set := range map[string]func(w *world){
+		"the profile's delete fails": func(w *world) { w.failProfile = true },
+		"the role jobs fail":         func(w *world) { w.failRoleJobs = true },
+		"the footprint cannot be read again": func(w *world) {
+			// Once the regional lease is finished, the next read is the
+			// global step's.
+			w.table(region).Hook = func(_ context.Context, op string) {
+				if op == "DeleteItem" {
+					w.src.Fail("global EnabledRegions", errors.New("UnauthorizedOperation"))
 				}
 			}
-		}
-		r := Tick(ctx, w.cfg(west, true), w.deps(west))
-		if r.Outcome != OutcomeLeaseLost || r.Plan.Last || !strings.Contains(r.Plan.LastWhy, "could not end this region's lease") {
-			t.Fatalf("%+v\n%s", r, w.log())
-		}
-		if _, ok, _ := w.client("test").Get(ctx, Tool, lifecycle.ScopeGlobal); ok {
-			t.Error("the global lease was not given back")
-		}
-	})
-	t.Run("the wait is cancelled", func(t *testing.T) {
+		},
+	} {
 		w := newWorld(t, west, region)
-		w.idleTicks(false, west, region)
-		other := w.client("lagotto-poller/eu-central-1")
-		if _, _, err := other.Observe(ctx, Tool, lifecycle.ScopeGlobal, false); err != nil {
-			t.Fatal(err)
+		w.finished(west)
+		w.idleTicks(true, region)
+		set(w)
+		r := Tick(ctx, w.cfg(region, true), w.deps(region))
+		if r.Outcome != OutcomeReaped || r.Err == nil || !strings.Contains(w.log(), "global_lease=held") {
+			t.Fatalf("%s: %+v\n%s", name, r, w.log())
 		}
-		if _, err := other.Claim(ctx, Tool, lifecycle.ScopeGlobal, 0); err != nil {
-			t.Fatal(err)
+		if it, ok := w.globalItem(); !ok || it.Lease == nil {
+			t.Errorf("%s: the global lease was not left held: %+v", name, it)
 		}
-		cfg := w.cfg(west, false)
-		cfg.Sleep = func(context.Context, time.Duration) error { return context.Canceled }
-		r := Tick(ctx, cfg, w.deps(west))
-		if r.Plan.Last || !errors.Is(r.Err, context.Canceled) {
-			t.Fatalf("%+v", r)
+		if _, ok := w.item(region); ok {
+			t.Errorf("%s: the regional lease was not finished", name)
 		}
+		if name == "the profile's delete fails" && w.count("create us-east-1 one-shot lagotto-teardown-role") != 0 {
+			t.Errorf("%s: created role jobs after a failed delete", name)
+		}
+	}
+
+	// Report mode: a footprint that cannot be read again is not the last.
+	w := newWorld(t, region)
+	w.idleTicks(false, region)
+	reads := 0
+	d := w.deps(region)
+	d.Source = hookSource{Source: w.src, before: func() {
+		if reads++; reads == 2 { // the post-claim footprint, then the global step's
+			w.src.Fail("global EnabledRegions", errors.New("UnauthorizedOperation"))
+		}
+	}}
+	if r := Tick(ctx, w.cfg(region, false), d); r.Outcome != OutcomeReported || r.Plan.Last ||
+		!strings.Contains(r.Plan.LastWhy, "could not read the footprint again") {
+		t.Fatalf("report: %+v", r)
+	}
+
+	// A creator takes the regional lease over before the jobs: the poller
+	// stops, and gives the global lease back.
+	w = newWorld(t, west, region)
+	w.idleTicks(true, west, region)
+	creator, err := lifecycle.New(lifecycle.Options{
+		DynamoDB: func(r string) (lifecycle.API, error) { return w.table(r), nil },
+		Owner:    "alice",
+		Now:      func() time.Time { return w.clock().Add(time.Hour) }, // west's lease looks stale to it
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	once := false
+	w.table(ControlRegion(west)).Hook = func(ctx context.Context, op string) {
+		if op == "UpdateItem" && !once { // the global claim
+			once = true
+			if err := creator.MarkActive(ctx, Tool, west); err != nil {
+				t.Errorf("creator: %v", err)
+			}
+		}
+	}
+	r := Tick(ctx, w.cfg(west, true), w.deps(west))
+	if r.Outcome != OutcomeLeaseLost || w.count("create us-west-2 one-shot") != 0 {
+		t.Fatalf("lease lost: %+v %v\n%s", r, w.ev.list(), w.log())
+	}
+	if _, ok := w.globalItem(); ok {
+		t.Error("the global lease was not given back")
+	}
 }
 
 func TestSleep(t *testing.T) {

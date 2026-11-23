@@ -61,7 +61,14 @@ type PollerInfo struct {
 	// Tags are the function's tags (`lagotto footprint`, #325). Not part of
 	// doctor's JSON.
 	Tags map[string]string `json:"-"`
+	// IdleGrace is the function's IdleGraceEnv variable, "" when unset: the
+	// grace its idle teardown waits (lagotto#340). Not part of doctor's JSON.
+	IdleGrace string `json:"-"`
 }
+
+// IdleGraceEnv is the poller's environment variable that overrides its idle
+// teardown's grace period (idle.GraceEnv).
+const IdleGraceEnv = "LAGOTTO_IDLE_GRACE"
 
 // ScheduleInfo is a read-only snapshot of the poller's EventBridge schedule.
 type ScheduleInfo struct {
@@ -109,6 +116,9 @@ func (d *Deployer) InspectPoller(ctx context.Context) (PollerInfo, error) {
 		info.RoleARN = aws.ToString(cfg.Role)
 		info.Runtime = string(cfg.Runtime)
 		info.CodeSHA256 = aws.ToString(cfg.CodeSha256)
+		if cfg.Environment != nil {
+			info.IdleGrace = cfg.Environment.Variables[IdleGraceEnv]
+		}
 	}
 	return info, nil
 }

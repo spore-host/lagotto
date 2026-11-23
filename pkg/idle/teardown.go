@@ -23,7 +23,7 @@ const DefaultGrace = 24 * time.Hour
 
 // GraceEnv overrides [DefaultGrace] in the poller: a Go duration ("30m").
 // For live checks of the report; lagotto deploy does not set it.
-const GraceEnv = "LAGOTTO_IDLE_GRACE"
+const GraceEnv = deploy.IdleGraceEnv
 
 // GraceFrom reads the grace period from getenv. An unset value is
 // [DefaultGrace]; an invalid or non-positive one is too, with a warning.
@@ -520,9 +520,26 @@ func teardown(ctx context.Context, cfg Config, d Deps, lease *lifecycle.Lease, r
 	now := cfg.Now()
 	plan.OneShots = sr.Plan(now)
 	t.logOneShots(plan.OneShots)
+	// In reap mode, the global lease before anything that commits the
+	// poller's own removal (global.go): taken, it is held to the end of the
+	// account-wide decision; not taken, the poller gives its lease back
+	// intact and tries again a grace period later.
+	var gl *lifecycle.Lease
+	giveBack := func() {
+		if gl != nil {
+			t.finishGlobal(ctx, gl)
+		}
+	}
 	if cfg.Reap {
+		if gl, err = acquireGlobal(ctx, cfg, d.Lifecycle); err != nil {
+			plan.LastWhy = "could not take the global teardown lease: " + err.Error()
+			_ = stopped(ctx, cfg, lease, &res, fmt.Errorf("take the global teardown lease: %w", err), "taking the global teardown lease")
+			return res
+		}
+		cfg.Logf("idle-teardown %s region=%s phase=global claim=ok lease=%s scope=%s", cfg.label(), cfg.Region, shortToken(gl.Token()), lifecycle.ScopeGlobal)
 		if _, err := CreateOneShots(ctx, d.Scheduler, cfg.Region, cfg.AccountID, now, plan.OneShots, lease.Step); err != nil {
 			if stop := stopped(ctx, cfg, lease, &res, err, "creating the one-shot jobs"); stop {
+				giveBack()
 				return res
 			}
 		}
@@ -531,27 +548,24 @@ func teardown(ctx context.Context, cfg Config, d Deps, lease *lifecycle.Lease, r
 	plan.Final, err = fp.Execute(ctx, plan.Phases[PhaseFinal], mode, deleter, lease)
 	t.logRow(string(PhaseFinal), plan.Phases[PhaseFinal], plan.Final)
 	if stop := stopped(ctx, cfg, lease, &res, err, "the final deletes"); stop {
+		giveBack()
 		return res
 	}
 
-	// 4. The global step: whether this is the last region, the account-wide
-	// teardown if it is, and the end of the regional lease. Report mode
-	// never finishes the regional lease or closes a table: it releases, the
-	// grace period starts over, and the next report is a grace period away.
-	g := t.global(ctx, plan)
+	// 4. The global step: the end of the regional lease, whether this is the
+	// last region, and the account-wide teardown if it is. Report mode never
+	// finishes the regional lease or closes a table: it releases, the grace
+	// period starts over, and the next report is a grace period away.
+	g := t.global(ctx, plan, gl)
 	if g.err != nil {
 		res.Err = errors.Join(res.Err, g.err)
 		cfg.Logf("idle-teardown %s region=%s phase=global error=%q", cfg.label(), cfg.Region, g.err.Error())
 	}
 	summary := func(lease string) {
-		cfg.Logf("idle-teardown %s region=%s would_delete=%d kept=%d failed=%d one_shots=%d last_region=%t lease=%s last_region_why=%q",
-			cfg.label(), cfg.Region, plan.WouldDelete(), plan.KeptCount(), plan.Failed(), len(plan.OneShots)+plan.globalOneShots(), plan.Last, lease, plan.LastWhy)
+		cfg.Logf("idle-teardown %s region=%s would_delete=%d kept=%d failed=%d one_shots=%d last_region=%t lease=%s global_lease=%s last_region_why=%q",
+			cfg.label(), cfg.Region, plan.WouldDelete(), plan.KeptCount(), plan.Failed(), len(plan.OneShots)+plan.globalOneShots(), plan.Last, lease, g.lease, plan.LastWhy)
 	}
 	switch {
-	case g.held:
-		res.Outcome = OutcomeFailed
-		summary("held")
-		return res
 	case g.endErr != nil:
 		res.Outcome, res.Err = OutcomeFailed, errors.Join(res.Err, g.endErr)
 		if errors.Is(g.endErr, lifecycle.ErrLeaseLost) {
@@ -569,8 +583,8 @@ func teardown(ctx context.Context, cfg Config, d Deps, lease *lifecycle.Lease, r
 		return res
 	}
 	t.closeTable(ctx, cfg.Region)
-	if control := ControlRegion(cfg.Region); g.mutex && control != cfg.Region {
-		// The global item is gone: its table holds nothing of lagotto's.
+	if control := ControlRegion(cfg.Region); g.lease == GlobalFinished && control != cfg.Region {
+		// The global item is gone: its table may hold nothing now.
 		t.closeTable(ctx, control)
 	}
 	res.Outcome = OutcomeReaped

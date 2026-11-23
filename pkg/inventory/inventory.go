@@ -177,6 +177,9 @@ type Item struct {
 	ARN  string
 	Name string
 	Tags map[string]string
+	// IdleGrace is set on the poller function only: its LAGOTTO_IDLE_GRACE,
+	// "" when unset (lagotto#340 judges another region's idleness by it).
+	IdleGrace string
 }
 
 // Table is one of lagotto's tables that exists.

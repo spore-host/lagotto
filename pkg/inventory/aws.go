@@ -326,7 +326,7 @@ func (r *awsRegion) Poller(ctx context.Context) (*Item, string, error) {
 	if arn == "" {
 		arn = deploy.PollerFunctionARN(r.region, r.accountID)
 	}
-	return &Item{ARN: arn, Name: deploy.PollerFunctionName, Tags: info.Tags}, info.RoleARN, nil
+	return &Item{ARN: arn, Name: deploy.PollerFunctionName, Tags: info.Tags, IdleGrace: info.IdleGrace}, info.RoleARN, nil
 }
 
 func (r *awsRegion) Topic(ctx context.Context) (*Item, error) {

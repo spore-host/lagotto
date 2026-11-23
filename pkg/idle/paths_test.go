@@ -312,9 +312,10 @@ func TestReportLeaseLostAtRelease(t *testing.T) {
 	h.advance(25 * time.Hour)
 	updates := 0
 	h.table.Hook = func(ctx context.Context, op string) {
-		// The claim, 12 heartbeats, then the release.
+		// The claim, 9 heartbeats (the region's own rows; the account-wide
+		// rows come after the release, with no lease), then the release.
 		if op == "UpdateItem" {
-			if updates++; updates == 14 {
+			if updates++; updates == 11 {
 				if err := creator.MarkActive(ctx, Tool, region); err != nil {
 					t.Error(err)
 				}
