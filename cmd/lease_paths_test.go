@@ -50,7 +50,7 @@ func TestMarkActiveOwnerAndClientFailure(t *testing.T) {
 		owner = o
 		return nil, errors.New("no DynamoDB client")
 	}
-	err := markActive(context.Background(), aws.Config{}, "", "us-east-1", "create watch w-1", &bytes.Buffer{})
+	_, err := markCreating(context.Background(), aws.Config{}, "", "us-east-1", "create watch w-1", creatorLocal, &bytes.Buffer{})
 	if owner != "lagotto-cli" || err == nil || !strings.Contains(err.Error(), "refusing to create watch w-1") ||
 		!strings.Contains(err.Error(), "Nothing was created") {
 		t.Errorf("owner %q, err %v", owner, err)
@@ -65,7 +65,7 @@ func TestCreatorWarnsWithoutLeaseAccess(t *testing.T) {
 	}
 	installFakeLeases(t, table)
 	var out bytes.Buffer
-	if err := markActive(context.Background(), aws.Config{}, "arn:aws:iam::1:user/a", "us-east-1", "x", &out); err != nil {
+	if _, err := markCreating(context.Background(), aws.Config{}, "arn:aws:iam::1:user/a", "us-east-1", "x", creatorLocal, &out); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "Continuing without the teardown lease") || !strings.Contains(out.String(), "lagotto setup") {

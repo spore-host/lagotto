@@ -21,17 +21,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   us-east-1's `spore-host-lifecycle` table), only while no region has a poller
   function, a pending `lagotto-teardown` job, or a lifecycle item that is
   ACTIVE, held or under a live lease, and while the global item's epoch has not
-  moved, all re-checked before each delete. A failure leaves the global lease
-  held, to be taken over by the next CLI run. The lazy last mile runs it after
+  moved, all re-checked before each delete. Every write it makes to a
+  lifecycle item is conditional on the item being exactly as it judged it
+  (libs#89). A run that fails partway suspends its lease (the teardown is
+  marked incomplete, with no lease, and the next CLI run resumes it), so a run
+  that has exited never makes a creator wait. The lazy last mile runs it after
   `lastmile.Run`, in report mode in this release, with a 24 h grace on the
   global scope; `lagotto teardown --iam-roles` and the account-wide steps of
   `lagotto teardown --plan --mode reap` run it with no grace. Once every poller
   has finished, the account-wide IAM stays until the next lagotto command or
   `teardown --iam-roles`; DEPLOYMENT.md says why.
 - **`setup`, `deploy`, `watch` and `launch` mark lagotto's global scope active
-  before they create or change anything account-wide** (#345), so a teardown
-  holding the global lease is waited out, and one that decided before them
-  stops at its next delete.
+  before they create or change anything account-wide, and end their mark when
+  they finish** (#345). ACTIVE means in use: the account-wide teardown never
+  runs while a creator's mark is there (a mark older than an hour is one that
+  died), and the global grace runs from the last creator's end. A creator that
+  starts while the teardown holds the lease waits for it, and the teardown's
+  re-check before each delete then gives the lease back.
+- **`watch` and `launch` are refused in a region whose poller was torn down**
+  (its rate schedule gone, its function due for deletion), with nothing
+  created, and told to redeploy (#340, #349).
+- **`teardown --iam-roles` runs the account-wide check before it deletes
+  anything**, so a refusal leaves the account as it was.
 - **`lagotto teardown --iam-roles` deletes `lagotto-cli-user` only once nothing
   is attached to it** (owner decision, #340). Before, it detached the policy
   from every user, group and role first. An attached policy is now kept and
@@ -72,17 +83,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Sovereign Cloud, where the last mile still runs its regional checks.
 - The account-wide teardown gives the global lease back at once when a
   creator arrives mid-run, instead of leaving it held (which kept every
-  `setup`, `deploy`, `watch` and `launch` waiting for 20 minutes); it reads the
-  global item again after its claim, and stops if a creator marked it since
-  the decision (with no grace, Observe and Claim would otherwise take the new
-  epoch, so `setup`'s fresh IAM could be deleted); and each run writes a lease
+  `setup`, `deploy`, `watch` and `launch` waiting for 20 minutes); it writes the
+  global item only as it judged it, so a creator's mark is never erased (with
+  no grace, Observe and Claim used to take the new epoch, so `setup`'s fresh
+  IAM could be deleted); it finishes a dead regional item only as judged (a
+  `watch --local` that marked it since keeps it); a run that fails before
+  any delete releases the lease; and each run writes a lease
   owner of its own, so it never takes another CLI's lease for its own (#340).
 - A poller run that cannot claim because another run holds the region's live
-  lease no longer deletes that run's one-shot jobs, and a run whose footprint
-  lacks its region, or whose deletes footprint.Execute cannot run at all,
-  gives the lease back (#340).
+  lease, or that runs after its region's rate schedule is gone (a retried or
+  duplicate invocation), no longer deletes the region's one-shot jobs. A run
+  whose footprint lacks its region, or whose deletes footprint.Execute cannot
+  run at all, gives the lease back (#340).
 - `lagotto teardown --plan --mode reap` reports a plan step the account-wide
-  teardown kept (an attached `lagotto-cli-user`) as kept, with the reason.
+  teardown kept (an attached `lagotto-cli-user`) as kept, with the reason; a
+  step it could not judge because a read failed is not run, and fails the
+  command.
 - A poller's claim that fails with anything but a throttle is not tried again
   (it may have been applied), and a lease then found in the claimant's own name
   is reported as its own (#340). The account-wide teardown's wait for the

@@ -42,8 +42,10 @@ var (
 	// delete under SPORE_LASTMILE=reap. False in this release: the last mile
 	// is report-only (libs#79 and lagotto#328 decide when it may reap).
 	lastMileAccountWideReap = false
-	// teardownAccountWide is `teardown --iam-roles`'s account-wide teardown.
+	// teardownAccountWide is `teardown --iam-roles`' account-wide teardown.
 	teardownAccountWide = runAccountWide
+	// teardownAccountWideCheck is its check before anything is deleted.
+	teardownAccountWideCheck = checkAccountWide
 )
 
 // The lease owners the CLI's account-wide teardown writes, each made unique
@@ -74,6 +76,20 @@ func runAccountWide(ctx context.Context, cfg aws.Config, account string, only ma
 	return idle.TearDownAccountWide(ctx, idle.AccountWideConfig{
 		AccountID: account, Owner: owner, Reap: true, Only: only,
 		Options: footprintOptions(), Now: footprintNow, Logf: logf,
+	}, idle.AccountWideDeps{Lifecycle: c, Source: accountWideSource(cfg, account), Deleters: newTeardownDeleters(cfg, account)})
+}
+
+// checkAccountWide is the account-wide teardown in report mode, with no
+// grace, run by `teardown --iam-roles` before it deletes anything: region's
+// own lifecycle item and regional resources, which that teardown removes
+// first, do not count. It writes nothing.
+func checkAccountWide(ctx context.Context, cfg aws.Config, account, region string) idle.AccountWideResult {
+	c, err := newLifecycleClient(cfg, runOwner(teardownOwner))
+	if err != nil {
+		return idle.AccountWideResult{Outcome: idle.AccountWideFailed, Why: "no lifecycle client", Err: err}
+	}
+	return idle.TearDownAccountWide(ctx, idle.AccountWideConfig{
+		AccountID: account, Excluding: region, Options: footprintOptions(), Now: footprintNow,
 	}, idle.AccountWideDeps{Lifecycle: c, Source: accountWideSource(cfg, account), Deleters: newTeardownDeleters(cfg, account)})
 }
 

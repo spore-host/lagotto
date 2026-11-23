@@ -60,9 +60,11 @@ last mile uses (lagotto#340, #346): under lagotto's global teardown lease
 (tool#lagotto#global in us-east-1's spore-host-lifecycle table), and only while
 no region has a poller, a pending one-shot teardown job, or a lagotto lifecycle
 item that is in use or held by a live teardown, all re-checked before each
-delete. A deploy, watch or setup that starts meanwhile stops it before its next
-delete. A failure leaves the global lease held: it goes stale in 20 minutes and
-the next run takes it over and carries on.
+delete; and never while a setup, deploy, watch or launch is running (one that
+starts meanwhile waits for it, and the re-check then gives the lease back).
+That check also runs before anything is deleted, so a refusal changes nothing.
+A run that fails partway leaves the teardown marked incomplete, with no lease:
+nothing waits for it, and the next run carries it on.
 
 Once the tables are gone, and no poller is left in the region, teardown also
 finishes lagotto's item in that region's spore-host-lifecycle table (left

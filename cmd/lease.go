@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/scheduler"
@@ -25,81 +26,114 @@ var newLifecycleClient = func(cfg aws.Config, owner string) (*lifecycle.Client, 
 	return idle.NewClient(cfg, owner)
 }
 
-// markActive is every creating command's first write (lagotto#326): deploy,
+// creatorKind is what a creating command does to a region's poller, which
+// decides what happens to the region's pending one-shot teardown jobs.
+type creatorKind int
+
+const (
+	// creatorDeploy (deploy) recreates the poller and its schedule: the
+	// region's teardown jobs always go first.
+	creatorDeploy creatorKind = iota
+	// creatorHosted (watch, launch) needs the hosted poller: refused once
+	// its rate schedule is gone (the region was torn down; its function's
+	// job is pending, lagotto#349), and otherwise the jobs go.
+	creatorHosted
+	// creatorLocal (watch --local) needs no hosted poller: the jobs stay.
+	creatorLocal
+)
+
+// markCreating is every creating command's first write (lagotto#326): deploy,
 // watch (and watch --local) and launch mark lagotto active in region, and
-// then in the global scope (lagotto#345), before they create anything, so a
-// teardown holding either lease is waited out and none can start deleting
-// until a grace period after this.
+// then in the global scope (lagotto#345), before they create anything, and
+// deal with the region's pending teardown jobs (lagotto#340, creatorKind).
+// A teardown holding either lease is waited out (the CLI up to 10 min): it
+// refuses the command if it keeps the lease that long (non-zero exit,
+// nothing created). A caller whose IAM predates the lease table is warned on
+// errOut and carries on, as before lagotto#326, for either scope.
 //
-// A teardown that keeps the lease for the whole wait refuses the command
-// (non-zero exit, nothing created). A caller whose IAM predates the lease
-// table is warned on errOut and carries on, as before lagotto#326.
-func markActive(ctx context.Context, cfg aws.Config, owner, region, what string, errOut io.Writer) error {
-	return markCreating(ctx, cfg, owner, region, what, false, errOut)
-}
-
-// markCreating is markActive, and then the region's pending one-shot
-// teardown jobs go (lagotto#340): a poller that committed its removal leaves
-// its function's job due 92 min later, which would delete a poller deployed
-// in the meantime, whatever that poller's mode. deploying (deploy, which
-// recreates the poller's schedule) deletes them always; a watch or launch
-// only while the poller's rate schedule is still there (without it, the
-// region's teardown has finished, lagotto#349, and its job is what removes
-// the old function).
-func markCreating(ctx context.Context, cfg aws.Config, owner, region, what string, deploying bool, errOut io.Writer) error {
-	if err := markActiveOnly(ctx, cfg, owner, region, what, errOut); err != nil {
-		return err
-	}
-	return cancelTeardownJobs(ctx, newTeardownJobAPI(cfg, region), region, what, deploying, errOut)
-}
-
-func markActiveOnly(ctx context.Context, cfg aws.Config, owner, region, what string, errOut io.Writer) error {
+// done ends the command's global mark (lifecycle MarkDone): call it when the
+// command has finished, so the global scope goes idle from then (unless
+// another creator has marked since). A creator that dies leaves its mark,
+// which the account-wide teardown takes as in use for
+// idle.CreatorMarkBound.
+func markCreating(ctx context.Context, cfg aws.Config, owner, region, what string, kind creatorKind, errOut io.Writer) (done func(), err error) {
+	done = func() {}
 	if owner == "" {
 		owner = "lagotto-cli"
 	}
+	if kind == creatorHosted {
+		// Before any mark: a region whose poller was torn down is refused
+		// with nothing written. (cancelTeardownJobs checks again after the
+		// marks.)
+		if has, err := pollerScheduleExists(ctx, newTeardownJobAPI(cfg, region)); err == nil && !has {
+			return done, fmt.Errorf("refusing to %s: lagotto's poller in %s has been torn down (its rate schedule is gone, and its function "+
+				"is due for deletion). Nothing was created. Deploy it again first: lagotto deploy --region %s", what, region, region)
+		}
+	}
 	c, err := newLifecycleClient(cfg, owner)
 	if err != nil {
-		return fmt.Errorf("refusing to %s: %w. Nothing was created", what, err)
+		return done, fmt.Errorf("refusing to %s: %w. Nothing was created", what, err)
 	}
 	err = idle.MarkActive(ctx, c, region, what)
-	if errors.Is(err, idle.ErrLeaseUnavailable) {
+	switch {
+	case errors.Is(err, idle.ErrLeaseUnavailable):
 		_, _ = fmt.Fprintln(errOut, idle.LeaseWarning(err))
-		return nil
+	case err != nil:
+		return done, err
 	}
-	if err != nil {
-		return err
+	// The global scope is marked even when the region's table was not
+	// reachable: the account-wide teardown reads it on its own.
+	if done, err = markGlobalWith(ctx, c, what, errOut); err != nil {
+		return done, err
 	}
-	return markGlobalWith(ctx, c, what, errOut)
+	if kind == creatorLocal {
+		return done, nil
+	}
+	if err := cancelTeardownJobs(ctx, newTeardownJobAPI(cfg, region), region, what, kind, errOut); err != nil {
+		done()
+		return func() {}, err
+	}
+	return done, nil
 }
 
-// markGlobal marks lagotto's global scope active (lagotto#345) before a
-// command creates or changes anything account-wide: setup's IAM, and
-// deploy, watch and launch, which use it. The CLI's account-wide teardown
-// (idle.TearDownAccountWide) holds the global lease while it deletes, so a
-// creator waits it out; one that marks after its decision moves the global
-// item's epoch, which stops the teardown before its next delete, and starts
-// the global grace period over.
-func markGlobal(ctx context.Context, cfg aws.Config, owner, what string, errOut io.Writer) error {
+// markGlobal marks lagotto's global scope active (lagotto#345) before setup
+// creates or changes anything account-wide. While the account-wide teardown
+// (idle.TearDownAccountWide) holds the global lease, the mark waits for it
+// (up to 10 min); once marked, the teardown, which never claims the scope
+// while a creator's mark is fresh, waits for done (or for
+// idle.CreatorMarkBound) and then the global grace from then.
+func markGlobal(ctx context.Context, cfg aws.Config, owner, what string, errOut io.Writer) (done func(), err error) {
 	if owner == "" {
 		owner = "lagotto-cli"
 	}
 	c, err := newLifecycleClient(cfg, owner)
 	if err != nil {
-		return fmt.Errorf("refusing to %s: %w. Nothing was created", what, err)
+		return func() {}, fmt.Errorf("refusing to %s: %w. Nothing was created", what, err)
 	}
 	return markGlobalWith(ctx, c, what, errOut)
 }
 
-func markGlobalWith(ctx context.Context, c *lifecycle.Client, what string, errOut io.Writer) error {
+func markGlobalWith(ctx context.Context, c *lifecycle.Client, what string, errOut io.Writer) (func(), error) {
+	noop := func() {}
 	if _, err := c.RegionFor(lifecycle.ScopeGlobal); err != nil {
-		return nil // no global scope outside the aws partition (lagotto#347): nothing removes the account-wide IAM there
+		return noop, nil // no global scope outside the aws partition (lagotto#347): nothing removes the account-wide IAM there
 	}
-	err := idle.MarkActive(ctx, c, lifecycle.ScopeGlobal, what)
+	token, err := idle.Mark(ctx, c, lifecycle.ScopeGlobal, what)
 	if errors.Is(err, idle.ErrLeaseUnavailable) {
 		_, _ = fmt.Fprintln(errOut, idle.LeaseWarning(err))
-		return nil
+		return noop, nil
 	}
-	return err
+	if err != nil {
+		return noop, err
+	}
+	return func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if _, err := c.MarkDone(ctx, idle.Tool, lifecycle.ScopeGlobal, token); err != nil {
+			_, _ = fmt.Fprintf(errOut, "warning: could not end this command's mark on lagotto's global scope (%v); "+
+				"the account-wide teardown takes it as in use for %s\n", err, idle.CreatorMarkBound)
+		}
+	}, nil
 }
 
 // teardownJobAPI is the Scheduler API a creator cancels a region's one-shot
@@ -120,7 +154,7 @@ var newTeardownJobAPI = func(cfg aws.Config, region string) teardownJobAPI {
 // cancelTeardownJobs deletes region's pending one-shot teardown jobs (see
 // markCreating). A caller whose IAM predates the grant is warned and carries
 // on; any other failure refuses, with nothing created.
-func cancelTeardownJobs(ctx context.Context, api teardownJobAPI, region, what string, deploying bool, errOut io.Writer) error {
+func cancelTeardownJobs(ctx context.Context, api teardownJobAPI, region, what string, kind creatorKind, errOut io.Writer) error {
 	warn := func(err error) {
 		_, _ = fmt.Fprintf(errOut, "warning: could not delete the pending lagotto-teardown jobs in %s (%v); a job left there deletes the poller when it runs. "+
 			"An administrator's 'lagotto setup' updates the lagotto-cli-user policy to grant it.\n", region, err)
@@ -128,7 +162,7 @@ func cancelTeardownJobs(ctx context.Context, api teardownJobAPI, region, what st
 	refuse := func(err error) error {
 		return fmt.Errorf("refusing to %s: could not delete the pending lagotto-teardown jobs in %s: %w. Nothing was created", what, region, err)
 	}
-	if !deploying {
+	if kind == creatorHosted {
 		has, err := pollerScheduleExists(ctx, api)
 		switch {
 		case err != nil && isAccessDeniedErr(err):
@@ -137,7 +171,10 @@ func cancelTeardownJobs(ctx context.Context, api teardownJobAPI, region, what st
 		case err != nil:
 			return refuse(err)
 		case !has:
-			return nil
+			// The region was torn down (or is being): its poller's function
+			// is due for deletion, and nothing would poll or fire this.
+			return fmt.Errorf("refusing to %s: lagotto's poller in %s has been torn down (its rate schedule is gone, and its function "+
+				"is due for deletion). Nothing was created. Deploy it again first: lagotto deploy --region %s", what, region, region)
 		}
 	}
 	var names []string

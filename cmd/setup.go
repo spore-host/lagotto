@@ -126,11 +126,14 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	setupStamp = managedtags.Stamp{Owner: setupCallerOwner(ctx, cfg)}
 
 	// 0. The global scope, marked active before any account-wide create or
-	// change (lagotto#345): the CLI's account-wide teardown waits this out,
-	// or stops, and its grace period starts over.
-	if err := markGlobal(ctx, cfg, setupStamp.Owner, "set up lagotto's IAM", os.Stderr); err != nil {
+	// change (lagotto#345), and the mark ended when setup returns: while it
+	// is there the CLI's account-wide teardown does nothing, and its grace
+	// runs from the end. A teardown holding the lease is waited for.
+	markDone, err := markGlobal(ctx, cfg, setupStamp.Owner, "set up lagotto's IAM", os.Stderr)
+	if err != nil {
 		return err
 	}
+	defer markDone()
 
 	// 1. Tables (CLI-owned, #59): tagged where they exist, created nowhere
 	// (#325).

@@ -133,7 +133,24 @@ func (e *TeardownInProgressError) Unwrap() error { return e.Wait }
 // [ErrLeaseUnavailable] when the caller is not allowed to reach the table (it
 // should warn and carry on); and any other failure wrapped, which refuses.
 func MarkActive(ctx context.Context, c *lifecycle.Client, region, what string) error {
-	err := c.MarkActive(ctx, Tool, region)
+	_, err := Mark(ctx, c, region, what)
+	return err
+}
+
+// Mark is MarkActive, returning the token of the creator mark it wrote, for
+// lifecycle's MarkDone once the creator has finished (lagotto#340).
+func Mark(ctx context.Context, c *lifecycle.Client, region, what string) (string, error) {
+	token, err := c.Mark(ctx, Tool, region)
+	return token, markErr(err, region, what)
+}
+
+// CreatorMarkBound is how long a creator's mark on lagotto's global scope
+// keeps the account-wide resources in use (lagotto#340). A creator ends its
+// mark when it finishes (MarkDone); one still there after this is a creator
+// that died, and the account-wide teardown takes the scope as idle from then.
+const CreatorMarkBound = time.Hour
+
+func markErr(err error, region, what string) error {
 	var we *lifecycle.WaitError
 	switch {
 	case err == nil:

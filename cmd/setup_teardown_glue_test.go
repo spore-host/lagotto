@@ -319,6 +319,11 @@ func stubTeardown(t *testing.T, tables *fakeTables, roles runtimeiam.RoleDeleteA
 		return idle.AccountWideResult{Outcome: idle.AccountWideRemoved, Result: res}
 	}
 	setupCallerAccount = func(context.Context, aws.Config) (string, error) { return "123456789012", nil }
+	oldCheck := teardownAccountWideCheck
+	teardownAccountWideCheck = func(context.Context, aws.Config, string, string) idle.AccountWideResult {
+		return idle.AccountWideResult{Outcome: idle.AccountWideWould}
+	}
+	t.Cleanup(func() { teardownAccountWideCheck = oldCheck })
 	oldPoller := teardownPollerExists
 	teardownPollerExists = func(context.Context, aws.Config) (bool, error) { return false, nil }
 	t.Cleanup(func() { teardownPollerExists = oldPoller })

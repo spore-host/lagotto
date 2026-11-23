@@ -99,12 +99,14 @@ type actor struct {
 	noCrash bool
 	// injected: one of its AWS calls was failed by the model.
 	injected bool
-	run      func(ctx context.Context)
-	resume   chan int    // goOn, crashNow or failNow at the step point
-	parked   chan string // the step point it stopped at, or "" once done
-	at       string
-	ran      bool
-	done     bool
+	// crashed: the model crashed it.
+	crashed bool
+	run     func(ctx context.Context)
+	resume  chan int    // goOn, crashNow or failNow at the step point
+	parked  chan string // the step point it stopped at, or "" once done
+	at      string
+	ran     bool
+	done    bool
 	// passed: the actor has passed the execution's crashAfter step.
 	passed bool
 }
@@ -155,6 +157,10 @@ func failable(label string) bool {
 	return false
 }
 
+// waiting reports whether a step point is a wait (a blocked MarkActive's
+// poll, a backoff), from which an actor yields.
+func waiting(label string) bool { return label == "wait" || label == "sleep" }
+
 // option is one choice at a step: let actor go on, crash it, or fail its
 // AWS call.
 type option struct {
@@ -181,8 +187,10 @@ type execution struct {
 
 func (e *execution) options(actors []*actor, cur int) []option {
 	var out []option
-	curEnabled := cur >= 0 && !actors[cur].done
-	if curEnabled {
+	// An actor parked waiting (a creator's MarkActive under a live lease,
+	// a backoff) yields: switching away from it is no preemption.
+	curEnabled := cur >= 0 && !actors[cur].done && !waiting(actors[cur].at)
+	if cur >= 0 && !actors[cur].done {
 		out = append(out, option{actor: cur})
 	}
 	for i, a := range actors {
@@ -194,6 +202,7 @@ func (e *execution) options(actors []*actor, cur int) []option {
 		}
 		out = append(out, option{actor: i})
 	}
+	_ = curEnabled
 	reach := func(i int, a *actor) bool {
 		return !a.done && a.ran && (i == cur || !curEnabled || e.preempts < e.maxPreempt)
 	}
@@ -247,10 +256,11 @@ func (e *execution) run(actors []*actor) {
 		}
 		e.chosen, e.widths = append(e.chosen, i), append(e.widths, len(opts))
 		o := opts[i]
-		curEnabled := cur >= 0 && !actors[cur].done
+		curEnabled := cur >= 0 && !actors[cur].done && !waiting(actors[cur].at)
 		switch o.mode {
 		case crashNow:
 			e.crashes++
+			actors[o.actor].crashed = true
 		case failNow:
 			e.fails++
 		}
@@ -380,6 +390,13 @@ type mworld struct {
 	passes    []int
 	// pollerReport: the pollers run in report mode (the CLI in reap).
 	pollerReport bool
+	// creating counts the creators past their marks and not yet done.
+	creating int
+	// regionMarkedAt[region] is the step of a creator's first mark there.
+	regionMarkedAt map[string]int
+	// markLive[region]: a creator's mark is the item's state, unchanged
+	// since but by CLI runs (which must never erase it).
+	markLive map[string]bool
 	// failedRuns are the CLI runs that crashed, or ended Held after one of
 	// their calls failed: those may leave the global lease held by design.
 	failedRuns map[string]bool
@@ -416,7 +433,7 @@ type globalSpec string
 
 func newMWorld(reap bool, global globalSpec, specs ...regionSpec) *mworld {
 	m := &mworld{now: t0, tables: map[string]*lifecycletest.Fake{}, reap: reap, acct: inventorytest.Account(acct), due: map[string]time.Time{},
-		read: map[string]map[string]int{}, changed: map[string]int{}, writesBy: map[string]int{}, passedUnder: map[string]bool{}, decidedAt: map[string]int{}, failedRuns: map[string]bool{}}
+		read: map[string]map[string]int{}, changed: map[string]int{}, writesBy: map[string]int{}, passedUnder: map[string]bool{}, decidedAt: map[string]int{}, failedRuns: map[string]bool{}, regionMarkedAt: map[string]int{}, markLive: map[string]bool{}}
 	enabled := []string{modelControl}
 	for _, s := range specs {
 		enabled = append(enabled, s.name)
@@ -567,8 +584,16 @@ func (m *mworld) table(region string) *lifecycletest.Fake {
 				m.writesBy[m.current]++
 				m.seq++
 				for _, k := range writtenKeys(in) {
-					if k == lifecycle.ItemKey(Tool, region) {
-						m.changed[region] = m.seq
+					if k != lifecycle.ItemKey(Tool, region) {
+						continue
+					}
+					m.changed[region] = m.seq
+					cliRun := strings.HasPrefix(m.current, "cli")
+					if op == "DeleteItem" && cliRun && m.markLive[region] {
+						m.violations = append(m.violations, fmt.Sprintf("SAFETY: %s finished %s's lifecycle item, which a creator had marked since it was judged", m.current, region))
+					}
+					if !cliRun {
+						m.markLive[region] = false
 					}
 				}
 			}
@@ -628,8 +653,8 @@ func (m *mworld) deps(r string) Deps {
 // awRun is one CLI account-wide teardown as owner.
 func (m *mworld) awRun(ctx context.Context, owner string, reap bool, grace time.Duration) AccountWideResult {
 	return TearDownAccountWide(ctx, AccountWideConfig{AccountID: acct, Owner: owner, Reap: reap, Grace: grace, Now: m.clock, Logf: m.logf,
-		Wait: 10 * time.Second, sequential: true,
-		Sleep: func(ctx context.Context, _ time.Duration) error { park(ctx, "sleep"); return nil }},
+		sequential: true,
+		Sleep:      func(ctx context.Context, _ time.Duration) error { park(ctx, "sleep"); return nil }},
 		AccountWideDeps{Lifecycle: m.client(owner), Source: m.src, Deleters: m.deleters()})
 }
 
@@ -738,6 +763,9 @@ func (m *mworld) checkSafe(by, what string) {
 			}
 			m.violate("SAFETY: %s by %s while %s has a poller function", what, by, r)
 		}
+		if f.ActiveWatches > 0 {
+			m.violate("SAFETY: %s by %s while a watch is active in %s", what, by, r)
+		}
 		if j := m.pendingJobs(r); len(j) > 0 {
 			m.violate("SAFETY: %s by %s while %s has one-shot jobs %v pending", what, by, r, j)
 		}
@@ -761,6 +789,12 @@ func (m *mworld) checkSafe(by, what string) {
 	m.mu.Unlock()
 	if len(late) > 0 {
 		m.violate("SAFETY: %s by %s after a creator started since its decision (decided at step %d, creator at %v)", what, by, decided, late)
+	}
+	m.mu.Lock()
+	creating := m.creating
+	m.mu.Unlock()
+	if creating > 0 {
+		m.violate("SAFETY: %s by %s while a creator is running (past its marks, not done)", what, by)
 	}
 	g, ok := m.item(lifecycle.ScopeGlobal)
 	if !ok || g.Lease == nil || g.Lease.Owner != by || g.State == lifecycle.StateActive {
@@ -993,28 +1027,46 @@ func (m *mworld) cli(owner string, grace time.Duration) *actor {
 
 // mark is a creator's first writes (cmd markActive): its region, then the
 // global scope; a refusal of either creates nothing.
-func (m *mworld) mark(ctx context.Context, c *lifecycle.Client, region string, deploying bool) bool {
-	if region != "" && MarkActive(ctx, c, region, "create") != nil {
-		return false
-	}
-	if err := MarkActive(ctx, c, lifecycle.ScopeGlobal, "create"); err != nil {
-		// Refused by a global lease: a run that has ended may hold it only
-		// after a failure, never because a creator came along.
-		var tip *TeardownInProgressError
-		if errors.As(err, &tip) {
-			for _, a := range m.actors {
-				if a.name == tip.Wait.Owner && a.done {
-					m.mu.Lock()
-					failed := m.failedRuns[a.name]
-					m.mu.Unlock()
-					if !failed {
-						m.violate("a creator was refused by the global lease of %s, which had ended without a failure", a.name)
-					}
-				}
+func (m *mworld) mark(ctx context.Context, c *lifecycle.Client, region string, kind creatorKindModel) (done func(), ok bool) {
+	done = func() {}
+	hasSchedule := func() bool {
+		for _, s := range m.regionFacts(region).Schedules {
+			if s.Name == deploy.PollerScheduleName {
+				return true
 			}
 		}
 		return false
 	}
+	if kind == mHosted && !hasSchedule() {
+		return done, false // the region was torn down: refused, nothing written (cmd's pre-check)
+	}
+	if region != "" {
+		if MarkActive(ctx, c, region, "create") != nil {
+			return done, false
+		}
+		m.mu.Lock()
+		m.seq++
+		if m.regionMarkedAt[region] == 0 {
+			m.regionMarkedAt[region] = m.seq
+		}
+		m.markLive[region] = true
+		m.mu.Unlock()
+	}
+	token, err := Mark(ctx, c, lifecycle.ScopeGlobal, "create")
+	if err != nil {
+		// Refused by a global lease: a run that has exited never holds one
+		// a creator waits for, unless it crashed.
+		var tip *TeardownInProgressError
+		if errors.As(err, &tip) {
+			for _, a := range m.actors {
+				if a.name == tip.Wait.Owner && a.done && !a.crashed {
+					m.violate("a creator was refused by the global lease of %s, which had exited without crashing", a.name)
+				}
+			}
+		}
+		return done, false
+	}
+	done = func() { _, _ = c.MarkDone(ctx, Tool, lifecycle.ScopeGlobal, token) }
 	if g, ok := m.item(lifecycle.ScopeGlobal); ok && g.Lease != nil {
 		m.mu.Lock()
 		m.passedUnder[g.Lease.Token] = true
@@ -1023,27 +1075,47 @@ func (m *mworld) mark(ctx context.Context, c *lifecycle.Client, region string, d
 	m.mu.Lock()
 	m.seq++
 	m.passes = append(m.passes, m.seq)
+	m.creating++
 	m.mu.Unlock()
-	hasSchedule := false
-	for _, s := range m.regionFacts(region).Schedules {
-		hasSchedule = hasSchedule || s.Name == deploy.PollerScheduleName
+	mdone := done
+	ended := false
+	done = func() {
+		if ended {
+			return
+		}
+		ended = true
+		mdone()
+		m.mu.Lock()
+		m.creating--
+		m.mu.Unlock()
 	}
-	if region != "" && (deploying || hasSchedule) {
-		// As cmd's markActive does (lagotto#340): the region's pending
-		// teardown jobs go before anything is created or changed there: by
-		// deploy always (it recreates the schedule), by a watch while the
-		// poller's schedule is there (without it, the region's teardown has
-		// finished: lagotto#349).
+	if region != "" && kind != mLocal {
+		if kind == mHosted && !hasSchedule() {
+			done()
+			return func() {}, false // torn down since the pre-check: refused
+		}
+		// As cmd's markCreating does (lagotto#340): the region's pending
+		// teardown jobs go before anything is created or changed there.
 		sch := mScheduler{m, region}
 		for _, j := range m.pendingJobs(region) {
 			if _, err := sch.DeleteSchedule(ctx, &scheduler.DeleteScheduleInput{Name: aws.String(j), GroupName: aws.String(runtimeiam.TeardownScheduleGroup)}); err != nil &&
 				!isNotFound(err) {
-				return false // refused: nothing created
+				done()
+				return func() {}, false // refused: nothing created
 			}
 		}
 	}
-	return true
+	return done, true
 }
+
+// creatorKindModel is cmd's creatorKind, in the model.
+type creatorKindModel int
+
+const (
+	mDeploy creatorKindModel = iota
+	mHosted
+	mLocal
+)
 
 // ensureIAM is what setup and deploy converge: lagotto's account-wide IAM.
 func (m *mworld) ensureIAM() {
@@ -1058,9 +1130,11 @@ func (m *mworld) ensureIAM() {
 // arms the schedule.
 func (m *mworld) deployActor(region string) *actor {
 	return &actor{name: "deploy " + region, noCrash: true, run: func(ctx context.Context) {
-		if !m.mark(ctx, m.client("deploy "+region), region, true) {
+		done, ok := m.mark(ctx, m.client("deploy "+region), region, mDeploy)
+		if !ok {
 			return
 		}
+		defer done()
 		park(ctx, "deploy ensures the IAM")
 		m.ensureIAM()
 		park(ctx, "deploy creates the region")
@@ -1090,9 +1164,14 @@ func (m *mworld) watchActor(region string) *actor {
 		for _, s := range m.regionFacts(region).Schedules {
 			has = has || s.Name == deploy.PollerScheduleName
 		}
-		if !has || !m.mark(ctx, m.client("watch "+region), region, false) {
+		if !has {
 			return
 		}
+		done, ok := m.mark(ctx, m.client("watch "+region), region, mHosted)
+		if !ok {
+			return
+		}
+		defer done()
 		park(ctx, "watch stores the watch")
 		m.src.Update(region, func(r *inventory.Region) {
 			r.ActiveWatches = 1
@@ -1105,14 +1184,53 @@ func (m *mworld) watchActor(region string) *actor {
 	}}
 }
 
+// localWatchActor is `lagotto watch --local` in region: both marks, and a
+// watch a local poll daemon serves (it needs lagotto's instance role, not a
+// hosted poller).
+func (m *mworld) localWatchActor(region string) *actor {
+	return &actor{name: "watch --local " + region, noCrash: true, run: func(ctx context.Context) {
+		done, ok := m.mark(ctx, m.client("watch --local "+region), region, mLocal)
+		if !ok {
+			return
+		}
+		defer done()
+		park(ctx, "watch --local stores the watch")
+		m.src.Update(region, func(r *inventory.Region) { r.ActiveWatches = 1 })
+	}}
+}
+
+// launchActor is `lagotto launch` in region: it needs the hosted poller,
+// and arms a schedule that invokes its function.
+func (m *mworld) launchActor(region string) *actor {
+	return &actor{name: "launch " + region, noCrash: true, run: func(ctx context.Context) {
+		done, ok := m.mark(ctx, m.client("launch "+region), region, mHosted)
+		if !ok {
+			return
+		}
+		defer done()
+		park(ctx, "launch arms its schedule")
+		for _, j := range m.pendingJobs(region) {
+			if j == FunctionJobName {
+				m.violate("a scheduled launch was armed in %s against a poller whose function is due for deletion", region)
+			}
+		}
+		if f := m.regionFacts(region); f.Function == nil {
+			m.violate("a scheduled launch was armed in %s with no poller function", region)
+		}
+	}}
+}
+
 // setupActor is `lagotto setup`: the global mark, then the IAM.
 func (m *mworld) setupActor() *actor {
 	return &actor{name: "setup", noCrash: true, run: func(ctx context.Context) {
-		if !m.mark(ctx, m.client("setup"), "", false) {
+		done, ok := m.mark(ctx, m.client("setup"), "", mDeploy)
+		if !ok {
 			return
 		}
 		park(ctx, "setup ensures the IAM")
 		m.ensureIAM()
+		park(ctx, "setup ends its mark")
+		done()
 	}}
 }
 
@@ -1413,6 +1531,28 @@ func modelScenarios(long bool) []scenario {
 			specs: []regionSpec{{name: mA, deployed: true, enabled: true, noSchedule: true, item: "teardown",
 				jobs: []string{"lagotto-teardown-log-group", FunctionJobName}}},
 			actors: acts(tick(mA), cli("cli", 0)), maxPreempt: p, maxFail: 1, kinds: k},
+		// A dead regional item that a watch --local marks again while the
+		// CLI judges it (finishDeadRegion acts only as judged).
+		scenario{name: "a dead regional item, a watch --local and the CLI", reap: true, specs: []regionSpec{{name: mA, item: "stale"}},
+			actors: acts(cli("cli", 0), func(m *mworld) *actor { return m.localWatchActor(mA) }), maxPreempt: p, maxFail: 1, kinds: k},
+		// A launch in the job window, and one with a poller whose run left
+		// its jobs.
+		scenario{name: "a launch in the job window", reap: true,
+			specs: []regionSpec{{name: mA, deployed: true, enabled: true, noSchedule: true, item: "absent",
+				jobs: []string{"lagotto-teardown-log-group", FunctionJobName}}},
+			actors: acts(func(m *mworld) *actor { return m.launchActor(mA) }), maxFail: 1, kinds: k},
+		scenario{name: "a launch while jobs are left", reap: true,
+			specs:  []regionSpec{{name: mA, deployed: true, enabled: true, item: "idle", jobs: []string{"lagotto-teardown-log-group", FunctionJobName}}},
+			actors: acts(func(m *mworld) *actor { return m.launchActor(mA) }, tick(mA)), maxPreempt: p, maxFail: 1, kinds: k},
+		// A retried or duplicate invocation after the region committed and
+		// finished.
+		scenario{name: "a duplicate poller invocation after the commit", reap: true,
+			specs: []regionSpec{{name: mA, deployed: true, enabled: true, noSchedule: true, item: "absent",
+				jobs: []string{"lagotto-teardown-log-group", FunctionJobName}}},
+			actors: acts(tick(mA), cli("cli", 0)), maxPreempt: p, maxFail: 1, kinds: k},
+		// A CLI run that fails, and a creator after it.
+		scenario{name: "a failing CLI run and a setup", reap: true, specs: []regionSpec{empty(mA)},
+			actors: acts(cli("cli", 0), func(m *mworld) *actor { return m.setupActor() }), maxPreempt: p, maxCrash: 1, maxFail: 1, kinds: k},
 		// A redeploy in the job window, the pollers in report mode: deploy
 		// deletes the region's jobs first.
 		scenario{name: "a deploy in the job window, pollers in report mode", reap: true, pollerReport: true,

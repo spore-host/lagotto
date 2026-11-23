@@ -325,10 +325,14 @@ teardown holds either lease they wait (the CLI up to 10 minutes), then exit
 non-zero, having created nothing. `lagotto-cli-user` grants this on that table only
 (`UpdateItem`, `ConditionCheckItem`, `DescribeTable`, `CreateTable`,
 `TagResource`, and `DeleteItem` of the closing sentinel's key only). Then
-`deploy` deletes the region's pending one-shot teardown jobs, and `watch` and
-`launch` do while the poller's rate schedule is still there (lagotto#340): a
+`deploy` deletes the region's pending one-shot teardown jobs (lagotto#340): a
 poller whose region was torn down leaves its function's job due 92 minutes
 later, which would delete a poller deployed in the meantime, in either mode.
+`watch` and `launch` need the hosted poller: once its rate schedule is gone
+(the region was torn down, its function due for deletion) they are refused,
+with nothing created, and told to redeploy (lagotto#349); otherwise they
+delete the region's pending jobs too. `watch --local` needs no hosted poller,
+and leaves them.
 `lagotto-cli-user` grants `scheduler:DeleteSchedule` on the
 `lagotto-teardown` group's schedules only. A caller whose policy predates
 either grant gets a warning and carries on: re-run `lagotto setup`.
@@ -692,50 +696,62 @@ actor removes them: the CLI (lagotto#340), from its lazy last mile, from
 teardown --plan --mode reap` (lagotto#346). All three run one code path
 (`idle.TearDownAccountWide`):
 
-1. **The global lease.** It works under the lease on lagotto's global scope,
-   the item `tool#lagotto#global` in us-east-1's `spore-host-lifecycle` table.
-   A last mile waits for nothing: another run's live lease means "later". An
-   explicit teardown waits for it for at most 2 minutes, and never past its own
-   time budget.
-2. **The conditions.** It may delete only while all of these hold, re-checked
+1. **The global scope.** lagotto's global scope is the item
+   `tool#lagotto#global` in us-east-1's `spore-host-lifecycle` table. **ACTIVE
+   means in use**: every creator of something account-wide (`setup`, `deploy`,
+   `watch`, `launch`) marks it ACTIVE first (lagotto#345), with a mark of its
+   own, and ends that mark when it finishes (libs `MarkDone`): the scope goes
+   IDLE then, idle from that moment, unless another creator has marked since
+   (that one ends it). While a creator's mark is fresh the teardown does
+   nothing. A mark older than an hour is a creator that died: the teardown
+   takes the scope as idle from when it records it so.
+2. **Writes only as judged.** The teardown never writes to a lifecycle item,
+   global or regional, except on condition that it is still exactly as the
+   teardown judged it (its epoch, state, lease and mark; libs#89). It records
+   the scope IDLE (an absent item, a mark that died, its own release), and then
+   claims the global lease, each only if nothing changed since its read; a
+   creator that marked in between refuses it. A creator that comes while the
+   teardown holds the lease waits for it (up to 10 minutes, as libs
+   `MarkActive` does): the teardown re-checks before each delete, and gives the
+   lease back at once when it finds something in use.
+3. **The conditions.** It may delete only while all of these hold, re-checked
    before **each** delete:
    - no region has a poller function;
    - no `lagotto-teardown` one-shot job is pending in any region (they run as
      the invoke role);
    - no region's lagotto lifecycle item is ACTIVE, held, or under a live lease;
      and, once the dead items are finished (below), no region has one at all;
-   - the global item's epoch has not moved since its decision. Every creator of
-     something account-wide (`setup`, `deploy`, `watch`, `launch`) marks the
-     global scope active first (lagotto#345). A mark between the decision and
-     the claim is seen by reading the global item again once claimed (its
-     epoch against the decision's); one after the claim takes the teardown's
-     lease away, so its next heartbeat fails and it stops.
+   - it holds the global lease, claimed at the epoch it judged.
 
-   A read that fails, or a footprint that is not complete, means "don't". When
-   a re-check finds something in use (a creator came along), the teardown gives
-   the global lease back at once, as ACTIVE, so the creator's own mark does not
-   wait for it.
-3. **Dead regional items.** A region's item whose lease went stale, or that is
+   A read that fails, or a footprint that is not complete, means "don't".
+4. **Dead regional items.** A region's item whose lease went stale, or that is
    IDLE, in a region with no poller function and no job left, has no poller to
-   carry it on. The teardown finishes it, closes that region's table, and goes
-   ahead. Anything else of lagotto's left there (tables, a bucket, a schedule
-   group: a regional teardown that stopped partway) needs nothing
-   account-wide; `lagotto teardown --plan` removes it. A function left there is
-   a poller, and blocks.
-4. **The deletes**, in dependency order (a profile before its role).
+   carry it on. The teardown finishes it, only as it judged it (a `watch
+   --local` that marked it since keeps it, and stops the run), closes that
+   region's table, and goes ahead. Anything else of lagotto's left there
+   (tables, a bucket, a schedule group: a regional teardown that stopped
+   partway) needs nothing account-wide; `lagotto teardown --plan` removes it. A
+   function left there is a poller, and blocks.
+5. **The deletes**, in dependency order (a profile before its role).
    `lagotto-cli-user` is deleted only while nothing is attached to it (owner
    decision); attached, it stays, and does not keep the global item.
-5. **The end.** It finishes the global lease, which deletes the global item,
-   and closes us-east-1's table if no tool's item is left in it. **Any
-   failure leaves the global lease held**: it goes stale in 20 minutes, and the
-   next CLI run takes it over and carries on, without waiting a grace period
-   again. Each run writes a lease owner of its own (`lagotto teardown/<random>`),
-   so only that run takes a lease in its name for its own.
+6. **The end.** It finishes the global lease, which deletes the global item,
+   and closes us-east-1's table if no tool's item is left in it. **A run that
+   has exited never makes a creator wait.** One that fails before deleting
+   anything gives the lease back. One that fails partway suspends it (libs
+   `Lease.Suspend`): the global item is left IDLE and marked incomplete, with
+   no lease, and the next CLI run resumes it without waiting a grace period
+   again; a creator in the meantime clears that mark (the scope is in use
+   again). Only a run that crashed, or whose own last write failed, leaves a
+   live lease, which goes stale in 20 minutes. Each run writes a lease owner of
+   its own (`lagotto teardown/<random>`).
 
-The global scope has a grace of its own, 24 h: the last mile records the scope
-idle while none of the conditions blocks, and removes the resources only once
-it has been idle that long, so a `lagotto setup` that deploys no poller is not
-undone by the next command. An explicit `lagotto teardown` uses no grace.
+The global scope has a grace of its own, 24 h from the last creator's end: the
+last mile removes the resources only once the scope has been idle that long, so
+a `lagotto setup` that deploys no poller is not undone by the next command. An
+explicit `lagotto teardown` uses no grace, but never runs while a creator is
+running. `lagotto teardown --iam-roles` runs this check, in report mode,
+before it deletes anything, so a refusal leaves the account as it was.
 Outside the aws partition (GovCloud, China, the ISO partitions, the European
 Sovereign Cloud) there is no global scope, and the account-wide teardown does
 not run: remove the account-wide resources with `lagotto teardown

@@ -7,8 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
-	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	fp "github.com/spore-host/libs/footprint"
 	"github.com/spore-host/libs/lifecycle"
 
@@ -18,54 +16,32 @@ import (
 )
 
 // TestAccountWideMarkBeforeTheClaim: with no grace, a creator (setup, which
-// marks only the global scope) that marks between the decision and the
-// claim is seen by the epoch read after the claim: the lease goes back and
-// nothing is deleted (it would delete the IAM setup just wrote).
+// marks only the global scope) that marks between the judgement and the
+// claim is never erased: the actor's writes are conditional on what it
+// judged, so it stops, with nothing deleted and the creator's mark intact.
 func TestAccountWideMarkBeforeTheClaim(t *testing.T) {
-	w := newAWWorld(t)
-	d := w.deps()
-	d.Gather = func(ctx context.Context) (inventory.Facts, error) {
-		f, err := inventory.Gather(ctx, w.src, acct, inventory.Scope{AllRegions: true}, inventory.Options{})
-		if err := MarkActive(ctx, w.client("setup"), lifecycle.ScopeGlobal, "set up lagotto's IAM"); err != nil {
-			t.Fatal(err)
-		}
-		return f, err
-	}
-	r := TearDownAccountWide(context.Background(), w.cfg(true, 0), d)
-	if r.Outcome != AccountWideBlocked || !strings.Contains(r.Why, "a creator marked lagotto active since the decision") || len(w.ev.list()) != 0 {
-		t.Fatalf("%+v %v\n%s", r, w.ev.list(), w.log())
-	}
-	if g, _ := w.global(); g.Lease != nil {
-		t.Errorf("the lease was not given back: %+v", g)
-	}
-	// A global item that cannot be read after the claim: the same.
-	w = newAWWorld(t)
-	d = w.deps()
-	gets, claimed := 0, false
-	global := func(in any) bool {
-		switch x := in.(type) {
-		case *dynamodb.GetItemInput:
-			v, ok := x.Key["pk"].(*ddbtypes.AttributeValueMemberS)
-			return ok && v.Value == lifecycle.ItemKey(Tool, lifecycle.ScopeGlobal)
-		case *dynamodb.UpdateItemInput:
-			v, ok := x.Key["pk"].(*ddbtypes.AttributeValueMemberS)
-			return ok && v.Value == lifecycle.ItemKey(Tool, lifecycle.ScopeGlobal)
-		}
-		return false
-	}
-	w.tables[region].Err = func(op string, in any) error {
-		switch {
-		case op == "UpdateItem" && global(in):
-			claimed = true
-		case op == "GetItem" && claimed && global(in):
-			if gets++; gets == 1 {
-				return errors.New("network down")
+	for _, existing := range []bool{false, true} {
+		w := newAWWorld(t)
+		if existing {
+			if _, err := w.client("an earlier run").SetIdleIfUnchanged(context.Background(), Tool, lifecycle.ScopeGlobal, lifecycle.Expect{}); err != nil {
+				t.Fatal(err)
 			}
 		}
-		return nil
-	}
-	if r := TearDownAccountWide(context.Background(), w.cfg(true, 0), d); r.Outcome != AccountWideBlocked || len(w.ev.list()) != 0 {
-		t.Errorf("unreadable after the claim: %+v (%d reads)\n%s", r, gets, w.log())
+		d := w.deps()
+		d.Gather = func(ctx context.Context) (inventory.Facts, error) {
+			f, err := inventory.Gather(ctx, w.src, acct, inventory.Scope{AllRegions: true}, inventory.Options{})
+			if err := MarkActive(ctx, w.client("setup"), lifecycle.ScopeGlobal, "set up lagotto's IAM"); err != nil {
+				t.Fatal(err)
+			}
+			return f, err
+		}
+		r := TearDownAccountWide(context.Background(), w.cfg(true, 0), d)
+		if r.Outcome != AccountWideBlocked || len(w.ev.list()) != 0 {
+			t.Fatalf("existing=%t: %+v %v\n%s", existing, r, w.ev.list(), w.log())
+		}
+		if g, _ := w.global(); g.Lease != nil || g.State != lifecycle.StateActive || g.Mark == nil {
+			t.Errorf("existing=%t: the creator's mark was erased: %+v", existing, g)
+		}
 	}
 }
 
@@ -188,7 +164,7 @@ func TestExecuteWithoutAResult(t *testing.T) {
 		return nil, boom
 	}
 	w := newAWWorld(t)
-	if r := w.run(true, 0); r.Outcome != AccountWideHeld || !errors.Is(r.Err, boom) || len(w.ev.list()) != 0 {
+	if r := w.run(true, 0); r.Outcome != AccountWideFailed || !errors.Is(r.Err, boom) || len(w.ev.list()) != 0 {
 		t.Errorf("account-wide: %+v", r)
 	}
 	if r := w.run(false, 0); r.Outcome != AccountWideWaiting && r.Outcome != AccountWideWould {
@@ -222,4 +198,106 @@ func TestAccountWideLeftovers(t *testing.T) {
 		t.Errorf("a function left: %+v", r)
 	}
 	_ = time.Second
+}
+
+// TestAccountWideSetupFinishesBeforeTheClaim: setup marks and ends its mark
+// between the teardown recording the scope idle and its claim: the epoch
+// moved since the judgement, so the claim is refused.
+func TestAccountWideSetupFinishesBeforeTheClaim(t *testing.T) {
+	w := newAWWorld(t)
+	f := w.tables[region]
+	wrote, ran := false, false
+	f.Hook = func(ctx context.Context, op string) {
+		switch {
+		case op == "TransactWriteItems" && !ran:
+			wrote = true
+		case op == "GetItem" && wrote && !ran:
+			ran = true
+			setup := w.client("setup")
+			token, err := Mark(ctx, setup, lifecycle.ScopeGlobal, "set up")
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if done, err := setup.MarkDone(ctx, Tool, lifecycle.ScopeGlobal, token); !done || err != nil {
+				t.Error(done, err)
+			}
+		}
+	}
+	r := w.run(true, 0)
+	if !ran || r.Outcome != AccountWideBlocked || len(w.ev.list()) != 0 {
+		t.Fatalf("ran=%t %+v %v\n%s", ran, r, w.ev.list(), w.log())
+	}
+}
+
+// TestAccountWideDeadItemMarkedAgain: a dead regional item a watch --local
+// marks again before it is finished is not finished: the run stops, the
+// IAM stays, the lease goes back.
+func TestAccountWideDeadItemMarkedAgain(t *testing.T) {
+	ctx := context.Background()
+	w := newAWWorld(t)
+	c := w.client(PollerOwner("us-west-2"))
+	if _, _, err := c.Observe(ctx, Tool, "us-west-2", false); err != nil {
+		t.Fatal(err)
+	}
+	f := w.tables["us-west-2"]
+	marked := false
+	f.Hook = func(ctx context.Context, op string) {
+		if op == "UpdateItem" && !marked { // the dead item's claim
+			marked = true
+			if err := w.client("watch --local").MarkActive(ctx, Tool, "us-west-2"); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	r := w.run(true, 0)
+	if !marked || r.Outcome != AccountWideBlocked || !strings.Contains(strings.Join(r.Blockers, ";"), "changed since it was judged dead") || len(w.ev.list()) != 0 {
+		t.Fatalf("%+v %v\n%s", r, w.ev.list(), w.log())
+	}
+	if it, ok, _ := w.client("x").Get(ctx, Tool, "us-west-2"); !ok || it.State != lifecycle.StateActive {
+		t.Errorf("the watch's item: %+v", it)
+	}
+	if g, _ := w.global(); g.Lease != nil {
+		t.Errorf("the global lease was not given back: %+v", g)
+	}
+}
+
+// TestCancelSkipsAFinishedRegion: a retried or duplicate invocation after
+// the region committed (its rate schedule gone) leaves the jobs: they are
+// the region's removal.
+func TestCancelSkipsAFinishedRegion(t *testing.T) {
+	h := newHarness(t)
+	h.src.Update(region, func(r *inventory.Region) {
+		r.Schedules = []inventory.Schedule{{Group: runtimeiam.TeardownScheduleGroup, Name: FunctionJobName}}
+	})
+	if r := Tick(context.Background(), h.cfg(true), h.deps()); strings.Contains(strings.Join(h.ev.list(), "\n"), "delete one-shot") {
+		t.Errorf("%+v %v", r, h.ev.list())
+	}
+	if !strings.Contains(h.log(), "the poller's rate schedule is gone") {
+		t.Errorf("log:\n%s", h.log())
+	}
+}
+
+// TestAccountWideExcluding: `teardown --iam-roles`' check ignores the
+// caller's own region's item and regional resources (it removes them
+// first), but not its poller.
+func TestAccountWideExcluding(t *testing.T) {
+	w := newAWWorld(t)
+	if err := w.client("deploy").MarkActive(context.Background(), Tool, "us-west-2"); err != nil {
+		t.Fatal(err)
+	}
+	w.src.SetRegion(inventory.Region{Region: "us-west-2", Tables: inventorytest.Deployed("us-west-2", acct).Tables, ActiveWatches: 1})
+	cfg := w.cfg(false, 0)
+	if r := TearDownAccountWide(context.Background(), cfg, w.deps()); r.Outcome != AccountWideBlocked {
+		t.Fatalf("not excluded: %+v", r)
+	}
+	cfg.Excluding = "us-west-2"
+	before := w.writes()
+	if r := TearDownAccountWide(context.Background(), cfg, w.deps()); r.Outcome != AccountWideWould || w.writes() != before {
+		t.Errorf("excluded: %+v (%d writes)", r, w.writes()-before)
+	}
+	w.src.SetRegion(inventorytest.Deployed("us-west-2", acct))
+	if r := TearDownAccountWide(context.Background(), cfg, w.deps()); r.Outcome != AccountWideBlocked {
+		t.Errorf("its poller still blocks: %+v", r)
+	}
 }

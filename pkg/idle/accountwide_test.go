@@ -304,13 +304,28 @@ func TestAccountWideGrace(t *testing.T) {
 	if r := w.run(false, DefaultGrace); r.Outcome != AccountWideWaiting || !strings.Contains(r.Why, "idle for 20h0m0s of its 24h0m0s grace") {
 		t.Errorf("report within the grace: %+v", r)
 	}
-	// A creator (setup) marks the global scope: the grace starts over.
-	if err := MarkActive(context.Background(), w.client("bob"), lifecycle.ScopeGlobal, "set up"); err != nil {
+	// A creator (setup) marks the global scope: while it runs (its mark
+	// fresh) the scope is in use, even with no grace; its done starts the
+	// grace over from then.
+	bob := w.client("bob")
+	token, err := Mark(context.Background(), bob, lifecycle.ScopeGlobal, "set up")
+	if err != nil {
 		t.Fatal(err)
+	}
+	before := w.writes()
+	if r := w.run(true, 0); r.Outcome != AccountWideBlocked || !strings.Contains(r.Why, "a creator is running") || w.writes() != before {
+		t.Fatalf("while setup runs: %+v", r)
+	}
+	w.advance(10 * time.Minute)
+	if done, err := bob.MarkDone(context.Background(), Tool, lifecycle.ScopeGlobal, token); !done || err != nil {
+		t.Fatal(done, err)
 	}
 	w.advance(5 * time.Hour)
 	if r := w.run(true, DefaultGrace); r.Outcome != AccountWideWaiting || len(w.ev.list()) != 0 {
 		t.Fatalf("after the mark: %+v", r)
+	}
+	if g, _ := w.global(); !g.IdleSince.Equal(t0.Add(20*time.Hour + 10*time.Minute)) {
+		t.Errorf("the grace does not start at the done: %+v", g)
 	}
 	w.advance(DefaultGrace + time.Minute)
 	if r := w.run(false, DefaultGrace); r.Outcome != AccountWideWould {
@@ -321,8 +336,8 @@ func TestAccountWideGrace(t *testing.T) {
 	}
 	w.deleted(t, allAccountWide...)
 
-	// In use: an ACTIVE regional item sets an IDLE global scope back to
-	// ACTIVE in reap mode, so its grace starts over.
+	// A blocked run writes nothing: the global scope's grace is the
+	// creators' (from their last done), not the teardown's.
 	w = newAWWorld(t)
 	if r := w.run(true, DefaultGrace); r.Outcome != AccountWideWaiting {
 		t.Fatal(r)
@@ -330,11 +345,22 @@ func TestAccountWideGrace(t *testing.T) {
 	if err := w.client("bob").MarkActive(context.Background(), Tool, "us-west-2"); err != nil {
 		t.Fatal(err)
 	}
-	if r := w.run(true, DefaultGrace); r.Outcome != AccountWideBlocked {
+	before = w.writes()
+	if r := w.run(true, DefaultGrace); r.Outcome != AccountWideBlocked || w.writes() != before {
 		t.Fatal(r)
 	}
-	if g, _ := w.global(); g.State != lifecycle.StateActive {
-		t.Errorf("the global scope stayed %s", g.State)
+	// A creator's mark older than CreatorMarkBound is one that died: the
+	// scope is idle from when the teardown records it so.
+	w = newAWWorld(t)
+	if err := MarkActive(context.Background(), w.client("bob"), lifecycle.ScopeGlobal, "set up"); err != nil {
+		t.Fatal(err)
+	}
+	w.advance(CreatorMarkBound + time.Minute)
+	if r := w.run(true, DefaultGrace); r.Outcome != AccountWideWaiting {
+		t.Fatalf("a dead creator's mark: %+v", r)
+	}
+	if g, _ := w.global(); g.State != lifecycle.StateIdle || g.Mark != nil {
+		t.Errorf("after a dead creator's mark: %+v", g)
 	}
 }
 
@@ -411,30 +437,24 @@ func TestAccountWideRecheckBeforeEachDelete(t *testing.T) {
 	}
 }
 
-// TestAccountWideFailureLeavesTheLeaseHeld: a delete that fails stops the
-// run with the global lease held; a creator meanwhile waits; the next run,
-// once the lease is stale, resumes (a grace is not waited again) and
-// finishes.
-func TestAccountWideFailureLeavesTheLeaseHeld(t *testing.T) {
+// TestAccountWideFailureSuspends: a delete that fails after another went
+// through suspends the run: no lease left (a creator marks at once), the
+// global item IDLE and incomplete; the next run resumes it without a grace.
+// One that fails before anything went gives the lease back.
+func TestAccountWideFailureSuspends(t *testing.T) {
 	w := newAWWorld(t)
 	w.acct.fail["role "+runtimeiam.RoleName] = errors.New("AccessDenied: iam:DeleteRole")
 	r := w.run(true, 0)
-	if r.Outcome != AccountWideHeld || r.Err == nil || !strings.Contains(w.log(), "lease=held") {
+	if r.Outcome != AccountWideHeld || r.Err == nil || !strings.Contains(w.log(), "lease=suspended") {
 		t.Fatalf("%+v\n%s", r, w.log())
 	}
 	g, ok := w.global()
-	if !ok || g.Lease == nil || g.Lease.Owner != cliOwner {
+	if !ok || g.Lease != nil || !g.Incomplete || g.State != lifecycle.StateIdle {
 		t.Fatalf("global %+v", g)
 	}
-	// Another run while it is live waits, and writes nothing.
-	before := w.writes()
-	if r := w.run(true, DefaultGrace); r.Outcome != AccountWideWaiting || w.writes() != before {
-		t.Errorf("while held: %+v", r)
-	}
-	// Report mode says reap mode would resume it.
-	w.advance(21 * time.Minute)
+	// Report mode says reap mode would resume it, a grace or not.
 	if r := w.run(false, DefaultGrace); r.Outcome != AccountWideWould {
-		t.Errorf("report of a stale lease: %+v", r)
+		t.Errorf("report of an incomplete run: %+v", r)
 	}
 	delete(w.acct.fail, "role "+runtimeiam.RoleName)
 	if r := w.run(true, DefaultGrace); r.Outcome != AccountWideRemoved {
@@ -443,6 +463,35 @@ func TestAccountWideFailureLeavesTheLeaseHeld(t *testing.T) {
 	w.deleted(t, "delete global role "+runtimeiam.RoleName)
 	if _, ok := w.global(); ok {
 		t.Error("the global item is left")
+	}
+
+	// A creator after it is never kept waiting, and clears the resume.
+	w = newAWWorld(t)
+	w.acct.fail["role "+runtimeiam.RoleName] = errors.New("AccessDenied: iam:DeleteRole")
+	if r := w.run(true, 0); r.Outcome != AccountWideHeld {
+		t.Fatal(r)
+	}
+	creator, err := lifecycle.New(lifecycle.Options{DynamoDB: func(r string) (lifecycle.API, error) { return w.tables[r], nil },
+		ControlRegion: region, Owner: "bob", Now: w.clock, WaitTimeout: time.Nanosecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := MarkActive(context.Background(), creator, lifecycle.ScopeGlobal, "deploy"); err != nil {
+		t.Fatalf("a creator after a suspended run: %v", err)
+	}
+	if g, _ := w.global(); g.Incomplete {
+		t.Errorf("the creator left the resume: %+v", g)
+	}
+
+	// The only delete failing: nothing went, the lease is given back.
+	w = newAWWorld(t)
+	w.src.SetAccount(inventory.Account{Policy: inventorytest.Account(acct).Policy})
+	w.acct.fail["policy"] = errors.New("AccessDenied")
+	if r := w.run(true, 0); r.Outcome != AccountWideFailed || !strings.Contains(r.Why, "nothing was deleted") {
+		t.Fatalf("%+v", r)
+	}
+	if g, _ := w.global(); g.Lease != nil || g.Incomplete {
+		t.Errorf("global %+v", g)
 	}
 }
 
@@ -523,8 +572,11 @@ func TestAccountWideDeadItems(t *testing.T) {
 		}
 		return nil
 	}
-	if r := w.run(true, 0); r.Outcome != AccountWideHeld || len(w.ev.list()) != 0 {
+	if r := w.run(true, 0); r.Outcome != AccountWideFailed || len(w.ev.list()) != 0 {
 		t.Errorf("finish failing: %+v %v", r, w.ev.list())
+	}
+	if g, _ := w.global(); g.Lease != nil {
+		t.Errorf("the global lease was not given back: %+v", g)
 	}
 }
 
@@ -570,7 +622,7 @@ func TestAccountWideReadFailures(t *testing.T) {
 		w.src.Fail("global EnabledRegions", errors.New("throttled"))
 		return f, err
 	}
-	if r := TearDownAccountWide(context.Background(), w.cfg(true, 0), d); r.Outcome != AccountWideHeld || reads != 1 {
+	if r := TearDownAccountWide(context.Background(), w.cfg(true, 0), d); r.Outcome != AccountWideFailed || reads != 1 {
 		t.Errorf("under the lease: %+v (%d cached reads)", r, reads)
 	}
 	// Outside the aws partition there is no global scope.
@@ -601,60 +653,53 @@ func TestAccountWideNewBlockerUnderTheLease(t *testing.T) {
 	}
 }
 
-// TestClaimGlobal: the wait for another actor's lease is bounded by time and
-// by the context's deadline; a throttle is waited out; a lease in the
-// caller's own name (a claim whose answer was lost) is recognised.
+// TestClaimGlobal: the claim is at exactly the judged item: another run's
+// claim since refuses it at once (nothing is waited for); a throttle is
+// tried again; a lease in the caller's own name (a claim whose answer was
+// lost) is recognised.
 func TestClaimGlobal(t *testing.T) {
 	ctx := context.Background()
 	w := newAWWorld(t)
+	me := w.client(cliOwner)
+	g, err := me.SetIdleIfUnchanged(ctx, Tool, lifecycle.ScopeGlobal, lifecycle.Expect{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	judged := lifecycle.ExpectOf(g, true)
 	other := w.client("carol")
-	if _, _, err := other.Observe(ctx, Tool, lifecycle.ScopeGlobal, false); err != nil {
+	if _, err := other.ClaimIfUnchanged(ctx, Tool, lifecycle.ScopeGlobal, 0, judged); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := other.Claim(ctx, Tool, lifecycle.ScopeGlobal, 0); err != nil {
-		t.Fatal(err)
-	}
-	cfg := w.cfg(true, 0)
-	cfg.Wait = 12 * time.Second
 	start := w.clock()
-	if _, err := claimGlobal(ctx, cfg.withDefaults(), w.client(cliOwner)); err == nil || !strings.Contains(err.Error(), "not free in 12s") ||
-		w.clock().Sub(start) != 15*time.Second {
-		t.Errorf("bounded wait: %v after %s", err, w.clock().Sub(start))
-	}
-	dl, cancel := context.WithTimeout(ctx, time.Second)
-	defer cancel()
-	if _, err := claimGlobal(dl, cfg.withDefaults(), w.client(cliOwner)); err == nil || !strings.Contains(err.Error(), "within the run's time") {
-		t.Errorf("deadline: %v", err)
-	}
-	cfg.Sleep = func(context.Context, time.Duration) error { return context.Canceled }
-	if _, err := claimGlobal(ctx, cfg.withDefaults(), w.client(cliOwner)); !errors.Is(err, context.Canceled) {
-		t.Errorf("cancelled: %v", err)
+	if _, err := claimGlobal(ctx, w.cfg(true, 0).withDefaults(), me, judged); !errors.Is(err, lifecycle.ErrNotClaimable) || w.clock() != start {
+		t.Errorf("another's claim since: %v after %s", err, w.clock().Sub(start))
 	}
 
 	// Its own lease: the claim was applied, the answer lost.
 	w = newAWWorld(t)
-	me := w.client(cliOwner)
-	if _, _, err := me.Observe(ctx, Tool, lifecycle.ScopeGlobal, false); err != nil {
+	me = w.client(cliOwner)
+	if g, err = me.SetIdleIfUnchanged(ctx, Tool, lifecycle.ScopeGlobal, lifecycle.Expect{}); err != nil {
 		t.Fatal(err)
 	}
+	judged = lifecycle.ExpectOf(g, true)
 	w.tables[region].Err = func(op string, _ any) error {
 		if op == "UpdateItem" {
 			w.tables[region].Err = nil
-			if _, err := w.client(cliOwner).Claim(ctx, Tool, lifecycle.ScopeGlobal, 0); err != nil {
+			if _, err := w.client(cliOwner).ClaimIfUnchanged(ctx, Tool, lifecycle.ScopeGlobal, 0, judged); err != nil {
 				t.Error(err)
 			}
 			return errors.New("connection reset")
 		}
 		return nil
 	}
-	if _, err := claimGlobal(ctx, w.cfg(true, 0).withDefaults(), me); err == nil || !strings.Contains(err.Error(), ownLeaseNote) {
+	if _, err := claimGlobal(ctx, w.cfg(true, 0).withDefaults(), me, judged); err == nil || !strings.Contains(err.Error(), ownLeaseNote) {
 		t.Errorf("own lease: %v", err)
 	}
 
 	// A throttle is tried again.
 	w = newAWWorld(t)
 	me = w.client(cliOwner)
-	if _, _, err := me.Observe(ctx, Tool, lifecycle.ScopeGlobal, false); err != nil {
+	if g, err = me.SetIdleIfUnchanged(ctx, Tool, lifecycle.ScopeGlobal, lifecycle.Expect{}); err != nil {
 		t.Fatal(err)
 	}
 	throttled := 0
@@ -665,7 +710,7 @@ func TestClaimGlobal(t *testing.T) {
 		}
 		return nil
 	}
-	if l, err := claimGlobal(ctx, w.cfg(true, 0).withDefaults(), me); err != nil || l == nil {
+	if l, err := claimGlobal(ctx, w.cfg(true, 0).withDefaults(), me, lifecycle.ExpectOf(g, true)); err != nil || l == nil {
 		t.Errorf("throttled: %v", err)
 	}
 }

@@ -32,7 +32,7 @@ func installFakeLeases(t *testing.T, table *lifecycletest.Fake, opts ...func(*li
 	}
 	t.Cleanup(func() { newLifecycleClient = prev })
 	prevJobs := newTeardownJobAPI
-	newTeardownJobAPI = func(aws.Config, string) teardownJobAPI { return &fakeTeardownJobs{} }
+	newTeardownJobAPI = func(aws.Config, string) teardownJobAPI { return &fakeTeardownJobs{schedule: true} }
 	t.Cleanup(func() { newTeardownJobAPI = prevJobs })
 }
 

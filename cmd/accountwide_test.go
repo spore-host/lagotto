@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/scheduler"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/spore-host/lagotto/pkg/idle"
 	"github.com/spore-host/lagotto/pkg/inventory"
+	"github.com/spore-host/lagotto/pkg/inventory/inventorytest"
 )
 
 // TestMarkGlobal (lagotto#345): setup's mark of the global scope bumps its
@@ -28,31 +30,48 @@ func TestMarkGlobal(t *testing.T) {
 	ctx := context.Background()
 	table := lifecycletest.New()
 	installFakeLeases(t, table)
-	if err := markGlobal(ctx, aws.Config{}, "", "set up lagotto's IAM", &bytes.Buffer{}); err != nil {
+	done, err := markGlobal(ctx, aws.Config{}, "", "set up lagotto's IAM", &bytes.Buffer{})
+	if err != nil {
 		t.Fatal(err)
 	}
 	c, _ := lifecycle.New(lifecycle.Options{DynamoDB: func(string) (lifecycle.API, error) { return table, nil }, ControlRegion: "us-east-1"})
-	if it, ok, _ := c.Get(ctx, inventory.Tool, lifecycle.ScopeGlobal); !ok || it.State != lifecycle.StateActive || it.Epoch != 1 {
+	if it, ok, _ := c.Get(ctx, inventory.Tool, lifecycle.ScopeGlobal); !ok || it.State != lifecycle.StateActive || it.Epoch != 1 || it.Mark == nil {
 		t.Errorf("global item %+v", it)
+	}
+	// Setup's end: the scope goes idle from then (lagotto#340).
+	done()
+	if it, _, _ := c.Get(ctx, inventory.Tool, lifecycle.ScopeGlobal); it.State != lifecycle.StateIdle || it.Mark != nil {
+		t.Errorf("after done: %+v", it)
+	}
+	// A done that fails is a warning.
+	var warned bytes.Buffer
+	done2, _ := markGlobal(ctx, aws.Config{}, "", "x", &warned)
+	table.Err = func(string, any) error { return errors.New("network down") }
+	done2()
+	table.Err = nil
+	if !strings.Contains(warned.String(), "could not end this command's mark") {
+		t.Errorf("a failing done: %q", warned.String())
 	}
 
 	denied := lifecycletest.New()
 	denied.Err = func(string, any) error { return &smithy.GenericAPIError{Code: "AccessDeniedException", Message: "no"} }
 	installFakeLeases(t, denied)
 	var out bytes.Buffer
-	if err := markGlobal(ctx, aws.Config{}, "alice", "x", &out); err != nil || !strings.Contains(out.String(), "Continuing without the teardown lease") {
+	if _, err := markGlobal(ctx, aws.Config{}, "alice", "x", &out); err != nil || !strings.Contains(out.String(), "Continuing without the teardown lease") {
 		t.Errorf("denied: %v %q", err, out.String())
 	}
 
 	installFakeLeases(t, lifecycletest.New(), func(o *lifecycle.Options) { o.ControlRegion = "" })
-	if err := markGlobal(ctx, aws.Config{}, "alice", "x", &bytes.Buffer{}); err != nil {
+	if done, err := markGlobal(ctx, aws.Config{}, "alice", "x", &bytes.Buffer{}); err != nil {
 		t.Errorf("no global scope: %v", err)
+	} else {
+		done()
 	}
 
 	prev := newLifecycleClient
 	t.Cleanup(func() { newLifecycleClient = prev })
 	newLifecycleClient = func(aws.Config, string) (*lifecycle.Client, error) { return nil, errors.New("no client") }
-	if err := markGlobal(ctx, aws.Config{}, "alice", "set up", &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "refusing to set up") {
+	if _, err := markGlobal(ctx, aws.Config{}, "alice", "set up", &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "refusing to set up") {
 		t.Errorf("no client: %v", err)
 	}
 	if r := runAccountWide(ctx, aws.Config{}, fpAcct, nil, func(string, ...any) {}); r.Outcome != idle.AccountWideFailed {
@@ -232,38 +251,38 @@ func TestCancelTeardownJobs(t *testing.T) {
 	ctx := context.Background()
 	var out bytes.Buffer
 	f := &fakeTeardownJobs{jobs: []string{"lagotto-teardown-log-group", "lagotto-teardown-function"}}
-	if err := cancelTeardownJobs(ctx, f, "us-west-2", "deploy the poller", true, &out); err != nil || len(f.deleted) != 2 || f.pages != 2 ||
+	if err := cancelTeardownJobs(ctx, f, "us-west-2", "deploy the poller", creatorDeploy, &out); err != nil || len(f.deleted) != 2 || f.pages != 2 ||
 		!strings.Contains(out.String(), "Deleted the pending teardown job lagotto-teardown-function in us-west-2") {
 		t.Errorf("deploy: %v %v (%d pages)\n%s", err, f.deleted, f.pages, out.String())
 	}
 	f = &fakeTeardownJobs{jobs: []string{"lagotto-teardown-function"}}
-	if err := cancelTeardownJobs(ctx, f, "us-west-2", "create watch w-1", false, &out); err != nil || len(f.deleted) != 0 {
+	if err := cancelTeardownJobs(ctx, f, "us-west-2", "create watch w-1", creatorHosted, &out); err == nil || !strings.Contains(err.Error(), "has been torn down") || len(f.deleted) != 0 {
 		t.Errorf("a watch with the region's teardown finished: %v %v", err, f.deleted)
 	}
 	f.schedule = true
-	if err := cancelTeardownJobs(ctx, f, "us-west-2", "create watch w-1", false, &out); err != nil || len(f.deleted) != 1 {
+	if err := cancelTeardownJobs(ctx, f, "us-west-2", "create watch w-1", creatorHosted, &out); err != nil || len(f.deleted) != 1 {
 		t.Errorf("a watch with the poller's schedule there: %v %v", err, f.deleted)
 	}
-	if err := cancelTeardownJobs(ctx, &fakeTeardownJobs{}, "us-west-2", "deploy", true, &out); err != nil {
+	if err := cancelTeardownJobs(ctx, &fakeTeardownJobs{}, "us-west-2", "deploy", creatorDeploy, &out); err != nil {
 		t.Errorf("no group: %v", err)
 	}
 	denied := &smithy.GenericAPIError{Code: "AccessDeniedException", Message: "no"}
-	for _, deploying := range []bool{true, false} {
+	for _, kind := range []creatorKind{creatorDeploy, creatorHosted} {
 		out.Reset()
-		if err := cancelTeardownJobs(ctx, &fakeTeardownJobs{err: denied}, "us-west-2", "x", deploying, &out); err != nil ||
+		if err := cancelTeardownJobs(ctx, &fakeTeardownJobs{err: denied}, "us-west-2", "x", kind, &out); err != nil ||
 			!strings.Contains(out.String(), "warning: could not delete the pending lagotto-teardown jobs") {
-			t.Errorf("denied (deploying %t): %v %q", deploying, err, out.String())
+			t.Errorf("denied (kind %d): %v %q", kind, err, out.String())
 		}
-		if err := cancelTeardownJobs(ctx, &fakeTeardownJobs{err: errors.New("network down")}, "us-west-2", "x", deploying, &out); err == nil ||
+		if err := cancelTeardownJobs(ctx, &fakeTeardownJobs{err: errors.New("network down")}, "us-west-2", "x", kind, &out); err == nil ||
 			!strings.Contains(err.Error(), "Nothing was created") {
-			t.Errorf("failing (deploying %t): %v", deploying, err)
+			t.Errorf("failing (kind %d): %v", kind, err)
 		}
 	}
 	// A delete that fails, or is denied, after the listing.
 	d := &deleteFails{fakeTeardownJobs: fakeTeardownJobs{jobs: []string{"lagotto-teardown-function"}}}
 	for _, err := range []error{&schedulertypes.ResourceNotFoundException{Message: aws.String("gone")}, denied, errors.New("boom")} {
 		d.err = err
-		got := cancelTeardownJobs(ctx, d, "us-west-2", "x", true, &bytes.Buffer{})
+		got := cancelTeardownJobs(ctx, d, "us-west-2", "x", creatorDeploy, &bytes.Buffer{})
 		if (got != nil) != (err.Error() == "boom") {
 			t.Errorf("delete %v: %v", err, got)
 		}
@@ -273,8 +292,50 @@ func TestCancelTeardownJobs(t *testing.T) {
 	installFakeLeases(t, lifecycletest.New())
 	f = &fakeTeardownJobs{jobs: []string{"lagotto-teardown-function"}}
 	newTeardownJobAPI = func(aws.Config, string) teardownJobAPI { return f }
-	if err := markCreating(ctx, aws.Config{}, "alice", "us-west-2", "deploy", true, &bytes.Buffer{}); err != nil || len(f.deleted) != 1 {
+	if done, err := markCreating(ctx, aws.Config{}, "alice", "us-west-2", "deploy", creatorDeploy, &bytes.Buffer{}); err != nil || len(f.deleted) != 1 {
 		t.Errorf("markCreating: %v %v", err, f.deleted)
+	} else {
+		done()
+	}
+	// A watch or launch in a region whose poller was torn down: refused,
+	// before anything is written; once the region's table was marked and
+	// the schedule went since, refused after the marks (lagotto#349).
+	table := lifecycletest.New()
+	installFakeLeases(t, table)
+	f = &fakeTeardownJobs{jobs: []string{"lagotto-teardown-function"}}
+	newTeardownJobAPI = func(aws.Config, string) teardownJobAPI { return f }
+	if _, err := markCreating(ctx, aws.Config{}, "alice", "us-west-2", "arm a scheduled launch", creatorHosted, &bytes.Buffer{}); err == nil ||
+		!strings.Contains(err.Error(), "has been torn down") || len(f.deleted) != 0 || table.Calls("TransactWriteItems") != 0 {
+		t.Errorf("a launch in a torn-down region: %v %v", err, f.deleted)
+	}
+	if err := cancelTeardownJobs(ctx, f, "us-west-2", "arm a scheduled launch", creatorHosted, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "has been torn down") {
+		t.Errorf("after the marks: %v", err)
+	}
+	// watch --local: no hosted poller needed, and the jobs stay.
+	if done, err := markCreating(ctx, aws.Config{}, "alice", "us-west-2", "create watch", creatorLocal, &bytes.Buffer{}); err != nil || len(f.deleted) != 0 {
+		t.Errorf("watch --local: %v %v", err, f.deleted)
+	} else {
+		done()
+	}
+	// A regional table the caller cannot reach still marks the global scope.
+	regional := lifecycletest.New()
+	regional.Err = func(string, any) error { return &smithy.GenericAPIError{Code: "AccessDeniedException", Message: "no"} }
+	global := lifecycletest.New()
+	prev := newLifecycleClient
+	t.Cleanup(func() { newLifecycleClient = prev })
+	newLifecycleClient = func(_ aws.Config, owner string) (*lifecycle.Client, error) {
+		return lifecycle.New(lifecycle.Options{DynamoDB: func(r string) (lifecycle.API, error) {
+			if r == "us-east-1" {
+				return global, nil
+			}
+			return regional, nil
+		}, ControlRegion: "us-east-1", Owner: owner, Sleep: func(context.Context, time.Duration) error { return nil }})
+	}
+	var out2 bytes.Buffer
+	if done, err := markCreating(ctx, aws.Config{}, "alice", "us-west-2", "deploy", creatorDeploy, &out2); err != nil || global.Calls("TransactWriteItems") == 0 {
+		t.Errorf("regional table unreachable: %v (%d global writes)\n%s", err, global.Calls("TransactWriteItems"), out2.String())
+	} else {
+		done()
 	}
 }
 
@@ -315,5 +376,75 @@ func TestTeardownPlanReapKeptAccountWide(t *testing.T) {
 	out, err := runTeardownPlanForTest(t, "")
 	if err != nil || len(rec.calls) != 0 || !strings.Contains(out, "the account-wide teardown kept it") {
 		t.Errorf("%v %v\n%s", err, rec.calls, out)
+	}
+}
+
+// TestTeardownPlanReapAccountWideReadFailure: account-wide steps blocked by
+// a read that failed are not run, and fail the command; only an in-use
+// blocker keeps them, with exit 0.
+func TestTeardownPlanReapAccountWideReadFailure(t *testing.T) {
+	facts := func() inventory.Facts {
+		f := orphanFacts()
+		f.Regions = []inventory.Region{{Region: "us-east-1"}}
+		return f
+	}
+	_, rec, _ := stubPlanTeardown(t, facts)
+	installFakeLeases(t, lifecycletest.New())
+	accountWideSource = func(aws.Config, string) inventory.Source {
+		s := sourceOf(facts()).(*inventorytest.Source)
+		s.Fail("us-east-1 Poller", errors.New("AccessDenied"))
+		return s
+	}
+	teardownMode, teardownYes = "reap", true
+	out, err := runTeardownPlanForTest(t, "")
+	if err == nil || !strings.Contains(err.Error(), "could not") || len(rec.calls) != 0 || !strings.Contains(out, "not-run") {
+		t.Errorf("%v %v\n%s", err, rec.calls, out)
+	}
+}
+
+// TestRunTeardown_IAMRolesChecksFirst: `teardown --iam-roles` runs the
+// account-wide check before any regional delete, so a refusal changes
+// nothing.
+func TestRunTeardown_IAMRolesChecksFirst(t *testing.T) {
+	tables := &fakeTables{empty: true}
+	calls := stubTeardown(t, tables, &cmdRoleDeleter{exists: map[string]bool{}}, true, false)
+	stubPollerRegions(t, nil, nil)
+	var region string
+	teardownAccountWideCheck = func(_ context.Context, _ aws.Config, _, r string) idle.AccountWideResult {
+		region = r
+		return idle.AccountWideResult{Outcome: idle.AccountWideBlocked, Why: "the account-wide resources are still needed",
+			Blockers: []string{"eu-west-1: its lifecycle item is ACTIVE"}}
+	}
+	_, err := runTeardownForTest(t)
+	if err == nil || !strings.Contains(err.Error(), "not deleting anything") || tables.deleted || len(*calls) != 0 || region != "us-west-2" {
+		t.Errorf("%v tables=%v calls=%v region=%q", err, tables.deleted, *calls, region)
+	}
+}
+
+// TestCheckAccountWide: the check is report mode, excluding the caller's
+// region's own item and resources, and writes nothing.
+func TestCheckAccountWide(t *testing.T) {
+	facts := func() inventory.Facts {
+		f := orphanFacts()
+		f.Regions = []inventory.Region{{Region: "us-east-1", Tables: fpTables("us-east-1")}}
+		return f
+	}
+	stubPlanTeardown(t, facts)
+	table := lifecycletest.New()
+	installFakeLeases(t, table)
+	c, _ := newLifecycleClient(aws.Config{}, "a deploy")
+	if err := c.MarkActive(context.Background(), inventory.Tool, "us-east-1"); err != nil {
+		t.Fatal(err)
+	}
+	writes := table.Calls("TransactWriteItems") + table.Calls("UpdateItem") + table.Calls("PutItem") + table.Calls("DeleteItem")
+	r := checkAccountWide(context.Background(), aws.Config{}, fpAcct, "us-east-1")
+	if r.Outcome != idle.AccountWideWould {
+		t.Errorf("%+v", r)
+	}
+	if n := table.Calls("TransactWriteItems") + table.Calls("UpdateItem") + table.Calls("PutItem") + table.Calls("DeleteItem"); n != writes {
+		t.Errorf("the check wrote %d times", n-writes)
+	}
+	if r := checkAccountWide(context.Background(), aws.Config{}, fpAcct, "eu-west-1"); r.Outcome != idle.AccountWideBlocked {
+		t.Errorf("another region's ACTIVE item: %+v", r)
 	}
 }

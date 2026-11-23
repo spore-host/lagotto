@@ -285,9 +285,10 @@ func Tick(ctx context.Context, cfg Config, d Deps) Result {
 }
 
 // cancelUncommittedJobs deletes the region's one-shot jobs, unless another
-// run holds the region's lease: its jobs may be a commit of its own (a run
-// that is finishing, or stranded after its commit), which this run must not
-// undo. A read or delete that fails is only logged: the next run tries again.
+// run holds the region's lease, or the poller's rate schedule is gone: the
+// jobs are then a commit (a run that is finishing, or stranded after its
+// commit, or finished: this run is a retried or duplicate invocation), which
+// this run must not undo. A read or delete that fails is only logged: the next run tries again.
 func cancelUncommittedJobs(ctx context.Context, cfg Config, d Deps) {
 	var (
 		it lifecycle.Item
@@ -313,10 +314,23 @@ func cancelUncommittedJobs(ctx context.Context, cfg Config, d Deps) {
 		return
 	}
 	var names []string
+	scheduled := false
 	for _, s := range ss {
-		if s.Group == runtimeiam.TeardownScheduleGroup {
+		switch {
+		case s.Group == runtimeiam.TeardownScheduleGroup:
 			names = append(names, s.Name)
+		case s.Name == deploy.PollerScheduleName:
+			scheduled = true
 		}
+	}
+	if !scheduled && len(names) > 0 {
+		// The poller's rate schedule is gone: its region finished, and this
+		// is a run nothing scheduled (a retried or duplicate invocation).
+		// Its jobs are the region's commit; deleting them would leave the
+		// function forever.
+		cfg.Logf("idle-teardown %s region=%s phase=one-shot cancel=skipped reason=%q", cfg.label(), cfg.Region,
+			"the poller's rate schedule is gone: the region's teardown committed, and its jobs are its own")
+		return
 	}
 	_ = (&run{cfg: cfg, d: d}).rollback(ctx, names)
 }

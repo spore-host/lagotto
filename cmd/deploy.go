@@ -191,9 +191,11 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	// Mark lagotto active in the region before anything is created or
 	// changed (lagotto#326): a teardown holding the lease there is waited
 	// out, and refuses the deploy if it does not finish.
-	if err := markCreating(ctx, cfg, callerARN, region, "deploy the poller", true, os.Stderr); err != nil {
+	markDone, err := markCreating(ctx, cfg, callerARN, region, "deploy the poller", creatorDeploy, os.Stderr)
+	if err != nil {
 		return err
 	}
+	defer markDone()
 
 	// Migration runs BEFORE the deploy, deliberately. The retain-update carries the
 	// stack's previous parameters across — including LambdaCodeKey — so a migration

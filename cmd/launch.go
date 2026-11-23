@@ -223,9 +223,11 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 	}
 	// Mark lagotto active in the region before the record and its schedule
 	// are created (lagotto#326).
-	if err := markActive(ctx, cfg, userID, region, "arm a scheduled launch", os.Stderr); err != nil {
+	markDone, err := markCreating(ctx, cfg, userID, region, "arm a scheduled launch", creatorHosted, os.Stderr)
+	if err != nil {
 		return err
 	}
+	defer markDone()
 
 	// Persist the scheduled launch, then arm the schedule. Store first so the
 	// Lambda can always resolve the id the schedule will send.

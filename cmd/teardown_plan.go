@@ -381,9 +381,12 @@ func reapAccountWide(ctx context.Context, cfg aws.Config, acct string, plan *fp.
 	outcome, reason := fp.OutcomeNotRun, accountWideWhy(r)
 	switch r.Outcome {
 	case idle.AccountWideBlocked:
-		// In use, as far as the account-wide teardown can tell: kept, like
-		// any active resource of the plan, and not a failure.
-		outcome, err = fp.OutcomeKept, nil
+		if !r.ReadFailed {
+			// In use, as far as the account-wide teardown can tell: kept,
+			// like any active resource of the plan, and not a failure.
+			outcome, err = fp.OutcomeKept, nil
+		}
+		// A read that failed is not "in use": not run, and an error.
 	case idle.AccountWideRemoved, idle.AccountWideNothing:
 		// What the run did not delete it kept: in use (lagotto-cli-user while
 		// something is attached to it) or not lagotto's to delete.

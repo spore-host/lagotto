@@ -315,9 +315,15 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	// Mark lagotto active in the region before anything is created
 	// (lagotto#326), --local included: a teardown that holds the lease is
 	// waited out, and refuses the watch if it does not finish.
-	if err := markActive(ctx, cfg, aws.ToString(identity.Arn), cfg.Region, armAction, os.Stderr); err != nil {
+	kind := creatorHosted
+	if watchLocal {
+		kind = creatorLocal
+	}
+	markDone, err := markCreating(ctx, cfg, aws.ToString(identity.Arn), cfg.Region, armAction, kind, os.Stderr)
+	if err != nil {
 		return err
 	}
+	defer markDone()
 
 	store := watcher.NewStore(cfg, watchesTable, historyTable)
 	// A table this creates is tagged with its creator as spore-host:owner (#324).
