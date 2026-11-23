@@ -82,6 +82,7 @@ import (
 
 	"github.com/spore-host/lagotto/pkg/cliiam"
 	"github.com/spore-host/lagotto/pkg/deploy"
+	"github.com/spore-host/lagotto/pkg/managedtags"
 	"github.com/spore-host/lagotto/pkg/runtimeiam"
 	"github.com/spore-host/lagotto/pkg/schedgroup"
 	"github.com/spore-host/lagotto/pkg/watcher"
@@ -509,7 +510,13 @@ func Classify(f Facts, o Options, now time.Time) *fp.Report {
 		add(&global, Global, TypeInstanceProfile, p.Item, ownership(p.Tags, true), activeOr(everywhereActive, fp.ClassLitter), roleARNs(acct, p.Roles)...)
 	}
 	for _, p := range f.Account.AuthorizedProfiles {
-		add(&global, Global, TypeInstanceProfile, p.Item, ownership(p.Tags, false), activeOr(everywhereActive, fp.ClassLitter), roleARNs(acct, p.Roles)...)
+		own := ownership(p.Tags, false)
+		if managedtags.ForeignOwner(p.Tags) != "" {
+			// Another tool's ownership tags too (lagotto#341): not lagotto's
+			// to delete, whatever lagotto's own tags say.
+			own = fp.OwnershipForeign
+		}
+		add(&global, Global, TypeInstanceProfile, p.Item, own, activeOr(everywhereActive, fp.ClassLitter), roleARNs(acct, p.Roles)...)
 	}
 	for _, role := range f.Account.Roles {
 		var c fp.Class

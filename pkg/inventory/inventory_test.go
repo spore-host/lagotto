@@ -384,3 +384,22 @@ func TestClassifyRestOfRegion(t *testing.T) {
 		t.Errorf("legacy stack: %s, deletable %v", st.Ownership, st.Deletable)
 	}
 }
+
+// TestClassifyAuthorizedProfileClaimedByAnotherTool: a profile for an
+// authorized role that carries another tool's ownership tags beside
+// lagotto's is foreign, so nothing lagotto plans deletes it (lagotto#341).
+func TestClassifyAuthorizedProfileClaimedByAnotherTool(t *testing.T) {
+	a := account(0)
+	a.AuthorizedProfiles = append(a.AuthorizedProfiles, Profile{
+		Item: Item{ARN: IAMARN(acct, "instance-profile", "aws-realign-gpu-instance"), Name: "aws-realign-gpu-instance",
+			Tags: with(with(with(lt(managedtagsGlobal), "lagotto:managed", "instance-profile"), "spawn:managed", "true"), "spawn:created-by", "spawn")},
+		Roles: []string{"aws-realign-gpu-instance"},
+	})
+	rep := Classify(Facts{AccountID: acct, AllRegions: true, Account: a}, Options{}, now)
+	if r := find(t, rep, TypeInstanceProfile, Global, "aws-realign-gpu-instance"); r.Ownership != fp.OwnershipForeign || r.Deletable {
+		t.Errorf("claimed profile: ownership %s deletable %v", r.Ownership, r.Deletable)
+	}
+	if r := find(t, rep, TypeInstanceProfile, Global, "team-gpu"); r.Ownership != fp.OwnershipTagged {
+		t.Errorf("setup's own profile: ownership %s", r.Ownership)
+	}
+}

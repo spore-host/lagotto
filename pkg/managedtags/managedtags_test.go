@@ -86,3 +86,45 @@ func TestStamp(t *testing.T) {
 		t.Error("the zero Stamp has no created time")
 	}
 }
+
+// TestConvergeNeverClaimsAnotherToolsResource: a spore-host:managed-by naming
+// another tool is never rewritten to lagotto, nor anything else added
+// (lagotto#341).
+func TestConvergeNeverClaimsAnotherToolsResource(t *testing.T) {
+	desired := Infrastructure("global", "AIDAX", ComponentInstanceRole, time.Unix(0, 0))
+	if got := Converge(map[string]string{tags.ManagedBy: "spawn"}, desired); got != nil {
+		t.Errorf("Converge over spawn's managed-by = %v, want nil", got)
+	}
+	// lagotto's own managed-by, or none, still converges.
+	if got := Converge(map[string]string{tags.ManagedBy: "lagotto"}, desired); len(got) == 0 || got[tags.ManagedBy] != "" {
+		t.Errorf("Converge over lagotto's = %v", got)
+	}
+	// A desired set without managed-by is not judged.
+	if got := Converge(map[string]string{tags.ManagedBy: "spawn"}, map[string]string{"Environment": "x"}); got["Environment"] != "x" {
+		t.Errorf("Converge without managed-by = %v", got)
+	}
+}
+
+func TestForeignOwner(t *testing.T) {
+	for _, c := range []struct {
+		tags         map[string]string
+		owner, mgdBy string
+	}{
+		{nil, "", ""},
+		{map[string]string{"lagotto:managed": "instance-profile"}, "", ""},
+		{map[string]string{tags.ManagedBy: "lagotto"}, "", ""},
+		{map[string]string{tags.ManagedBy: "calque"}, "calque", "calque"},
+		{map[string]string{"spawn:managed": "true"}, "spawn", ""},
+		{map[string]string{"spawn:managed": "false"}, "", ""},
+		{map[string]string{"spawn:created-by": "spawn"}, "spawn", ""},
+		// lagotto#341's profile: lagotto's tags and spawn's.
+		{map[string]string{tags.ManagedBy: "lagotto", "spawn:managed": "true"}, "spawn", ""},
+	} {
+		if got := ForeignOwner(c.tags); got != c.owner {
+			t.Errorf("ForeignOwner(%v) = %q, want %q", c.tags, got, c.owner)
+		}
+		if got := ForeignManagedBy(c.tags); got != c.mgdBy {
+			t.Errorf("ForeignManagedBy(%v) = %q, want %q", c.tags, got, c.mgdBy)
+		}
+	}
+}

@@ -56,16 +56,37 @@ func (f *tagIAM) TagInstanceProfile(_ context.Context, in *iam.TagInstanceProfil
 
 func TestEnsureInstanceRoleTags(t *testing.T) {
 	stamp := managedtags.Stamp{Owner: "AIDAADMIN", Now: func() time.Time { return time.Unix(0, 0) }}
+	marker := func(extra ...string) map[string]string {
+		m := map[string]string{ManagedProfileTagKey: ManagedProfileTagValue}
+		for i := 0; i+1 < len(extra); i += 2 {
+			m[extra[i]] = extra[i+1]
+		}
+		return m
+	}
+	spawnTags := []string{"spawn:managed", "true", "spawn:created-by", "spawn", "spawn:created", "2026-11-13T18:59:19Z"}
 	f := &tagIAM{
-		roles: map[string]map[string]string{InstanceRoleName: {"spawn:managed": "true"}, "admins": {}},
+		// lagotto created its own role and profile through spawn's library,
+		// which stamps spawn:* on them: still lagotto's.
+		roles: map[string]map[string]string{InstanceRoleName: marker(spawnTags...), "admins": {}},
 		profiles: map[string]map[string]string{
-			InstanceRoleName: {ManagedProfileTagKey: ManagedProfileTagValue},
-			"admins":         {},                                             // not setup's
-			"authorized":     {ManagedProfileTagKey: ManagedProfileTagValue}, // setup's
+			InstanceRoleName: marker(spawnTags...),
+			"admins":         {},       // not setup's
+			"authorized":     marker(), // setup's
+			// lagotto#341: a profile that carries spawn's ownership tags is
+			// not lagotto's to claim, marker or not.
+			"aws-realign-gpu-instance": marker(spawnTags...),
+			"spawn-only":               {"spawn:managed": "true", "spawn:created-by": "spawn"},
+			// Another spore.host tool's.
+			"calques": marker(tags.ManagedBy, "calque"),
 		},
 	}
 	ctx := context.Background()
-	for _, name := range []string{InstanceRoleName, "admins", "authorized"} {
+	names := []string{InstanceRoleName, "admins", "authorized", "aws-realign-gpu-instance", "spawn-only", "calques"}
+	before := map[string]int{}
+	for _, n := range names {
+		before[n] = len(f.profiles[n])
+	}
+	for _, name := range names {
 		if err := EnsureInstanceRoleTags(ctx, f, name, stamp); err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
@@ -77,8 +98,16 @@ func TestEnsureInstanceRoleTags(t *testing.T) {
 			t.Errorf("%s tags = %v", what, m)
 		}
 	}
-	if len(f.roles["admins"]) != 0 || len(f.profiles["admins"]) != 0 {
-		t.Errorf("an administrator's role or profile was tagged: %v %v", f.roles["admins"], f.profiles["admins"])
+	if len(f.roles["admins"]) != 0 {
+		t.Errorf("an administrator's role was tagged: %v", f.roles["admins"])
+	}
+	for _, n := range []string{"admins", "aws-realign-gpu-instance", "spawn-only", "calques"} {
+		if len(f.profiles[n]) != before[n] {
+			t.Errorf("profile %s, not lagotto's alone, was tagged: %v", n, f.profiles[n])
+		}
+	}
+	if f.profiles["spawn-only"][ManagedProfileTagKey] != "" || f.profiles["admins"][ManagedProfileTagKey] != "" {
+		t.Error("the setup-created marker was written onto a found profile")
 	}
 
 	// Steady state writes nothing.
@@ -87,12 +116,69 @@ func TestEnsureInstanceRoleTags(t *testing.T) {
 		t.Errorf("re-run: err %v, %d role and %d profile tag calls", err, f.roleTags, f.profileTags)
 	}
 
+	// Never the marker onto a found own role or profile lacking it.
+	g := &tagIAM{roles: map[string]map[string]string{InstanceRoleName: {}}, profiles: map[string]map[string]string{InstanceRoleName: {}}}
+	if err := EnsureInstanceRoleTags(ctx, g, InstanceRoleName, stamp); err != nil || g.roleTags+g.profileTags != 0 {
+		t.Errorf("a found unmarked %s was tagged: err %v, %v %v", InstanceRoleName, err, g.roles, g.profiles)
+	}
+	// Nor a different spore-host:managed-by on lagotto's own name.
+	g = &tagIAM{roles: map[string]map[string]string{InstanceRoleName: marker(tags.ManagedBy, "calque")},
+		profiles: map[string]map[string]string{InstanceRoleName: marker(tags.ManagedBy, "calque")}}
+	if err := EnsureInstanceRoleTags(ctx, g, InstanceRoleName, stamp); err != nil || g.roleTags+g.profileTags != 0 {
+		t.Errorf("another tool's %s was tagged: err %v", InstanceRoleName, err)
+	}
+
 	f.err = errors.New("AccessDenied")
 	if err := EnsureInstanceRoleTags(ctx, f, InstanceRoleName, stamp); err == nil {
 		t.Error("a GetRole failure was swallowed")
 	}
 	if err := EnsureInstanceRoleTags(ctx, f, "authorized", stamp); err == nil {
 		t.Error("a ListInstanceProfileTags failure was swallowed")
+	}
+}
+
+// createIAM answers CreateInstanceProfile as IAM does.
+type createIAM struct {
+	profiles map[string]map[string]string
+	err      error
+}
+
+func (f *createIAM) CreateInstanceProfile(_ context.Context, in *iam.CreateInstanceProfileInput, _ ...func(*iam.Options)) (*iam.CreateInstanceProfileOutput, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	n := aws.ToString(in.InstanceProfileName)
+	if _, ok := f.profiles[n]; ok {
+		return nil, &iamtypes.EntityAlreadyExistsException{Message: aws.String("exists")}
+	}
+	f.profiles[n] = iamtags.ToMap(in.Tags)
+	return &iam.CreateInstanceProfileOutput{}, nil
+}
+
+// TestCreateInstanceProfile: the marker is written only by lagotto's own
+// successful create, in the create request; a found profile is untouched
+// (lagotto#341).
+func TestCreateInstanceProfile(t *testing.T) {
+	ctx := context.Background()
+	f := &createIAM{profiles: map[string]map[string]string{"spawns": {"spawn:managed": "true"}}}
+	created, err := CreateInstanceProfile(ctx, f, "team-gpu", managedtags.Stamp{Owner: "AIDAADMIN"})
+	if err != nil || !created {
+		t.Fatalf("create: %v %v", created, err)
+	}
+	if m := f.profiles["team-gpu"]; m[ManagedProfileTagKey] != ManagedProfileTagValue || !tags.IsManagedBy(m, tags.ToolLagotto) ||
+		m[tags.Owner] != "AIDAADMIN" || m["spawn:managed"] != "" {
+		t.Errorf("created profile tags = %v", m)
+	}
+	created, err = CreateInstanceProfile(ctx, f, "spawns")
+	if err != nil || created {
+		t.Errorf("found profile: created %v err %v", created, err)
+	}
+	if m := f.profiles["spawns"]; len(m) != 1 {
+		t.Errorf("found profile was tagged: %v", m)
+	}
+	f.err = errors.New("AccessDenied")
+	if _, err := CreateInstanceProfile(ctx, f, "x"); err == nil || !strings.Contains(err.Error(), "create instance profile x") {
+		t.Errorf("err = %v", err)
 	}
 }
 

@@ -144,6 +144,7 @@ func (f *setupIAM) PutRolePolicy(_ context.Context, in *iam.PutRolePolicyInput, 
 type fakeProfiles struct {
 	ensured, deleted []string
 	err              error
+	delErr           map[string]error // DeleteManagedProfile's answer, by role
 }
 
 func (f *fakeProfiles) EnsureInstanceProfile(_ context.Context, role string) error {
@@ -152,6 +153,9 @@ func (f *fakeProfiles) EnsureInstanceProfile(_ context.Context, role string) err
 }
 
 func (f *fakeProfiles) DeleteManagedProfile(_ context.Context, role string) (bool, error) {
+	if err := f.delErr[role]; err != nil {
+		return false, err
+	}
 	f.deleted = append(f.deleted, role)
 	return true, nil
 }
@@ -567,6 +571,7 @@ func TestRunTeardown_ScheduleFailureKeepsTables(t *testing.T) {
 type fakeInstanceRoleTeardown struct {
 	authorized []string
 	deleted    []string
+	delErr     map[string]error
 }
 
 func (f *fakeInstanceRoleTeardown) AuthorizedRoles(context.Context) ([]string, error) {
@@ -579,6 +584,9 @@ func (f *fakeInstanceRoleTeardown) DeleteInstanceRole(context.Context) (bool, er
 }
 
 func (f *fakeInstanceRoleTeardown) DeleteManagedProfile(_ context.Context, name string) (bool, error) {
+	if err := f.delErr[name]; err != nil {
+		return false, err
+	}
 	f.deleted = append(f.deleted, "profile:"+name)
 	return true, nil
 }
@@ -652,5 +660,49 @@ func TestDeleteInstanceRoles(t *testing.T) {
 	}
 	if strings.Join(f.deleted, ",") != "profile:gpu-role,"+runtimeiam.InstanceRoleName {
 		t.Errorf("deleted = %v", f.deleted)
+	}
+}
+
+// TestDeleteInstanceRoles_LeavesAClaimedProfile: a profile another tool also
+// claims is reported and left, and the rest of the teardown goes on
+// (lagotto#341).
+func TestDeleteInstanceRoles_LeavesAClaimedProfile(t *testing.T) {
+	f := &fakeInstanceRoleTeardown{authorized: []string{"aws-realign-gpu-instance", "gpu-role"},
+		delErr: map[string]error{"aws-realign-gpu-instance": &runtimeiam.ClaimedError{Name: "aws-realign-gpu-instance", Tool: "spawn"}}}
+	var out bytes.Buffer
+	if err := deleteInstanceRoles(context.Background(), f, &out); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(f.deleted, ",") != "profile:gpu-role,"+runtimeiam.InstanceRoleName {
+		t.Errorf("deleted = %v", f.deleted)
+	}
+	if !strings.Contains(out.String(), "warning: instance profile aws-realign-gpu-instance left in place: its tags say spawn manages it") {
+		t.Errorf("output:\n%s", out.String())
+	}
+	// Any other failure still stops it.
+	f = &fakeInstanceRoleTeardown{authorized: []string{"gpu-role"}, delErr: map[string]error{"gpu-role": errors.New("AccessDenied")}}
+	if err := deleteInstanceRoles(context.Background(), f, &bytes.Buffer{}); err == nil {
+		t.Error("an AccessDenied was swallowed")
+	}
+}
+
+// TestApplySetupRoles_RevokeLeavesAClaimedProfile: revoking a role whose
+// profile another tool also claims warns and leaves the profile; the
+// revocation itself still happens (lagotto#341).
+func TestApplySetupRoles_RevokeLeavesAClaimedProfile(t *testing.T) {
+	f := newSetupIAM()
+	f.roles["aws-realign-gpu-instance"] = true
+	f.inline[runtimeiam.RoleName+"/"+runtimeiam.PolicyName] = irAuthorizedPolicy(t, "aws-realign-gpu-instance")
+	resetSetupRoleFlags(t, nil, []string{"aws-realign-gpu-instance"})
+	p := &fakeProfiles{delErr: map[string]error{"aws-realign-gpu-instance": &runtimeiam.ClaimedError{Name: "aws-realign-gpu-instance", Tool: "spawn"}}}
+	var out bytes.Buffer
+	if err := applySetupRoles(context.Background(), f, p, "us-west-2", "123456789012", &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.deleted) != 0 || !strings.Contains(out.String(), "warning: instance profile aws-realign-gpu-instance left in place") {
+		t.Errorf("deleted %v, output:\n%s", p.deleted, out.String())
+	}
+	if strings.Contains(f.inline[runtimeiam.RoleName+"/"+runtimeiam.PolicyName], ":role/aws-realign-gpu-instance") {
+		t.Error("the revoked role is still passable")
 	}
 }

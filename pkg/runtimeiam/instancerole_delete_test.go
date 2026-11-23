@@ -9,6 +9,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
+	"github.com/spore-host/libs/tags"
 )
 
 // fakeProfiles adds instance profiles to fakeRoleDeleter.
@@ -35,8 +36,11 @@ func (f *fakeProfiles) GetInstanceProfile(_ context.Context, in *iam.GetInstance
 }
 
 func (f *fakeProfiles) ListInstanceProfileTags(_ context.Context, in *iam.ListInstanceProfileTagsInput, _ ...func(*iam.Options)) (*iam.ListInstanceProfileTagsOutput, error) {
-	if f.errOn == "ListInstanceProfileTags" {
+	switch f.errOn {
+	case "ListInstanceProfileTags":
 		return nil, errors.New("AccessDenied")
+	case "ListNoSuchEntity":
+		return nil, &iamtypes.NoSuchEntityException{}
 	}
 	var out []iamtypes.Tag
 	for k, v := range f.tags[aws.ToString(in.InstanceProfileName)] {
@@ -61,6 +65,18 @@ func (f *fakeProfiles) DeleteInstanceProfile(_ context.Context, in *iam.DeleteIn
 	f.order = append(f.order, "delete-profile "+aws.ToString(in.InstanceProfileName))
 	delete(f.profiles, aws.ToString(in.InstanceProfileName))
 	return &iam.DeleteInstanceProfileOutput{}, nil
+}
+
+// with returns a copy of m with the key/value pairs kv added.
+func with(m map[string]string, kv ...string) map[string]string {
+	out := map[string]string{}
+	for k, v := range m {
+		out[k] = v
+	}
+	for i := 0; i+1 < len(kv); i += 2 {
+		out[kv[i]] = kv[i+1]
+	}
+	return out
 }
 
 func newFakeProfiles() *fakeProfiles {
@@ -115,6 +131,35 @@ func TestDeleteManagedInstanceProfile(t *testing.T) {
 	}
 	if gone, err := DeleteManagedInstanceProfile(ctx, f, "absent"); err != nil || gone {
 		t.Errorf("absent profile: %v, %v", gone, err)
+	}
+	// lagotto#341: lagotto's marker and another tool's ownership tags on one
+	// profile. Refused, named, and nothing is removed from it.
+	for name, tg := range map[string]map[string]string{
+		"aws-realign-gpu-instance": with(ManagedProfileTags(), "spawn:managed", "true", "spawn:created-by", "spawn", tags.ManagedBy, "lagotto"),
+		"created-by-spawn":         with(ManagedProfileTags(), "spawn:created-by", "spawn"),
+		"calques":                  with(ManagedProfileTags(), tags.ManagedBy, "calque"),
+	} {
+		f.profiles[name] = []string{name}
+		f.tags[name] = tg
+		f.order = nil
+		gone, err := DeleteManagedInstanceProfile(ctx, f, name)
+		var ce *ClaimedError
+		if gone || !errors.Is(err, ErrClaimedByAnotherTool) || !errors.As(err, &ce) || ce.Name != name ||
+			!strings.Contains(err.Error(), "left in place") {
+			t.Errorf("%s: gone %v err %v", name, gone, err)
+		}
+		if len(f.order) != 0 || f.profiles[name] == nil {
+			t.Errorf("%s: changed %v", name, f.order)
+		}
+		if gone, err := DeleteInstanceProfile(ctx, f, name); gone || !errors.Is(err, ErrClaimedByAnotherTool) {
+			t.Errorf("per-profile deleter, %s: %v %v", name, gone, err)
+		}
+	}
+	// A profile whose tags vanish between the reads is absent, not an error.
+	g := newFakeProfiles()
+	g.errOn = "ListNoSuchEntity"
+	if gone, err := DeleteManagedInstanceProfile(ctx, g, "gpu-role"); gone || err != nil {
+		t.Errorf("tags gone mid-delete: %v %v", gone, err)
 	}
 	for _, op := range []string{"GetInstanceProfile", "ListInstanceProfileTags", "RemoveRoleFromInstanceProfile", "DeleteInstanceProfile"} {
 		f := newFakeProfiles()
