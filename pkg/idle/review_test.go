@@ -7,6 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/smithy-go"
 	fp "github.com/spore-host/libs/footprint"
 	"github.com/spore-host/libs/lifecycle"
 
@@ -299,5 +302,32 @@ func TestAccountWideExcluding(t *testing.T) {
 	w.src.SetRegion(inventorytest.Deployed("us-west-2", acct))
 	if r := TearDownAccountWide(context.Background(), cfg, w.deps()); r.Outcome != AccountWideBlocked {
 		t.Errorf("its poller still blocks: %+v", r)
+	}
+}
+
+// TestAccountWideReleaseRetried: a release that fails once (a throttle) is
+// tried again, so a creator after the run is not kept waiting (the model
+// check found the single failure).
+func TestAccountWideReleaseRetried(t *testing.T) {
+	w := newAWWorld(t)
+	w.acct.before = func(string) {
+		if len(w.ev.list()) == 1 {
+			w.src.SetRegion(inventorytest.Deployed("us-west-2", acct))
+		}
+	}
+	failed := false
+	w.tables[region].Err = func(op string, in any) error {
+		if u, ok := in.(*dynamodb.UpdateItemInput); ok && op == "UpdateItem" && !failed &&
+			strings.Contains(aws.ToString(u.UpdateExpression), "SET #state = :active REMOVE #lease") {
+			failed = true
+			return &smithy.GenericAPIError{Code: "ThrottlingException", Message: "slow down"}
+		}
+		return nil
+	}
+	if r := w.run(true, 0); r.Outcome != AccountWideBlocked || !failed {
+		t.Fatalf("%+v (failed %t)", r, failed)
+	}
+	if g, _ := w.global(); g.Lease != nil {
+		t.Errorf("the lease was left live: %+v", g)
 	}
 }

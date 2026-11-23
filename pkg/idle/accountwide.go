@@ -320,8 +320,19 @@ func TearDownAccountWide(ctx context.Context, cfg AccountWideConfig, d AccountWi
 	// creator wait: the lease is released (nothing deleted, or something in
 	// use), or suspended (an incomplete teardown, no lease, resumed by the
 	// next run). Only a write that fails leaves it live, to go stale.
+	// Each is tried again on failure (a throttle, a dropped connection): a
+	// lease these leave live keeps every creator waiting until it is stale.
+	leaseWrite := func(w func(context.Context) error) error {
+		return retryOp(ctx, Config{Sleep: cfg.Sleep}, func() error {
+			if err := w(ctx); errors.Is(err, lifecycle.ErrLeaseLost) {
+				return &final{err}
+			} else {
+				return err
+			}
+		})
+	}
 	giveBack := func(r AccountWideResult) AccountWideResult {
-		if err := gl.Release(ctx); err != nil && !errors.Is(err, lifecycle.ErrLeaseLost) {
+		if err := leaseWrite(gl.Release); err != nil && !errors.Is(err, lifecycle.ErrLeaseLost) {
 			cfg.Logf("account-wide %s lease=release-failed error=%q", cfg.label(), err.Error())
 			r.Err = errors.Join(r.Err, err)
 		}
@@ -336,7 +347,7 @@ func TearDownAccountWide(ctx context.Context, cfg AccountWideConfig, d AccountWi
 			return log(r)
 		}
 		lease := "suspended"
-		if serr := gl.Suspend(ctx); serr != nil {
+		if serr := leaseWrite(gl.Suspend); serr != nil {
 			lease, err = "left held (the suspend failed: it goes stale in 20 min)", errors.Join(err, serr)
 		}
 		cfg.Logf("account-wide %s lease=%s reason=%q", cfg.label(), lease, why+"; the next run resumes it")
