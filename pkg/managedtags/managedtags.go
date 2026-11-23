@@ -111,7 +111,18 @@ var sticky = map[string]bool{tags.Created: true, tags.Owner: true}
 // It is how setup and deploy back-fill the spore.host tags onto a resource an
 // older lagotto created: the resource gets them all, and its spore-host:created
 // says when lagotto first tagged it.
+//
+// It never claims another tool's resource: when existing has a
+// spore-host:managed-by naming a tool other than the one desired names, it
+// returns nil, so spore-host:managed-by (and the rest) is never rewritten to
+// lagotto over another tool's claim (lagotto#341). Callers that must also
+// respect another tool's legacy ownership tags check [ForeignOwner] first.
 func Converge(existing, desired map[string]string) map[string]string {
+	if want := desired[tags.ManagedBy]; want != "" {
+		if cur := existing[tags.ManagedBy]; cur != "" && cur != want {
+			return nil
+		}
+	}
 	var out map[string]string
 	for k, v := range desired {
 		cur, ok := existing[k]
@@ -160,4 +171,44 @@ func (s Stamp) Infrastructure(scope, component string) map[string]string {
 // Workload is [Workload] with the stamp's owner and time.
 func (s Stamp) Workload(scope string) map[string]string {
 	return Workload(scope, s.Owner, s.now())
+}
+
+// The legacy ownership tags spawn stamps on what it creates (spawn pkg/aws
+// buildIAMTags): spawn:managed=true and spawn:created-by=spawn.
+const (
+	spawnManagedKey   = "spawn:managed"
+	spawnCreatedByKey = "spawn:created-by"
+)
+
+// ForeignManagedBy returns the tool a spore-host:managed-by on t names when
+// that is not lagotto, or "".
+func ForeignManagedBy(t map[string]string) string {
+	if v := t[tags.ManagedBy]; v != "" && v != string(tags.ToolLagotto) {
+		return v
+	}
+	return ""
+}
+
+// ForeignOwner returns the other tool whose ownership tags t carries, or ""
+// when none does: a spore-host:managed-by naming a tool other than lagotto,
+// or spawn's legacy spawn:managed=true or spawn:created-by (lagotto#341).
+//
+// A resource carrying another tool's claim is never claimed by lagotto (no
+// lagotto ownership tag is added to it) and never deleted by lagotto, even
+// when it also carries lagotto's: two tools claiming one resource is resolved
+// by neither of them deleting it.
+//
+// One caveat: spawn's library stamps its legacy tags on everything it creates
+// for any caller, so what lagotto created through spawn's
+// CreateOrGetInstanceProfile before lagotto#341 carries them too. lagotto's
+// own fixed-name instance role and profile (which spawn never creates for
+// itself) are judged by [ForeignManagedBy] alone for that reason.
+func ForeignOwner(t map[string]string) string {
+	if v := ForeignManagedBy(t); v != "" {
+		return v
+	}
+	if t[spawnManagedKey] == "true" || t[spawnCreatedByKey] != "" {
+		return string(tags.ToolSpawn)
+	}
+	return ""
 }

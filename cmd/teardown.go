@@ -380,6 +380,10 @@ func deleteInstanceRoles(ctx context.Context, t instanceRoleTeardown, out io.Wri
 	}
 	for _, name := range authorized {
 		gone, err := t.DeleteManagedProfile(ctx, name)
+		if errors.Is(err, runtimeiam.ErrClaimedByAnotherTool) {
+			_, _ = fmt.Fprintf(out, "warning: %v\n", err)
+			continue
+		}
 		if err != nil {
 			return fmt.Errorf("delete instance profile %s: %w", name, err)
 		}

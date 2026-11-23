@@ -218,24 +218,42 @@ type instanceProfileSetup interface {
 
 var newInstanceProfileSetup = func(cfg aws.Config) instanceProfileSetup { return spawnProfileSetup{cfg: cfg} }
 
-// spawnProfileSetup provisions through spawn's own CreateOrGetInstanceProfile,
-// so the role carries exactly the baseline `spawn launch --iam-role` writes.
-// It runs here, with an administrator's credentials, and never in the poller.
+// spawnProfileSetup creates the instance profile itself and then has spawn's
+// own CreateOrGetInstanceProfile complete it, so the role carries exactly the
+// baseline `spawn launch --iam-role` writes. It runs here, with an
+// administrator's credentials, and never in the poller.
 type spawnProfileSetup struct{ cfg aws.Config }
 
-// EnsureInstanceProfile has spawn create what is missing, tagged
-// runtimeiam.InstanceProfileTags (#324), and then adds those tags to what an
-// older lagotto created without them (runtimeiam.EnsureInstanceRoleTags:
-// lagotto's own role and profile, and a profile setup made for an authorized
-// role; never an administrator's role).
+// EnsureInstanceProfile ensures the role's same-named instance profile:
+//
+//  1. lagotto creates the profile, tagged runtimeiam.InstanceProfileTags, when
+//     it is absent (runtimeiam.CreateInstanceProfile). A profile that already
+//     exists is not tagged, whoever made it. Before lagotto#341 spawn's
+//     library created it, and stamped spawn:managed=true on it, so a profile
+//     lagotto created claimed to be spawn's too.
+//  2. spawn's CreateOrGetInstanceProfile writes its spored/SSM baseline onto
+//     the role (AttachRolePolicy AmazonSSMManagedInstanceCore and PutRolePolicy
+//     spored-baseline-policy, on every run, onto a found role too), creates
+//     the role when it is absent (lagotto's own), and adds the role to the
+//     profile when it is empty.
+//  3. runtimeiam.EnsureInstanceRoleTags adds the spore.host tags (#324) to
+//     what an older lagotto created without them, and only to that: never to
+//     an administrator's role, nor to a profile lagotto did not create or that
+//     carries another tool's ownership tags.
 func (p spawnProfileSetup) EnsureInstanceProfile(ctx context.Context, roleName string) error {
+	client := iam.NewFromConfig(p.cfg)
+	if _, err := runtimeiam.CreateInstanceProfile(ctx, client, roleName, setupStamp); err != nil {
+		return err
+	}
 	if _, err := spawnaws.NewClientFromConfig(p.cfg).CreateOrGetInstanceProfile(ctx, spawnaws.IAMRoleConfig{
 		RoleName: roleName,
-		Tags:     runtimeiam.InstanceProfileTags(setupStamp),
+		// Applied only to a role spawn creates (lagotto's own); the profile
+		// exists by now, so spawn does not create or tag it.
+		Tags: runtimeiam.InstanceProfileTags(setupStamp),
 	}); err != nil {
 		return err
 	}
-	return runtimeiam.EnsureInstanceRoleTags(ctx, iam.NewFromConfig(p.cfg), roleName, setupStamp)
+	return runtimeiam.EnsureInstanceRoleTags(ctx, client, roleName, setupStamp)
 }
 
 func (p spawnProfileSetup) DeleteManagedProfile(ctx context.Context, roleName string) (bool, error) {
@@ -408,6 +426,10 @@ func applySetupRoles(ctx context.Context, iamClient runtimeiam.IAMAPI, profiles 
 			continue
 		}
 		gone, err := profiles.DeleteManagedProfile(ctx, name)
+		if errors.Is(err, runtimeiam.ErrClaimedByAnotherTool) {
+			_, _ = fmt.Fprintf(out, "warning: %v\n", err)
+			continue
+		}
 		if err != nil {
 			return fmt.Errorf("delete the instance profile setup created for %s: %w", name, err)
 		}

@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `lagotto setup` no longer claims an instance profile it did not create, and
+  no lagotto command claims or deletes a resource another tool also claims
+  (#341). Setup now creates an authorized role's instance profile itself,
+  tagged `lagotto:managed=instance-profile` in the create request, so the
+  marker exists only on a profile lagotto made; a profile that already exists
+  is never given it. The spore.host tags are back-filled only onto a role or
+  profile that carries lagotto's marker and no other tool's ownership tags
+  (`spawn:managed=true`, `spawn:created-by`, or a `spore-host:managed-by`
+  naming another tool), and no tag back-fill anywhere rewrites another tool's
+  `spore-host:managed-by`. `setup --revoke-instance-role` and `teardown
+  --iam-roles` leave such a profile in place with a warning, and the
+  footprint classes it foreign. Before, setup let spawn's library create the
+  profile, which stamps spawn's ownership tags on everything it creates, so a
+  profile lagotto created claimed to be spawn's as well, and a later setup
+  added `spore-host:managed-by=lagotto` beside them.
+
 ## [0.72.0] - 2026-11-20
 
 ### Added

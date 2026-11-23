@@ -34,6 +34,8 @@ type memIAM struct {
 	inline   map[string]string            // role/policy -> doc
 	policy   map[string]string            // CLI-user policy tags; nil = absent
 	policyV  string
+	// createProfileErr, when set, is CreateInstanceProfile's answer.
+	createProfileErr error
 }
 
 func newMemIAM() *memIAM {
@@ -108,6 +110,13 @@ func (m *memIAM) GetInstanceProfile(_ context.Context, in *iam.GetInstanceProfil
 }
 
 func (m *memIAM) CreateInstanceProfile(_ context.Context, in *iam.CreateInstanceProfileInput, _ ...func(*iam.Options)) (*iam.CreateInstanceProfileOutput, error) {
+	if m.createProfileErr != nil {
+		return nil, m.createProfileErr
+	}
+	if _, ok := m.profiles[aws.ToString(in.InstanceProfileName)]; ok {
+		// As IAM: an existing profile is neither replaced nor tagged.
+		return nil, &iamtypes.EntityAlreadyExistsException{Message: aws.String("exists")}
+	}
 	tg := map[string]string{}
 	merge(tg, in.Tags)
 	m.profiles[aws.ToString(in.InstanceProfileName)] = tg
@@ -238,8 +247,10 @@ func TestSetup_BackfillsTagsOntoWhatAnOlderLagottoCreated(t *testing.T) {
 	m := newMemIAM()
 	m.roles[runtimeiam.RoleName] = map[string]string{"Application": "lagotto"}
 	m.roles[runtimeiam.SchedulerInvokeRoleName] = map[string]string{}
-	m.roles[runtimeiam.InstanceRoleName] = map[string]string{"spawn:managed": "true"}
-	m.profiles[runtimeiam.InstanceRoleName] = map[string]string{runtimeiam.ManagedProfileTagKey: runtimeiam.ManagedProfileTagValue}
+	// An older lagotto created its own role and profile through spawn's
+	// library: lagotto's marker, and the spawn:* tags that library stamps.
+	m.roles[runtimeiam.InstanceRoleName] = map[string]string{"spawn:managed": "true", runtimeiam.ManagedProfileTagKey: runtimeiam.ManagedProfileTagValue}
+	m.profiles[runtimeiam.InstanceRoleName] = map[string]string{"spawn:managed": "true", runtimeiam.ManagedProfileTagKey: runtimeiam.ManagedProfileTagValue}
 	m.inProf[runtimeiam.InstanceRoleName] = []string{runtimeiam.InstanceRoleName}
 	m.roles["admins-role"] = map[string]string{"owner": "admin"}
 	m.profiles["admins-role"] = map[string]string{} // not created by setup
@@ -388,4 +399,63 @@ func (f failingIAM) GetPolicy(ctx context.Context, in *iam.GetPolicyInput, o ...
 		return nil, errAccessDenied
 	}
 	return f.memIAM.GetPolicy(ctx, in, o...)
+}
+
+// TestSetup_NeverClaimsAFoundProfile is lagotto#341 through spawn's real
+// CreateOrGetInstanceProfile: setup --instance-role on a role whose profile
+// spawn already created leaves the profile's tags exactly as they were (no
+// lagotto:managed, no spore-host:managed-by), while spawn's library still
+// writes its spored baseline onto the role (the PutRolePolicy
+// spored-baseline-policy CloudTrail showed). A profile setup itself creates
+// carries lagotto's tags and none of spawn's, and holds the role.
+func TestSetup_NeverClaimsAFoundProfile(t *testing.T) {
+	withSetupStamp(t, managedtags.Stamp{Owner: "AIDAADMIN"})
+	m := newMemIAM()
+	spawns := map[string]string{"spawn:managed": "true", "spawn:created-by": "spawn", "spawn:created": "2026-11-13T18:59:19Z"}
+	m.roles["aws-realign-gpu-instance"] = map[string]string{}
+	m.profiles["aws-realign-gpu-instance"] = managedtags.With(spawns, nil)
+	m.inProf["aws-realign-gpu-instance"] = []string{"aws-realign-gpu-instance"}
+	m.roles["team-gpu"] = map[string]string{"owner": "admin"}
+
+	cfg := taggedIAMConfig(t, m)
+	ctx := context.Background()
+	for _, name := range []string{"aws-realign-gpu-instance", "team-gpu"} {
+		if err := (spawnProfileSetup{cfg: cfg}).EnsureInstanceProfile(ctx, name); err != nil {
+			t.Fatalf("EnsureInstanceProfile(%s): %v", name, err)
+		}
+	}
+	if got := m.profiles["aws-realign-gpu-instance"]; len(got) != len(spawns) || got[runtimeiam.ManagedProfileTagKey] != "" || got[tags.ManagedBy] != "" {
+		t.Errorf("spawn's profile was claimed: %v", got)
+	}
+	if len(m.roles["aws-realign-gpu-instance"]) != 0 {
+		t.Errorf("the administrator's role was tagged: %v", m.roles["aws-realign-gpu-instance"])
+	}
+	if _, ok := m.inline["aws-realign-gpu-instance/spored-baseline-policy"]; !ok {
+		t.Error("spawn's library did not write spored-baseline-policy (the writer this test documents)")
+	}
+	created := m.profiles["team-gpu"]
+	if created[runtimeiam.ManagedProfileTagKey] != runtimeiam.ManagedProfileTagValue || !tags.IsManagedBy(created, tags.ToolLagotto) ||
+		created["spawn:managed"] != "" || created["spawn:created-by"] != "" {
+		t.Errorf("the profile setup created: %v, want lagotto's tags and none of spawn's", created)
+	}
+	if strings.Join(m.inProf["team-gpu"], ",") != "team-gpu" {
+		t.Errorf("the created profile holds %v", m.inProf["team-gpu"])
+	}
+	if len(m.roles["team-gpu"]) != 1 {
+		t.Errorf("the administrator's role was tagged: %v", m.roles["team-gpu"])
+	}
+}
+
+// A failed create stops setup before spawn's library runs, naming the profile.
+func TestSetup_CreateProfileFailureStops(t *testing.T) {
+	m := newMemIAM()
+	m.roles["team-gpu"] = map[string]string{}
+	m.createProfileErr = &iamtypes.LimitExceededException{Message: aws.String("too many")}
+	err := (spawnProfileSetup{cfg: taggedIAMConfig(t, m)}).EnsureInstanceProfile(context.Background(), "team-gpu")
+	if err == nil || !strings.Contains(err.Error(), "create instance profile team-gpu") {
+		t.Errorf("err = %v", err)
+	}
+	if len(m.inline) != 0 {
+		t.Errorf("spawn's baseline was written after the create failed: %v", m.inline)
+	}
 }
