@@ -606,12 +606,18 @@ configuration drops one you set by hand. Any activity restarts the clock.
 2. **The re-check.** With the lease held it reads the footprint of every
    enabled region again. If anything in this region is active now, or the
    footprint cannot be read in full, it gives the lease back and stops.
-3. **The plan.** It plans with the same rules as `lagotto footprint` and
+3. **The plan, and the global lease.** It plans with the same rules as `lagotto footprint` and
    `lagotto teardown --plan`: only a resource tagged
    `spore-host:managed-by=lagotto` with lagotto's name, never one tagged
    `spore-host:role=service` or `spore-host:permanent=true`, never a
    legacy-name or foreign one; dependents before what they depend on. This
    plan is the region's own resources; the account-wide IAM is step 7's.
+   Then, before its first delete, it takes the **global lease** (see "The
+   invariant" below). It waits up to 5 minutes for another region to give it
+   back, and retries a failed read or write while it waits. If it can't take
+   it (or the region's partition has no known control region), it gives its
+   region's lease back having deleted nothing, and tries again a grace period
+   later.
 4. **Direct deletes**, by the poller, in dependency order: the per-launch
    `lagotto-launch-sl-*` schedules, then the three tables
    (`lagotto-watches`, **`lagotto-match-history`**, `lagotto-scheduled-launches`,
@@ -638,52 +644,67 @@ configuration drops one you set by hand. Any activity restarts the clock.
    `lagotto-capacity-poller` and the schedule group `lagotto`.
 7. **The account-wide resources** (lagotto#340), which every region's poller
    shares: the poller role, `lagotto-instance-role` and its profile. Exactly
-   one region removes them: the **last one to finish**. Every region's steps 5
-   to 8 run under the lease on lagotto's **global** scope: the item
-   `tool#lagotto#global` in the partition's IAM home region's
-   `spore-host-lifecycle` table (`us-east-1` in the commercial partition). The
-   poller takes it before step 5, so before it commits anything of its own
-   removal. It waits up to 5 minutes for another region to give the lease back,
-   and retries a failed read or write while it waits. If it can't take the
-   lease, it gives its region's lease back with nothing committed, and its
-   poller tries again a grace period later.
-
-   Holding the global lease, the poller finishes its own region's lease, then
-   reads the footprint again and every other enabled region's lagotto item.
-   Each other region is one of three things:
+   one region removes them: the **last one to finish**. Still holding the
+   global lease, the poller finishes its own region's lease, then reads the
+   footprint again and every other enabled region's lagotto item (each read
+   tried three times). Each other region is one of three things:
    - **Done:** it has no item and no live poller (a live poller is a function
      with its rate schedule, not yet handed to its `lagotto-teardown-function`
-     job), or a stalled teardown whose poller is already gone.
-   - **Pending:** it is tearing down now, or it has been idle past *its own*
-     grace (its poller's `LAGOTTO_IDLE_GRACE`) and has a live poller to tear it
-     down. A pending region runs this same step after its own deletes.
+     job), or nothing of lagotto's is left there, or its teardown stalled after
+     its poller was already gone.
+   - **Pending:** its *own poller* (lease owner `lagotto-poller/<region>`)
+     holds its lease, or it has been idle past *its own* grace (its poller's
+     `LAGOTTO_IDLE_GRACE`), and in both cases it has a live poller. A pending
+     region runs this same step after its own deletes.
    - **Active:** anything else. That includes in use, within its grace, just
-     deployed, held, a stalled teardown its poller will resume, idle with no
-     poller but something of lagotto's left, a poller older than the lease, and
-     any read that failed after three tries.
+     deployed, held, a stalled teardown its poller will resume, a lease held by
+     anyone but its own poller (the CLI's `lagotto teardown --plan`, which
+     doesn't decide the account-wide resources, lagotto#346), something of
+     lagotto's left with no poller, a poller older than the lease, and any read
+     that failed.
 
-   A pending or active region keeps the account-wide resources, and decides
-   them itself later. Of two regions that go idle together, the first always
-   defers to the second, and the second always finds the first finished. The
-   last region re-reads the other regions' items just before each change, in
-   case a deploy has started meanwhile (lagotto#345 will have setup and deploy
-   mark the global scope). It then deletes `lagotto-instance-role` and its
-   profile, and creates the poller role's jobs in its own `lagotto-teardown`
-   group. The invoke role and `lagotto-cli-user` are left for
-   `lagotto teardown` (below).
-8. The poller finishes the global lease once the decision is final: the
-   account-wide resources were removed, or another region will decide them.
-   The region's `spore-host-lifecycle` table, and the global item's table, are
-   then closed if no spore.host tool's items are left in them. If the decision
-   could not finish (a failed delete or job, or a footprint or item that could
-   not be read), the poller leaves the global lease **held** (`global_lease=held`
-   in its summary line). After 20 minutes the lease is stale. The next region's
-   teardown then takes it over and decides again, and the CLI's lazy last mile
-   reports `tool#lagotto#global` as a teardown to resume. While the item
-   exists, the last mile keeps the invoke role.
+   A pending or active region keeps the account-wide resources. Of two regions
+   that go idle together, the first always defers and the second always finds
+   the first finished. The last region re-reads the other regions' items just
+   before each change, in case a deploy has started meanwhile (lagotto#345
+   will have setup and deploy mark the global scope). It then deletes
+   `lagotto-instance-role` and its profile, and creates the poller role's jobs
+   in its own `lagotto-teardown` group. The invoke role and `lagotto-cli-user`
+   are left for `lagotto teardown` (below).
+8. The poller finishes the global lease, or leaves it held, as the invariant
+   says. The region's `spore-host-lifecycle` table, and the global item's
+   table, are closed whenever no spore.host tool's items are left in them.
 
-A failed step before step 7 gives the lease back, and nothing that depends on
-it is tried; the next grace period tries again.
+#### The invariant (reap mode)
+
+> A region takes the global lease **before its first delete**, and holds it
+> until the account-wide decision is durable. The global item
+> `tool#lagotto#global` is deleted **only** when the account-wide resources
+> are gone, or a region with a live poller still owes them. That region is
+> either this one (stopped before it committed its own removal, so its poller
+> runs again) or another one whose own poller will run step 7 when it tears
+> down. **Every other exit leaves the global lease held.**
+
+A region *commits its own removal* when it creates the
+`lagotto-teardown-function` job, or starts deleting its own rate schedule;
+from then on its poller will not run again. That gives three kinds of exit:
+
+- **A failure before the commit** (a failed direct delete, a failed function
+  job) gives both leases back. The poller is intact and tries again a grace
+  period later.
+- **A failure after the commit** (a later job, the final deletes, finishing
+  its own lease, the footprint or an item that can't be read again, a failed
+  account-wide delete or job) never gives the regional lease back to ACTIVE.
+  Both leases stay held.
+- **A decision not to remove** the account-wide resources finishes the global
+  lease only if a region that keeps them has a live poller of its own, and
+  that poller (or nobody) holds its lease. Otherwise the global lease is held.
+
+A held lease shows as `global_lease=held` in the summary line, and goes stale
+after 20 minutes. The next region's teardown then takes it over and decides
+again (a stale regional teardown whose poller is gone counts as done). The
+CLI's lazy last mile reports `tool#lagotto#global` as a teardown to resume,
+and keeps the invoke role while the item exists.
 
 ### Report mode (this release)
 

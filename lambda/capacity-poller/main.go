@@ -130,7 +130,7 @@ func setup() {
 	schedulerClient = scheduler.NewFromConfig(cfg)
 
 	region := cfg.Region
-	leases, err = idle.NewClient(cfg, "lagotto-poller/"+region, func(o *lifecycle.Options) { o.WaitTimeout = leaseWaitTimeout })
+	leases, err = idle.NewClient(cfg, idle.PollerOwner(region), func(o *lifecycle.Options) { o.WaitTimeout = leaseWaitTimeout })
 	if err != nil {
 		log.Printf("Warning: idle teardown and the teardown lease are off: %v", err)
 		return

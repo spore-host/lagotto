@@ -176,6 +176,7 @@ func (h *harness) advance(d time.Duration) {
 
 func (h *harness) cfg(reap bool) Config {
 	return Config{Region: region, AccountID: acct, Grace: 24 * time.Hour, Reap: reap, Now: h.clock,
+		Sleep: func(context.Context, time.Duration) error { return nil },
 		Logf: func(f string, a ...any) {
 			h.mu.Lock()
 			defer h.mu.Unlock()

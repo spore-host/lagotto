@@ -195,7 +195,11 @@ func lastMile(ctx context.Context, mode lastmile.Mode, logf func(string, ...any)
 		logf("lastmile: skipped: load AWS config: %v", err)
 		return
 	}
-	control := lastMileControlRegion(cfg.Region)
+	control, err := lastMileControlRegion(cfg.Region)
+	if err != nil {
+		logf("lastmile: skipped: %v", err)
+		return
+	}
 	if cfg.Region == "" {
 		cfg.Region = control
 	}
@@ -282,7 +286,7 @@ func lastMileResidue(account string, regions []string) []fp.Resource {
 // items: the partition's IAM home region, so every invocation reads the same
 // one whatever --region says. It is the poller's (idle.ControlRegion), whose
 // global teardown lease lives there (lagotto#340).
-func lastMileControlRegion(region string) string { return idle.ControlRegion(region) }
+func lastMileControlRegion(region string) (string, error) { return idle.ControlRegion(region) }
 
 // lastMileFootprint is lagotto's footprint of every region, read at most once
 // per run: lastmile's Footprint and the Deleter's re-checks share it.

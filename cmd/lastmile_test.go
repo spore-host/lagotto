@@ -900,9 +900,13 @@ func TestLastMileMaybeDue(t *testing.T) {
 // home region, whatever region the command used.
 func TestLastMileControlRegion(t *testing.T) {
 	for in, want := range map[string]string{"": "us-east-1", "eu-west-1": "us-east-1", "us-gov-east-1": "us-gov-west-1", "cn-northwest-1": "cn-north-1"} {
-		if got := lastMileControlRegion(in); got != want {
-			t.Errorf("lastMileControlRegion(%q) = %q, want %q", in, got, want)
+		if got, err := lastMileControlRegion(in); got != want || err != nil {
+			t.Errorf("lastMileControlRegion(%q) = %q, %v, want %q", in, got, err, want)
 		}
+	}
+	// A partition lagotto does not know: no guess (lagotto#340).
+	if got, err := lastMileControlRegion("us-iso-east-1"); got != "" || err == nil {
+		t.Errorf("an ISO region: %q, %v", got, err)
 	}
 }
 
@@ -1212,5 +1216,22 @@ func TestLastMileDefaultSeams(t *testing.T) {
 	}
 	if ok, _ := lmDefaultPollerExists(ctx, cfg, lmAccount, lmWest); ok {
 		t.Error("a poller reported present through a refusing client")
+	}
+}
+
+// TestLastMileUnknownPartition: in a partition with no known control region
+// the last mile does nothing, and says so under --verbose (lagotto#340).
+func TestLastMileUnknownPartition(t *testing.T) {
+	w := newLMWorld(t)
+	awscfg.SetLoaderForTest(t, func(context.Context, ...func(*awsconfig.LoadOptions) error) (aws.Config, error) {
+		return aws.Config{Region: "us-iso-east-1"}, nil
+	})
+	probeCmd(t, "lm-iso", "", nil)
+	_, stderr, err := execRoot(t, "lm-iso", "-v")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr, "lastmile: skipped: no control region for us-iso-east-1") || w.runCount() != 0 {
+		t.Errorf("runs %d, stderr:\n%s", w.runCount(), stderr)
 	}
 }

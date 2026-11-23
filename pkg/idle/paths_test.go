@@ -281,7 +281,9 @@ func TestReportCarriesOnPastAFailedHeartbeat(t *testing.T) {
 }
 
 // TestReapStopsOnAFailedHeartbeat: in reap mode the same failure stops the
-// teardown before anything else, and tries to give the lease back.
+// teardown before anything else, and tries to give the lease back. The first
+// write after the claim is the global lease's (taken before the first
+// delete), so that is where it stops.
 func TestReapStopsOnAFailedHeartbeat(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
@@ -294,7 +296,7 @@ func TestReapStopsOnAFailedHeartbeat(t *testing.T) {
 	if r.Outcome != OutcomeFailed || len(h.ev.list()) != 0 || len(h.sched.inputs) != 0 {
 		t.Fatalf("result %+v, deletes %v, jobs %d", r, h.ev.list(), len(h.sched.inputs))
 	}
-	if !strings.Contains(h.log(), `lease=release-failed reason="the direct deletes failed`) {
+	if !strings.Contains(h.log(), `lease=release-failed reason="taking the global teardown lease failed`) {
 		t.Errorf("log:\n%s", h.log())
 	}
 }

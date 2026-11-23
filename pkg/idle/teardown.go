@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -237,7 +238,10 @@ type Plan struct {
 	Phases map[Phase]*fp.Plan
 	// OneShots are the region's self-removal jobs.
 	OneShots []OneShot
-	// Global is the account-wide teardown, set only when Last.
+	// Global is the account-wide teardown, set when this run planned it.
+	// Last is true when this run removes the account-wide resources; a fence
+	// that stopped it after the account-wide deletes (a region elsewhere is
+	// no longer done) leaves Last false and Global holding what ran.
 	Global *GlobalPlan
 }
 
@@ -491,10 +495,52 @@ func teardown(ctx context.Context, cfg Config, d Deps, lease *lifecycle.Lease, r
 			cfg.label(), cfg.Region, k.Resource.Type, k.Resource.Region, k.Resource.Name, k.Resource.ARN, k.Reason)
 	}
 
+	// 0. In reap mode, the global lease BEFORE the first delete (the
+	// invariant, global.go). Not taken, the poller gives its lease back
+	// having deleted nothing, and tries again a grace period later.
+	var gl *lifecycle.Lease
+	if cfg.Reap {
+		_, err := ControlRegion(cfg.Region)
+		if err == nil {
+			gl, err = acquireGlobal(ctx, cfg, d.Lifecycle)
+		}
+		if err != nil {
+			plan.LastWhy = "could not take the global teardown lease: " + err.Error()
+			_ = stopped(ctx, cfg, lease, &res, fmt.Errorf("take the global teardown lease: %w", err), "taking the global teardown lease")
+			return res
+		}
+		cfg.Logf("idle-teardown %s region=%s phase=global claim=ok lease=%s scope=%s", cfg.label(), cfg.Region, shortToken(gl.Token()), lifecycle.ScopeGlobal)
+	}
+	// stop ends a run stopped BEFORE it committed its removal: stopped's
+	// rules for the regional lease, and the global item goes, since this
+	// region's poller is intact and still owes the decision.
+	stop := func(err error, what string) bool {
+		if !stopped(ctx, cfg, lease, &res, err, what) {
+			return false
+		}
+		if gl != nil {
+			t.finishGlobal(ctx, gl)
+		}
+		return true
+	}
+	// strand ends a run stopped AFTER it committed its removal: its poller
+	// will not run again, so both leases stay held, to go stale and be
+	// resumed (a stale teardown whose poller is gone counts as done).
+	strand := func(err error, what string) Result {
+		res.Outcome, res.Err = OutcomeFailed, errors.Join(res.Err, err)
+		if errors.Is(err, lifecycle.ErrLeaseLost) {
+			res.Outcome = OutcomeLeaseLost
+		}
+		cfg.Logf("idle-teardown %s region=%s lease=held during=%q error=%q reason=%q", cfg.label(), cfg.Region, what, err.Error(),
+			"failed after the poller committed its own removal; the regional lease is left to go stale")
+		t.holdGlobal("this region failed after committing its removal")
+		return res
+	}
+
 	// 1. What the poller deletes directly.
 	plan.Direct, err = fp.Execute(ctx, plan.Phases[PhaseDirect], mode, deleter, lease)
 	t.logRow(string(PhaseDirect), plan.Phases[PhaseDirect], plan.Direct)
-	if stop := stopped(ctx, cfg, lease, &res, err, "the direct deletes"); stop {
+	if stop(err, "the direct deletes") {
 		return res
 	}
 	// 2. Its own function and log group: always report mode, only to apply
@@ -502,7 +548,7 @@ func teardown(ctx context.Context, cfg Config, d Deps, lease *lifecycle.Lease, r
 	// account-wide: the global step's.)
 	plan.Self, err = fp.Execute(ctx, plan.Phases[PhaseSelf], fp.ModeReport, deleter, lease)
 	t.logRow(string(PhaseSelf), plan.Phases[PhaseSelf], plan.Self)
-	if stop := stopped(ctx, cfg, lease, &res, err, "the self-removal check"); stop {
+	if stop(err, "the self-removal check") {
 		return res
 	}
 	sr := SelfRemoval{Region: cfg.Region, AccountID: cfg.AccountID}
@@ -520,35 +566,28 @@ func teardown(ctx context.Context, cfg Config, d Deps, lease *lifecycle.Lease, r
 	now := cfg.Now()
 	plan.OneShots = sr.Plan(now)
 	t.logOneShots(plan.OneShots)
-	// In reap mode, the global lease before anything that commits the
-	// poller's own removal (global.go): taken, it is held to the end of the
-	// account-wide decision; not taken, the poller gives its lease back
-	// intact and tries again a grace period later.
-	var gl *lifecycle.Lease
-	giveBack := func() {
-		if gl != nil {
-			t.finishGlobal(ctx, gl)
-		}
-	}
 	if cfg.Reap {
-		if gl, err = acquireGlobal(ctx, cfg, d.Lifecycle); err != nil {
-			plan.LastWhy = "could not take the global teardown lease: " + err.Error()
-			_ = stopped(ctx, cfg, lease, &res, fmt.Errorf("take the global teardown lease: %w", err), "taking the global teardown lease")
-			return res
-		}
-		cfg.Logf("idle-teardown %s region=%s phase=global claim=ok lease=%s scope=%s", cfg.label(), cfg.Region, shortToken(gl.Token()), lifecycle.ScopeGlobal)
-		if _, err := CreateOneShots(ctx, d.Scheduler, cfg.Region, cfg.AccountID, now, plan.OneShots, lease.Step); err != nil {
-			if stop := stopped(ctx, cfg, lease, &res, err, "creating the one-shot jobs"); stop {
-				giveBack()
+		created, err := CreateOneShots(ctx, d.Scheduler, cfg.Region, cfg.AccountID, now, plan.OneShots, lease.Step)
+		switch {
+		case err != nil && slices.Contains(created, FunctionJobName):
+			return strand(err, "creating the one-shot jobs")
+		case err != nil:
+			if stop(err, "creating the one-shot jobs") {
 				return res
 			}
 		}
 	}
-	// 3. Its own rate schedule and lagotto's schedule group.
+	// 3. Its own rate schedule and lagotto's schedule group. From its first
+	// delete the poller will not run again: it has committed its removal.
 	plan.Final, err = fp.Execute(ctx, plan.Phases[PhaseFinal], mode, deleter, lease)
 	t.logRow(string(PhaseFinal), plan.Phases[PhaseFinal], plan.Final)
-	if stop := stopped(ctx, cfg, lease, &res, err, "the final deletes"); stop {
-		giveBack()
+	if err != nil && cfg.Reap && !errors.Is(err, lifecycle.ErrLeaseLost) {
+		return strand(err, "the final deletes")
+	}
+	if stopped(ctx, cfg, lease, &res, err, "the final deletes") {
+		if gl != nil {
+			t.holdGlobal("this region lost its lease after committing its removal")
+		}
 		return res
 	}
 
@@ -583,10 +622,6 @@ func teardown(ctx context.Context, cfg Config, d Deps, lease *lifecycle.Lease, r
 		return res
 	}
 	t.closeTable(ctx, cfg.Region)
-	if control := ControlRegion(cfg.Region); g.lease == GlobalFinished && control != cfg.Region {
-		// The global item is gone: its table may hold nothing now.
-		t.closeTable(ctx, control)
-	}
 	res.Outcome = OutcomeReaped
 	summary("finished")
 	return res

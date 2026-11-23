@@ -41,16 +41,18 @@ const Tool = tags.ToolLagotto
 
 // NewClient returns a lifecycle client that reaches each region's
 // spore-host-lifecycle table with cfg's credentials, with lagotto's global
-// scope in ControlRegion(cfg.Region). owner names the caller in a lease
-// ("lagotto-poller/us-east-1", or the CLI caller's ARN).
+// scope in ControlRegion(cfg.Region) (none, in a partition ControlRegion does
+// not know: every use of the global scope then fails, closed). owner names
+// the caller in a lease (PollerOwner(region), or the CLI caller's ARN).
 func NewClient(cfg aws.Config, owner string, opts ...func(*lifecycle.Options)) (*lifecycle.Client, error) {
+	control, _ := ControlRegion(cfg.Region)
 	o := lifecycle.Options{
 		DynamoDB: func(region string) (lifecycle.API, error) {
 			c := cfg.Copy()
 			c.Region = region
 			return dynamodb.NewFromConfig(c), nil
 		},
-		ControlRegion: ControlRegion(cfg.Region),
+		ControlRegion: control,
 		Owner:         owner,
 	}
 	for _, f := range opts {
