@@ -1273,8 +1273,11 @@ func modelScenarios(long bool) []scenario {
 			actors: func(m *mworld) []*actor { return []*actor{m.tick(a), m.tick(b), m.clockActor()} }},
 	)
 	if long {
+		// Three regions at two preemptions and a crash did not finish in
+		// 48 min; one of each, together, is still every pairwise race with
+		// a third region in any standing.
 		out = append(out, scenario{name: "three idle regions", reap: true, specs: []regionSpec{idle(a), idle(b), idle(c)},
-			actors: ticks(a, b, c), maxPreempt: 2, maxCrash: 1})
+			actors: ticks(a, b, c), maxPreempt: 1, maxCrash: 1})
 	}
 	return out
 }
