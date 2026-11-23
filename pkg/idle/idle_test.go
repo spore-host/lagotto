@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -641,6 +642,17 @@ func TestCreateOneShotsIdempotent(t *testing.T) {
 	if err != nil || len(created) != 2 || len(steps) != 2 {
 		t.Fatalf("created %v steps %v err %v", created, steps, err)
 	}
+	// A job already there keeps the time it was created with, so it is
+	// deleted and created again at this run's (review 4, finding 3).
+	if !slices.Contains(ev.list(), "delete one-shot lagotto-teardown/lagotto-teardown-function") || len(f.inputs) != 3 {
+		t.Errorf("not recreated: %v (%d creates)", ev.list(), len(f.inputs))
+	}
+	// A job that conflicts again is an error.
+	f.conflict[FunctionJobName] = true
+	g := &stickyConflict{fakeScheduler: f}
+	if _, err := CreateOneShots(context.Background(), g, region, acct, t0, jobs, nil); err == nil {
+		t.Error("a job that conflicts after its delete was taken as created")
+	}
 	// A failed heartbeat stops before the next job.
 	f.inputs = nil
 	_, err = CreateOneShots(context.Background(), f, region, acct, t0, jobs, func(context.Context, string) error { return lifecycle.ErrLeaseLost })
@@ -759,5 +771,13 @@ func fpResource(typ, name, arn string) fp.Resource {
 
 func (f *fakeScheduler) DeleteSchedule(_ context.Context, in *scheduler.DeleteScheduleInput, _ ...func(*scheduler.Options)) (*scheduler.DeleteScheduleOutput, error) {
 	f.e.add("delete one-shot %s/%s", aws.ToString(in.GroupName), aws.ToString(in.Name))
+	delete(f.conflict, aws.ToString(in.Name)) // gone: a create no longer conflicts
+	return &scheduler.DeleteScheduleOutput{}, nil
+}
+
+// stickyConflict's jobs conflict even after a delete.
+type stickyConflict struct{ *fakeScheduler }
+
+func (s *stickyConflict) DeleteSchedule(context.Context, *scheduler.DeleteScheduleInput, ...func(*scheduler.Options)) (*scheduler.DeleteScheduleOutput, error) {
 	return &scheduler.DeleteScheduleOutput{}, nil
 }

@@ -328,20 +328,36 @@ func Tick(ctx context.Context, cfg Config, d Deps) Result {
 		logf("idle-verdict region=%s warning=%q", cfg.Region, w)
 	}
 
-	_, idleFor, err := d.Lifecycle.Observe(ctx, Tool, cfg.Region, v.Active)
+	var idleFor time.Duration
+	err := retryOp(ctx, cfg, func() error {
+		var err error
+		_, idleFor, err = d.Lifecycle.Observe(ctx, Tool, cfg.Region, v.Active)
+		if errors.Is(err, lifecycle.ErrTableClosing) {
+			return &final{err}
+		}
+		return err
+	})
 	res.IdleFor = idleFor
 	if err != nil {
 		res.Outcome, res.Err = OutcomeFailed, err
 		if errors.Is(err, lifecycle.ErrTableClosing) {
 			logf("idle-verdict region=%s active=%t observe=skipped reason=%q", cfg.Region, v.Active, "the lifecycle table is being deleted")
-			if cfg.Reap {
-				// A closer that died leaves its sentinel, and Observe never
-				// clears one (MarkActive does; libs#88). CloseTableIfEmpty takes a
-				// stale sentinel over, and drops it again while any tool's
-				// item is left, so the next run observes; a live closer's
-				// sentinel it leaves alone.
+			// A closer that died leaves its sentinel, and Observe never
+			// clears one (libs#88). CloseTableIfEmpty takes a stale sentinel
+			// over, and drops it again while any tool's item is left; a
+			// live closer's it leaves alone. Either way the next run
+			// observes. Report mode deletes no table, so it does this only
+			// while the table holds an item (CloseTableIfEmpty then only
+			// clears the sentinel); an empty one it leaves to reap mode and
+			// the last mile.
+			clear := cfg.Reap
+			if !cfg.Reap {
+				items, exists, lerr := d.Lifecycle.ListItems(ctx, cfg.Region)
+				clear = lerr == nil && exists && len(items) > 0
+			}
+			if clear {
 				if _, cerr := d.Lifecycle.CloseTableIfEmpty(ctx, cfg.Region); cerr != nil {
-					logf("idle-verdict region=%s close_table=failed error=%q", cfg.Region, cerr.Error())
+					logf("idle-verdict region=%s clear_sentinel=failed error=%q", cfg.Region, cerr.Error())
 				}
 			}
 			return res
@@ -353,6 +369,9 @@ func Tick(ctx context.Context, cfg Config, d Deps) Result {
 	if v.Active {
 		logf("%s reasons=%q", line, strings.Join(v.Reasons, "; "))
 		res.Outcome = OutcomeActive
+		if cfg.Reap {
+			revive(ctx, cfg, d)
+		}
 		return res
 	}
 	logf("%s", line)
@@ -361,7 +380,15 @@ func Tick(ctx context.Context, cfg Config, d Deps) Result {
 		return res
 	}
 
-	lease, err := d.Lifecycle.Claim(ctx, Tool, cfg.Region, cfg.Grace)
+	var lease *lifecycle.Lease
+	err = retryOp(ctx, cfg, func() error {
+		var err error
+		lease, err = d.Lifecycle.Claim(ctx, Tool, cfg.Region, cfg.Grace)
+		if errors.Is(err, lifecycle.ErrNotClaimable) {
+			return &final{err}
+		}
+		return err
+	})
 	if err != nil {
 		res.Err = err
 		res.Outcome = OutcomeNotClaimable
@@ -531,7 +558,12 @@ func (t *run) selfRemoval(self *fp.Result) SelfRemoval {
 	return sr
 }
 
-func (t *run) summary(plan *Plan, lease string, g GlobalLease) {
+// summary logs the run's last line. lease is what became of the regional
+// lease; a run whose lease a creator took over logs it as lost.
+func (t *run) summary(plan *Plan, res *Result, lease string, g GlobalLease) {
+	if res != nil && res.Outcome == OutcomeLeaseLost && lease == "released" {
+		lease = "lost"
+	}
 	t.cfg.Logf("idle-teardown %s region=%s would_delete=%d kept=%d failed=%d one_shots=%d last_region=%t lease=%s global_lease=%s last_region_why=%q",
 		t.cfg.label(), t.cfg.Region, plan.WouldDelete(), plan.KeptCount(), plan.Failed(), len(plan.OneShots)+plan.globalOneShots(), plan.Last, lease, g, plan.LastWhy)
 }
@@ -573,7 +605,7 @@ func (t *run) report(ctx context.Context, res Result) Result {
 			res.Outcome = OutcomeLeaseLost
 		}
 		plan.LastWhy = "could not release this region's lease: " + err.Error()
-		t.summary(plan, "release-failed", GlobalNone)
+		t.summary(plan, &res, "release-failed", GlobalNone)
 		return res
 	}
 	if err := t.reportGlobal(ctx, plan); err != nil {
@@ -581,7 +613,7 @@ func (t *run) report(ctx context.Context, res Result) Result {
 		cfg.Logf("idle-teardown %s region=%s phase=global error=%q", cfg.label(), cfg.Region, err.Error())
 	}
 	res.Outcome = OutcomeReported
-	t.summary(plan, "released", GlobalNone)
+	t.summary(plan, &res, "released", GlobalNone)
 	return res
 }
 
@@ -595,6 +627,7 @@ func (t *run) reap(ctx context.Context, res Result) Result {
 	plan := &Plan{Phases: map[Phase]*fp.Plan{}}
 	res.Plan = plan
 	g := GlobalNone
+	summary := func(l string) { t.summary(plan, &res, l, g) }
 
 	// 0. The global lease, before anything is deleted.
 	_, err := ControlRegion(cfg.Region)
@@ -609,41 +642,65 @@ func (t *run) reap(ctx context.Context, res Result) Result {
 	}
 	cfg.Logf("idle-teardown %s region=%s phase=global claim=ok lease=%s scope=%s", cfg.label(), cfg.Region, shortToken(gl.Token()), lifecycle.ScopeGlobal)
 
+	// 1. The decision, on a footprint read with the global lease held.
+	fresh, err := inventory.Gather(ctx, d.Source, cfg.AccountID, inventory.Scope{AllRegions: true}, cfg.Options)
+	if err == nil {
+		t.facts = fresh
+	}
+	// committed: an earlier run of this region created its function's job
+	// (and crashed, or failed, before it finished). Other regions may have
+	// judged it done and acted on that, so it never goes back to keeping its
+	// poller while another region is removing the account-wide resources.
+	here := t.facts.RegionFacts(cfg.Region)
+	committed := here != nil && functionJobPending(here)
+	othersRemoving := roleJobsElsewhere(&t.facts, cfg.Region)
+
 	// back gives everything back before the commit: the regional lease
 	// (stopped's rules) and the global item, since this region's poller is
 	// intact and still owes the decision. The next grace period tries again.
 	back := func(err error, what string) Result {
-		t.cancelLeftJobs(ctx)
+		if committed && othersRemoving {
+			return t.strand(&res, plan, t.finishGlobal(ctx, gl), err, what)
+		}
+		if cerr := t.cancelLeftJobs(ctx, nil); cerr != nil {
+			// Jobs an earlier run left are still due: the region does not
+			// keep its poller with them; its next run tries again.
+			return t.strand(&res, plan, t.finishGlobal(ctx, gl), errors.Join(err, cerr), "deleting the jobs an earlier run left")
+		}
 		if !stopped(ctx, cfg, lease, &res, err, what) {
 			res.Outcome, res.Err = OutcomeFailed, errors.Join(res.Err, err)
 		}
 		g = t.finishGlobal(ctx, gl)
-		t.summary(plan, "released", g)
+		summary("released")
 		return res
 	}
 	// keep gives everything back without a failure: this region keeps its
 	// poller, and decides again a grace period later.
 	keep := func(outcome Outcome, why string) Result {
-		t.cancelLeftJobs(ctx)
+		if cerr := t.cancelLeftJobs(ctx, nil); cerr != nil {
+			return t.strand(&res, plan, t.finishGlobal(ctx, gl), cerr, "deleting the jobs an earlier run left")
+		}
 		_ = release(ctx, cfg, lease, why)
 		g = t.finishGlobal(ctx, gl)
 		res.Outcome = outcome
-		t.summary(plan, "released", g)
+		summary("released")
 		return res
 	}
 
-	// 1. The decision, on a footprint read with the global lease held.
-	fresh, err := inventory.Gather(ctx, d.Source, cfg.AccountID, inventory.Scope{AllRegions: true}, cfg.Options)
 	if err != nil {
 		return back(err, "reading the footprint under the global lease")
 	}
-	if here := fresh.RegionFacts(cfg.Region); here == nil || here.Active() {
+	if here == nil || here.Active() {
 		return keep(OutcomeReleased, "active after the global lease was taken")
 	}
-	t.facts = fresh
 	plan.Others = t.judgeAll(ctx, &fresh)
 	last, why, owed := decideGlobal(&fresh, plan.Others, true)
 	plan.LastWhy = why
+	if !last && !owed && committed && othersRemoving {
+		// Another region is removing the account-wide resources, having
+		// judged this one done: it finishes its own removal.
+		owed, plan.LastWhy = true, why+"; this region's removal was committed and another region is removing the account-wide resources, so it finishes"
+	}
 	if !last && !owed {
 		return keep(OutcomeKept, "kept the poller: "+why+"; no region with a live poller owes the account-wide resources, so this one keeps owing them")
 	}
@@ -674,7 +731,7 @@ func (t *run) reap(ctx context.Context, res Result) Result {
 		gp.Direct, err = fp.Execute(ctx, gp.Phases[PhaseDirect], fp.ModeReap, fenced, gl)
 		t.logRow("global-direct", gp.Phases[PhaseDirect], gp.Direct)
 		if errors.Is(err, errFenced) {
-			plan.Last = false
+			plan.Last = false // Global keeps what ran
 			return keep(OutcomeKept, "kept the poller: "+plan.LastWhy)
 		}
 		if err != nil {
@@ -718,11 +775,13 @@ func (t *run) reap(ctx context.Context, res Result) Result {
 	t.logOneShots(jobs)
 
 	// 5. The commit, still under the global lease, so no other poller can
-	// decide in between: the jobs, the poller role's first and its
-	// function's last. They all fire after the poller's next hourly run, so
-	// a run that stops anywhere before its own schedule is deleted leaves a
-	// poller that runs once more and finishes. A deploy or a watch since the
-	// decision stops it, before the jobs and again after (rolled back).
+	// decide in between: first any job an earlier run left that this
+	// decision does not plan goes (the poller role's, after a run that was
+	// the last but this one defers), then the jobs, the poller role's first
+	// and its function's last, each due after the poller's next hourly run
+	// (a job already there is recreated at the new time). A deploy or a
+	// watch since the decision stops it, before the jobs and again after
+	// (rolled back).
 	before := func(ctx context.Context, step string) error {
 		if err := gl.Step(ctx, step); err != nil {
 			return err
@@ -730,8 +789,11 @@ func (t *run) reap(ctx context.Context, res Result) Result {
 		return lease.Step(ctx, step)
 	}
 	if !t.fence(ctx, plan, &fresh, "the poller's own removal") {
-		plan.Last, plan.Global = false, nil
+		plan.Last = false // Global keeps what ran
 		return keep(OutcomeKept, "kept the poller: "+plan.LastWhy)
+	}
+	if err := t.cancelLeftJobs(ctx, jobs); err != nil {
+		return back(err, "deleting the jobs an earlier run left")
 	}
 	created, err := CreateOneShots(ctx, d.Scheduler, cfg.Region, cfg.AccountID, now, jobs, before)
 	if err != nil {
@@ -745,7 +807,7 @@ func (t *run) reap(ctx context.Context, res Result) Result {
 		// decision still is: another region that took the global lease over
 		// (it went stale) has judged this one committed, and acts on that.
 		if err := gl.Step(ctx, "roll the commit back"); err == nil {
-			plan.Last, plan.Global = false, nil
+			plan.Last = false // Global keeps what ran
 			if rerr := t.rollback(ctx, created); rerr != nil {
 				return t.strand(&res, plan, GlobalHeld, rerr, "rolling the one-shot jobs back")
 			}
@@ -757,49 +819,165 @@ func (t *run) reap(ctx context.Context, res Result) Result {
 
 	// 6. The decision is durable (the account-wide resources are gone or
 	// handed to their jobs, or a region with a live poller owes them): the
-	// global item goes. Then its own rate schedule and group.
-	g = t.finishGlobal(ctx, gl)
+	// global item goes, before the poller's own schedule, so that a run that
+	// stops here still has a poller to try again.
+	if g = t.finishGlobal(ctx, gl); g != GlobalFinished {
+		return t.strand(&res, plan, g, errors.New("the global lease could not be finished"), "finishing the global lease")
+	}
 	plan.Final, err = fp.Execute(ctx, plan.Phases[PhaseFinal], fp.ModeReap, deleter, lease)
 	t.logRow(string(PhaseFinal), plan.Phases[PhaseFinal], plan.Final)
 	if err != nil {
-		if plan.Final.Count(fp.OutcomeDeleted) == 0 {
-			// Nothing of its own schedule is gone yet (a creator took the
-			// lease over, say): its jobs go, and its poller stays, owing the
-			// decision again.
-			if rerr := t.rollback(ctx, created); rerr == nil {
-				_ = stopped(ctx, cfg, lease, &res, err, "the final deletes")
-				t.summary(plan, "released", g)
-				return res
-			}
+		if plan.Final.Count(fp.OutcomeDeleted) == 0 && errors.Is(err, lifecycle.ErrLeaseLost) && t.uncommit(ctx, created) {
+			// A creator took this region over before its own schedule
+			// went, and no other region has acted on the commit: its
+			// poller stays, for the creator.
+			res.Outcome, res.Err = OutcomeLeaseLost, errors.Join(res.Err, err)
+			summary("lost")
+			return res
 		}
+		// Committed: nothing is rolled back. A poller whose schedule is
+		// still there runs again and finishes.
 		return t.strand(&res, plan, g, err, "the final deletes")
 	}
 
 	// 7. Its lease, and its table.
-	if err := lease.Finish(ctx); err != nil {
+	if err := t.retry(ctx, func() error { return lease.Finish(ctx) }); err != nil {
 		return t.strand(&res, plan, g, err, "finishing its lease")
 	}
 	t.closeTable(ctx, cfg.Region)
 	res.Outcome = OutcomeReaped
-	t.summary(plan, "finished", g)
+	summary("finished")
 	return res
 }
 
+// final wraps an error retryOp must not retry.
+type final struct{ err error }
+
+func (f *final) Error() string { return f.err.Error() }
+func (f *final) Unwrap() error { return f.err }
+
+// retryOp runs f up to readAttempts times while it fails, unless it returns
+// a *final, whose error it returns at once.
+func retryOp(ctx context.Context, cfg Config, f func() error) error {
+	var err error
+	for a := 0; a < readAttempts; a++ {
+		if a > 0 {
+			if serr := cfg.Sleep(ctx, time.Second); serr != nil {
+				return errors.Join(err, serr)
+			}
+		}
+		if err = f(); err == nil {
+			return nil
+		}
+		var fe *final
+		if errors.As(err, &fe) {
+			return fe.err
+		}
+	}
+	return err
+}
+
+// revive is reap mode's answer to activity in a region whose removal an
+// earlier run committed (its function's job is pending) but did not finish:
+// a creator arrived since. Holding the global lease, and only if no other
+// region has since started removing the account-wide resources (it would
+// have judged this region done), it deletes this region's one-shot jobs, so
+// its poller stays for the creator.
+func revive(ctx context.Context, cfg Config, d Deps) {
+	scheds, err := d.Source.Region(cfg.Region).Schedules(ctx)
+	if err != nil {
+		return
+	}
+	var jobs []string
+	pending := false
+	for _, s := range scheds {
+		if s.Group == runtimeiam.TeardownScheduleGroup && strings.HasPrefix(s.Name, "lagotto-teardown-") {
+			jobs = append(jobs, s.Name)
+			pending = pending || s.Name == FunctionJobName
+		}
+	}
+	if !pending {
+		return
+	}
+	t := &run{cfg: cfg, d: d}
+	if t.uncommit(ctx, jobs) {
+		cfg.Logf("idle-teardown %s region=%s revived=%d reason=%q", cfg.label(), cfg.Region, len(jobs),
+			"activity in a region whose removal was committed but not finished: its jobs are deleted and its poller stays")
+	}
+}
+
+// retry runs f up to readAttempts times while it fails with anything but a
+// lost lease.
+func (t *run) retry(ctx context.Context, f func() error) error {
+	var err error
+	for a := 0; a < readAttempts; a++ {
+		if a > 0 {
+			if serr := t.cfg.Sleep(ctx, time.Second); serr != nil {
+				return errors.Join(err, serr)
+			}
+		}
+		if err = f(); err == nil || errors.Is(err, lifecycle.ErrLeaseLost) {
+			return err
+		}
+	}
+	return err
+}
+
+// uncommit undoes a commit for a creator that took this region's lease over
+// after the global item went: it takes the global lease again, and only if
+// no other region has since started removing the account-wide resources
+// (which would mean it judged this region done) does it roll the jobs back.
+func (t *run) uncommit(ctx context.Context, created []string) bool {
+	gl, err := acquireGlobal(ctx, t.cfg, t.d.Lifecycle)
+	if err != nil {
+		return false
+	}
+	defer t.finishGlobal(ctx, gl)
+	fresh, err := inventory.Gather(ctx, t.d.Source, t.cfg.AccountID, inventory.Scope{AllRegions: true}, t.cfg.Options)
+	if err != nil || roleJobsElsewhere(&fresh, t.cfg.Region) {
+		return false
+	}
+	return t.rollback(ctx, created) == nil
+}
+
+// roleJobsElsewhere reports whether another region of f has the poller
+// role's jobs pending: it is removing the account-wide resources.
+func roleJobsElsewhere(f *inventory.Facts, self string) bool {
+	for i := range f.Regions {
+		r := &f.Regions[i]
+		if r.Region == self {
+			continue
+		}
+		for _, s := range r.Schedules {
+			if s.Group == runtimeiam.TeardownScheduleGroup && strings.HasPrefix(s.Name, roleJobPrefix) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // cancelLeftJobs deletes the one-shot jobs an earlier run of this region
-// left (it crashed while committing) when this run does not commit: the
-// poller stays, and so must its role.
-func (t *run) cancelLeftJobs(ctx context.Context) {
+// left (it crashed, or failed, while committing) that keep does not list:
+// all of them when this run does not commit (the poller stays, and so must
+// its role), or the ones this run's decision no longer plans (the poller
+// role's, after a run that was the last when this one defers).
+func (t *run) cancelLeftJobs(ctx context.Context, keep []OneShot) error {
 	here := t.facts.RegionFacts(t.cfg.Region)
 	if here == nil {
-		return
+		return nil
+	}
+	wanted := map[string]bool{}
+	for _, j := range keep {
+		wanted[j.Name] = true
 	}
 	var left []string
 	for _, s := range here.Schedules {
-		if s.Group == runtimeiam.TeardownScheduleGroup && strings.HasPrefix(s.Name, "lagotto-teardown-") {
+		if s.Group == runtimeiam.TeardownScheduleGroup && strings.HasPrefix(s.Name, "lagotto-teardown-") && !wanted[s.Name] {
 			left = append(left, s.Name)
 		}
 	}
-	_ = t.rollback(ctx, left)
+	return t.rollback(ctx, left)
 }
 
 // roleJobPrefix names the poller role's one-shot jobs.
@@ -810,9 +988,15 @@ const roleJobPrefix = "lagotto-teardown-role"
 func (t *run) rollback(ctx context.Context, created []string) error {
 	var errs []error
 	for _, name := range created {
-		_, err := t.d.Scheduler.DeleteSchedule(ctx, &scheduler.DeleteScheduleInput{
-			Name: aws.String(name), GroupName: aws.String(runtimeiam.TeardownScheduleGroup)})
-		if err != nil && !isNotFound(err) {
+		err := t.retry(ctx, func() error {
+			_, err := t.d.Scheduler.DeleteSchedule(ctx, &scheduler.DeleteScheduleInput{
+				Name: aws.String(name), GroupName: aws.String(runtimeiam.TeardownScheduleGroup)})
+			if isNotFound(err) {
+				return nil
+			}
+			return err
+		})
+		if err != nil {
 			errs = append(errs, fmt.Errorf("delete one-shot job %s: %w", name, err))
 		}
 	}
@@ -833,7 +1017,7 @@ func (t *run) strand(res *Result, plan *Plan, g GlobalLease, err error, what str
 	}
 	t.cfg.Logf("idle-teardown %s region=%s lease=held during=%q error=%q reason=%q", t.cfg.label(), t.cfg.Region, what, err.Error(),
 		"failed after the poller committed its own removal; the regional lease is left to go stale")
-	t.summary(plan, "held", g)
+	t.summary(plan, res, "held", g)
 	return *res
 }
 

@@ -750,8 +750,10 @@ func TestGlobalFence(t *testing.T) {
 			}
 		}
 		r := Tick(ctx, w.cfg(region, true), w.deps(region))
-		if r.Outcome != OutcomeKept || r.Plan.Last || (read <= 2 && r.Plan.Global != nil) {
-			t.Fatalf("%s: %+v\n%s", want.desc, r, w.log())
+		// A stop before the account-wide deletes leaves no Global; one after
+		// any of them ran keeps what ran (review 4, finding 7).
+		if r.Outcome != OutcomeKept || r.Plan.Last || (read <= 2) != (r.Plan.Global == nil) {
+			t.Fatalf("%s: %+v (Global %v)\n%s", want.desc, r, r.Plan.Global != nil, w.log())
 		}
 		for _, d := range want.deleted {
 			if w.count(d) == 0 {
@@ -811,26 +813,29 @@ func TestJudge(t *testing.T) {
 		"its poller committed":        {rf: committed, it: teardown(lease), ok: true, want: StandingDone, why: "committed its own removal"},
 		"its poller committed, stale": {rf: committed, it: teardown(lease), ok: true, stale: true, want: StandingDone, why: "committed its own removal"},
 		// The CLI never decides the account-wide resources (lagotto#346).
-		"the CLI tearing it down":        {rf: livePoller, it: teardown(cliLease), ok: true, want: StandingActive, why: "a teardown by alice holds its lease"},
-		"the CLI, no poller":             {it: teardown(cliLease), ok: true, want: StandingActive, why: "a teardown by alice holds its lease"},
-		"the CLI's, stale, no poller":    {it: teardown(cliLease), ok: true, stale: true, want: StandingDone, why: "the last mile reports it"},
-		"stalled, poller live":           {rf: livePoller, it: teardown(lease), ok: true, stale: true, want: StandingActive, why: "its poller resumes it", owes: true},
-		"idle past its grace":            {rf: livePoller, it: idle(25 * time.Hour), ok: true, want: StandingPending, why: "past its 24h0m0s grace", owes: true},
-		"idle within its grace":          {rf: livePoller, it: idle(time.Hour), ok: true, want: StandingActive, why: "of its 24h0m0s grace", owes: true},
-		"idle within its own grace":      {rf: inventory.Region{Function: poller("72h"), Schedules: rate}, it: idle(25 * time.Hour), ok: true, want: StandingActive, why: "of its 72h0m0s grace", owes: true},
-		"idle past, no poller":           {rf: tables, it: idle(25 * time.Hour), ok: true, want: StandingActive, why: "no live poller to tear it down"},
-		"idle, nothing left":             {it: idle(25 * time.Hour), ok: true, want: StandingDone, why: "nothing of lagotto's left"},
-		"idle, poller without a rate":    {rf: inventory.Region{Function: poller("")}, it: idle(25 * time.Hour), ok: true, want: StandingActive, why: "no live poller"},
-		"idle, its poller DISABLED":      {rf: inventory.Region{Function: poller(""), Schedules: disabled}, it: idle(25 * time.Hour), ok: true, want: StandingActive, why: "no live poller"},
+		"the CLI tearing it down":     {rf: livePoller, it: teardown(cliLease), ok: true, want: StandingActive, why: "a teardown by alice holds its lease"},
+		"the CLI, no poller":          {it: teardown(cliLease), ok: true, want: StandingDone, why: "nothing there that needs the account-wide resources"},
+		"the CLI, a stopped poller":   {rf: inventory.Region{Function: poller(""), Schedules: disabled}, it: teardown(cliLease), ok: true, want: StandingActive, why: "will not run to finish it"},
+		"the CLI's, stale, no poller": {it: teardown(cliLease), ok: true, stale: true, want: StandingDone, why: "the last mile reports it"},
+		"stalled, poller live":        {rf: livePoller, it: teardown(lease), ok: true, stale: true, want: StandingActive, why: "its poller resumes it", owes: true},
+		"idle past its grace":         {rf: livePoller, it: idle(25 * time.Hour), ok: true, want: StandingPending, why: "past its 24h0m0s grace", owes: true},
+		"idle within its grace":       {rf: livePoller, it: idle(time.Hour), ok: true, want: StandingActive, why: "of its 24h0m0s grace", owes: true},
+		"idle within its own grace":   {rf: inventory.Region{Function: poller("72h"), Schedules: rate}, it: idle(25 * time.Hour), ok: true, want: StandingActive, why: "of its 72h0m0s grace", owes: true},
+		// Tables need none of the account-wide resources; a poller function
+		// does, whatever its schedule's state (review 4, finding 4).
+		"idle past, only tables":         {rf: tables, it: idle(25 * time.Hour), ok: true, want: StandingDone, why: "nothing there that needs"},
+		"idle, nothing left":             {it: idle(25 * time.Hour), ok: true, want: StandingDone, why: "nothing there that needs"},
+		"idle, poller without a rate":    {rf: inventory.Region{Function: poller("")}, it: idle(25 * time.Hour), ok: true, want: StandingActive, why: "a poller that will not run"},
+		"idle, its poller DISABLED":      {rf: inventory.Region{Function: poller(""), Schedules: disabled}, it: idle(25 * time.Hour), ok: true, want: StandingActive, why: "a poller that will not run"},
 		"active, its poller live":        {rf: livePoller, it: lifecycle.Item{State: lifecycle.StateActive}, ok: true, want: StandingActive, why: "state ACTIVE", owes: true},
 		"active, its poller DISABLED":    {rf: inventory.Region{Function: poller(""), Schedules: disabled}, it: lifecycle.Item{State: lifecycle.StateActive}, ok: true, want: StandingActive, why: "state ACTIVE"},
 		"active, nothing created yet":    {it: lifecycle.Item{State: lifecycle.StateActive, Epoch: 3}, ok: true, want: StandingActive, why: "state ACTIVE"},
 		"pre-#326 poller":                {rf: livePoller, want: StandingActive, why: "has no lifecycle item"},
-		"a pre-#326 poller, DISABLED":    {rf: inventory.Region{Function: poller(""), Schedules: disabled}, want: StandingDone, why: "no lifecycle item"},
+		"a pre-#326 poller, DISABLED":    {rf: inventory.Region{Function: poller(""), Schedules: append(append([]inventory.Schedule{}, disabled...), tables.Schedules...)}, want: StandingActive, why: "its schedule is not enabled"},
 		"finished, going":                {rf: committed, want: StandingDone, why: "handed to its one-shot job"},
 		"tables only":                    {rf: tables, want: StandingDone, why: "no lifecycle item"},
 		"nothing of lagotto's":           {want: StandingDone, why: "no lifecycle item"},
-		"a function, no job, no rate":    {rf: inventory.Region{Function: poller("")}, want: StandingDone, why: "no lifecycle item"},
+		"a function, no job, no rate":    {rf: inventory.Region{Function: poller("")}, want: StandingActive, why: "its schedule is not enabled"},
 		"held by another tool":           {rf: livePoller, it: lifecycle.Item{State: lifecycle.StateActive, Holds: []tags.Tool{"spawn"}}, ok: true, want: StandingActive, why: "held by [spawn]", owes: true},
 		"a state it does not know about": {rf: livePoller, it: lifecycle.Item{State: "LATER"}, ok: true, want: StandingActive, why: "state LATER", owes: true},
 	} {
@@ -1121,7 +1126,11 @@ func TestGlobalInvariant(t *testing.T) {
 		}
 	})
 
-	t.Run("its rate schedule's delete fails: nothing committed, rolled back", func(t *testing.T) {
+	t.Run("its rate schedule's delete fails: stranded, and its next run finishes", func(t *testing.T) {
+		// Committed, and the global item is gone: another region may have
+		// judged this one done since, so nothing is rolled back (review 4,
+		// finding 1). Its schedule is still there, so its poller runs again
+		// and finishes.
 		w := newWorld(t, west, region)
 		w.finished(region)
 		w.idleTicks(true, west)
@@ -1129,11 +1138,14 @@ func TestGlobalInvariant(t *testing.T) {
 		if r := Tick(ctx, w.cfg(west, true), w.deps(west)); r.Outcome != OutcomeFailed {
 			t.Fatalf("%+v\n%s", r, w.log())
 		}
-		if it, ok := w.item(west); !ok || it.Lease != nil {
-			t.Errorf("the regional lease was not given back: %+v", it)
+		stranded(t, w, west)
+		if w.count("delete us-west-2 one-shot") != 0 {
+			t.Errorf("rolled back after the global item went: %v", w.ev.list())
 		}
-		if n := w.count("create us-west-2 one-shot") - w.count("delete us-west-2 one-shot"); n != 0 {
-			t.Errorf("%d job(s) left: %v", n, w.ev.list())
+		w.failFinal = false
+		w.advance(time.Hour)
+		if r := Tick(ctx, w.cfg(west, true), w.deps(west)); r.Outcome != OutcomeReaped {
+			t.Fatalf("the next run: %+v\n%s", r, w.log())
 		}
 	})
 
@@ -1190,9 +1202,12 @@ func TestGlobalInvariant(t *testing.T) {
 			}
 			return nil
 		}
+		// Retried, and still refused: the run stops before its own
+		// schedule goes, so its poller runs again (and finishes the global
+		// lease then).
 		r := Tick(ctx, w.cfg(west, true), w.deps(west))
-		if r.Outcome != OutcomeReaped || !r.Plan.Last || !strings.Contains(w.log(), "phase=global lease=finish-failed") ||
-			!strings.Contains(w.log(), "global_lease=held") {
+		if r.Outcome != OutcomeFailed || !r.Plan.Last || !strings.Contains(w.log(), "phase=global lease=finish-failed") ||
+			!strings.Contains(w.log(), "global_lease=held") || w.count("delete us-west-2 schedule") != 0 {
 			t.Fatalf("%+v\n%s", r, w.log())
 		}
 	})
@@ -1260,4 +1275,108 @@ func TestRollback(t *testing.T) {
 	if roleWouldGo(nil) {
 		t.Error("roleWouldGo(nil)")
 	}
+}
+
+// TestReview4 pins review 4's findings, each also a model counterexample on
+// the earlier head (model_test.go).
+func TestReview4(t *testing.T) {
+	ctx := context.Background()
+	t.Run("1: another region decides between the global item and a failed final delete", func(t *testing.T) {
+		w := newWorld(t, west, region)
+		w.idleTicks(true, west, region)
+		globalKey := lifecycle.ItemKey(Tool, lifecycle.ScopeGlobal)
+		finished, done, failNext := false, false, false
+		w.table(region).Err = func(op string, in any) error {
+			if di, ok := in.(*dynamodb.DeleteItemInput); ok && op == "DeleteItem" {
+				if pk, ok := di.Key["pk"].(*ddbtypes.AttributeValueMemberS); ok && pk.Value == globalKey {
+					finished = true
+				}
+			}
+			return nil
+		}
+		w.table(west).Hook = func(context.Context, string) {}
+		w.table(west).Err = func(op string, _ any) error {
+			if op == "UpdateItem" && finished && !done { // us-west-2's heartbeat before its own schedule's delete
+				done = true
+				if r := Tick(context.Background(), w.cfg(region, true), w.deps(region)); r.Plan == nil || !r.Plan.Last {
+					t.Errorf("us-east-1 should be the last: %+v", r)
+				}
+				failNext = true
+			}
+			if failNext && op == "UpdateItem" {
+				failNext = false
+				return errors.New("ThrottlingException")
+			}
+			return nil
+		}
+		Tick(ctx, w.cfg(west, true), w.deps(west))
+		// us-east-1 judged us-west-2 committed and removed the account-wide
+		// resources: us-west-2 must not go back to keeping its poller.
+		f := w.src
+		var pending bool
+		f.Update(west, func(r *inventory.Region) { pending = functionJobPending(r) })
+		if it, _ := w.item(west); it.State == lifecycle.StateActive || !pending {
+			t.Errorf("us-west-2 rolled its commit back: item %s, function job pending %v\n%s", it.State, pending, w.log())
+		}
+	})
+	t.Run("2: leftover role jobs go when a later run defers", func(t *testing.T) {
+		w := newWorld(t, west, region)
+		w.src.Update(west, func(r *inventory.Region) {
+			for _, j := range []string{"lagotto-teardown-role-inline", "lagotto-teardown-role-managed", "lagotto-teardown-role"} {
+				r.Schedules = append(r.Schedules, inventory.Schedule{Group: runtimeiam.TeardownScheduleGroup, Name: j})
+			}
+		})
+		w.idleTicks(true, west, region)
+		if r := Tick(ctx, w.cfg(west, true), w.deps(west)); r.Outcome != OutcomeReaped || r.Plan.Last {
+			t.Fatalf("us-west-2 should defer to us-east-1: %+v\n%s", r, w.log())
+		}
+		if n := w.count("delete us-west-2 one-shot lagotto-teardown-role"); n != 3 {
+			t.Errorf("%d of the 3 leftover role jobs deleted: %v", n, w.ev.list())
+		}
+	})
+	t.Run("revive: a committed region that turns active keeps its poller", func(t *testing.T) {
+		w := newWorld(t, west, region)
+		w.finished(region)
+		w.src.Update(west, func(r *inventory.Region) {
+			r.Schedules = append(r.Schedules, inventory.Schedule{Group: runtimeiam.TeardownScheduleGroup, Name: FunctionJobName})
+			r.ActiveWatches = 1
+		})
+		if r := Tick(ctx, w.cfg(west, true), w.deps(west)); r.Outcome != OutcomeActive || w.count("delete us-west-2 one-shot "+FunctionJobName) != 1 {
+			t.Fatalf("%+v %v\n%s", r, w.ev.list(), w.log())
+		}
+		// ...but not once another region is removing the account-wide
+		// resources (it judged this one done).
+		w = newWorld(t, west, region)
+		w.src.Update(west, func(r *inventory.Region) {
+			r.Schedules = append(r.Schedules, inventory.Schedule{Group: runtimeiam.TeardownScheduleGroup, Name: FunctionJobName})
+			r.ActiveWatches = 1
+		})
+		w.src.Update(region, func(r *inventory.Region) {
+			r.Schedules = append(r.Schedules, inventory.Schedule{Group: runtimeiam.TeardownScheduleGroup, Name: "lagotto-teardown-role"})
+		})
+		if r := Tick(ctx, w.cfg(west, true), w.deps(west)); r.Outcome != OutcomeActive || w.count("delete us-west-2 one-shot") != 0 {
+			t.Fatalf("revived while another region removes them: %+v %v", r, w.ev.list())
+		}
+	})
+	t.Run("8: a lease a creator took over is logged lost", func(t *testing.T) {
+		w := newWorld(t, west, region)
+		w.idleTicks(true, west, region)
+		creator, err := lifecycle.New(lifecycle.Options{DynamoDB: func(r string) (lifecycle.API, error) { return w.table(r), nil },
+			Owner: "alice", Now: func() time.Time { return w.clock().Add(time.Hour) }})
+		if err != nil {
+			t.Fatal(err)
+		}
+		once := false
+		w.table(region).Hook = func(ctx context.Context, op string) {
+			if op == "UpdateItem" && !once { // the global claim, before any delete
+				once = true
+				if err := creator.MarkActive(ctx, Tool, west); err != nil {
+					t.Errorf("creator: %v", err)
+				}
+			}
+		}
+		if r := Tick(ctx, w.cfg(west, true), w.deps(west)); r.Outcome != OutcomeLeaseLost || !strings.Contains(w.log(), "lease=lost") {
+			t.Fatalf("%+v\n%s", r, w.log())
+		}
+	})
 }

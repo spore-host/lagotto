@@ -48,17 +48,29 @@ import (
 //
 // # The decision
 //
-// Holding the global lease, the region deletes its own resources, commits its
-// removal, finishes its regional lease (its item is deleted), and only then
-// reads the footprint again and every other enabled region's item. Each other
-// region stands done (nothing there needs or will decide the globals),
-// pending (its own poller holds its lease, waiting for the global lease, or
-// it is idle past its own grace with a live poller), or active (anything
-// else, including anything that could not be read). Any pending or active
-// region keeps the globals. Because one lease serializes the regions and each
-// finishes its own item before it reads the others, of two regions the first
-// always defers and the second always finds the first gone: exactly one
-// removes the globals.
+// Holding the global lease (taken before its first delete), the region reads
+// the footprint again and every other enabled region's item, and judges each
+// other region done (nothing there needs or will decide the globals),
+// pending (its own poller holds its lease, or it is idle past its own grace,
+// with a live poller either way), or active (anything else, including
+// anything that could not be read). A non-done region with a live poller of
+// its own owes the globals. The decision is last (every other region done:
+// this one removes them), deferring (a region owes them), or neither (this
+// region keeps its poller and decides again later). Then, in order: both
+// plans; the account-wide deletes when last, each re-checked against the
+// other regions; its own direct deletes; the commit (its one-shot jobs, the
+// poller role's first and its function's last, every one due after the
+// poller's next hourly run), fenced before and after; the global item, once
+// the decision is durable; its own schedule and group; its lease. Because
+// one lease serializes the regions' decisions, and a region's item shows it
+// committed (its poller is handed to its job) before the lease is given up,
+// of two regions the first always defers and the second always finds the
+// first done: exactly one removes the globals.
+//
+// A region whose function's job is already pending (an earlier run
+// committed, then stopped) finishes that commit: once another region is
+// removing the account-wide resources it may have judged this one done, so
+// this one never goes back to keeping its poller.
 //
 // Before each change to the account-wide resources the last region re-reads
 // the other regions' items (a deploy elsewhere since the decision stops it;
@@ -66,7 +78,7 @@ import (
 //
 // The CLI's `lagotto teardown --plan --mode reap` does not join this decision
 // (lagotto#346): a region whose lease the CLI holds counts as active and
-// owes nothing, so the pollers leave the global lease held.
+// owes nothing, so the pollers keep their own.
 //
 // # Report mode
 //
@@ -202,29 +214,28 @@ func judge(rf *inventory.Region, it lifecycle.Item, ok bool, err error, stale bo
 		o.Why = strings.Join(rf.ActiveReasons(), "; ")
 	case ok && len(it.Holds) > 0:
 		o.Why = fmt.Sprintf("held by %v", it.Holds)
+	case ok && it.Lease != nil && functionJobPending(rf):
+		// Its poller is handed to its jobs: that run decided, and committed
+		// its removal; what is left of it the last mile reports.
+		o.Standing, o.Why = StandingDone, "its poller committed its own removal (lease held by "+it.Lease.Owner+")"
 	case ok && it.Lease != nil && live && stale:
 		o.Why = "its teardown stalled (a stale lease held by " + it.Lease.Owner + "); its poller resumes it at its next run"
 	case ok && it.Lease != nil && live && it.Lease.Owner == owner:
 		o.Standing, o.Why = StandingPending, "its poller is tearing it down"
 	case ok && it.Lease != nil && live:
 		o.Why = "a teardown by " + it.Lease.Owner + " holds its lease; only its own poller decides the account-wide resources"
-	case ok && it.Lease != nil && it.Lease.Owner == owner:
-		// Its poller is handed to its jobs: that run decided, and committed
-		// its removal; what is left of it the last mile reports.
-		o.Standing, o.Why = StandingDone, "its poller committed its own removal (lease held by "+it.Lease.Owner+")"
-	case ok && it.Lease != nil && stale:
-		o.Standing = StandingDone
-		o.Why = "its teardown stalled (a stale lease held by " + it.Lease.Owner + ") with no live poller left; the last mile reports it to resume"
+	case ok && it.Lease != nil && needsGlobals(rf):
+		o.Why = "a lease held by " + it.Lease.Owner + ", and a poller that needs the poller role but will not run to finish it"
 	case ok && it.Lease != nil:
-		o.Why = "a teardown by " + it.Lease.Owner + " holds its lease; only its own poller decides the account-wide resources"
+		o.Standing, o.Why = StandingDone, "a lease held by "+it.Lease.Owner+", and nothing there that needs the account-wide resources; the last mile reports it"
 	case ok && it.State == lifecycle.StateActive:
 		// Whatever the footprint says: a creator marks a region active
 		// before it creates anything.
 		o.Why = "state ACTIVE"
-	case ok && !live && !lagottoLeft(rf):
-		o.Standing, o.Why = StandingDone, "a lifecycle item (state "+string(it.State)+"), and nothing of lagotto's left"
+	case ok && !live && !needsGlobals(rf):
+		o.Standing, o.Why = StandingDone, "a lifecycle item (state "+string(it.State)+"), and nothing there that needs the account-wide resources"
 	case ok && !live:
-		o.Why = "state " + string(it.State) + ", with no live poller to tear it down ('lagotto teardown --plan' removes what is left)"
+		o.Why = "state " + string(it.State) + ", with a poller that will not run to tear it down ('lagotto teardown --plan' removes what is left)"
 	case ok && it.State == lifecycle.StateIdle:
 		grace := graceOf(rf)
 		if idle := it.IdleFor(now); !it.IdleSince.IsZero() && idle >= grace {
@@ -236,6 +247,11 @@ func judge(rf *inventory.Region, it lifecycle.Item, ok bool, err error, stale bo
 		o.Why = "state " + string(it.State)
 	case live:
 		o.Why = "its poller has no lifecycle item (a poller from before lagotto#326)"
+	case needsGlobals(rf):
+		// A poller that will run once a watch arms its schedule needs the
+		// poller role whatever the schedule's state (a region from before
+		// lagotto#326, or deployed and never watched, lagotto#348).
+		o.Why = "its poller has no lifecycle item, and its schedule is not enabled (a poller from before lagotto#326, or never watched)"
 	default:
 		o.Standing, o.Why = StandingDone, "no lifecycle item"
 		if functionJobPending(rf) {
@@ -264,10 +280,12 @@ func pollerLive(r *inventory.Region) bool {
 	return false
 }
 
-// lagottoLeft reports whether anything of lagotto's is left in r.
-func lagottoLeft(r *inventory.Region) bool {
-	return len(r.Tables) > 0 || r.Bucket != nil || r.Topic != nil || r.Function != nil || r.LogGroup != nil ||
-		len(r.Groups) > 0 || len(r.Schedules) > 0 || r.Stack != nil
+// needsGlobals reports whether r has a poller function, not handed to its
+// delete job, that runs as the poller role (now, or once a watch arms its
+// schedule). Tables and the rest of a region need none of the account-wide
+// resources.
+func needsGlobals(r *inventory.Region) bool {
+	return r.Function != nil && !functionJobPending(r)
 }
 
 // graceOf is the grace r's own poller waits: its LAGOTTO_IDLE_GRACE, read
@@ -401,7 +419,7 @@ func (t *run) finishGlobal(ctx context.Context, gl *lifecycle.Lease) GlobalLease
 	if gl == nil {
 		return GlobalNone
 	}
-	if err := gl.Finish(ctx); err != nil {
+	if err := t.retry(ctx, func() error { return gl.Finish(ctx) }); err != nil {
 		t.cfg.Logf("idle-teardown %s region=%s phase=global lease=finish-failed scope=%s error=%q", t.cfg.label(), t.cfg.Region, lifecycle.ScopeGlobal, err.Error())
 		return GlobalHeld
 	}

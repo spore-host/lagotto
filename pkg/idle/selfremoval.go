@@ -180,9 +180,10 @@ func isNotFound(err error) bool {
 }
 
 // CreateOneShots creates the lagotto-teardown schedule group, tagged, and
-// then each job in it. Both are idempotent: a ConflictException (the group or
-// job already exists, from a teardown that crashed after creating it) counts
-// as success, so a resumed teardown carries on where it stopped. before, when
+// then each job in it. The group's ConflictException (it exists) is success.
+// A job's ConflictException means an earlier run's job of that name, which
+// keeps the time it was created with: it is deleted and created again at
+// this run's time, so every job fires after the poller's next run. before, when
 // set, runs before each job is created (the lease heartbeat); its error stops
 // the creation.
 func CreateOneShots(ctx context.Context, api OneShotAPI, region, accountID string, now time.Time, jobs []OneShot,
@@ -204,7 +205,18 @@ func CreateOneShots(ctx context.Context, api OneShotAPI, region, accountID strin
 				return created, err
 			}
 		}
-		if _, err := api.CreateSchedule(ctx, ScheduleInput(j, invoke)); err != nil && !isConflict(err) {
+		_, err := api.CreateSchedule(ctx, ScheduleInput(j, invoke))
+		if isConflict(err) {
+			// An earlier run's job of that name, with its own time: a job
+			// keeps the time it was created with (ConflictException), so it
+			// is recreated at this run's, after the poller's next run.
+			if _, derr := api.DeleteSchedule(ctx, &scheduler.DeleteScheduleInput{
+				Name: aws.String(j.Name), GroupName: aws.String(runtimeiam.TeardownScheduleGroup)}); derr != nil && !isNotFound(derr) {
+				return created, fmt.Errorf("recreate one-shot teardown job %s: delete the earlier one: %w", j.Name, derr)
+			}
+			_, err = api.CreateSchedule(ctx, ScheduleInput(j, invoke))
+		}
+		if err != nil {
 			return created, fmt.Errorf("create one-shot teardown job %s: %w", j.Name, err)
 		}
 		created = append(created, j.Name)

@@ -620,20 +620,21 @@ configuration drops one you set by hand. Any activity restarts the clock.
    Holding the lease, it reads the footprint again and every other enabled
    region's lagotto item (each read tried three times), and judges each:
    - **Done:** nothing there needs, or will decide, the account-wide
-     resources. That means no item and no live poller, an item with nothing of
-     lagotto's left, or a teardown whose poller has already committed its own
-     removal (see below). A *live poller* is a function whose rate schedule is
-     **ENABLED** and that isn't yet handed to its `lagotto-teardown-function`
-     job. `lagotto deploy` creates the schedule DISABLED and only a watch
-     enables it, so a region deployed and never watched has none (lagotto#348).
+     resources. That means no poller function (its tables need none of
+     them), or a poller already handed to its `lagotto-teardown-function` job
+     (its removal is committed). A *live poller* is a function whose rate
+     schedule is **ENABLED** and that isn't yet handed to that job. `lagotto
+     deploy` creates the schedule DISABLED and only a watch enables it, so a
+     region deployed and never watched has none (lagotto#348). Its function
+     still needs the poller role once a watch arms it, so it is not done.
    - **Pending:** its own poller (lease owner `lagotto-poller/<region>`) holds
      its lease, or it has been idle past *its own* grace (its poller's
      `LAGOTTO_IDLE_GRACE`), and in both cases it has a live poller.
    - **Active:** anything else. That includes ACTIVE (whatever the footprint
      shows: a deploy marks a region active before it creates anything), within
      its grace, held, a lease held by anyone but its own poller (the CLI,
-     lagotto#346), something of lagotto's left with no live poller, a poller
-     older than the lease, and any read that failed.
+     lagotto#346), a poller function that won't run (DISABLED, or from before
+     #326), and any read that failed.
 
    A pending or active region with a live poller of its own *owes* the
    account-wide resources: it will run this same step when it tears down.
@@ -677,35 +678,59 @@ configuration drops one you set by hand. Any activity restarts the clock.
    | `lagotto-teardown-log-group` | +107 min | the log group `/aws/lambda/lagotto-capacity-poller` |
    | `lagotto-teardown-function` | +92 min | the poller function `lagotto-capacity-poller` |
 
-   **Creating the function's job commits the poller's removal.** It is created
-   last, and re-read fences come right before and right after the jobs. A
-   deploy or watch elsewhere since the decision stops the commit before it
-   happens, or rolls the jobs back after it. A rollback happens only while the
-   decision is still this region's: if the global lease was taken over, another
-   region has judged this one committed, and it stays committed. Each job fires
-   after the next hourly run, so a teardown that stops anywhere before its own
-   schedule is deleted has a poller that runs once more and finishes. The log
-   group goes last, and late, on purpose: while the function is still flushing
-   its last logs, Lambda recreates a deleted log group within seconds,
-   untagged and with no retention (seen live, lagotto#326).
+   **Creating the function's job commits the poller's removal.** Before the
+   jobs, any job an earlier run left that this decision doesn't plan is deleted:
+   for example, the poller role's jobs from a run that was the last, when this
+   run defers. A job that already exists keeps the time it was created with
+   (Scheduler answers ConflictException), so it is deleted and created again at
+   this run's time. The function's job is created last, and re-read fences come
+   right before and right after the jobs. A deploy or watch elsewhere since the
+   decision stops the commit before it happens, or rolls the jobs back after it.
+   A rollback happens only while the decision is still this region's: if the
+   global lease was taken over, another region has judged this one committed,
+   and it stays committed. The log group goes last, and late, on purpose: while
+   the function is still flushing its last logs, Lambda recreates a deleted log
+   group within seconds, untagged and with no retention (seen live,
+   lagotto#326).
 8. **The global item goes, then the final deletes.** Once the decision is
-   durable, the poller finishes the global lease (the account-wide resources
-   are gone or handed to their jobs, or a region with a live poller owes
-   them). The control region's table is closed if nothing is left in it. Then
-   it deletes its own schedule `lagotto-capacity-poller` and the schedule group
-   `lagotto`, finishes its region's lease, and closes that region's
-   `spore-host-lifecycle` table if no spore.host tool's items are left in it.
+   durable (the account-wide resources are gone or handed to their jobs, or a
+   region with a live poller owes them), the poller finishes the global lease
+   *before* it deletes its own schedule, retrying a failed write. The control
+   region's table is closed if nothing is left in it. Then it deletes its own
+   schedule `lagotto-capacity-poller` and the schedule group `lagotto`,
+   finishes its region's lease, and closes that region's `spore-host-lifecycle`
+   table if no spore.host tool's items are left in it.
 
-A step that fails before the commit gives both leases back, rolls back any
-jobs, and leaves the poller to try again a grace period later. A failure after
-the commit leaves the region's lease **held** (`lease=held`). It goes stale, a
-stale teardown whose poller is gone counts as done, and the last mile reports
-it to resume; the account-wide decision is already durable by then.
+A step that fails **before the commit** gives both leases back, rolls back any
+jobs (retrying each delete), and leaves the poller to try again a grace period
+later.
+
+From the commit on, the region **never goes back to keeping its poller** on its
+own: another region may already have judged it done and acted on that. So a
+failure after the commit leaves the region's lease **held** (`lease=held`), and
+nothing is rolled back. That covers failing to finish the global lease, a
+failed final delete, and failing to finish its lease. While the poller's
+schedule is still there, the poller's next run finds its own function's job
+pending and finishes the commit, recreating its jobs at the new time. Every job
+fires after that run. Once the schedule is gone, the stale lease counts as done
+and the last mile reports it.
+
+There are two exceptions, and both happen only while no other region is removing
+the account-wide resources (no other region has the poller role's jobs pending):
+- **A creator takes the region's lease over before its own schedule is
+  deleted.** The poller takes the global lease again and rolls the jobs back,
+  so the creator keeps its poller.
+- **A region whose removal was committed but not finished turns out to be in
+  use.** Its next run does the same, deleting its jobs.
+
+Each read and write of the lifecycle table is retried on a transient error.
 
 A closer that died can leave `spore-host-lifecycle`'s closing sentinel behind,
-and libs' Observe never clears one (libs#88). The poller, the global lease and
+and libs' Observe never clears one (libs#88). Reap mode, the global lease and
 `lagotto teardown --plan` then call `CloseTableIfEmpty`, which takes a stale
-sentinel over.
+sentinel over. Report mode does the same only while the table still holds an
+item; there it only clears the sentinel, and an empty table is left for reap
+mode and the last mile.
 
 #### The invariant (reap mode)
 
@@ -724,16 +749,33 @@ account-wide resources exist, some live poller owes them**. The last region
 never removes itself while leaving them behind. It removes them, or hands them
 to another region with a live poller, or it keeps its own poller.
 
-The model check `pkg/idle/model_test.go` checks this mechanically. It
-explores every interleaving of two or three regions' teardowns, crashes at
-every step, a deploy and a watch, the clock passing the stale-lease time, and
-the CLI teardown, all within preemption and crash bounds. It drives the real
-code against in-memory fakes. In every end state it checks SAFETY (no
-account-wide delete after the deciding region read a creator's mark),
-LIVENESS (the account-wide resources, the global item and the control table
-are gone, or a poller that can still run owes them), that report mode writes
-nothing to the global scope, and that the CLI teardown can remove whatever is
-left. Two things are outside it:
+The model check `pkg/idle/model_test.go` checks this mechanically. It drives
+the real code against in-memory fakes. Within bounds on preemptions, crashes
+and AWS errors, it explores every interleaving of:
+- two or three regions' teardowns, with a crash at any step, or any AWS call
+  returning an error;
+- a deploy and a watch;
+- the clock passing the stale-lease time;
+- the CLI teardown.
+
+It also explores starting states: each poller ENABLED or DISABLED, with every
+lifecycle state; regions from before #326; and one-shot jobs an earlier run
+left, with their old fire times. The Scheduler answers ConflictException as
+AWS does.
+
+In every end state it checks:
+- **SAFETY:** no account-wide delete after the deciding region read a creator's
+  mark.
+- **No orphaned poller:** no poller function is left whose role is gone.
+- **LIVENESS:** the account-wide resources, the global item and the control
+  table are gone, or a poller that can still run owes them.
+- Report mode writes nothing to the global scope.
+- The CLI teardown can remove whatever is left.
+
+Outside it:
+- Two crashes in a row: one that leaves the jobs, and another in the run that
+  resumes them before it refreshes them. The jobs then fire before a third
+  run.
 - A deploy that lands after a region has committed the account-wide removal:
   the jobs then delete the poller role under it. lagotto#345, which has setup
   and deploy mark the global scope, closes that window.

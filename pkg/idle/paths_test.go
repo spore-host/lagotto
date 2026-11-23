@@ -172,6 +172,22 @@ func TestTickObserveFailures(t *testing.T) {
 	if r := Tick(ctx, h.cfg(false), h.deps()); !errors.Is(r.Err, lifecycle.ErrTableClosing) || !strings.Contains(h.log(), "observe=skipped") {
 		t.Errorf("table closing: %+v\n%s", r, h.log())
 	}
+	// A live closer's sentinel is left alone; one gone stale (its closer
+	// died, libs#88) is cleared, in report mode too, and the next run
+	// observes (review 4, finding 5).
+	if r := Tick(ctx, h.cfg(false), h.deps()); !errors.Is(r.Err, lifecycle.ErrTableClosing) {
+		t.Errorf("a live closer's sentinel was cleared: %+v", r)
+	}
+	h.advance(21 * time.Minute)
+	if r := Tick(ctx, h.cfg(false), h.deps()); !errors.Is(r.Err, lifecycle.ErrTableClosing) {
+		t.Errorf("the stale sentinel's run: %+v", r)
+	}
+	if r := Tick(ctx, h.cfg(false), h.deps()); r.Err != nil || r.Outcome != OutcomeActive {
+		t.Errorf("after the stale sentinel was cleared: %+v\n%s", r, h.log())
+	}
+	if n := h.table.Calls("DeleteTable"); n != 0 {
+		t.Errorf("report mode deleted the table (%d)", n)
+	}
 }
 
 // TestTickClaimRefused: another teardown holds a live lease, or the claim

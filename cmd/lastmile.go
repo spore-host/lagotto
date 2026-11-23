@@ -197,8 +197,11 @@ func lastMile(ctx context.Context, mode lastmile.Mode, logf func(string, ...any)
 	}
 	control, err := lastMileControlRegion(cfg.Region)
 	if err != nil {
-		logf("lastmile: skipped: %v", err)
-		return
+		// Outside the aws partition there is no global scope to read
+		// (lagotto#347): the regional checks still run, and the global
+		// scope's (the residue) is skipped.
+		logf("lastmile: the global scope is skipped: %v", err)
+		control = ""
 	}
 	if cfg.Region == "" {
 		cfg.Region = control

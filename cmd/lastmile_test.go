@@ -1222,7 +1222,8 @@ func TestLastMileDefaultSeams(t *testing.T) {
 }
 
 // TestLastMileUnknownPartition: in a partition with no known control region
-// the last mile does nothing, and says so under --verbose (lagotto#340).
+// the last mile still checks the regions, skips the global scope, and says
+// so under --verbose (lagotto#340, lagotto#347).
 func TestLastMileUnknownPartition(t *testing.T) {
 	w := newLMWorld(t)
 	awscfg.SetLoaderForTest(t, func(context.Context, ...func(*awsconfig.LoadOptions) error) (aws.Config, error) {
@@ -1233,7 +1234,8 @@ func TestLastMileUnknownPartition(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(stderr, "lastmile: skipped: no control region for us-iso-east-1") || w.runCount() != 0 {
+	// The regional checks still run; only the global scope is skipped.
+	if !strings.Contains(stderr, "lastmile: the global scope is skipped: no control region for us-iso-east-1") || w.runCount() != 1 {
 		t.Errorf("runs %d, stderr:\n%s", w.runCount(), stderr)
 	}
 }
