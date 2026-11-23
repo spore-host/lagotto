@@ -856,6 +856,17 @@ func (m *mworld) watchActor(region string) *actor {
 	}}
 }
 
+// staleWatchActor is the clock moving past the 20 min stale lease (as
+// clockActor does) and then a watch in region: one actor, so a single
+// preemption reaches a creator taking a stale lease over.
+func (m *mworld) staleWatchActor(region string) *actor {
+	clock, watch := m.clockActor(), m.watchActor(region)
+	return &actor{name: "the clock, then a watch " + region, run: func(ctx context.Context) {
+		clock.run(ctx)
+		watch.run(ctx)
+	}}
+}
+
 // clockActor moves the clock past the 20 min stale lease, but never while
 // an actor is inside a lease write or between a heartbeat and the delete or
 // job it is for: the lease protocol assumes that time is "well under 20 min"
@@ -1228,7 +1239,7 @@ func modelScenarios(long bool) []scenario {
 	var out []scenario
 	for _, reap := range []bool{true, false} {
 		out = append(out, scenario{name: fmt.Sprintf("two idle regions, reap=%t", reap), reap: reap,
-			specs: []regionSpec{idle(a), idle(b)}, actors: ticks(a, b), maxPreempt: p2, maxCrash: 1})
+			specs: []regionSpec{idle(a), idle(b)}, actors: ticks(a, b), maxPreempt: p2, maxCrash: 1, separate: !long && !reap})
 	}
 	// Every start of the other region, against an idle region's run.
 	for _, enabled := range []bool{true, false} {
@@ -1256,8 +1267,8 @@ func modelScenarios(long bool) []scenario {
 			regionSpec{name: b, enabled: false, item: "absent"}),
 		withActor("a watch here", func(m *mworld) *actor { return m.watchActor(a) }, idle(a)),
 		withActor("the CLI teardown", func(m *mworld) *actor { return m.cliTeardown() }, idle(a), idle(b)),
-		scenario{name: "a watch here, the lease gone stale", reap: true, specs: []regionSpec{idle(a)}, maxPreempt: 2,
-			actors: func(m *mworld) []*actor { return []*actor{m.tick(a), m.clockActor(), m.watchActor(a)} }},
+		scenario{name: "a watch here, the lease gone stale", reap: true, specs: []regionSpec{idle(a)}, maxPreempt: p2,
+			actors: func(m *mworld) []*actor { return []*actor{m.tick(a), m.staleWatchActor(a)} }},
 		scenario{name: "the clock, two regions", reap: true, specs: []regionSpec{idle(a), idle(b)}, maxPreempt: p2,
 			actors: func(m *mworld) []*actor { return []*actor{m.tick(a), m.tick(b), m.clockActor()} }},
 	)
