@@ -338,3 +338,35 @@ func TestReview4GraceStartAsJudged(t *testing.T) {
 		t.Errorf("a closing control table: %+v", r)
 	}
 }
+
+// TestReview4DeadItemBehindASentinel (the long model check): a dead regional
+// item in a table a closer that died left its sentinel in is still finished:
+// the sentinel, once stale, is cleared and the idle write tried again.
+func TestReview4DeadItemBehindASentinel(t *testing.T) {
+	ctx := context.Background()
+	w := newAWWorld(t)
+	creator := w.client("watch --local")
+	token, err := Mark(ctx, creator, "us-west-2", "create watch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := EndMark(ctx, creator, "us-west-2", token); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.tables["us-west-2"].PutRaw(lifecycle.TableName, map[string]ddbtypes.AttributeValue{
+		"pk":    &ddbtypes.AttributeValueMemberS{Value: lifecycle.SentinelKey},
+		"since": &ddbtypes.AttributeValueMemberS{Value: "2026-11-16T12:00:00.000Z"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if r := w.run(true, 0); r.Outcome != AccountWideFailed {
+		t.Fatalf("a live closer's sentinel: %+v", r)
+	}
+	w.advance(21 * time.Minute)
+	if r := w.run(true, 0); r.Outcome != AccountWideRemoved {
+		t.Fatalf("a stale one: %+v\n%s", r, w.log())
+	}
+	if it, ok, _ := w.client("reader").Get(ctx, Tool, "us-west-2"); ok {
+		t.Errorf("the dead item is left: %+v", it)
+	}
+}

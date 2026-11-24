@@ -345,27 +345,37 @@ func cancelUncommittedJobs(ctx context.Context, cfg Config, d Deps, seen *invent
 		skip("the poller's rate schedule is gone: the region's teardown committed, and its jobs are its own")
 		return
 	}
-	var (
-		it lifecycle.Item
-		ok bool
-	)
-	err = retryOp(ctx, cfg, func() error {
-		var err error
-		it, ok, err = d.Lifecycle.Get(ctx, Tool, cfg.Region)
-		return err
-	})
-	switch {
-	case err != nil:
-		skip("could not read the region's lifecycle item: " + err.Error())
-		return
-	case !ok:
-		skip("the region has no lifecycle item to lock")
-		return
-	case it.Lease != nil && !d.Lifecycle.LeaseStale(it):
-		skip("another run holds the region's lease (" + it.Lease.Owner + "); its jobs are its own")
-		return
+	// The lock is taken as the item is read; an item that changed in
+	// between (a creator's mark ended, an activity stamped) is read again,
+	// a few times, so a benign change does not leave the jobs.
+	var lock *lifecycle.Lease
+	for attempt := 1; ; attempt++ {
+		var (
+			it lifecycle.Item
+			ok bool
+		)
+		err = retryOp(ctx, cfg, func() error {
+			var err error
+			it, ok, err = d.Lifecycle.Get(ctx, Tool, cfg.Region)
+			return err
+		})
+		switch {
+		case err != nil:
+			skip("could not read the region's lifecycle item: " + err.Error())
+			return
+		case !ok:
+			skip("the region has no lifecycle item to lock")
+			return
+		case it.Lease != nil && !d.Lifecycle.LeaseStale(it):
+			skip("another run holds the region's lease (" + it.Lease.Owner + "); its jobs are its own")
+			return
+		}
+		lock, err = d.Lifecycle.LockIfUnchanged(ctx, Tool, cfg.Region, lifecycle.ExpectOf(it, ok))
+		var nc *lifecycle.NotClaimableError
+		if err == nil || !errors.As(err, &nc) || !strings.HasPrefix(nc.Reason, "changed") || attempt == readAttempts {
+			break
+		}
 	}
-	lock, err := d.Lifecycle.LockIfUnchanged(ctx, Tool, cfg.Region, lifecycle.ExpectOf(it, ok))
 	if err != nil {
 		skip("the region's lifecycle item could not be locked: " + err.Error())
 		return

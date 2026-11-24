@@ -49,8 +49,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its answer was lost is ended too. A region's item not in use, with no poller
   left, is dead: the account-wide teardown finishes it, as judged.
 - **The poller deletes a region's leftover one-shot jobs under a lock on the
-  region's lifecycle item** (no concurrent invocation can commit meanwhile).
-  A run that read its footprint and found no job makes no call; one that
+  region's lifecycle item** (no concurrent invocation can commit meanwhile),
+  reading the item again if it changed just before the lock (a creator's mark
+  ended there). A run that read its footprint and found no job makes no call; one that
   stopped before reading it lists the region's schedules.
 - **A lease left by a claim whose answer was lost is given back** (poller and
   CLI), and each poller container and CLI run writes a lease owner of its

@@ -679,7 +679,8 @@ and reads no other region.
    a delete failed), and every reap run that does not commit (the region is in
    use or within its grace), deletes its region's jobs, so the poller stays.
    It does that under a lock on the region's lifecycle item (no run can claim,
-   and so commit, meanwhile), heartbeating it before each delete; and never
+   and so commit, meanwhile; taken as the item was read, which is read again
+   if it changed just before), heartbeating it before each delete; and never
    while another run holds the region's live lease, or once the poller's rate
    schedule is gone (the jobs are then a commit: a run finishing, stranded
    after its commit, or finished, and this a retried or duplicate

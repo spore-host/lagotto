@@ -818,6 +818,15 @@ func (f fencedAccountDeleter) Describe(ctx context.Context, r fp.Resource) (fp.R
 // that cannot be closed is only logged.
 func finishDeadRegion(ctx context.Context, cfg AccountWideConfig, lc *lifecycle.Client, r deadItem) error {
 	expect, err := idleAsJudged(ctx, lc, r.region, r.expect)
+	if errors.Is(err, lifecycle.ErrTableClosing) {
+		// A closer that died left its sentinel (libs#88): CloseTableIfEmpty
+		// takes a stale one over (and drops it while items remain); a live
+		// closer's it leaves alone, and the next run tries again.
+		if _, cerr := lc.CloseTableIfEmpty(ctx, r.region); cerr != nil {
+			return errors.Join(err, cerr)
+		}
+		expect, err = idleAsJudged(ctx, lc, r.region, r.expect)
+	}
 	if err != nil {
 		return err
 	}

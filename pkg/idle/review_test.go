@@ -413,22 +413,37 @@ func TestCancelUnderTheLock(t *testing.T) {
 	if it := h.item(t); it.Lease != nil {
 		t.Errorf("the lock was left: %+v", it)
 	}
-	// The item changed between the read and the lock: nothing is deleted.
-	h = newHarness(t)
-	h.pastGrace(t, true)
-	jobs(h)
-	other2, _ := lifecycle.New(lifecycle.Options{DynamoDB: func(string) (lifecycle.API, error) { return h.table, nil }, Owner: "a creator", Now: h.clock})
-	h.table.Hook = func(ctx context.Context, op string) {
-		if op == "UpdateItem" && h.table.Hook != nil {
-			h.table.Hook = nil
-			if err := other2.MarkActive(ctx, Tool, region); err != nil {
-				t.Error(err)
+	// The item changed between the read and the lock: read again and
+	// locked (the long model check: a creator's mark ending there left the
+	// jobs); one that keeps changing is left, and nothing is deleted.
+	for _, always := range []bool{false, true} {
+		h = newHarness(t)
+		h.pastGrace(t, true)
+		jobs(h)
+		other2, _ := lifecycle.New(lifecycle.Options{DynamoDB: func(string) (lifecycle.API, error) { return h.table, nil }, Owner: "a creator", Now: h.clock})
+		changes := 0
+		var hook func(ctx context.Context, op string)
+		hook = func(ctx context.Context, op string) {
+			if op == "UpdateItem" && (always || changes == 0) {
+				changes++
+				h.table.Hook = nil
+				h.advance(time.Second)
+				if err := other2.MarkActive(ctx, Tool, region); err != nil {
+					t.Error(err)
+				}
+				h.table.Hook = hook
 			}
 		}
-	}
-	cancelUncommittedJobs(ctx, h.cfg(true).withDefaults(), h.deps(), nil)
-	if strings.Contains(strings.Join(h.ev.list(), "\n"), "delete one-shot") || !strings.Contains(h.log(), "could not be locked") {
-		t.Errorf("changed: %v\n%s", h.ev.list(), h.log())
+		h.table.Hook = hook
+		cancelUncommittedJobs(ctx, h.cfg(true).withDefaults(), h.deps(), nil)
+		h.table.Hook = nil
+		deleted := strings.Contains(strings.Join(h.ev.list(), "\n"), "delete one-shot")
+		if always && (deleted || !strings.Contains(h.log(), "could not be locked") || changes != readAttempts) {
+			t.Errorf("always changed (%d): %v\n%s", changes, h.ev.list(), h.log())
+		}
+		if !always && (!deleted || changes != 1) {
+			t.Errorf("changed once: %v\n%s", h.ev.list(), h.log())
+		}
 	}
 	// The footprint the run read shows no job: no call at all.
 	h = newHarness(t)
