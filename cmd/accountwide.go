@@ -119,7 +119,7 @@ func runAccountWideUnfenced(ctx context.Context, cfg aws.Config, account string,
 	kept = append(kept, deps...)
 	lease, err := unfencedLease(ctx)
 	if err != nil {
-		return idle.AccountWideResult{Outcome: idle.AccountWideFailed, Why: "no stand-in lease", Err: err}
+		return idle.AccountWideResult{Outcome: idle.AccountWideFailed, Why: "no stand-in lease", Err: err, Kept: kept}
 	}
 	res, err := fp.Execute(ctx, plan, fp.ModeReap, inventory.NewDeleter(live, newTeardownDeleters(cfg, account)), lease)
 	out := idle.AccountWideResult{Outcome: idle.AccountWideRemoved, Why: "removed without a global lease", Plan: plan, Result: res, Err: err, Kept: kept}

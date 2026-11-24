@@ -122,6 +122,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A dead regional item whose finish fails gives its lease back**, and a
   Finish whose delete applied though its answer was lost counts as done
   (the account-wide teardown, and the poller's regional one).
+- **An interrupted CLI gives its lease back** (#340): SIGINT and SIGTERM
+  cancel the command's work, and a teardown then releases or suspends the
+  lease it holds, and a creator ends its marks, each with a fresh context. A
+  creator waits up to 22 minutes for a teardown's lease (was 10), past the
+  20 minutes a lease takes to go stale, so a killed teardown's lease is taken
+  over rather than refusing every creator in the account.
+- **The poller reads its region's jobs again when its footprint could not
+  be read in full** (#340): a reap run whose post-claim read failed no longer
+  takes that for "no jobs", which left an earlier run's function job to
+  delete a live poller.
+- `lagotto teardown --plan` writes a lease owner of its own run, and with
+  `--i-understand-no-lease` outside the aws partition it removes the
+  account-wide resources through the same checks as `teardown --iam-roles`
+  (no poller and no pending teardown job in any region).
 - **Outside the aws partition, `teardown --iam-roles` also refuses while a
   lagotto-teardown job is pending in any region** (they run as the invoke
   role), and its pre-check refuses a run whose plan failed.

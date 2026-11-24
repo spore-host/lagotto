@@ -146,7 +146,7 @@ func runTeardown(cmd *cobra.Command, args []string) error {
 	if teardownPlan != "" {
 		return runTeardownPlan(cmd)
 	}
-	ctx := context.Background()
+	ctx := commandContext(cmd)
 
 	cfg, err := awscfg.Load(ctx, "")
 	if err != nil {
@@ -410,7 +410,9 @@ func finishRegionItem(ctx context.Context, cfg aws.Config, out io.Writer) {
 	}
 	if err := l.Finish(ctx); err != nil {
 		// Given back, so no creator waits for a teardown that has stopped.
-		if rerr := l.Release(ctx); rerr != nil && !errors.Is(rerr, lifecycle.ErrLeaseLost) {
+		rctx, cancel := freshCtx(ctx)
+		defer cancel()
+		if rerr := l.Release(rctx); rerr != nil && !errors.Is(rerr, lifecycle.ErrLeaseLost) {
 			err = errors.Join(err, fmt.Errorf("giving the lease back: %w (it goes stale in 20 min)", rerr))
 		}
 		warn(err)

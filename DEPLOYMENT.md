@@ -321,8 +321,11 @@ and the poller before it fires a scheduled launch, first mark lagotto active in
 the region's `spore-host-lifecycle` table; the CLI's commands then mark
 lagotto's global scope too (`tool#lagotto#global` in us-east-1's table,
 lagotto#345), as `lagotto setup` does before it writes any IAM. While a
-teardown holds either lease they wait (the CLI up to 10 minutes), then exit
-non-zero, having created nothing. `lagotto-cli-user` grants this on that table only
+teardown holds either lease they wait (the CLI up to 22 minutes, past the
+20 minutes a lease takes to go stale, so the lease a teardown that was killed
+left is taken over), then exit non-zero, having created nothing. An
+interrupted CLI (Ctrl-C, SIGTERM) gives back the lease it holds, or suspends
+it, and ends its marks before it exits. `lagotto-cli-user` grants this on that table only
 (`UpdateItem`, `ConditionCheckItem`, `DescribeTable`, `CreateTable`,
 `TagResource`, and `DeleteItem` of the closing sentinel's key only). A
 creator that runs for long (a `watch --local`) refreshes its marks every 20
@@ -640,7 +643,7 @@ deletion of, or decides about anything account-wide, takes no global lease,
 and reads no other region.
 
 1. **The lease.** The poller claims the region's teardown lease. While it holds
-   it, a `deploy`, `watch` or `launch` in that region waits (the CLI up to 10
+   it, a `deploy`, `watch` or `launch` in that region waits (the CLI up to 22
    minutes) and then exits non-zero having created nothing; a creator that
    takes over a lease gone stale stops the teardown before its next delete. A
    claim that fails with anything but a throttle is not tried again (it may
@@ -748,8 +751,8 @@ teardown --plan --mode reap` (lagotto#346). All three run one code path
    libs#89). Once the scope is not in use and past its grace, it records it
    IDLE and then claims the global lease, each only if nothing changed since
    its read; a creator that marked in between refuses it. A creator that comes while the
-   teardown holds the lease waits for it (up to 10 minutes, as libs
-   `MarkActive` does): the teardown re-checks before each delete, and gives the
+   teardown holds the lease waits for it (up to 22 minutes, past the lease's
+   20-minute staleness, so a killed teardown's lease is taken over): the teardown re-checks before each delete, and gives the
    lease back at once when it finds something in use.
 3. **The conditions.** It may delete only while all of these hold, re-checked
    before **each** delete:

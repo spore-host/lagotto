@@ -390,6 +390,8 @@ type mworld struct {
 	passes    []int
 	// pollerReport: the pollers run in report mode (the CLI in reap).
 	pollerReport bool
+	// waitAdvances: see scenario.waitAdvances.
+	waitAdvances bool
 	// creating counts the creators past their marks and not yet done.
 	creating int
 	// runs counts poller invocations, for their owners.
@@ -625,7 +627,7 @@ func (m *mworld) who(ctx context.Context) string {
 
 // client is a lifecycle client as owner; a blocked MarkActive waits in steps.
 func (m *mworld) client(owner string) *lifecycle.Client {
-	c, err := lifecycle.New(lifecycle.Options{
+	o := lifecycle.Options{
 		DynamoDB:      func(r string) (lifecycle.API, error) { return m.table(r), nil },
 		ControlRegion: modelControl,
 		Owner:         owner,
@@ -633,7 +635,20 @@ func (m *mworld) client(owner string) *lifecycle.Client {
 		Sleep:         func(ctx context.Context, _ time.Duration) error { park(ctx, "wait"); return nil },
 		WaitTimeout:   30 * time.Second,
 		PollInterval:  10 * time.Second,
-	})
+	}
+	if m.waitAdvances {
+		// A creator's wait takes time, as lagotto's does (CreatorWait, past
+		// the stale bound), in two polls.
+		o.WaitTimeout, o.PollInterval = CreatorWait, CreatorWait/2
+		o.Sleep = func(ctx context.Context, d time.Duration) error {
+			park(ctx, "wait")
+			if a, _ := ctx.Value(actorKey{}).(*actor); a != nil && a.noCrash {
+				m.advanceIfQuiet(a, d)
+			}
+			return nil
+		}
+	}
+	c, err := lifecycle.New(o)
 	if err != nil {
 		panic(err)
 	}
@@ -1092,6 +1107,16 @@ func (m *mworld) mark(ctx context.Context, c *lifecycle.Client, region string, k
 		// a creator waits for, unless it crashed. (Judged at the refusal,
 		// before this creator's own region mark is ended.)
 		var tip *TeardownInProgressError
+		if errors.As(err, &tip) && m.waitAdvances {
+			// Waiting past the stale bound, a killed teardown's lease never
+			// refuses a creator: it is taken over. (A live one may, in the
+			// model, whose polls are not time when another actor is busy.)
+			for _, a := range m.actors {
+				if a.name == tip.Wait.Owner && a.crashed {
+					m.violate("a creator was refused by the global lease of %s, killed after its claim, which it should have outwaited", a.name)
+				}
+			}
+		}
 		if errors.As(err, &tip) {
 			for _, a := range m.actors {
 				if a.name == tip.Wait.Owner && a.done && !a.crashed {
@@ -1352,20 +1377,28 @@ func (m *mworld) setupActor() *actor {
 func (m *mworld) clockActor() *actor {
 	return &actor{name: "clock", run: func(ctx context.Context) {
 		park(ctx, "+21m")
-		for _, a := range m.actors {
-			if a.done {
-				continue
-			}
-			busy := strings.HasPrefix(a.at, "delete ") || strings.HasPrefix(a.at, "create ") // not "created "
-			for _, w := range []string{" UpdateItem", " PutItem", " DeleteItem", " TransactWriteItems"} {
-				busy = busy || strings.HasSuffix(a.at, w) // a lease write computes its time before it parks
-			}
-			if busy {
-				return
-			}
-		}
-		m.advance(21 * time.Minute)
+		m.advanceIfQuiet(nil, 21*time.Minute)
 	}}
+}
+
+// advanceIfQuiet moves the clock by d, unless an actor other than self is
+// inside a lease write or between a heartbeat and the delete or job it is
+// for: the lease protocol assumes that time is "well under 20 min" (libs
+// lifecycle).
+func (m *mworld) advanceIfQuiet(self *actor, d time.Duration) {
+	for _, a := range m.actors {
+		if a.done || a == self {
+			continue
+		}
+		busy := strings.HasPrefix(a.at, "delete ") || strings.HasPrefix(a.at, "create ") // not "created "
+		for _, w := range []string{" UpdateItem", " PutItem", " DeleteItem", " TransactWriteItems"} {
+			busy = busy || strings.HasSuffix(a.at, w) // a lease write computes its time before it parks
+		}
+		if busy {
+			return
+		}
+	}
+	m.advance(d)
 }
 
 // ---- the drain and the checks -------------------------------------------------
@@ -1589,11 +1622,14 @@ type scenario struct {
 	crashAfter string
 	// pollerReport: the pollers run in report mode, the CLI in reap.
 	pollerReport bool
+	// waitAdvances: a creator's wait for a lease takes time (CreatorWait).
+	waitAdvances bool
 }
 
 func (s scenario) build() (*mworld, []*actor) {
 	m := newMWorld(s.reap, s.global, s.specs...)
 	m.pollerReport = s.pollerReport
+	m.waitAdvances = s.waitAdvances
 	m.actors = s.actors(m)
 	return m, m.actors
 }
@@ -1727,6 +1763,12 @@ func modelScenarios(long bool) []scenario {
 		scenario{name: "a CLI region teardown and a deploy", reap: true, specs: []regionSpec{{name: mA, item: "idle"}},
 			actors:     acts(func(m *mworld) *actor { return m.cliRegionActor(mA) }, func(m *mworld) *actor { return m.deployActor(mA) }),
 			maxPreempt: p, maxCrash: 1, maxFail: 1, kinds: k},
+		// A CLI killed after its global claim (Ctrl-C, with no handler to
+		// give the lease back): a creator outwaits the lease's staleness and
+		// takes it over.
+		scenario{name: "a CLI killed after its claim, and a setup", reap: true, global: "idle", specs: []regionSpec{empty(mA)}, waitAdvances: true,
+			actors: acts(cli("cli", 0), func(m *mworld) *actor { return m.setupActor() }), maxPreempt: p, maxCrash: 1, kinds: k,
+			crashAfter: modelControl + " UpdateItem"},
 		scenario{name: "the CLI's report run", specs: []regionSpec{empty(mA)}, global: "idle",
 			actors: acts(cli("cli", 0), cli("cli last mile", DefaultGrace)), maxPreempt: p, maxFail: 1, kinds: k},
 	)

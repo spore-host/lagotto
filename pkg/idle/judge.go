@@ -121,8 +121,10 @@ func claimJudged(ctx context.Context, lc *lifecycle.Client, scope string, accept
 func claimAsJudged(ctx context.Context, lc *lifecycle.Client, scope string, e lifecycle.Expect, sleep func(context.Context, time.Duration) error) (*lifecycle.Lease, error) {
 	l, err := lc.ClaimIfUnchanged(ctx, Tool, scope, 0, e)
 	if err != nil && !errors.Is(err, lifecycle.ErrNotClaimable) {
-		if _, aerr := lc.AdoptLease(ctx, Tool, scope); aerr == nil {
-			err = fmt.Errorf("%w (%s)", err, giveBackOwn(ctx, lc, scope, sleep))
+		fctx, cancel := freshContext(ctx)
+		defer cancel()
+		if _, aerr := lc.AdoptLease(fctx, Tool, scope); aerr == nil {
+			err = fmt.Errorf("%w (%s)", err, giveBackOwn(fctx, lc, scope, sleep))
 		}
 	}
 	return l, err
@@ -151,6 +153,8 @@ func finishLease(ctx context.Context, sleep func(context.Context, time.Duration)
 // releaseLease gives l back (lifecycle Release), tried again on failure; a
 // lease already gone is not an error.
 func releaseLease(ctx context.Context, sleep func(context.Context, time.Duration) error, l *lifecycle.Lease) error {
+	ctx, cancel := freshContext(ctx)
+	defer cancel()
 	err := retryOp(ctx, Config{Sleep: sleep}, func() error {
 		if err := l.Release(ctx); errors.Is(err, lifecycle.ErrLeaseLost) {
 			return &final{err}
@@ -162,4 +166,11 @@ func releaseLease(ctx context.Context, sleep func(context.Context, time.Duration
 		return nil
 	}
 	return err
+}
+
+// freshContext is a short context for giving a lease back, or ending a mark,
+// after ctx was cancelled (the CLI interrupted): ctx's values, not its
+// cancellation, and 30 s.
+func freshContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 }

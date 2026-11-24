@@ -39,7 +39,7 @@ import (
 // it is still exactly as it judged it (lifecycle SetIdleIfUnchanged and
 // ClaimIfUnchanged: epoch, state, lease, marks, last activity), so it never
 // erases a creator's mark. A creator that marks while the actor holds the lease
-// waits for it (lifecycle MarkActive, up to 10 min); the actor re-checks
+// waits for it (lifecycle MarkActive, up to CreatorWait); the actor re-checks
 // before each delete, and gives the lease back at once when something is in
 // use. It may delete only while all of these hold, re-checked before each:
 //
@@ -212,14 +212,17 @@ func TearDownAccountWide(ctx context.Context, cfg AccountWideConfig, d AccountWi
 		cfg.Logf("%s", line)
 		return r
 	}
-	blocked := func(why string, blockers []blocker) AccountWideResult {
+	// blockedResult is a blocked outcome, not yet logged (giveBack logs it
+	// once the lease is given back); blocked logs it.
+	blockedResult := func(why string, blockers []blocker) AccountWideResult {
 		r := AccountWideResult{Outcome: AccountWideBlocked, Why: why}
 		for _, b := range blockers {
 			r.Blockers = append(r.Blockers, b.text)
 			r.ReadFailed = r.ReadFailed || b.readFailed
 		}
-		return log(r)
+		return r
 	}
+	blocked := func(why string, blockers []blocker) AccountWideResult { return log(blockedResult(why, blockers)) }
 	control, err := lc.RegionFor(lifecycle.ScopeGlobal)
 	if err != nil {
 		return log(AccountWideResult{Outcome: AccountWideSkipped, Why: err.Error()})
@@ -334,9 +337,14 @@ func TearDownAccountWide(ctx context.Context, cfg AccountWideConfig, d AccountWi
 	// next run). Only a write that fails leaves it live, to go stale.
 	// Each is tried again on failure (a throttle, a dropped connection): a
 	// lease these leave live keeps every creator waiting until it is stale.
+	// They run with a fresh context of their own: a run whose context was
+	// cancelled (the CLI interrupted, its budget spent) still gives its
+	// lease back.
 	leaseWrite := func(w func(context.Context) error) error {
-		return retryOp(ctx, Config{Sleep: cfg.Sleep}, func() error {
-			if err := w(ctx); errors.Is(err, lifecycle.ErrLeaseLost) {
+		wctx, cancel := freshContext(ctx)
+		defer cancel()
+		return retryOp(wctx, Config{Sleep: cfg.Sleep}, func() error {
+			if err := w(wctx); errors.Is(err, lifecycle.ErrLeaseLost) {
 				return &final{err}
 			} else {
 				return err
@@ -348,15 +356,14 @@ func TearDownAccountWide(ctx context.Context, cfg AccountWideConfig, d AccountWi
 			cfg.Logf("account-wide %s lease=release-failed error=%q", cfg.label(), err.Error())
 			r.Err = errors.Join(r.Err, err)
 		}
-		return r
+		return log(r)
 	}
 	suspend := func(why string, err error, plan *fp.Plan, res *fp.Result) AccountWideResult {
 		if errors.Is(err, lifecycle.ErrLeaseLost) {
 			return log(AccountWideResult{Outcome: AccountWideLeaseLost, Why: why + ": the global lease was taken over; stopped", Err: err, Plan: plan, Result: res})
 		}
 		if count(res, fp.OutcomeDeleted) == 0 && why != "could not finish the global lease" {
-			r := giveBack(AccountWideResult{Outcome: AccountWideFailed, Why: why + "; nothing was deleted, and the global lease was given back", Err: err, Plan: plan, Result: res})
-			return log(r)
+			return giveBack(AccountWideResult{Outcome: AccountWideFailed, Why: why + "; nothing was deleted, and the global lease was given back", Err: err, Plan: plan, Result: res})
 		}
 		lease := "suspended"
 		if serr := leaseWrite(gl.Suspend); serr != nil {
@@ -372,7 +379,7 @@ func TearDownAccountWide(ctx context.Context, cfg AccountWideConfig, d AccountWi
 	_, kept = accountWideResources(facts, cfg)
 	if blockers, dead = accountWideBlockers(ctx, cfg, d, facts); len(blockers) > 0 {
 		// Something appeared since: the lease goes back.
-		r := giveBack(blocked("the account-wide resources are needed again", blockers))
+		r := giveBack(blockedResult("the account-wide resources are needed again", blockers))
 		return r
 	}
 	for _, r := range dead {
@@ -380,7 +387,7 @@ func TearDownAccountWide(ctx context.Context, cfg AccountWideConfig, d AccountWi
 		case errors.Is(err, lifecycle.ErrNotClaimable):
 			// It changed since it was judged dead (a creator, a watch
 			// --local, marked it): in use again.
-			return giveBack(blocked("the account-wide resources are needed again", []blocker{inUse(r.region + ": its lifecycle item changed since it was judged dead")}))
+			return giveBack(blockedResult("the account-wide resources are needed again", []blocker{inUse(r.region + ": its lifecycle item changed since it was judged dead")}))
 		case err != nil:
 			return suspend("could not finish "+r.region+"'s dead lifecycle item", err, nil, nil)
 		}
@@ -392,9 +399,9 @@ func TearDownAccountWide(ctx context.Context, cfg AccountWideConfig, d AccountWi
 	if errors.As(err, &be) {
 		// A creator arrived mid-run: the lease goes back at once, so its
 		// global mark does not wait for it.
-		r := giveBack(blocked("the account-wide resources are needed again", be.blockers))
+		r := blockedResult("the account-wide resources are needed again", be.blockers)
 		r.Plan, r.Result = plan, res
-		return r
+		return giveBack(r)
 	}
 	if err != nil || count(res, fp.OutcomeFailed)+count(res, fp.OutcomeStopped)+count(res, fp.OutcomeNotRun) > 0 {
 		if err == nil {
@@ -450,8 +457,12 @@ func claimGlobal(ctx context.Context, cfg AccountWideConfig, lc *lifecycle.Clien
 		}
 		return err
 	})
-	if err != nil && cfg.Owner != "" && ownLease(ctx, lc, lifecycle.ScopeGlobal, cfg.Owner) {
-		err = fmt.Errorf("%w (%s)", err, giveBackOwn(ctx, lc, lifecycle.ScopeGlobal, cfg.Sleep))
+	if err != nil && cfg.Owner != "" {
+		fctx, cancel := freshContext(ctx) // the claim may have applied as the run was interrupted
+		defer cancel()
+		if ownLease(fctx, lc, lifecycle.ScopeGlobal, cfg.Owner) {
+			err = fmt.Errorf("%w (%s)", err, giveBackOwn(fctx, lc, lifecycle.ScopeGlobal, cfg.Sleep))
+		}
 	}
 	return l, err
 }

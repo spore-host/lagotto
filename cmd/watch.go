@@ -131,7 +131,7 @@ func init() {
 
 func runWatch(cmd *cobra.Command, args []string) error {
 	pattern := args[0]
-	ctx := context.Background()
+	ctx := commandContext(cmd)
 
 	// Parse TTL
 	ttl, err := parseTTLFlag(watchTTL)

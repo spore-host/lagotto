@@ -32,8 +32,10 @@ var newLifecycleClient = func(cfg aws.Config, owner string) (*lifecycle.Client, 
 type creatorKind int
 
 const (
-	// creatorDeploy (deploy) recreates the poller and its schedule: the
-	// region's teardown jobs always go first.
+	// creatorDeploy (deploy) recreates the poller and its schedule: it
+	// settles the region's teardown jobs on every path once it has
+	// replaced the poller (settleDeployJobs), so a deploy that fails first
+	// leaves them to finish the region's teardown.
 	creatorDeploy creatorKind = iota
 	// creatorHosted (watch, launch) needs the hosted poller: refused once
 	// its rate schedule is gone (the region was torn down; its function's
@@ -47,7 +49,8 @@ const (
 // watch (and watch --local) and launch mark lagotto active in region, and
 // then in the global scope (lagotto#345), before they create anything, and
 // deal with the region's pending teardown jobs (lagotto#340, creatorKind).
-// A teardown holding either lease is waited out (the CLI up to 10 min): it
+// A teardown holding either lease is waited out (idle.CreatorWait, 22 min,
+// past the lease's staleness, so a killed teardown's is taken over): it
 // refuses the command if it keeps the lease that long (non-zero exit,
 // nothing created). A caller whose IAM predates the lease table is warned on
 // errOut and carries on, as before lagotto#326, for either scope.
@@ -143,7 +146,7 @@ func endMark(c *lifecycle.Client, scope, token string, errOut io.Writer) {
 // creates or changes anything account-wide, as every creator does. The
 // regional mark is what stops an account-wide teardown already deleting: its
 // re-check before each delete sees it and gives the global lease back, and
-// the global mark, which waits for that lease (up to 10 min), then proceeds.
+// the global mark, which waits for that lease (idle.CreatorWait), then proceeds.
 // Once marked, the teardown, which never claims the scope while a creator's
 // mark is fresh, waits for done (or for idle.CreatorMarkBound) and then the
 // global grace from then.

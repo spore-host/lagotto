@@ -90,16 +90,7 @@ func TestReview4LostMarkReplyEnded(t *testing.T) {
 	if _, err := c.SetIdleIfUnchanged(ctx, inventory.Tool, "us-west-2", lifecycle.Expect{}); err != nil {
 		t.Fatal(err) // the table, and the item
 	}
-	lost := false
-	table.Err = func(op string, in any) error {
-		if tw, ok := in.(*dynamodb.TransactWriteItemsInput); ok && op == "TransactWriteItems" && !lost {
-			lost = true
-			table.Err = nil
-			_, _ = table.TransactWriteItems(ctx, tw)
-			return errors.New("connection reset")
-		}
-		return nil
-	}
+	table.Err = loseCommit(ctx, table)
 	if _, err := markCreating(ctx, aws.Config{}, "alice", "us-west-2", "create watch", creatorHosted, &bytes.Buffer{}); err == nil {
 		t.Fatal("a lost answer is a refusal")
 	}
@@ -145,14 +136,7 @@ func TestReview4LostGlobalMarkReplyEnded(t *testing.T) {
 	if _, err := c.SetIdleIfUnchanged(ctx, inventory.Tool, lifecycle.ScopeGlobal, lifecycle.Expect{}); err != nil {
 		t.Fatal(err)
 	}
-	table.Err = func(op string, in any) error {
-		if tw, ok := in.(*dynamodb.TransactWriteItemsInput); ok && op == "TransactWriteItems" {
-			table.Err = nil
-			_, _ = table.TransactWriteItems(ctx, tw)
-			return errors.New("connection reset")
-		}
-		return nil
-	}
+	table.Err = loseCommit(ctx, table)
 	if _, err := markGlobal(ctx, aws.Config{}, "", "set up lagotto's IAM", &bytes.Buffer{}); err == nil {
 		t.Fatal("a lost answer is a refusal")
 	}
@@ -164,4 +148,24 @@ func TestReview4LostGlobalMarkReplyEnded(t *testing.T) {
 	if it, _, _ := c.Get(ctx, inventory.Tool, lifecycle.ScopeGlobal); len(it.Marks) != 0 {
 		t.Errorf("a global mark after the refusal: %+v", it)
 	}
+}
+
+// loseCommit makes table's first transaction that commits apply, then
+// answer with a dropped connection (one that does not commit, say a mark
+// written the other way round, answers as it is).
+func loseCommit(ctx context.Context, table *lifecycletest.Fake) func(string, any) error {
+	var hook func(string, any) error
+	hook = func(op string, in any) error {
+		tw, ok := in.(*dynamodb.TransactWriteItemsInput)
+		if !ok || op != "TransactWriteItems" {
+			return nil
+		}
+		table.Err = nil
+		if _, err := table.TransactWriteItems(ctx, tw); err != nil {
+			table.Err = hook
+			return err
+		}
+		return errors.New("connection reset")
+	}
+	return hook
 }

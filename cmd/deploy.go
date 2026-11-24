@@ -101,7 +101,7 @@ func init() {
 }
 
 func runDeploy(cmd *cobra.Command, args []string) error {
-	ctx := context.Background()
+	ctx := commandContext(cmd)
 	out := cmd.OutOrStdout()
 
 	if deployTeardown && deployMigrate {
@@ -202,7 +202,9 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	settled := false
 	defer func() {
 		if !settled {
-			if serr := settleDeployJobs(ctx, cfg, region, false, os.Stderr); serr != nil {
+			sctx, cancel := freshCtx(ctx) // also after an interrupt
+			defer cancel()
+			if serr := settleDeployJobs(sctx, cfg, region, false, os.Stderr); serr != nil {
 				fmt.Fprintf(os.Stderr, "warning: %v\n", serr)
 			}
 		}

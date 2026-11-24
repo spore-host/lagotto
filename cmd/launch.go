@@ -86,7 +86,7 @@ func init() {
 }
 
 func runLaunch(cmd *cobra.Command, args []string) error {
-	ctx := context.Background()
+	ctx := commandContext(cmd)
 	out := cmd.OutOrStdout()
 
 	// --stack-name no longer participates in resolving anything here (#154): the

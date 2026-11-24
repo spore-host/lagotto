@@ -1,10 +1,14 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spore-host/lagotto/pkg/awscfg"
@@ -47,7 +51,14 @@ func Execute() {
 	_ = rootCmd.ParseFlags(os.Args[1:])
 	ensureI18nInitialized()
 
-	if err := rootCmd.Execute(); err != nil {
+	// SIGINT and SIGTERM cancel the command's context (commandContext): a
+	// command holding a teardown lease gives it back, or suspends it, and a
+	// creator ends its marks, each with a fresh context of its own, before
+	// it exits. A second signal exits at once.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() { <-ctx.Done(); stop() }()
+	if err := rootCmd.ExecuteContext(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(exitStatus(err))
 	}
@@ -166,4 +177,19 @@ func updateCommandDescriptions() {
 
 func getOutputFormat() string {
 	return outputFormat
+}
+
+// commandContext is cmd's context (Execute's, cancelled by SIGINT or
+// SIGTERM), or a background one for a command run without it (tests).
+func commandContext(cmd *cobra.Command) context.Context {
+	if cmd != nil && cmd.Context() != nil {
+		return cmd.Context()
+	}
+	return context.Background()
+}
+
+// freshCtx is a short context for giving a lease back after ctx was
+// cancelled (an interrupt): ctx's values, not its cancellation, and 30 s.
+func freshCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 }

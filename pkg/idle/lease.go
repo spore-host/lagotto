@@ -101,6 +101,9 @@ func NewClient(cfg aws.Config, owner string, opts ...func(*lifecycle.Options)) (
 		// An idle Observe (the poller's) leaves a creator's mark this young
 		// alone: a creator it cannot see is running.
 		MarkBound: CreatorMarkBound,
+		// A creator waits out a lease longer than it takes to go stale, so
+		// one a teardown that was killed left is taken over, not a refusal.
+		WaitTimeout: CreatorWait,
 	}
 	for _, f := range opts {
 		f(&o)
@@ -168,13 +171,27 @@ func Mark(ctx context.Context, c *lifecycle.Client, region, what string) (string
 // after a removal that applied finds the mark gone, which is not an error.
 func EndMark(ctx context.Context, c *lifecycle.Client, scope, token string) error {
 	var err error
-	for attempt := 0; attempt < 3; attempt++ {
+	for attempt := 0; attempt < readAttempts; attempt++ {
+		if attempt > 0 {
+			if serr := endMarkSleep(ctx, time.Second); serr != nil {
+				return errors.Join(err, serr)
+			}
+		}
 		if _, err = c.MarkDone(ctx, Tool, scope, token); err == nil {
 			return nil
 		}
 	}
 	return err
 }
+
+// endMarkSleep is EndMark's pause between tries. A seam for tests.
+var endMarkSleep = sleep
+
+// CreatorWait is how long a creator waits for a teardown's lease
+// (lifecycle Options.WaitTimeout): longer than the lease takes to go stale
+// (lifecycle DefaultStaleAfter, 20 min), so a lease that a teardown killed
+// mid-run left is taken over by the creator, never a refusal.
+const CreatorWait = lifecycle.DefaultStaleAfter + 2*time.Minute
 
 // RefreshMark re-stamps a creator's mark (lifecycle RefreshMark): a creator
 // that may run longer than CreatorMarkBound calls it well within it. False

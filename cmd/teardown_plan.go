@@ -262,7 +262,7 @@ func reapWithLeases(ctx context.Context, cfg aws.Config, acct string, plan *fp.P
 		}
 	}
 
-	c, err := newLifecycleClient(cfg, "lagotto teardown --plan")
+	c, err := newLifecycleClient(cfg, runOwner("lagotto teardown --plan"))
 	if err != nil {
 		return nil, fmt.Errorf("not deleting anything: %w", err)
 	}
@@ -270,7 +270,9 @@ func reapWithLeases(ctx context.Context, cfg aws.Config, acct string, plan *fp.P
 	giveBack := func() {
 		for _, l := range leases {
 			if l.real {
-				_ = l.lease.Release(ctx)
+				rctx, cancel := freshCtx(ctx)
+				_ = l.lease.Release(rctx)
+				cancel()
 			}
 		}
 	}
@@ -331,7 +333,10 @@ func reapWithLeases(ctx context.Context, cfg aws.Config, acct string, plan *fp.P
 			}
 			continue
 		}
-		if err := l.lease.Release(ctx); err != nil && !errors.Is(err, lifecycle.ErrLeaseLost) {
+		rctx, cancel := freshCtx(ctx)
+		err := l.lease.Release(rctx)
+		cancel()
+		if err != nil && !errors.Is(err, lifecycle.ErrLeaseLost) {
 			errs = append(errs, err)
 		}
 	}
@@ -362,19 +367,18 @@ func reapAccountWide(ctx context.Context, cfg aws.Config, acct string, plan *fp.
 	for _, r := range global {
 		only[r.ARN] = true
 	}
-	r := runAccountWide(ctx, cfg, acct, only, func(f string, a ...any) {
+	logf := func(f string, a ...any) {
 		if verbose {
 			_, _ = fmt.Fprintf(errOut, "debug: "+f+"\n", a...)
 		}
-	})
+	}
+	r := runAccountWide(ctx, cfg, acct, only, logf)
 	if r.Outcome == idle.AccountWideSkipped && teardownNoLease {
-		_, _ = fmt.Fprintf(errOut, "warning: no global teardown lease (%s); --%s: deleting the account-wide resources without one\n", r.Why, noLeaseFlag)
-		l, err := unfencedLease(ctx)
-		if err != nil {
-			return err
-		}
-		run(global, deleter, l)
-		return nil
+		// The same checks as `teardown --iam-roles` there: no poller and no
+		// pending lagotto-teardown job in any region, read in full.
+		_, _ = fmt.Fprintf(errOut, "warning: no global teardown lease (%s); --%s: deleting the account-wide resources without one, "+
+			"once no poller and no pending teardown job is left in any region\n", r.Why, noLeaseFlag)
+		r = teardownAccountWideUnfenced(ctx, cfg, acct, only, logf)
 	}
 	if r.Result != nil {
 		for _, a := range r.Result.Actions {

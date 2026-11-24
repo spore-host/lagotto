@@ -291,10 +291,7 @@ func Tick(ctx context.Context, cfg Config, d Deps) Result {
 		var seen *inventory.Region
 		// What this run read, unless it went on to create jobs itself.
 		if res.facts != nil && (res.Plan == nil || len(res.Plan.OneShots) == 0) {
-			seen = res.facts.RegionFacts(cfg.Region)
-			if seen == nil {
-				seen = &inventory.Region{Region: cfg.Region}
-			}
+			seen = res.facts.RegionFacts(cfg.Region) // nil: listed
 		}
 		cancelUncommittedJobs(ctx, cfg, d, seen)
 	}
@@ -653,7 +650,6 @@ func teardown(ctx context.Context, cfg Config, d Deps, lease *lifecycle.Lease, r
 	// The post-claim re-check, and the footprint the plan is made from, read
 	// now that the lease keeps creators out of this region.
 	facts, err := gatherFacts(ctx, d.Source, cfg.AccountID, inventory.Scope{Regions: []string{cfg.Region}}, cfg.Options)
-	res.facts = &facts
 	if err != nil {
 		res.Outcome, res.Err = OutcomeReleased, err
 		_ = release(ctx, cfg, lease, "could not read the footprint: "+err.Error())
@@ -662,6 +658,11 @@ func teardown(ctx context.Context, cfg Config, d Deps, lease *lifecycle.Lease, r
 	// Only its own region is read (no other region's state matters to it),
 	// and the account-wide resources, to say they are left for the CLI.
 	here := facts.RegionFacts(cfg.Region)
+	if here != nil && !here.ActivityUnknown {
+		// Only a footprint read in full says what jobs the region has
+		// (cancelUncommittedJobs); otherwise they are listed.
+		res.facts = &facts
+	}
 	switch {
 	case here == nil:
 		// Gather read exactly this region, so it is there; a footprint
