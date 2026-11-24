@@ -240,7 +240,7 @@ func TestAccountWideBlockers(t *testing.T) {
 			if err := w.client("bob").MarkActive(ctx, Tool, "us-west-2"); err != nil {
 				t.Fatal(err)
 			}
-		}, "us-west-2: its lifecycle item is ACTIVE"},
+		}, "us-west-2: its lifecycle item is in use (marked active at"},
 		"a live regional lease": {func(w *awWorld) {
 			c := w.client(PollerOwner("us-west-2"))
 			if _, _, err := c.Observe(ctx, Tool, "us-west-2", false); err != nil {
@@ -249,12 +249,12 @@ func TestAccountWideBlockers(t *testing.T) {
 			if _, err := c.Claim(ctx, Tool, "us-west-2", 0); err != nil {
 				t.Fatal(err)
 			}
-		}, "us-west-2: a teardown holds its lease (lagotto-poller/us-west-2)"},
+		}, "us-west-2: its lifecycle item is in use (a teardown holds its lease (lagotto-poller/us-west-2)"},
 		"a hold": {func(w *awWorld) {
 			if err := w.client("bob").AddHold(ctx, Tool, "us-west-2", "spawn"); err != nil {
 				t.Fatal(err)
 			}
-		}, "us-west-2: held by"},
+		}, "us-west-2: its lifecycle item is in use (held by"},
 		"an item that cannot be read": {func(w *awWorld) {
 			w.tables["us-west-2"].Err = func(op string, _ any) error {
 				if op == "GetItem" {
@@ -324,7 +324,8 @@ func TestAccountWideGrace(t *testing.T) {
 	if r := w.run(true, DefaultGrace); r.Outcome != AccountWideWaiting || len(w.ev.list()) != 0 {
 		t.Fatalf("after the mark: %+v", r)
 	}
-	if g, _ := w.global(); !g.IdleSince.Equal(t0.Add(20*time.Hour + 10*time.Minute)) {
+	// No writer idled it: the grace runs from the done, as read.
+	if g, _ := w.global(); !lifecycle.IdleSince(g, w.clock(), CreatorMarkBound).Equal(t0.Add(20*time.Hour + 10*time.Minute)) {
 		t.Errorf("the grace does not start at the done: %+v", g)
 	}
 	w.advance(DefaultGrace + time.Minute)
@@ -349,18 +350,27 @@ func TestAccountWideGrace(t *testing.T) {
 	if r := w.run(true, DefaultGrace); r.Outcome != AccountWideBlocked || w.writes() != before {
 		t.Fatal(r)
 	}
-	// A creator's mark older than CreatorMarkBound is one that died: the
-	// scope is idle from when the teardown records it so.
-	w = newAWWorld(t)
-	if err := MarkActive(context.Background(), w.client("bob"), lifecycle.ScopeGlobal, "set up"); err != nil {
-		t.Fatal(err)
-	}
-	w.advance(CreatorMarkBound + time.Minute)
-	if r := w.run(true, DefaultGrace); r.Outcome != AccountWideWaiting {
-		t.Fatalf("a dead creator's mark: %+v", r)
-	}
-	if g, _ := w.global(); g.State != lifecycle.StateIdle || len(g.Marks) != 0 {
-		t.Errorf("after a dead creator's mark: %+v", g)
+	// A creator's mark older than CreatorMarkBound is one that died (a
+	// MarkActive's too): the scope is idle from the mark's bound, with no
+	// write, and the resources go a grace after that.
+	for _, mark := range []string{"Mark", "MarkActive"} {
+		w = newAWWorld(t)
+		if mark == "Mark" {
+			if _, err := Mark(context.Background(), w.client("bob"), lifecycle.ScopeGlobal, "set up"); err != nil {
+				t.Fatal(err)
+			}
+		} else if err := MarkActive(context.Background(), w.client("bob"), lifecycle.ScopeGlobal, "set up"); err != nil {
+			t.Fatal(err)
+		}
+		w.advance(CreatorMarkBound + time.Minute)
+		before := w.writes()
+		if r := w.run(true, DefaultGrace); r.Outcome != AccountWideWaiting || !strings.Contains(r.Why, "idle for 1m0s of") || w.writes() != before {
+			t.Fatalf("%s: a dead creator's mark: %+v", mark, r)
+		}
+		w.advance(DefaultGrace)
+		if r := w.run(true, DefaultGrace); r.Outcome != AccountWideRemoved {
+			t.Fatalf("%s: a grace after it: %+v\n%s", mark, r, w.log())
+		}
 	}
 }
 

@@ -38,9 +38,10 @@ func TestMarkGlobal(t *testing.T) {
 	if it, ok, _ := c.Get(ctx, inventory.Tool, lifecycle.ScopeGlobal); !ok || it.State != lifecycle.StateActive || it.Epoch != 1 || len(it.Marks) != 1 {
 		t.Errorf("global item %+v", it)
 	}
-	// Setup's end: the scope goes idle from then (lagotto#340).
+	// Setup's end: the scope is idle from then, as read (lagotto#340; no
+	// writer idles it).
 	done()
-	if it, _, _ := c.Get(ctx, inventory.Tool, lifecycle.ScopeGlobal); it.State != lifecycle.StateIdle || len(it.Marks) != 0 {
+	if it, _, _ := c.Get(ctx, inventory.Tool, lifecycle.ScopeGlobal); len(it.Marks) != 0 || c.InUse(it, idle.CreatorMarkBound) {
 		t.Errorf("after done: %+v", it)
 	}
 	// A done that fails is a warning.
@@ -176,9 +177,14 @@ func TestTeardownPlanReapNoGlobalScope(t *testing.T) {
 // item stays.
 func TestTeardownFinishesTheRegionItem(t *testing.T) {
 	ctx := context.Background()
+	// What deploy and watch leave: their marks, ended.
 	mark := func(table *lifecycletest.Fake) *lifecycle.Client {
 		c, _ := lifecycle.New(lifecycle.Options{DynamoDB: func(string) (lifecycle.API, error) { return table, nil }, ControlRegion: "us-east-1"})
-		if err := c.MarkActive(ctx, inventory.Tool, "us-west-2"); err != nil {
+		token, err := c.Mark(ctx, inventory.Tool, "us-west-2")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.MarkDone(ctx, inventory.Tool, "us-west-2", token); err != nil {
 			t.Fatal(err)
 		}
 		return c
@@ -211,6 +217,12 @@ func TestTeardownFinishesTheRegionItem(t *testing.T) {
 		},
 		"no client": func() {
 			newLifecycleClient = func(aws.Config, string) (*lifecycle.Client, error) { return nil, errors.New("no client") }
+		},
+		"a creator running (watch --local)": func() {
+			other, _ := newLifecycleClient(aws.Config{}, "alice")
+			if _, err := other.Mark(ctx, inventory.Tool, "us-west-2"); err != nil {
+				t.Fatal(err)
+			}
 		},
 		"a live lease": func() {
 			other, _ := newLifecycleClient(aws.Config{}, "lagotto-poller/us-west-2")
@@ -512,7 +524,7 @@ func TestMarkCreatingEndsMarksOnRefusal(t *testing.T) {
 	}
 	c, _ := lifecycle.New(lifecycle.Options{DynamoDB: func(string) (lifecycle.API, error) { return table, nil }, ControlRegion: "us-east-1"})
 	for _, scope := range []string{"us-west-2", lifecycle.ScopeGlobal} {
-		if it, ok, _ := c.Get(ctx, inventory.Tool, scope); !ok || len(it.Marks) != 0 || it.State != lifecycle.StateIdle {
+		if it, ok, _ := c.Get(ctx, inventory.Tool, scope); !ok || len(it.Marks) != 0 || c.InUse(it, idle.CreatorMarkBound) {
 			t.Errorf("%s after the refusal: %+v", scope, it)
 		}
 	}

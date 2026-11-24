@@ -309,8 +309,10 @@ func Tick(ctx context.Context, cfg Config, d Deps) Result {
 // is gone, the region's teardown committed and finished: this run is a
 // retried or duplicate invocation), and heartbeats the lock before each
 // delete. Another run's live lease, a lock it cannot take, or a read that
-// fails, leaves the jobs: the next run tries again. A run whose footprint
-// shows no job makes no call at all.
+// fails, leaves the jobs: the next run tries again. A run that read its
+// region's footprint (seen) and found no job there makes no call; one that
+// stopped before reading it (active, within its grace, refused the claim)
+// lists the region's schedules, since an earlier run's jobs may be there.
 func cancelUncommittedJobs(ctx context.Context, cfg Config, d Deps, seen *inventory.Region) {
 	skip := func(why string) {
 		cfg.Logf("idle-teardown %s region=%s phase=one-shot cancel=skipped reason=%q", cfg.label(), cfg.Region, why)
@@ -716,17 +718,9 @@ func teardown(ctx context.Context, cfg Config, d Deps, lease *lifecycle.Lease, r
 			cfg.label(), cfg.Region, k.Resource.Type, k.Resource.Region, k.Resource.Name, k.Resource.ARN, k.Reason)
 	}
 
-	// 1. What the poller deletes directly.
-	plan.Direct, err = execute(ctx, plan.Phases[PhaseDirect], mode, deleter, lease)
-	t.logRow(string(PhaseDirect), plan.Phases[PhaseDirect], plan.Direct)
-	if plan.Direct == nil {
-		return t.unrun(ctx, &res, plan, err, "the direct deletes")
-	}
-	if t.stop(ctx, &res, plan, err, "the direct deletes") {
-		return res
-	}
-	// 2. Its own function and log group: always report mode, only to apply
-	// the delete guard; what passes becomes a one-shot job.
+	// 1. Its own function and log group, checked first: always report
+	// mode, only to apply the delete guard; what passes becomes a one-shot
+	// job.
 	plan.Self, err = execute(ctx, plan.Phases[PhaseSelf], fp.ModeReport, deleter, lease)
 	t.logRow(string(PhaseSelf), plan.Phases[PhaseSelf], plan.Self)
 	if plan.Self == nil {
@@ -746,6 +740,39 @@ func teardown(ctx context.Context, cfg Config, d Deps, lease *lifecycle.Lease, r
 		case inventory.TypeLogGroup:
 			sr.LogGroup = true
 		}
+	}
+	if cfg.Reap && here.Function != nil && !sr.Function {
+		// The function did not pass the delete guard (not lagotto's, or
+		// permanent, or kept): no job would remove it, and a commit would
+		// remove its rate schedule and leave it. Nothing is deleted: the
+		// region's removal waits (the account-wide teardown names it).
+		why := "its function " + here.Function.Name + " did not pass the delete guard"
+		if r, ok := unremovable(live, here.Function.ARN); ok {
+			why += " (" + r + ")"
+		}
+		for _, a := range plan.Self.Actions {
+			if a.Type == inventory.TypeFunction && a.Reason != "" {
+				why += " (" + string(a.Outcome) + ": " + a.Reason + ")"
+			}
+		}
+		for _, k := range plan.Kept {
+			if k.Resource.Type == inventory.TypeFunction && k.Resource.Region == cfg.Region {
+				why += " (kept: " + k.Reason + ")"
+			}
+		}
+		res.Outcome = OutcomeReleased
+		_ = release(ctx, cfg, lease, why+"; not committing the region's removal")
+		t.summary(plan, &res, "released")
+		return res
+	}
+	// 2. What the poller deletes directly.
+	plan.Direct, err = execute(ctx, plan.Phases[PhaseDirect], mode, deleter, lease)
+	t.logRow(string(PhaseDirect), plan.Phases[PhaseDirect], plan.Direct)
+	if plan.Direct == nil {
+		return t.unrun(ctx, &res, plan, err, "the direct deletes")
+	}
+	if t.stop(ctx, &res, plan, err, "the direct deletes") {
+		return res
 	}
 	now := cfg.Now()
 	plan.OneShots = sr.Plan(now)

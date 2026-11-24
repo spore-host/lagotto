@@ -261,7 +261,7 @@ func TestTeardownPlanReapAfterwards(t *testing.T) {
 	rec.failTable = "lagotto-watches"
 	isRelease := func(op string, in any) bool {
 		u, ok := in.(*dynamodb.UpdateItemInput)
-		return op == "UpdateItem" && ok && strings.HasPrefix(aws.ToString(u.UpdateExpression), "SET #state = :active REMOVE #lease")
+		return op == "UpdateItem" && ok && strings.HasPrefix(aws.ToString(u.UpdateExpression), "SET #state = :active, #lastActivityAt = :now")
 	}
 	installFakeLeases(t, failOn(isRelease))
 	teardownMode, teardownYes = "reap", true

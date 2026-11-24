@@ -399,14 +399,14 @@ func TestReportDeletesNothingAndLogsThePlan(t *testing.T) {
 	if strings.Contains(log, "outcome=would-delete type=AWS::IAM") || strings.Contains(log, "last_region") {
 		t.Error("the poller plans something account-wide")
 	}
-	// Order: kept, direct, self, one-shots, final, summary.
+	// Order: kept, self (checked first), direct, one-shots, final, summary.
 	var phases []string
 	for _, l := range strings.Split(log, "\n") {
 		if m := rowRE.FindStringSubmatch(l); m != nil && (len(phases) == 0 || phases[len(phases)-1] != m[1]) {
 			phases = append(phases, m[1])
 		}
 	}
-	if got := strings.Join(phases, ","); got != "kept,direct,self,one-shot,final" {
+	if got := strings.Join(phases, ","); got != "kept,self,direct,one-shot,final" {
 		t.Errorf("phases logged in order %s", got)
 	}
 	if t.Failed() {

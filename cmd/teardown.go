@@ -215,7 +215,7 @@ func runTeardown(cmd *cobra.Command, args []string) error {
 			"Delete it yourself if it is yours.\n", name)
 	}
 	// The region's lagotto lifecycle item: with its tables gone and no poller
-	// left, nothing will ever carry it on, and while it is ACTIVE it keeps the
+	// left, nothing will ever carry it on, and while it is in use it keeps the
 	// account-wide resources (lagotto#340).
 	finishRegionItem(ctx, cfg, out)
 	if teardownIAMRoles {
@@ -398,12 +398,18 @@ func finishRegionItem(ctx context.Context, cfg aws.Config, out io.Writer) {
 		}
 		return
 	}
-	l, err := claimRegion(ctx, c, cfg.Region, false)
+	// As judged: a creator's live mark there (a watch --local, a deploy
+	// under way) refuses it, and is never erased.
+	l, err := idle.ClaimJudged(ctx, c, cfg.Region, true)
 	if err != nil {
 		warn(err)
 		return
 	}
 	if err := l.Finish(ctx); err != nil {
+		// Given back, so no creator waits for a teardown that has stopped.
+		if rerr := l.Release(ctx); rerr != nil && !errors.Is(rerr, lifecycle.ErrLeaseLost) {
+			err = errors.Join(err, fmt.Errorf("giving the lease back: %w (it goes stale in 20 min)", rerr))
+		}
 		warn(err)
 		return
 	}

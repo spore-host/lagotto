@@ -596,6 +596,11 @@ func (m *mworld) table(region string) *lifecycletest.Fake {
 					if op == "DeleteItem" && cliRun && m.markLive[region] {
 						m.violations = append(m.violations, fmt.Sprintf("SAFETY: %s finished %s's lifecycle item, which a creator had marked since it was judged", m.current, region))
 					}
+					if op == "DeleteItem" && cliRun && liveMarkRaw(f.Item(lifecycle.TableName, k), m.now) {
+						// Writers never idle an item; a CLI never removes one
+						// a creator's live mark (or a hold) is on.
+						m.violations = append(m.violations, fmt.Sprintf("SAFETY: %s finished %s's lifecycle item with a live creator mark or a hold on it", m.current, region))
+					}
 					if !cliRun {
 						m.markLive[region] = false
 					}
@@ -1265,6 +1270,31 @@ func (m *mworld) launchActor(region string) *actor {
 }
 
 // setupActor is `lagotto setup`: the global mark, then the IAM.
+// cliRegionActor is `lagotto teardown` in region, once its tables are gone
+// (cmd finishRegionItem): with no poller function there, it claims the
+// region's item as judged (ClaimJudged) and finishes it, and gives the lease
+// back if the finish fails.
+func (m *mworld) cliRegionActor(region string) *actor {
+	return &actor{name: "cli teardown " + region, run: func(ctx context.Context) {
+		if m.regionFacts(region).Function != nil {
+			return // the poller carries it on
+		}
+		c := m.client("cli teardown " + region)
+		if _, ok, err := c.Get(ctx, Tool, region); err != nil || !ok {
+			return
+		}
+		l, err := ClaimJudged(ctx, c, region, true)
+		if err != nil {
+			return
+		}
+		if err := l.Finish(ctx); err != nil {
+			_ = l.Release(ctx)
+			return
+		}
+		_, _ = c.CloseTableIfEmpty(ctx, region)
+	}}
+}
+
 func (m *mworld) setupActor() *actor {
 	return &actor{name: "setup", noCrash: true, run: func(ctx context.Context) {
 		done, ok := m.mark(ctx, m.client("setup"), "", mDeploy)
@@ -1474,7 +1504,7 @@ func (m *mworld) finish() {
 	for _, r := range m.allRegions() {
 		f := m.regionFacts(r)
 		it, ok := m.item(r)
-		if f.Function != nil || len(m.pendingJobs(r)) > 0 || (ok && (it.State == lifecycle.StateActive || (it.Lease != nil && !m.client("model").LeaseStale(it)))) {
+		if f.Function != nil || len(m.pendingJobs(r)) > 0 || (ok && m.client("model").InUse(it, CreatorMarkBound)) {
 			return // not drained: a never-watched poller (lagotto#348), or a watch --local region
 		}
 	}
@@ -1622,7 +1652,7 @@ func modelScenarios(long bool) []scenario {
 			specs:  []regionSpec{{name: mA, deployed: true, enabled: true, item: "idle", jobs: []string{"lagotto-teardown-log-group", FunctionJobName}}},
 			actors: acts(tick(mA), tick(mA)), maxPreempt: p, maxFail: 1, kinds: k},
 		// A watch refused after its marks (the poller's schedule went while
-		// it waited): its marks end, and nothing is left ACTIVE.
+		// it waited): its marks end, and nothing is left in use.
 		scenario{name: "a watch while its region is torn down, and the CLI", reap: true, specs: []regionSpec{idle(mA)},
 			actors: acts(tick(mA), func(m *mworld) *actor { return m.watchActor(mA) }, cli("cli", 0)), maxPreempt: p, maxFail: 1, kinds: k},
 		// A CLI run that fails, and a creator after it.
@@ -1646,6 +1676,14 @@ func modelScenarios(long bool) []scenario {
 			actors: acts(cli("cli", 0)), maxCrash: 1, maxFail: 1, kinds: k},
 		scenario{name: "a watch --local region", reap: true, specs: []regionSpec{{name: mA, item: "active"}},
 			actors: acts(cli("cli", 0)), maxCrash: 1, maxFail: 1, kinds: k},
+		// `lagotto teardown` in a region (its item claimed as judged)
+		// against a creator there, and the account-wide run.
+		scenario{name: "a CLI region teardown, a watch --local and the CLI", reap: true, specs: []regionSpec{{name: mA, item: "stale"}},
+			actors:     acts(func(m *mworld) *actor { return m.cliRegionActor(mA) }, func(m *mworld) *actor { return m.localWatchActor(mA) }, cli("cli", 0)),
+			maxPreempt: p, maxFail: 1, kinds: k},
+		scenario{name: "a CLI region teardown and a deploy", reap: true, specs: []regionSpec{{name: mA, item: "idle"}},
+			actors:     acts(func(m *mworld) *actor { return m.cliRegionActor(mA) }, func(m *mworld) *actor { return m.deployActor(mA) }),
+			maxPreempt: p, maxCrash: 1, maxFail: 1, kinds: k},
 		scenario{name: "the CLI's report run", specs: []regionSpec{empty(mA)}, global: "idle",
 			actors: acts(cli("cli", 0), cli("cli last mile", DefaultGrace)), maxPreempt: p, maxFail: 1, kinds: k},
 	)
@@ -1686,4 +1724,24 @@ func TestModelCheck(t *testing.T) {
 
 func accountWideWhyModel(r AccountWideResult) string {
 	return fmt.Sprintf("%s (%v; %v)", r.Why, r.Blockers, r.Err)
+}
+
+// liveMarkRaw reports whether a stored lifecycle item (raw) holds a hold, or
+// a creator mark younger than CreatorMarkBound at now.
+func liveMarkRaw(raw map[string]ddbtypes.AttributeValue, now time.Time) bool {
+	if h, ok := raw["holds"].(*ddbtypes.AttributeValueMemberSS); ok && len(h.Value) > 0 {
+		return true
+	}
+	mk, ok := raw["marks"].(*ddbtypes.AttributeValueMemberSS)
+	if !ok {
+		return false
+	}
+	for _, e := range mk.Value {
+		i := strings.LastIndex(e, "|")
+		at, err := time.Parse("2006-01-02T15:04:05.000Z", e[i+1:])
+		if i < 0 || err != nil || now.Sub(at) < CreatorMarkBound {
+			return true
+		}
+	}
+	return false
 }

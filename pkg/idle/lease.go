@@ -98,6 +98,9 @@ func NewClient(cfg aws.Config, owner string, opts ...func(*lifecycle.Options)) (
 		},
 		ControlRegion: control,
 		Owner:         owner,
+		// An idle Observe (the poller's) leaves a creator's mark this young
+		// alone: a creator it cannot see is running.
+		MarkBound: CreatorMarkBound,
 	}
 	for _, f := range opts {
 		f(&o)
@@ -145,9 +148,12 @@ func (e *TeardownInProgressError) Unwrap() error { return e.Wait }
 // teardown held the lease for the whole wait; an error wrapping
 // [ErrLeaseUnavailable] when the caller is not allowed to reach the table (it
 // should warn and carry on); and any other failure wrapped, which refuses.
+//
+// It records activity with no end of its own (lifecycle MarkActive: in use
+// for CreatorMarkBound), for the poller, which is its region's backstop and
+// sees what it created; a CLI creator uses Mark, and ends it.
 func MarkActive(ctx context.Context, c *lifecycle.Client, region, what string) error {
-	_, err := Mark(ctx, c, region, what)
-	return err
+	return markErr(c.MarkActive(ctx, Tool, region), region, what)
 }
 
 // Mark is MarkActive, returning the token of the creator mark it wrote, for
@@ -170,10 +176,12 @@ func EndMark(ctx context.Context, c *lifecycle.Client, scope, token string) erro
 	return err
 }
 
-// CreatorMarkBound is how long a creator's mark on lagotto's global scope
-// keeps the account-wide resources in use (lagotto#340). A creator ends its
-// mark when it finishes (MarkDone); one still there after this is a creator
-// that died, and the account-wide teardown takes the scope as idle from then.
+// CreatorMarkBound is how long a creator's mark keeps lagotto's scope (a
+// region, or the global one) in use (lagotto#340): the bound lagotto judges
+// with (lifecycle InUse and IdleSince), and the one an idle Observe leaves a
+// mark alone for. A creator ends its mark when it finishes (MarkDone); one
+// still there after this is a creator that died, and the scope is idle from
+// then.
 const CreatorMarkBound = time.Hour
 
 func markErr(err error, region, what string) error {

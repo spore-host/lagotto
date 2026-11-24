@@ -310,7 +310,7 @@ func TestReapStopsOnAFailedHeartbeat(t *testing.T) {
 	if r.Outcome != OutcomeFailed || len(h.ev.list()) != 0 || len(h.sched.inputs) != 0 {
 		t.Fatalf("result %+v, deletes %v, jobs %d", r, h.ev.list(), len(h.sched.inputs))
 	}
-	if !strings.Contains(h.log(), `lease=release-failed reason="the direct deletes failed`) {
+	if !strings.Contains(h.log(), `lease=release-failed reason="the self-removal check failed`) {
 		t.Errorf("log:\n%s", h.log())
 	}
 }

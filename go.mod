@@ -25,7 +25,7 @@ require (
 	github.com/scttfrdmn/substrate v0.129.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
-	github.com/spore-host/libs v0.55.1-0.20261124001508-939f7064547d
+	github.com/spore-host/libs v0.55.1-0.20261124040949-926808afe405
 	github.com/spore-host/spawn v0.161.0
 	github.com/spore-host/truffle v0.63.0
 	golang.org/x/tools v0.52.0

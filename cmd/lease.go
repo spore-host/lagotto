@@ -52,7 +52,7 @@ const (
 // errOut and carries on, as before lagotto#326, for either scope.
 //
 // done ends the command's global mark (lifecycle MarkDone): call it when the
-// command has finished, so the global scope goes idle from then (unless
+// command has finished, so the global scope is idle from then, as read (unless
 // another creator has marked since). A creator that dies leaves its mark,
 // which the account-wide teardown takes as in use for
 // idle.CreatorMarkBound.
@@ -83,6 +83,9 @@ func markCreating(ctx context.Context, cfg aws.Config, owner, region, what strin
 	case errors.Is(err, idle.ErrLeaseUnavailable):
 		_, _ = fmt.Fprintln(errOut, idle.LeaseWarning(err))
 	case err != nil:
+		// A mark that committed though its answer was lost is ended too
+		// (one that did not commit is not there to end).
+		endMark(c, region, token, io.Discard)
 		return done, err
 	default:
 		endRegion = func() { endMark(c, region, token, errOut) }
@@ -108,7 +111,11 @@ func markCreating(ctx context.Context, cfg aws.Config, owner, region, what strin
 // endMark ends a command's mark on scope (idle.EndMark), with a fresh
 // context: the command's own may be done. A failure is a warning: the mark
 // is in use for idle.CreatorMarkBound, then taken for a creator that died.
+// No token (no mark was written) is nothing to end.
 func endMark(c *lifecycle.Client, scope, token string, errOut io.Writer) {
+	if token == "" {
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := idle.EndMark(ctx, c, scope, token); err != nil {
@@ -145,6 +152,7 @@ func markGlobalWith(ctx context.Context, c *lifecycle.Client, what string, errOu
 		return noop, nil
 	}
 	if err != nil {
+		endMark(c, lifecycle.ScopeGlobal, token, io.Discard) // a mark whose answer was lost
 		return noop, err
 	}
 	return func() { endMark(c, lifecycle.ScopeGlobal, token, errOut) }, nil

@@ -26,17 +26,18 @@ import (
 // The actor works under the lease on lagotto's global scope (the item
 // tool#lagotto#global in ControlRegion's spore-host-lifecycle table).
 //
-// ACTIVE means in use: every creator of something account-wide (setup,
-// deploy, watch, launch) marks the global scope (lifecycle Mark) before it
-// creates anything, and ends its mark when it finishes (MarkDone), which
-// sets the scope IDLE from then unless another creator has marked since.
-// While a creator's mark is younger than CreatorMarkBound the actor does
-// nothing; an older one is a creator that died.
+// Every creator of something account-wide (setup, deploy, watch, launch)
+// marks the global scope (lifecycle Mark) before it creates anything, and
+// ends its mark when it finishes (MarkDone). No writer idles an item: the
+// actor judges each one from what it holds and its times (WhyInUse:
+// lifecycle InUse and IdleSince, with CreatorMarkBound). While a creator's
+// mark is younger than CreatorMarkBound the scope is in use; an older one is
+// a creator that died, and a mark whose end failed is one of those.
 //
 // The actor writes to an item, global or regional, only on condition that
 // it is still exactly as it judged it (lifecycle SetIdleIfUnchanged and
-// ClaimIfUnchanged: epoch, state, lease, mark), so it never erases a
-// creator's mark. A creator that marks while the actor holds the lease
+// ClaimIfUnchanged: epoch, state, lease, marks, last activity), so it never
+// erases a creator's mark. A creator that marks while the actor holds the lease
 // waits for it (lifecycle MarkActive, up to 10 min); the actor re-checks
 // before each delete, and gives the lease back at once when something is in
 // use. It may delete only while all of these hold, re-checked before each:
@@ -44,9 +45,10 @@ import (
 //   - no region has a poller function;
 //   - no lagotto-teardown one-shot job is pending in any region (they run as
 //     the Scheduler invoke role);
-//   - no region's lagotto lifecycle item is ACTIVE, held, or under a live
-//     lease; a dead one (below) is finished first, as judged, and then none
-//     may be left;
+//   - no region's lagotto lifecycle item is in use (WhyInUse: a live
+//     creator mark, a hold, a live lease, or an older lagotto's ACTIVE); a
+//     dead one (below) is finished first, as judged, and then none may be
+//     left;
 //   - it holds the global lease, claimed at the epoch it judged.
 //
 // A read that fails, or a footprint that is not complete, means "don't". A
@@ -56,14 +58,14 @@ import (
 // with no grace. On success it finishes the global lease (the item is
 // deleted) and closes the control region's table if nothing is left in it.
 //
-// The global scope's grace (AccountWideConfig.Grace) runs from the last
-// creator's end, so a `lagotto setup` that deploys no poller is not undone
+// The global scope's grace (AccountWideConfig.Grace) runs from when it
+// stopped being in use (lifecycle IdleSince: the last creator's end, or its
+// mark's bound), so a `lagotto setup` that deploys no poller is not undone
 // by the next command's last mile. An explicit `lagotto teardown` uses no
 // grace.
 //
-// A regional item whose lease went stale (its poller died, or the CLI's
-// teardown did) or that is IDLE, in a region with no poller function and no
-// job left, is dead: nothing will carry it on. In reap mode the actor
+// A regional item not in use (its lease gone stale, its creators ended or
+// dead), in a region with no poller function and no job left, is dead: nothing will carry it on. In reap mode the actor
 // finishes it and closes that region's table, and the deletes go ahead.
 // Anything else of lagotto's left there (tables, a bucket, a schedule group:
 // a regional teardown that stopped partway) needs nothing account-wide, and
@@ -182,13 +184,21 @@ type AccountWideResult struct {
 	Err    error
 	// ReadFailed: a blocker is a read that failed, not something in use.
 	ReadFailed bool
+	// Kept are the account-wide resources the run leaves, and why:
+	// lagotto-cli-user while something is attached to it, what is not
+	// lagotto's to delete, and what an active resource depends on.
+	Kept []inventory.Kept
 }
 
 // TearDownAccountWide is one run of the account-wide teardown.
 func TearDownAccountWide(ctx context.Context, cfg AccountWideConfig, d AccountWideDeps) AccountWideResult {
 	cfg = cfg.withDefaults()
 	lc := d.Lifecycle
+	var kept []inventory.Kept // as of the latest footprint read
 	log := func(r AccountWideResult) AccountWideResult {
+		if r.Kept == nil {
+			r.Kept = kept
+		}
 		line := fmt.Sprintf("account-wide %s outcome=%s why=%q", cfg.label(), r.Outcome, r.Why)
 		if len(r.Blockers) > 0 {
 			line += fmt.Sprintf(" blockers=%q", strings.Join(r.Blockers, "; "))
@@ -220,11 +230,11 @@ func TearDownAccountWide(ctx context.Context, cfg AccountWideConfig, d AccountWi
 	if gok && g.Lease != nil && !lc.LeaseStale(g) {
 		return log(AccountWideResult{Outcome: AccountWideWaiting, Why: "an account-wide teardown holds the global lease (" + g.Lease.Owner + ")"})
 	}
-	if m, ok := liveMark(g, cfg.Now()); gok && ok {
-		// ACTIVE means in use: a creator (setup, deploy, watch, launch) is
-		// running, and the scope goes idle when the last one ends its mark.
-		return blocked("a creator is running (lagotto's global scope is ACTIVE)",
-			[]blocker{inUse(fmt.Sprintf("global: marked active at %s", m.At.UTC().Format(time.RFC3339)))})
+	if why := WhyInUse(lc, g); gok && why != "" {
+		// A creator (setup, deploy, watch, launch) is running: the scope is
+		// idle once the last one ends its mark, or its mark is past
+		// CreatorMarkBound.
+		return blocked("a creator is running (lagotto's global scope is in use)", []blocker{inUse("global: " + why)})
 	}
 
 	// The regions' lifecycle items first: while lagotto is in use one of
@@ -235,7 +245,7 @@ func TearDownAccountWide(ctx context.Context, cfg AccountWideConfig, d AccountWi
 			return log(AccountWideResult{Outcome: AccountWideFailed, Why: "could not list the account's regions", Err: err})
 		}
 	}
-	if b := itemBlockers(excluding(regionChecks(ctx, cfg, d, regions, false), cfg.Excluding), cfg.Now()); len(b) > 0 {
+	if b := itemBlockers(lc, excluding(regionChecks(ctx, cfg, d, regions, false), cfg.Excluding)); len(b) > 0 {
 		return blocked("the account-wide resources are still needed", b)
 	}
 	gather := d.Gather
@@ -247,7 +257,7 @@ func TearDownAccountWide(ctx context.Context, cfg AccountWideConfig, d AccountWi
 		return log(AccountWideResult{Outcome: AccountWideFailed, Why: "could not read the footprint", Err: err})
 	}
 	blockers, dead := accountWideBlockers(ctx, cfg, d, facts)
-	planned := accountWideResources(facts, cfg)
+	planned, kept := accountWideResources(facts, cfg)
 	if len(planned) == 0 && !gok && len(dead) == 0 && len(blockers) == 0 {
 		if cfg.Reap {
 			// A run that finished the global item but not the close.
@@ -263,54 +273,52 @@ func TearDownAccountWide(ctx context.Context, cfg AccountWideConfig, d AccountWi
 		return blocked("the account-wide resources are still needed", blockers)
 	}
 
-	// A run that stopped partway (suspended, or a lease of an older lagotto
-	// gone stale) is resumed at once: its grace had passed.
+	// A run that stopped partway (suspended, or a lease gone stale) is
+	// resumed at once: its grace had passed.
 	if gok && (g.Incomplete || g.Lease != nil) {
 		cfg.Grace = 0
 	}
-	idleNow := gok && g.State == lifecycle.StateIdle && !g.IdleSince.IsZero()
+	// The grace runs from when the scope stopped being in use, as read
+	// (lifecycle IdleSince); an absent item (an older lagotto made the IAM)
+	// has not started it, and reap mode starts it now.
+	since := lc.IdleSince(g, CreatorMarkBound)
+	started := gok && !since.IsZero()
+	if cfg.Grace > 0 && (!started || cfg.Now().Sub(since) < cfg.Grace) {
+		why := "the global scope's grace has not started (reap mode would start it now)"
+		if started {
+			why = fmt.Sprintf("the global scope has been idle for %s of its %s grace", max(cfg.Now().Sub(since), 0).Round(time.Minute), cfg.Grace)
+		} else if cfg.Reap {
+			// Recorded idle from now, as judged (the item made IDLE).
+			if _, err := idleAsJudged(ctx, lc, lifecycle.ScopeGlobal, lifecycle.ExpectOf(g, gok)); err != nil {
+				return globalWriteFailed(ctx, lc, control, err, log, blocked)
+			}
+			why = "the global scope's grace starts now"
+		}
+		return log(AccountWideResult{Outcome: AccountWideWaiting, Why: why})
+	}
 	if !cfg.Reap {
 		// Report mode writes nothing: it says what reap mode would do.
-		if cfg.Grace > 0 && (!idleNow || g.IdleFor(cfg.Now()) < cfg.Grace) {
-			why := "the global scope's grace has not started (reap mode would start it now)"
-			if idleNow {
-				why = fmt.Sprintf("the global scope has been idle for %s of its %s grace", g.IdleFor(cfg.Now()).Round(time.Minute), cfg.Grace)
-			}
-			return log(AccountWideResult{Outcome: AccountWideWaiting, Why: why})
-		}
 		for _, r := range dead {
 			cfg.Logf("account-wide %s dead_item=would-finish region=%s", cfg.label(), r.region)
 		}
-		plan, res, err := accountWidePlan(ctx, cfg, d, facts, planned, nil)
+		plan, res, deps, err := accountWidePlan(ctx, cfg, d, facts, planned, nil)
+		kept = append(kept, deps...)
 		return log(AccountWideResult{Outcome: AccountWideWould, Why: "nothing needs them", Plan: plan, Result: res, Err: err})
 	}
 
-	// Reap. The global scope idle, as judged: absent (an older lagotto
-	// made the IAM), ACTIVE from the actor's own release or from a creator
-	// whose mark is older than CreatorMarkBound (one that died). Only if it
-	// is still exactly what was read.
-	expect := lifecycle.ExpectOf(g, gok)
-	if !gok || g.State == lifecycle.StateActive {
-		ng, err := lc.SetIdleIfUnchanged(ctx, Tool, lifecycle.ScopeGlobal, expect)
-		switch {
-		case errors.Is(err, lifecycle.ErrChanged):
-			return blocked("lagotto's global scope changed since it was judged (a creator marked it)", []blocker{inUse("global: changed since it was judged")})
-		case errors.Is(err, lifecycle.ErrTableClosing):
-			_, _ = lc.CloseTableIfEmpty(ctx, control) // a closer that died (libs#88)
-			return log(AccountWideResult{Outcome: AccountWideFailed, Why: "the control region's lifecycle table is closing", Err: err})
-		case err != nil:
-			return log(AccountWideResult{Outcome: AccountWideFailed, Why: "could not record the global scope idle", Err: err})
-		}
-		// What the write made of the judged item, not a read after it (a
-		// creator may have marked and finished in between).
-		g, expect = ng, lifecycle.Expect{Exists: true, Epoch: g.Epoch, State: lifecycle.StateIdle}
+	// Reap. The global scope not in use and past its grace, as judged:
+	// recorded IDLE if it is not (absent, or ACTIVE with no live mark), then
+	// claimed, each only if it is still exactly what was read.
+	expect, err := idleAsJudged(ctx, lc, lifecycle.ScopeGlobal, lifecycle.ExpectOf(g, gok))
+	if err != nil {
+		return globalWriteFailed(ctx, lc, control, err, log, blocked)
 	}
 	gl, err := claimGlobal(ctx, cfg, lc, expect)
 	if err != nil {
 		var nc *lifecycle.NotClaimableError
 		switch {
 		case errors.As(err, &nc) && strings.HasPrefix(nc.Reason, "changed"):
-			return blocked("lagotto's global scope changed since it was judged (a creator marked it)", []blocker{inUse("global: changed since it was judged")})
+			return globalWriteFailed(ctx, lc, control, err, log, blocked)
 		case errors.Is(err, lifecycle.ErrNotClaimable):
 			return log(AccountWideResult{Outcome: AccountWideWaiting, Why: "the global lease was not taken", Err: err})
 		}
@@ -358,6 +366,7 @@ func TearDownAccountWide(ctx context.Context, cfg AccountWideConfig, d AccountWi
 	if err != nil {
 		return suspend("could not read the footprint under the global lease", err, nil, nil)
 	}
+	_, kept = accountWideResources(facts, cfg)
 	if blockers, dead = accountWideBlockers(ctx, cfg, d, facts); len(blockers) > 0 {
 		// Something appeared since: the lease goes back.
 		r := giveBack(blocked("the account-wide resources are needed again", blockers))
@@ -373,7 +382,9 @@ func TearDownAccountWide(ctx context.Context, cfg AccountWideConfig, d AccountWi
 			return suspend("could not finish "+r.region+"'s dead lifecycle item", err, nil, nil)
 		}
 	}
-	plan, res, err := accountWidePlan(ctx, cfg, d, facts, accountWideResources(facts, cfg), gl)
+	planned, kept = accountWideResources(facts, cfg)
+	plan, res, deps, err := accountWidePlan(ctx, cfg, d, facts, planned, gl)
+	kept = append(kept, deps...)
 	var be *blockedError
 	if errors.As(err, &be) {
 		// A creator arrived mid-run: the lease goes back at once, so its
@@ -407,8 +418,26 @@ func gatherAll(ctx context.Context, cfg AccountWideConfig, d AccountWideDeps) (i
 	return inventory.Gather(ctx, d.Source, cfg.AccountID, inventory.Scope{AllRegions: true}, cfg.Options)
 }
 
-// claimGlobal claims the global lease at exactly expect (the judgement, or
-// the idle record made from it). A throttle (not applied) is tried again;
+// globalWriteFailed is the result of a write to the global item that did
+// not apply: one refused because the item changed since it was judged (a
+// creator marked it) is "blocked"; a closing table (a closer that died,
+// libs#88, cleared for the next run) and anything else, "failed".
+func globalWriteFailed(ctx context.Context, lc *lifecycle.Client, control string, err error, log func(AccountWideResult) AccountWideResult,
+	blocked func(string, []blocker) AccountWideResult) AccountWideResult {
+	var nc *lifecycle.NotClaimableError
+	switch {
+	case errors.As(err, &nc) && strings.HasPrefix(nc.Reason, "changed"):
+		return blocked("lagotto's global scope changed since it was judged (a creator marked it)", []blocker{inUse("global: changed since it was judged")})
+	case errors.Is(err, lifecycle.ErrTableClosing):
+		_, _ = lc.CloseTableIfEmpty(ctx, control)
+		return log(AccountWideResult{Outcome: AccountWideFailed, Why: "the control region's lifecycle table is closing", Err: err})
+	}
+	return log(AccountWideResult{Outcome: AccountWideFailed, Why: "could not record the global scope idle", Err: err})
+}
+
+// claimGlobal claims the global lease at exactly expect (the idle record
+// made from the judgement), with no grace (the judgement's IdleSince was
+// the grace). A throttle (not applied) is tried again;
 // any other failure is not (the claim may have been applied), and a live
 // lease then found in cfg.Owner's name (unique to this run) is recognised as
 // this run's own claim whose answer was lost, and given back, so the run
@@ -418,7 +447,7 @@ func claimGlobal(ctx context.Context, cfg AccountWideConfig, lc *lifecycle.Clien
 	var l *lifecycle.Lease
 	err := retryOp(ctx, Config{Sleep: cfg.Sleep}, func() error {
 		var err error
-		l, err = lc.ClaimIfUnchanged(ctx, Tool, lifecycle.ScopeGlobal, cfg.Grace, expect)
+		l, err = lc.ClaimIfUnchanged(ctx, Tool, lifecycle.ScopeGlobal, 0, expect)
 		if err != nil && !isThrottle(err) {
 			return &final{err}
 		}
@@ -462,8 +491,6 @@ type regionCheck struct {
 	poller  bool
 	jobs    []string
 	liveErr error
-	// staleLease: the item's lease has gone stale.
-	staleLease bool
 }
 
 // regionChecks reads every region's lagotto item, and with live each
@@ -476,7 +503,6 @@ func regionChecks(ctx context.Context, cfg AccountWideConfig, d AccountWideDeps,
 			c.item, c.hasItm, err = d.Lifecycle.Get(ctx, Tool, region)
 			return err
 		})
-		c.staleLease = c.item.Lease != nil && d.Lifecycle.LeaseStale(c.item)
 		if live {
 			rs := d.Source.Region(region)
 			fn, _, err := rs.Poller(ctx)
@@ -518,10 +544,10 @@ func regionChecks(ctx context.Context, cfg AccountWideConfig, d AccountWideDeps,
 }
 
 // itemBlockers says what in checks blocks the account-wide teardown: an item
-// that cannot be read, is held, is ACTIVE, or has a live lease; and, for a
-// live check (the one before each delete, once the dead items are finished),
-// any item at all, a poller, a pending one-shot job, or a read that failed.
-func itemBlockers(checks []regionCheck, now time.Time) []blocker {
+// that cannot be read, or is in use (WhyInUse); and, for a live check (the
+// one before each delete, once the dead items are finished), any item at
+// all, a poller, a pending one-shot job, or a read that failed.
+func itemBlockers(lc *lifecycle.Client, checks []regionCheck) []blocker {
 	var out []blocker
 	for _, c := range checks {
 		name := c.region
@@ -531,18 +557,13 @@ func itemBlockers(checks []regionCheck, now time.Time) []blocker {
 		case !c.hasItm:
 		case c.live:
 			out = append(out, inUse(fmt.Sprintf("%s: it has a lifecycle item (%s)", name, c.item.State)))
-		case len(c.item.Holds) > 0:
-			out = append(out, inUse(fmt.Sprintf("%s: held by %v", name, c.item.Holds)))
-		case c.item.Lease != nil && !c.stale():
-			out = append(out, inUse(name+": a teardown holds its lease ("+c.item.Lease.Owner+")"))
 		default:
-			// ACTIVE blocks while a creator's mark there is live; an older
-			// mark is a creator that died, and none at all is a backstop's
-			// activity, which only its poller (a function, blocking) or the
-			// footprint's activity carries on.
-			if m, ok := liveMark(c.item, now); ok {
-				out = append(out, inUse(fmt.Sprintf("%s: its lifecycle item is ACTIVE (a creator marked it at %s; once lagotto is not in use there, "+
-					"'lagotto teardown --region %s' clears it)", name, m.At.UTC().Format(time.RFC3339), name)))
+			// In use as judged. A backstop's activity (an active Observe)
+			// is not: only its poller (a function, blocking) or the
+			// footprint's activity carries that on.
+			if why := WhyInUse(lc, c.item); why != "" {
+				out = append(out, inUse(fmt.Sprintf("%s: its lifecycle item is in use (%s; once lagotto is not in use there, "+
+					"'lagotto teardown --region %s' clears it)", name, why, name)))
 			}
 		}
 		if !c.live {
@@ -561,9 +582,6 @@ func itemBlockers(checks []regionCheck, now time.Time) []blocker {
 	return sortBlockers(out)
 }
 
-// stale reports whether the check's item's lease has gone stale.
-func (c regionCheck) stale() bool { return c.staleLease }
-
 // accountWideBlockers says what in facts blocks the account-wide teardown,
 // and which regions hold only a dead lifecycle item (its lease stale, or
 // IDLE, with nothing of lagotto's left there).
@@ -576,7 +594,8 @@ func accountWideBlockers(ctx context.Context, cfg AccountWideConfig, d AccountWi
 		names[i] = r.Region
 	}
 	checks := regionChecks(ctx, cfg, d, names, false)
-	blockers = append(blockers, itemBlockers(excluding(checks, cfg.Excluding), cfg.Now())...)
+	blockers = append(blockers, itemBlockers(d.Lifecycle, excluding(checks, cfg.Excluding))...)
+	live := inventory.Classify(facts, cfg.Options, cfg.Now())
 	for i := range facts.Regions {
 		r, c := &facts.Regions[i], checks[i]
 		var b []blocker
@@ -589,14 +608,20 @@ func accountWideBlockers(ctx context.Context, cfg AccountWideConfig, d AccountWi
 			b = append(b, inUse(r.Region+": in use ("+strings.Join(r.ActiveReasons(), "; ")+")"))
 		}
 		if r.Function != nil {
-			b = append(b, inUse(r.Region+": a poller is deployed"+pollerGrace(r.Function, c, cfg.Now())))
+			if why, ok := unremovable(live, r.Function.ARN); ok {
+				// Its poller never removes it, so it never goes by itself.
+				b = append(b, inUse(fmt.Sprintf("%s: a function named %s is there that lagotto does not remove (%s); "+
+					"remove it, or tag it as lagotto's, and run 'lagotto teardown --region %s'", r.Region, r.Function.Name, why, r.Region)))
+			} else {
+				b = append(b, inUse(r.Region+": a poller is deployed"+pollerGrace(d.Lifecycle, r.Function, c, cfg.Now())))
+			}
 		}
 		for _, s := range r.Schedules {
 			if s.Group == runtimeiam.TeardownScheduleGroup {
 				b = append(b, inUse(r.Region+": one-shot job "+s.Name+" is pending"))
 			}
 		}
-		if !ours && c.hasItm && c.itemErr == nil && len(b) == 0 && len(itemBlockers([]regionCheck{c}, cfg.Now())) == 0 {
+		if !ours && c.hasItm && c.itemErr == nil && len(b) == 0 && len(itemBlockers(d.Lifecycle, []regionCheck{c})) == 0 {
 			// No poller is left to carry it on: dead. What else of lagotto's
 			// is left there (a teardown that stopped partway) needs nothing
 			// account-wide; 'lagotto teardown --plan' removes it.
@@ -614,13 +639,28 @@ func accountWideBlockers(ctx context.Context, cfg AccountWideConfig, d AccountWi
 // pollerGrace says when a region's poller removes its region: its own idle
 // grace (LAGOTTO_IDLE_GRACE on the function, else DefaultGrace), and how long
 // the region has been idle, per its item.
-func pollerGrace(fn *inventory.Item, c regionCheck, now time.Time) string {
+func pollerGrace(lc *lifecycle.Client, fn *inventory.Item, c regionCheck, now time.Time) string {
 	grace, _ := GraceFrom(func(string) string { return fn.IdleGrace })
 	out := fmt.Sprintf(" (it removes its region once idle for %s", grace)
-	if c.hasItm && c.item.State == lifecycle.StateIdle && !c.item.IdleSince.IsZero() {
+	if c.hasItm && c.item.State == lifecycle.StateIdle && !c.item.IdleSince.IsZero() && !lc.InUse(c.item, CreatorMarkBound) {
 		out += fmt.Sprintf("; idle for %s", c.item.IdleFor(now).Round(time.Minute))
 	}
 	return out + ")"
+}
+
+// unremovable reports whether the function arn, per live, is one lagotto
+// never deletes (not its own, or permanent), and why.
+func unremovable(live *fp.Report, arn string) (string, bool) {
+	for _, r := range live.Resources {
+		if r.ARN != arn {
+			continue
+		}
+		if !r.Deletable {
+			return r.Reason, true
+		}
+		return "", false
+	}
+	return "", false
 }
 
 // lagottoLeft reports whether anything of lagotto's is left in r.
@@ -630,31 +670,50 @@ func lagottoLeft(r *inventory.Region) bool {
 }
 
 // accountWideResources are the account-wide resources of facts the teardown
-// would delete, as the footprint classifies them, limited to cfg.Only: not
-// what is in use (lagotto-cli-user while anything is attached to it) or not
-// lagotto's (an administrator's authorized role), which stay and do not keep
-// the global item.
-func accountWideResources(facts inventory.Facts, cfg AccountWideConfig) []fp.Resource {
+// would delete, as the footprint classifies them, limited to cfg.Only, and
+// those it keeps, with why: what is in use (lagotto-cli-user while anything
+// is attached to it) or not lagotto's to delete (an administrator's
+// authorized role, an untagged one), which stay and do not keep the global
+// item.
+func accountWideResources(facts inventory.Facts, cfg AccountWideConfig) (planned []fp.Resource, kept []inventory.Kept) {
 	live := inventory.Classify(facts, cfg.Options, cfg.Now())
-	var out []fp.Resource
 	for _, r := range live.Resources {
-		if r.Region == inventory.Global && r.Deletable && r.Class != fp.ClassActive && (cfg.Only == nil || cfg.Only[r.ARN]) {
-			out = append(out, r)
+		if r.Region != inventory.Global || (cfg.Only != nil && !cfg.Only[r.ARN]) {
+			continue
+		}
+		switch {
+		case !r.Deletable:
+			kept = append(kept, inventory.Kept{Resource: r, Reason: "not lagotto's to delete: " + r.Reason})
+		case r.Class == fp.ClassActive && r.Type == inventory.TypePolicy:
+			kept = append(kept, inventory.Kept{Resource: r, Reason: fmt.Sprintf("in use: attached to %d user(s), group(s) or role(s)", facts.Account.PolicyAttachments)})
+		case r.Class == fp.ClassActive:
+			kept = append(kept, inventory.Kept{Resource: r, Reason: "in use"})
+		default:
+			planned = append(planned, r)
 		}
 	}
-	return out
+	return planned, kept
+}
+
+// AccountWideResources is accountWideResources for a caller with no
+// global lease (`teardown --iam-roles` outside the aws partition): the
+// account-wide resources of facts to delete, limited to only when set, and
+// those kept, with why.
+func AccountWideResources(facts inventory.Facts, o inventory.Options, now time.Time, only map[string]bool) ([]fp.Resource, []inventory.Kept) {
+	return accountWideResources(facts, AccountWideConfig{Options: o, Only: only, Now: func() time.Time { return now }})
 }
 
 // accountWidePlan plans and runs the deletes: in reap mode under gl, with
 // every regional item read again before each delete; in report mode (gl
-// nil) only re-checked.
-func accountWidePlan(ctx context.Context, cfg AccountWideConfig, d AccountWideDeps, facts inventory.Facts, planned []fp.Resource, gl *lifecycle.Lease) (*fp.Plan, *fp.Result, error) {
+// nil) only re-checked. It returns what the plan keeps (what an active
+// resource depends on), and why.
+func accountWidePlan(ctx context.Context, cfg AccountWideConfig, d AccountWideDeps, facts inventory.Facts, planned []fp.Resource, gl *lifecycle.Lease) (*fp.Plan, *fp.Result, []inventory.Kept, error) {
 	live := inventory.Classify(facts, cfg.Options, cfg.Now())
 	scoped := *live
 	scoped.Resources = planned
 	plan, kept, err := inventory.PlanTeardown(&scoped, live, cfg.Options)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	for _, k := range kept {
 		cfg.Logf("account-wide %s outcome=kept type=%s name=%q reason=%q", cfg.label(), k.Resource.Type, k.Resource.Name, k.Reason)
@@ -668,7 +727,7 @@ func accountWidePlan(ctx context.Context, cfg AccountWideConfig, d AccountWideDe
 			names[i] = r.Region
 		}
 		deleter = fencedAccountDeleter{Deleter: deleter, recheck: func(ctx context.Context) error {
-			if b := itemBlockers(regionChecks(ctx, cfg, d, names, true), cfg.Now()); len(b) > 0 {
+			if b := itemBlockers(d.Lifecycle, regionChecks(ctx, cfg, d, names, true)); len(b) > 0 {
 				return &blockedError{blockers: b}
 			}
 			return nil
@@ -676,7 +735,7 @@ func accountWidePlan(ctx context.Context, cfg AccountWideConfig, d AccountWideDe
 	}
 	res, err := execute(ctx, plan, mode, deleter, gl)
 	if res == nil {
-		return plan, nil, err
+		return plan, nil, kept, err
 	}
 	for _, a := range res.Actions {
 		row := fmt.Sprintf("account-wide %s outcome=%s type=%s name=%q arn=%s", cfg.label(), a.Outcome, a.Type, a.Name, a.ARN)
@@ -688,7 +747,7 @@ func accountWidePlan(ctx context.Context, cfg AccountWideConfig, d AccountWideDe
 		}
 		cfg.Logf("%s", row)
 	}
-	return plan, res, err
+	return plan, res, kept, err
 }
 
 // execute is footprint.Execute, which returns a nil Result with an error
@@ -736,24 +795,6 @@ func sortBlockers(b []blocker) []blocker {
 	return b
 }
 
-// liveMark is an item's youngest creator mark younger than
-// CreatorMarkBound, if it is ACTIVE with one: a creator still running. An
-// older mark is a creator that died; none at all is ACTIVE with no creator
-// (a release, or a backstop's activity).
-func liveMark(it lifecycle.Item, now time.Time) (lifecycle.MarkInfo, bool) {
-	if it.State != lifecycle.StateActive {
-		return lifecycle.MarkInfo{}, false
-	}
-	var live lifecycle.MarkInfo
-	found := false
-	for _, m := range it.Marks {
-		if now.Sub(m.At) < CreatorMarkBound && (!found || m.At.After(live.At)) {
-			live, found = m, true
-		}
-	}
-	return live, found
-}
-
 // fencedAccountDeleter re-reads every region's lifecycle item before each
 // delete's re-check (footprint.Execute then heartbeats the global lease,
 // which a creator's mark has taken away).
@@ -770,22 +811,15 @@ func (f fencedAccountDeleter) Describe(ctx context.Context, r fp.Resource) (fp.R
 }
 
 // finishDeadRegion finishes a region's dead lifecycle item, exactly as it
-// was judged (its lease stale, or IDLE): claimed only if it has not changed
+// was judged (not in use: its lease stale, its creators ended or dead):
+// recorded IDLE if it is not, and claimed, each only if it has not changed
 // since (ErrNotClaimable: a creator, a watch --local, marked it), then
 // finished, and the region's table closed if no tool is left in it. A table
 // that cannot be closed is only logged.
 func finishDeadRegion(ctx context.Context, cfg AccountWideConfig, lc *lifecycle.Client, r deadItem) error {
-	expect := r.expect
-	if expect.State == lifecycle.StateActive {
-		// ACTIVE with no live mark and no poller left: set IDLE first, as
-		// judged (a creator that marked it since keeps it).
-		if _, err := lc.SetIdleIfUnchanged(ctx, Tool, r.region, expect); err != nil {
-			if errors.Is(err, lifecycle.ErrChanged) {
-				return &lifecycle.NotClaimableError{Tool: Tool, Scope: r.region, Reason: "changed since it was judged"}
-			}
-			return err
-		}
-		expect = lifecycle.Expect{Exists: true, Epoch: expect.Epoch, State: lifecycle.StateIdle}
+	expect, err := idleAsJudged(ctx, lc, r.region, r.expect)
+	if err != nil {
+		return err
 	}
 	l, err := lc.ClaimIfUnchanged(ctx, Tool, r.region, 0, expect)
 	if err != nil {

@@ -201,10 +201,14 @@ func unfencedLease(ctx context.Context) (*lifecycle.Lease, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, _, err := c.Observe(ctx, inventory.Tool, lifecycle.ScopeGlobal, false); err != nil {
+	if _, err := c.SetIdleIfUnchanged(ctx, inventory.Tool, lifecycle.ScopeGlobal, lifecycle.Expect{}); err != nil {
 		return nil, fmt.Errorf("take the local stand-in lease: %w", err)
 	}
-	lease, err := c.Claim(ctx, inventory.Tool, lifecycle.ScopeGlobal, 0)
+	it, ok, err := c.Get(ctx, inventory.Tool, lifecycle.ScopeGlobal)
+	if err != nil {
+		return nil, fmt.Errorf("take the local stand-in lease: %w", err)
+	}
+	lease, err := c.ClaimIfUnchanged(ctx, inventory.Tool, lifecycle.ScopeGlobal, 0, lifecycle.ExpectOf(it, ok))
 	if err != nil {
 		return nil, fmt.Errorf("take the local stand-in lease: %w", err)
 	}
@@ -379,6 +383,7 @@ func reapAccountWide(ctx context.Context, cfg aws.Config, acct string, plan *fp.
 	}
 	err := accountWideError(r)
 	outcome, reason := fp.OutcomeNotRun, accountWideWhy(r)
+	finished := false
 	switch r.Outcome {
 	case idle.AccountWideBlocked:
 		if !r.ReadFailed {
@@ -388,39 +393,42 @@ func reapAccountWide(ctx context.Context, cfg aws.Config, acct string, plan *fp.
 		}
 		// A read that failed is not "in use": not run, and an error.
 	case idle.AccountWideRemoved, idle.AccountWideNothing:
-		// What the run did not delete it kept: in use (lagotto-cli-user while
-		// something is attached to it) or not lagotto's to delete.
-		outcome, reason = fp.OutcomeKept, "the account-wide teardown kept it: it is in use (lagotto-cli-user, while anything is attached to it) or not removable"
+		finished = true
+	}
+	kept := map[string]string{}
+	for _, k := range r.Kept {
+		kept[k.Resource.ARN] = k.Reason
 	}
 	for _, g := range global {
-		if _, ok := byARN[g.ARN]; !ok {
-			byARN[g.ARN] = fp.Action{ARN: g.ARN, Type: g.Type, Name: g.Name, Outcome: outcome, Reason: reason}
+		if _, ok := byARN[g.ARN]; ok {
+			continue
 		}
+		a := fp.Action{ARN: g.ARN, Type: g.Type, Name: g.Name, Outcome: outcome, Reason: reason}
+		if finished {
+			// The run read the account afresh: what it kept, it says why;
+			// what its footprint no longer had is gone.
+			if why, ok := kept[g.ARN]; ok {
+				a.Outcome, a.Reason = fp.OutcomeKept, "the account-wide teardown kept it: "+why
+			} else {
+				a.Outcome, a.Reason = fp.OutcomeGone, "no longer there when the account-wide teardown read the account"
+			}
+		}
+		byARN[g.ARN] = a
 	}
 	return err
 }
 
-// claimRegion takes the teardown lease in region: it records what the
-// footprint says (active or not), then claims with no grace period, the human
-// path's decision being the plan itself.
+// claimRegion takes the teardown lease in region, with no grace period (the
+// human path's decision being the plan itself), as judged: refused while
+// the footprint says something there is in use, or the region's item is
+// (idle.ClaimJudged: a creator's live mark, a hold, a live lease), and
+// claimed only if the item is still exactly what was read, so a creator's
+// mark is never erased.
 func claimRegion(ctx context.Context, c *lifecycle.Client, region string, active bool) (*lifecycle.Lease, error) {
 	if active {
 		return nil, fmt.Errorf("something of lagotto's in %s is in use", region)
 	}
-	_, _, err := c.Observe(ctx, inventory.Tool, region, false)
-	if errors.Is(err, lifecycle.ErrTableClosing) {
-		// A closer that died left its sentinel, which Observe never clears
-		// (libs#88): CloseTableIfEmpty takes a stale one over (and drops it
-		// while items remain), and a live closer's it leaves alone.
-		if _, cerr := c.CloseTableIfEmpty(ctx, region); cerr != nil {
-			return nil, errors.Join(err, cerr)
-		}
-		_, _, err = c.Observe(ctx, inventory.Tool, region, false)
-	}
-	if err != nil {
-		return nil, err
-	}
-	return c.Claim(ctx, inventory.Tool, region, 0)
+	return idle.ClaimJudged(ctx, c, region, true)
 }
 
 // regionCleared reports whether every resource of lagotto's in region, per

@@ -19,9 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no global lease and reads no other region. Those are removed by the CLI's
   account-wide teardown, under lagotto's global lease (`tool#lagotto#global` in
   us-east-1's `spore-host-lifecycle` table), only while no region has a poller
-  function, a pending `lagotto-teardown` job, or a lifecycle item that is
-  ACTIVE, held or under a live lease, and while the global item's epoch has not
-  moved, all re-checked before each delete. Every write it makes to a
+  function, a pending `lagotto-teardown` job, or a lifecycle item in use (a
+  creator's fresh mark, a hold, a live lease, or an older lagotto's ACTIVE),
+  and while the global item has not changed, all re-checked before each
+  delete. Every write it makes to a
   lifecycle item is conditional on the item being exactly as it judged it
   (libs#89). A run that fails partway suspends its lease (the teardown is
   marked incomplete, with no lease, and the next CLI run resumes it), so a run
@@ -33,20 +34,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `teardown --iam-roles`; DEPLOYMENT.md says why.
 - **`setup`, `deploy`, `watch` and `launch` mark lagotto's global scope active
   before they create or change anything account-wide, and end their mark when
-  they finish** (#345). ACTIVE means in use: the account-wide teardown never
-  runs while a creator's mark is there (a mark older than an hour is one that
-  died), and the global grace runs from the last creator's end. A creator that
+  they finish** (#345). No writer idles an item: lagotto judges it from what
+  it holds and its times (libs `InUse` and `IdleSince`, with a mark bound of
+  an hour). The account-wide teardown never runs while a creator's mark is
+  fresh (one older than an hour is a creator that died, or one whose end
+  failed: it ages out), and the global grace runs from when the scope stopped
+  being in use. A creator that
   starts while the teardown holds the lease waits for it, and the teardown's
   re-check before each delete then gives the lease back.
 - **A creator's marks are a set, and every creator ends its own**, in its
   region and on the global scope, when it returns (on a refusal too), so
   overlapping creators keep lagotto in use until the last one ends, and a
-  refused watch or launch leaves nothing ACTIVE. A region's ACTIVE item with
-  only marks older than an hour, and no poller left, is a creator that died:
-  the account-wide teardown finishes it, as judged.
+  refused watch or launch leaves nothing in use. A mark that committed though
+  its answer was lost is ended too. A region's item not in use, with no poller
+  left, is dead: the account-wide teardown finishes it, as judged.
 - **The poller deletes a region's leftover one-shot jobs under a lock on the
-  region's lifecycle item** (no concurrent invocation can commit meanwhile),
-  and only when its footprint shows a job.
+  region's lifecycle item** (no concurrent invocation can commit meanwhile).
+  A run that read its footprint and found no job makes no call; one that
+  stopped before reading it lists the region's schedules.
 - **A lease left by a claim whose answer was lost is given back** (poller and
   CLI), and each poller container and CLI run writes a lease owner of its
   own.
@@ -80,8 +85,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The last mile's residue no longer lists the invoke role: it is the
   account-wide teardown's.
 - **`lagotto teardown` finishes its region's lifecycle item** once the tables
-  are gone and no poller is left there (#340): `deploy` and `watch` leave it
-  ACTIVE, and an ACTIVE item keeps the account-wide resources.
+  are gone and no poller is left there (#340), claimed as judged: a creator's
+  fresh mark there (a `watch --local` running) leaves it, and is never erased;
+  a finish that fails gives the lease back. `lagotto teardown --plan --mode
+  reap` claims each region's lease the same way.
+- **`teardown --iam-roles` and `teardown --plan` say what the account-wide
+  teardown kept, and why** (#340): `lagotto-cli-user` while something is
+  attached to it, and what is not lagotto's to delete. A plan step the fresh
+  footprint no longer has is reported gone, not kept.
+- **A poller whose function lagotto does not remove (untagged, or permanent)
+  commits nothing** (#340): it gives its lease back before any delete, since
+  no job would remove the function and its rate schedule would be gone; the
+  account-wide teardown names that function as what keeps the account-wide
+  resources. The poller now checks its own function and log group against
+  the delete guard before its direct deletes.
+- **The poller's mark before it fires a scheduled launch is activity with no
+  end of its own** (libs `MarkActive`), in use for an hour; an idle
+  observation leaves a creator's fresh mark alone.
 - **`deploy` deletes a region's pending one-shot teardown jobs before it
   creates or changes anything there, and `watch` and `launch` do while the
   poller's schedule is still there** (#340): a job due after a redeploy would

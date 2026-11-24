@@ -34,7 +34,7 @@ func TestAccountWideMarkBeforeTheClaim(t *testing.T) {
 		d := w.deps()
 		d.Gather = func(ctx context.Context) (inventory.Facts, error) {
 			f, err := inventory.Gather(ctx, w.src, acct, inventory.Scope{AllRegions: true}, inventory.Options{})
-			if err := MarkActive(ctx, w.client("setup"), lifecycle.ScopeGlobal, "set up lagotto's IAM"); err != nil {
+			if _, err := Mark(ctx, w.client("setup"), lifecycle.ScopeGlobal, "set up lagotto's IAM"); err != nil {
 				t.Fatal(err)
 			}
 			return f, err
@@ -319,7 +319,7 @@ func TestAccountWideReleaseRetried(t *testing.T) {
 	failed := false
 	w.tables[region].Err = func(op string, in any) error {
 		if u, ok := in.(*dynamodb.UpdateItemInput); ok && op == "UpdateItem" && !failed &&
-			strings.Contains(aws.ToString(u.UpdateExpression), "SET #state = :active REMOVE #lease") {
+			strings.Contains(aws.ToString(u.UpdateExpression), "SET #state = :active, #lastActivityAt = :now") {
 			failed = true
 			return &smithy.GenericAPIError{Code: "ThrottlingException", Message: "slow down"}
 		}
@@ -347,7 +347,8 @@ func TestClaimGlobalGivesBackItsOwn(t *testing.T) {
 	w.tables[region].Err = func(op string, _ any) error {
 		if op == "UpdateItem" {
 			w.tables[region].Err = nil
-			if _, err := w.client(cliOwner).ClaimIfUnchanged(ctx, Tool, lifecycle.ScopeGlobal, 0, judged); err != nil {
+			// The claim applies (this very client's), its answer is lost.
+			if _, err := me.ClaimIfUnchanged(ctx, Tool, lifecycle.ScopeGlobal, 0, judged); err != nil {
 				t.Error(err)
 			}
 			return errors.New("connection reset")

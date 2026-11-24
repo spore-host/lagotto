@@ -28,6 +28,7 @@ import (
 
 	"github.com/spore-host/lagotto/pkg/awscfg"
 	"github.com/spore-host/lagotto/pkg/inventory"
+	"github.com/spore-host/lagotto/pkg/inventory/inventorytest"
 	"github.com/spore-host/lagotto/pkg/runtimeiam"
 )
 
@@ -1278,13 +1279,25 @@ func TestLastMileAccountWideReport(t *testing.T) {
 
 	w = newLMWorld(t)
 	lmAccountWide(w)
-	w.facts.Regions[1].Function = &inventory.Item{Name: "lagotto-capacity-poller"}
+	w.facts.Regions[1].Function = inventorytest.Deployed("us-west-2", "123456789012").Function
 	probeCmd(t, "lm-probe", "", nil)
 	if _, stderr, err = execRoot(t, "lm-probe", "--verbose"); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(stderr, `account-wide REPORT outcome=blocked`) || !strings.Contains(stderr, "us-west-2: a poller is deployed") {
 		t.Errorf("no blocker reported:\n%s", stderr)
+	}
+	// A function lagotto does not remove (untagged: an older lagotto's, or
+	// not lagotto's) is named as such: no poller will ever remove it.
+	w = newLMWorld(t)
+	lmAccountWide(w)
+	w.facts.Regions[1].Function = &inventory.Item{Name: "lagotto-capacity-poller"}
+	probeCmd(t, "lm-probe", "", nil)
+	if _, stderr, err = execRoot(t, "lm-probe", "--verbose"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr, "us-west-2: a function named lagotto-capacity-poller is there that lagotto does not remove") {
+		t.Errorf("an unremovable function not named:\n%s", stderr)
 	}
 }
 

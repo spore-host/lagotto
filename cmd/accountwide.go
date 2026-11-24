@@ -86,25 +86,22 @@ func runAccountWideUnfenced(ctx context.Context, cfg aws.Config, account string,
 	}
 	live := inventory.Classify(facts, footprintOptions(), footprintNow())
 	scoped := *live
-	scoped.Resources = nil
-	for _, r := range live.Resources {
-		if r.Region == inventory.Global && r.Deletable && r.Class != fp.ClassActive && (only == nil || only[r.ARN]) {
-			scoped.Resources = append(scoped.Resources, r)
-		}
-	}
+	var kept []inventory.Kept
+	scoped.Resources, kept = idle.AccountWideResources(facts, footprintOptions(), footprintNow(), only)
 	if len(scoped.Resources) == 0 {
-		return idle.AccountWideResult{Outcome: idle.AccountWideNothing, Why: "nothing account-wide is left"}
+		return idle.AccountWideResult{Outcome: idle.AccountWideNothing, Why: "nothing account-wide is left", Kept: kept}
 	}
-	plan, _, err := inventory.PlanTeardown(&scoped, live, footprintOptions())
+	plan, deps, err := inventory.PlanTeardown(&scoped, live, footprintOptions())
 	if err != nil {
-		return idle.AccountWideResult{Outcome: idle.AccountWideFailed, Why: "could not plan", Err: err}
+		return idle.AccountWideResult{Outcome: idle.AccountWideFailed, Why: "could not plan", Err: err, Kept: kept}
 	}
+	kept = append(kept, deps...)
 	lease, err := unfencedLease(ctx)
 	if err != nil {
 		return idle.AccountWideResult{Outcome: idle.AccountWideFailed, Why: "no stand-in lease", Err: err}
 	}
 	res, err := fp.Execute(ctx, plan, fp.ModeReap, inventory.NewDeleter(live, newTeardownDeleters(cfg, account)), lease)
-	out := idle.AccountWideResult{Outcome: idle.AccountWideRemoved, Why: "removed without a global lease", Plan: plan, Result: res, Err: err}
+	out := idle.AccountWideResult{Outcome: idle.AccountWideRemoved, Why: "removed without a global lease", Plan: plan, Result: res, Err: err, Kept: kept}
 	if err != nil {
 		out.Outcome, out.Why = idle.AccountWideFailed, "a delete did not complete"
 	}
@@ -185,12 +182,23 @@ func resourceKind(typ string) string {
 }
 
 // writeAccountWide prints what an explicit teardown's account-wide run did,
-// one line per resource.
+// one line per resource, and what it kept, with why (lagotto-cli-user while
+// something is attached to it, what is not lagotto's to delete).
 func writeAccountWide(out io.Writer, r idle.AccountWideResult) {
+	said := map[string]bool{}
+	defer func() {
+		for _, k := range r.Kept {
+			if !said[k.Resource.ARN] {
+				said[k.Resource.ARN] = true
+				_, _ = fmt.Fprintf(out, "Kept %s %s (%s)\n", resourceKind(k.Resource.Type), k.Resource.Name, k.Reason)
+			}
+		}
+	}()
 	if r.Result == nil {
 		return
 	}
 	for _, a := range r.Result.Actions {
+		said[a.ARN] = true
 		switch a.Outcome {
 		case fp.OutcomeDeleted:
 			_, _ = fmt.Fprintf(out, "Deleted %s %s\n", resourceKind(a.Type), a.Name)

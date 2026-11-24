@@ -540,14 +540,18 @@ To leave nothing behind in an account:
    It stops before deleting any table if it cannot list or delete the
    schedules. Once the tables are gone, with no poller left in the region, it
    also finishes lagotto's item in that region's `spore-host-lifecycle` table
-   (left ACTIVE by `deploy` and `watch`), which would otherwise keep the
-   account-wide resources (lagotto#340).
+   (left by `deploy` and `watch`), which would otherwise keep the account-wide
+   resources (lagotto#340). It claims the item only as it judged it, and never
+   while a creator's mark there is fresh (a `watch --local` running): it says
+   so and leaves the item, for the next `lagotto teardown`.
 3. `lagotto teardown --iam-roles`: the two IAM roles and their policies,
    `lagotto-instance-role` and its profile, the profiles setup made for authorized
    roles, and the `lagotto-cli-user` policy once nothing is attached to it (an
    attached one is kept and reported: detach it first if you mean to remove it).
    It refuses while a poller, a pending one-shot job or a lifecycle item in use
-   exists in any enabled region.
+   exists in any enabled region. It prints what it kept and why (`Kept IAM
+   policy lagotto-cli-user (in use: attached to ...)`, or `not lagotto's to
+   delete` for one it did not tag).
 
 `lagotto doctor` warns about what a partial teardown leaves: an artifact bucket
 in a region with no poller (`artifact-buckets`) and a per-launch schedule that no
@@ -643,12 +647,18 @@ and reads no other region.
    legacy-name or foreign one; dependents before what they depend on. Only its
    region's resources are in the plan; everything account-wide is listed as
    kept, for the CLI.
-4. **Direct deletes**, by the poller, in dependency order: the per-launch
+4. **The self-removal check.** Its own function and log group are re-checked
+   against the delete guard first. A function that does not pass it (not
+   tagged as lagotto's, or permanent) would never be removed by a job: the
+   poller gives the lease back, deletes nothing and commits nothing, and says
+   why; the account-wide teardown names that function as what keeps the
+   account-wide resources.
+5. **Direct deletes**, by the poller, in dependency order: the per-launch
    `lagotto-launch-sl-*` schedules, then the three tables
    (`lagotto-watches`, **`lagotto-match-history`**, `lagotto-scheduled-launches`,
    whatever they hold), the artifact bucket `lagotto-lambda-<account>-<region>`
    and the alerts topic `lagotto-capacity-alerts`.
-5. **Self-removal jobs: the commit.** The poller never deletes its own function
+6. **Self-removal jobs: the commit.** The poller never deletes its own function
    or log group from inside itself. It first deletes any job an earlier run of
    its region left that this plan does not list, then creates one-shot
    EventBridge Scheduler jobs in the schedule group `lagotto-teardown`, which run
@@ -673,13 +683,15 @@ and reads no other region.
    while another run holds the region's live lease, or once the poller's rate
    schedule is gone (the jobs are then a commit: a run finishing, stranded
    after its commit, or finished, and this a retried or duplicate
-   invocation). A run whose footprint shows no job makes no call for it. The
+   invocation). A run that read its region's footprint and found no job makes
+   no call for it; one that stopped before reading it (the region in use, or
+   within its grace) lists the region's schedules. The
    log group goes late on purpose: while the function is still flushing its
    last logs, Lambda recreates a deleted log group within seconds, untagged and
    with no retention (seen live, lagotto#326).
-6. **Final deletes**, once the jobs exist: the poller's own schedule
+7. **Final deletes**, once the jobs exist: the poller's own schedule
    `lagotto-capacity-poller` and the schedule group `lagotto`.
-7. The poller finishes the lease, and the region's `spore-host-lifecycle` table
+8. The poller finishes the lease, and the region's `spore-host-lifecycle` table
    is closed if no spore.host tool's items are left in it. A lease that cannot
    be finished, or a final delete that fails after its schedule is gone, is left
    held to go stale: with no poller left to carry it on, the account-wide
@@ -701,22 +713,27 @@ teardown --plan --mode reap` (lagotto#346). All three run one code path
 (`idle.TearDownAccountWide`):
 
 1. **The global scope.** lagotto's global scope is the item
-   `tool#lagotto#global` in us-east-1's `spore-host-lifecycle` table. **ACTIVE
-   means in use**: every creator of something account-wide (`setup`, `deploy`,
-   `watch`, `launch`) marks it ACTIVE first (lagotto#345), adding a mark of
-   its own to the item's set of marks, and removes it when it returns (libs
-   `MarkDone`, on a refusal too); its region's mark likewise. The scope goes
-   IDLE, idle from that moment, when the last mark is gone and no hold is
-   left: overlapping creators keep it ACTIVE until the last one ends. While
-   any mark is fresh the teardown does nothing. A mark older than an hour is a
-   creator that died: the teardown takes the scope as idle from when it
-   records it so.
+   `tool#lagotto#global` in us-east-1's `spore-host-lifecycle` table. Every
+   creator of something account-wide (`setup`, `deploy`, `watch`, `launch`)
+   marks it first (lagotto#345), adding a mark of its own (a token and the
+   time it was written) to the item's set of marks, and removes it when it
+   returns (libs `MarkDone`, on a refusal too); its region's mark likewise.
+   **No writer ever sets an item idle.** Whether it is in use, and since when
+   it has been idle, is read from what it holds and its times (libs `InUse`
+   and `IdleSince`, with a mark bound of an hour): it is in use while a
+   creator's mark is younger than an hour, a hold or a live lease is on it,
+   or an older lagotto left it ACTIVE (with no time to age it by); and idle
+   since the latest of its last activity (a mark added or removed, a hold, an
+   active observation, a release), each mark's time plus an hour, and a lease's
+   last heartbeat plus 20 minutes. Overlapping creators keep it in use until
+   the last one ends. A mark older than an hour is a creator that died, or
+   one whose end failed: it ages out by itself.
 2. **Writes only as judged.** The teardown never writes to a lifecycle item,
    global or regional, except on condition that it is still exactly as the
-   teardown judged it (its epoch, state, lease and mark; libs#89). It records
-   the scope IDLE (an absent item, a mark that died, its own release), and then
-   claims the global lease, each only if nothing changed since its read; a
-   creator that marked in between refuses it. A creator that comes while the
+   teardown judged it (its epoch, state, lease, marks and last activity;
+   libs#89). Once the scope is not in use and past its grace, it records it
+   IDLE and then claims the global lease, each only if nothing changed since
+   its read; a creator that marked in between refuses it. A creator that comes while the
    teardown holds the lease waits for it (up to 10 minutes, as libs
    `MarkActive` does): the teardown re-checks before each delete, and gives the
    lease back at once when it finds something in use.
@@ -725,25 +742,27 @@ teardown --plan --mode reap` (lagotto#346). All three run one code path
    - no region has a poller function;
    - no `lagotto-teardown` one-shot job is pending in any region (they run as
      the invoke role);
-   - no region's lagotto lifecycle item is held, under a live lease, or ACTIVE
-     with a creator's fresh mark (one older than an hour is a creator that
-     died); and, once the dead items are finished (below), no region has one
-     at all;
+   - no region's lagotto lifecycle item is in use (a creator's fresh mark, a
+     hold, a live lease, or an older lagotto's ACTIVE: `lagotto teardown
+     --region` clears that); and, once the dead items are finished (below),
+     no region has one at all;
    - it holds the global lease, claimed at the epoch it judged.
 
    A read that fails, or a footprint that is not complete, means "don't".
-4. **Dead regional items.** A region's item whose lease went stale, that is
-   IDLE, or that is ACTIVE with no fresh mark, in a region with no poller
-   function, no job and nothing in use left, has no poller to carry it on. The
+4. **Dead regional items.** A region's item that is not in use (its lease
+   stale, its creators ended or dead), in a region with no poller function, no
+   job and nothing in use left, has no poller to carry it on. The
    teardown finishes it, only as it judged it (a `watch
    --local` that marked it since keeps it, and stops the run), closes that
    region's table, and goes ahead. Anything else of lagotto's left there
    (tables, a bucket, a schedule group: a regional teardown that stopped
    partway) needs nothing account-wide; `lagotto teardown --plan` removes it. A
-   function left there is a poller, and blocks.
+   function left there is a poller, and blocks; one lagotto does not remove
+   (untagged, or permanent) is named as such.
 5. **The deletes**, in dependency order (a profile before its role).
    `lagotto-cli-user` is deleted only while nothing is attached to it (owner
-   decision); attached, it stays, and does not keep the global item.
+   decision); attached, it stays, and does not keep the global item. What a
+   run keeps it reports, with why.
 6. **The end.** It finishes the global lease, which deletes the global item,
    and closes us-east-1's table if no tool's item is left in it. **A run that
    has exited never makes a creator wait.** One that fails before deleting
@@ -754,10 +773,11 @@ teardown --plan --mode reap` (lagotto#346). All three run one code path
    again). Only a run that crashed, or whose own last write failed, leaves a
    live lease, which goes stale in 20 minutes. Each run writes a lease owner of
    its own (`lagotto teardown/<random>`; a poller, one per container), and a
-   claim whose answer was lost but which applied is recognised by it and given
-   back (libs `AdoptLease`).
+   claim whose answer was lost but which applied is recognised by it, and by
+   the client's own random id, and given back (libs `AdoptLease`).
 
-The global scope has a grace of its own, 24 h from the last creator's end: the
+The global scope has a grace of its own, 24 h from when it stopped being in
+use (the last creator's end, as read): the
 last mile removes the resources only once the scope has been idle that long, so
 a `lagotto setup` that deploys no poller is not undone by the next command. An
 explicit `lagotto teardown` uses no grace, but never runs while a creator is
@@ -790,7 +810,7 @@ reap` delete.
 
 ### Report mode (this release)
 
-The poller runs steps 1 to 6 as a report: it claims the lease, re-checks,
+The poller runs steps 1 to 7 as a report: it claims the lease, re-checks,
 plans, re-checks every step against the live account, logs each one, and gives
 the lease back. It creates no job and deletes nothing, writes nothing
 account-wide, and it never finishes the lease or closes the table, so the next
