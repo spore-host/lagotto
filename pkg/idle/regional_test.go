@@ -52,13 +52,19 @@ func TestClaimRecognisesItsOwnLease(t *testing.T) {
 	if r.Outcome != OutcomeFailed || !strings.Contains(r.Err.Error(), ownLeaseNote) || len(h.ev.list()) != 0 {
 		t.Fatalf("%+v\n%s", r, h.log())
 	}
-	if n := h.table.Calls("UpdateItem"); n != 2 { // the lost answer and the applied write; no retry
+	// The lost answer, the applied write, and the give-back (adopted); no
+	// retry of the claim.
+	if n := h.table.Calls("UpdateItem"); n != 3 {
 		t.Errorf("%d UpdateItem", n)
 	}
-	// The next run, once the lease is stale, claims again.
-	h.advance(21 * time.Minute)
-	if r := Tick(ctx, h.cfg(true), h.deps()); r.Outcome != OutcomeReaped {
-		t.Errorf("after the lease went stale: %+v\n%s", r, h.log())
+	if it := h.item(t); it.Lease != nil || !strings.Contains(r.Err.Error(), "it was given back") {
+		t.Errorf("its own lease was left: %+v %v", it, r.Err)
+	}
+	// A creator after it is not kept waiting.
+	creator, _ := lifecycle.New(lifecycle.Options{DynamoDB: func(string) (lifecycle.API, error) { return h.table, nil },
+		Now: h.clock, WaitTimeout: time.Nanosecond})
+	if err := creator.MarkActive(ctx, Tool, region); err != nil {
+		t.Errorf("a creator after the run: %v", err)
 	}
 
 	// Another's lease is not called its own.

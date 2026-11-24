@@ -667,9 +667,13 @@ and reads no other region.
    after creating them, but before deleting its own schedule, runs once more and
    finishes its region. A run that stops before that (a creator took the lease,
    a delete failed), and every reap run that does not commit (the region is in
-   use or within its grace), deletes its region's jobs, so the poller stays;
-   except while another run holds the region's live lease, whose jobs they may
-   be (a run finishing, or stranded after its commit). The
+   use or within its grace), deletes its region's jobs, so the poller stays.
+   It does that under a lock on the region's lifecycle item (no run can claim,
+   and so commit, meanwhile), heartbeating it before each delete; and never
+   while another run holds the region's live lease, or once the poller's rate
+   schedule is gone (the jobs are then a commit: a run finishing, stranded
+   after its commit, or finished, and this a retried or duplicate
+   invocation). A run whose footprint shows no job makes no call for it. The
    log group goes late on purpose: while the function is still flushing its
    last logs, Lambda recreates a deleted log group within seconds, untagged and
    with no retention (seen live, lagotto#326).
@@ -699,12 +703,14 @@ teardown --plan --mode reap` (lagotto#346). All three run one code path
 1. **The global scope.** lagotto's global scope is the item
    `tool#lagotto#global` in us-east-1's `spore-host-lifecycle` table. **ACTIVE
    means in use**: every creator of something account-wide (`setup`, `deploy`,
-   `watch`, `launch`) marks it ACTIVE first (lagotto#345), with a mark of its
-   own, and ends that mark when it finishes (libs `MarkDone`): the scope goes
-   IDLE then, idle from that moment, unless another creator has marked since
-   (that one ends it). While a creator's mark is fresh the teardown does
-   nothing. A mark older than an hour is a creator that died: the teardown
-   takes the scope as idle from when it records it so.
+   `watch`, `launch`) marks it ACTIVE first (lagotto#345), adding a mark of
+   its own to the item's set of marks, and removes it when it returns (libs
+   `MarkDone`, on a refusal too); its region's mark likewise. The scope goes
+   IDLE, idle from that moment, when the last mark is gone and no hold is
+   left: overlapping creators keep it ACTIVE until the last one ends. While
+   any mark is fresh the teardown does nothing. A mark older than an hour is a
+   creator that died: the teardown takes the scope as idle from when it
+   records it so.
 2. **Writes only as judged.** The teardown never writes to a lifecycle item,
    global or regional, except on condition that it is still exactly as the
    teardown judged it (its epoch, state, lease and mark; libs#89). It records
@@ -719,14 +725,17 @@ teardown --plan --mode reap` (lagotto#346). All three run one code path
    - no region has a poller function;
    - no `lagotto-teardown` one-shot job is pending in any region (they run as
      the invoke role);
-   - no region's lagotto lifecycle item is ACTIVE, held, or under a live lease;
-     and, once the dead items are finished (below), no region has one at all;
+   - no region's lagotto lifecycle item is held, under a live lease, or ACTIVE
+     with a creator's fresh mark (one older than an hour is a creator that
+     died); and, once the dead items are finished (below), no region has one
+     at all;
    - it holds the global lease, claimed at the epoch it judged.
 
    A read that fails, or a footprint that is not complete, means "don't".
-4. **Dead regional items.** A region's item whose lease went stale, or that is
-   IDLE, in a region with no poller function and no job left, has no poller to
-   carry it on. The teardown finishes it, only as it judged it (a `watch
+4. **Dead regional items.** A region's item whose lease went stale, that is
+   IDLE, or that is ACTIVE with no fresh mark, in a region with no poller
+   function, no job and nothing in use left, has no poller to carry it on. The
+   teardown finishes it, only as it judged it (a `watch
    --local` that marked it since keeps it, and stops the run), closes that
    region's table, and goes ahead. Anything else of lagotto's left there
    (tables, a bucket, a schedule group: a regional teardown that stopped
@@ -744,7 +753,9 @@ teardown --plan --mode reap` (lagotto#346). All three run one code path
    again; a creator in the meantime clears that mark (the scope is in use
    again). Only a run that crashed, or whose own last write failed, leaves a
    live lease, which goes stale in 20 minutes. Each run writes a lease owner of
-   its own (`lagotto teardown/<random>`).
+   its own (`lagotto teardown/<random>`; a poller, one per container), and a
+   claim whose answer was lost but which applied is recognised by it and given
+   back (libs `AdoptLease`).
 
 The global scope has a grace of its own, 24 h from the last creator's end: the
 last mile removes the resources only once the scope has been idle that long, so
@@ -753,9 +764,11 @@ explicit `lagotto teardown` uses no grace, but never runs while a creator is
 running. `lagotto teardown --iam-roles` runs this check, in report mode,
 before it deletes anything, so a refusal leaves the account as it was.
 Outside the aws partition (GovCloud, China, the ISO partitions, the European
-Sovereign Cloud) there is no global scope, and the account-wide teardown does
-not run: remove the account-wide resources with `lagotto teardown
---plan --mode reap --i-understand-no-lease`.
+Sovereign Cloud) there is no global scope, and the last mile's account-wide
+teardown does not run. There `lagotto teardown --iam-roles` removes the
+account-wide resources as it did before lagotto#340, with no lease, once no
+poller is left in any region (it says so); `lagotto teardown --plan --mode
+reap` does with `--i-understand-no-lease`.
 
 **What remains after the pollers finish, and why.** Once every poller has
 removed its region, **the account-wide IAM is still there, until the next

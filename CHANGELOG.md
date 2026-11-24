@@ -38,6 +38,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   died), and the global grace runs from the last creator's end. A creator that
   starts while the teardown holds the lease waits for it, and the teardown's
   re-check before each delete then gives the lease back.
+- **A creator's marks are a set, and every creator ends its own**, in its
+  region and on the global scope, when it returns (on a refusal too), so
+  overlapping creators keep lagotto in use until the last one ends, and a
+  refused watch or launch leaves nothing ACTIVE. A region's ACTIVE item with
+  only marks older than an hour, and no poller left, is a creator that died:
+  the account-wide teardown finishes it, as judged.
+- **The poller deletes a region's leftover one-shot jobs under a lock on the
+  region's lifecycle item** (no concurrent invocation can commit meanwhile),
+  and only when its footprint shows a job.
+- **A lease left by a claim whose answer was lost is given back** (poller and
+  CLI), and each poller container and CLI run writes a lease owner of its
+  own.
+- **Outside the aws partition, `teardown --iam-roles` removes the account-wide
+  resources again** (with no lease, once no poller is left anywhere).
 - **`watch` and `launch` are refused in a region whose poller was torn down**
   (its rate schedule gone, its function due for deletion), with nothing
   created, and told to redeploy (#340, #349).

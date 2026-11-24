@@ -199,10 +199,11 @@ func TearDownAccountWide(ctx context.Context, cfg AccountWideConfig, d AccountWi
 		cfg.Logf("%s", line)
 		return r
 	}
-	blocked := func(why string, blockers []string) AccountWideResult {
-		r := AccountWideResult{Outcome: AccountWideBlocked, Why: why, Blockers: blockers}
+	blocked := func(why string, blockers []blocker) AccountWideResult {
+		r := AccountWideResult{Outcome: AccountWideBlocked, Why: why}
 		for _, b := range blockers {
-			r.ReadFailed = r.ReadFailed || isReadFailure(b)
+			r.Blockers = append(r.Blockers, b.text)
+			r.ReadFailed = r.ReadFailed || b.readFailed
 		}
 		return log(r)
 	}
@@ -219,11 +220,11 @@ func TearDownAccountWide(ctx context.Context, cfg AccountWideConfig, d AccountWi
 	if gok && g.Lease != nil && !lc.LeaseStale(g) {
 		return log(AccountWideResult{Outcome: AccountWideWaiting, Why: "an account-wide teardown holds the global lease (" + g.Lease.Owner + ")"})
 	}
-	if gok && g.State == lifecycle.StateActive && g.Mark != nil && cfg.Now().Sub(g.Mark.At) < CreatorMarkBound {
+	if m, ok := liveMark(g, cfg.Now()); gok && ok {
 		// ACTIVE means in use: a creator (setup, deploy, watch, launch) is
-		// running, and the scope goes idle when it ends its mark.
+		// running, and the scope goes idle when the last one ends its mark.
 		return blocked("a creator is running (lagotto's global scope is ACTIVE)",
-			[]string{fmt.Sprintf("global: marked active at %s", g.Mark.At.UTC().Format(time.RFC3339))})
+			[]blocker{inUse(fmt.Sprintf("global: marked active at %s", m.At.UTC().Format(time.RFC3339)))})
 	}
 
 	// The regions' lifecycle items first: while lagotto is in use one of
@@ -234,7 +235,7 @@ func TearDownAccountWide(ctx context.Context, cfg AccountWideConfig, d AccountWi
 			return log(AccountWideResult{Outcome: AccountWideFailed, Why: "could not list the account's regions", Err: err})
 		}
 	}
-	if b := itemBlockers(excluding(regionChecks(ctx, cfg, d, regions, false), cfg.Excluding)); len(b) > 0 {
+	if b := itemBlockers(excluding(regionChecks(ctx, cfg, d, regions, false), cfg.Excluding), cfg.Now()); len(b) > 0 {
 		return blocked("the account-wide resources are still needed", b)
 	}
 	gather := d.Gather
@@ -293,7 +294,7 @@ func TearDownAccountWide(ctx context.Context, cfg AccountWideConfig, d AccountWi
 		ng, err := lc.SetIdleIfUnchanged(ctx, Tool, lifecycle.ScopeGlobal, expect)
 		switch {
 		case errors.Is(err, lifecycle.ErrChanged):
-			return blocked("lagotto's global scope changed since it was judged (a creator marked it)", nil)
+			return blocked("lagotto's global scope changed since it was judged (a creator marked it)", []blocker{inUse("global: changed since it was judged")})
 		case errors.Is(err, lifecycle.ErrTableClosing):
 			_, _ = lc.CloseTableIfEmpty(ctx, control) // a closer that died (libs#88)
 			return log(AccountWideResult{Outcome: AccountWideFailed, Why: "the control region's lifecycle table is closing", Err: err})
@@ -309,7 +310,7 @@ func TearDownAccountWide(ctx context.Context, cfg AccountWideConfig, d AccountWi
 		var nc *lifecycle.NotClaimableError
 		switch {
 		case errors.As(err, &nc) && strings.HasPrefix(nc.Reason, "changed"):
-			return blocked("lagotto's global scope changed since it was judged (a creator marked it)", nil)
+			return blocked("lagotto's global scope changed since it was judged (a creator marked it)", []blocker{inUse("global: changed since it was judged")})
 		case errors.Is(err, lifecycle.ErrNotClaimable):
 			return log(AccountWideResult{Outcome: AccountWideWaiting, Why: "the global lease was not taken", Err: err})
 		}
@@ -367,16 +368,17 @@ func TearDownAccountWide(ctx context.Context, cfg AccountWideConfig, d AccountWi
 		case errors.Is(err, lifecycle.ErrNotClaimable):
 			// It changed since it was judged dead (a creator, a watch
 			// --local, marked it): in use again.
-			return giveBack(blocked("the account-wide resources are needed again", []string{r.region + ": its lifecycle item changed since it was judged dead"}))
+			return giveBack(blocked("the account-wide resources are needed again", []blocker{inUse(r.region + ": its lifecycle item changed since it was judged dead")}))
 		case err != nil:
 			return suspend("could not finish "+r.region+"'s dead lifecycle item", err, nil, nil)
 		}
 	}
 	plan, res, err := accountWidePlan(ctx, cfg, d, facts, accountWideResources(facts, cfg), gl)
-	if errors.Is(err, errAccountWideBlocked) {
+	var be *blockedError
+	if errors.As(err, &be) {
 		// A creator arrived mid-run: the lease goes back at once, so its
 		// global mark does not wait for it.
-		r := giveBack(blocked("the account-wide resources are needed again", []string{err.Error()}))
+		r := giveBack(blocked("the account-wide resources are needed again", be.blockers))
 		r.Plan, r.Result = plan, res
 		return r
 	}
@@ -409,8 +411,9 @@ func gatherAll(ctx context.Context, cfg AccountWideConfig, d AccountWideDeps) (i
 // the idle record made from it). A throttle (not applied) is tried again;
 // any other failure is not (the claim may have been applied), and a live
 // lease then found in cfg.Owner's name (unique to this run) is recognised as
-// this run's own claim whose answer was lost. Another run's claim since the
-// judgement refuses it (ErrNotClaimable): nothing is waited for.
+// this run's own claim whose answer was lost, and given back, so the run
+// leaves no lease that would keep a creator waiting. Another run's claim
+// since the judgement refuses it (ErrNotClaimable): nothing is waited for.
 func claimGlobal(ctx context.Context, cfg AccountWideConfig, lc *lifecycle.Client, expect lifecycle.Expect) (*lifecycle.Lease, error) {
 	var l *lifecycle.Lease
 	err := retryOp(ctx, Config{Sleep: cfg.Sleep}, func() error {
@@ -422,14 +425,10 @@ func claimGlobal(ctx context.Context, cfg AccountWideConfig, lc *lifecycle.Clien
 		return err
 	})
 	if err != nil && cfg.Owner != "" && ownLease(ctx, lc, lifecycle.ScopeGlobal, cfg.Owner) {
-		err = fmt.Errorf("%w (%s)", err, ownLeaseNote)
+		err = fmt.Errorf("%w (%s)", err, giveBackOwn(ctx, lc, lifecycle.ScopeGlobal, cfg.Sleep))
 	}
 	return l, err
 }
-
-// isReadFailure reports whether a blocker is a read that failed rather than
-// something in use.
-func isReadFailure(b string) bool { return strings.Contains(b, "could not") }
 
 // excluding drops region's checks (see AccountWideConfig.Excluding).
 func excluding(checks []regionCheck, region string) []regionCheck {
@@ -522,38 +521,44 @@ func regionChecks(ctx context.Context, cfg AccountWideConfig, d AccountWideDeps,
 // that cannot be read, is held, is ACTIVE, or has a live lease; and, for a
 // live check (the one before each delete, once the dead items are finished),
 // any item at all, a poller, a pending one-shot job, or a read that failed.
-func itemBlockers(checks []regionCheck) []string {
-	var out []string
+func itemBlockers(checks []regionCheck, now time.Time) []blocker {
+	var out []blocker
 	for _, c := range checks {
 		name := c.region
 		switch {
 		case c.itemErr != nil:
-			out = append(out, name+": could not read its lifecycle item")
+			out = append(out, unreadable(name+": could not read its lifecycle item"))
 		case !c.hasItm:
 		case c.live:
-			out = append(out, fmt.Sprintf("%s: it has a lifecycle item (%s)", name, c.item.State))
+			out = append(out, inUse(fmt.Sprintf("%s: it has a lifecycle item (%s)", name, c.item.State)))
 		case len(c.item.Holds) > 0:
-			out = append(out, fmt.Sprintf("%s: held by %v", name, c.item.Holds))
-		case c.item.State == lifecycle.StateActive:
-			out = append(out, name+": its lifecycle item is ACTIVE (lagotto is in use there; once it is not, 'lagotto teardown --region "+name+"' clears it)")
+			out = append(out, inUse(fmt.Sprintf("%s: held by %v", name, c.item.Holds)))
 		case c.item.Lease != nil && !c.stale():
-			out = append(out, name+": a teardown holds its lease ("+c.item.Lease.Owner+")")
+			out = append(out, inUse(name+": a teardown holds its lease ("+c.item.Lease.Owner+")"))
+		default:
+			// ACTIVE blocks while a creator's mark there is live; an older
+			// mark is a creator that died, and none at all is a backstop's
+			// activity, which only its poller (a function, blocking) or the
+			// footprint's activity carries on.
+			if m, ok := liveMark(c.item, now); ok {
+				out = append(out, inUse(fmt.Sprintf("%s: its lifecycle item is ACTIVE (a creator marked it at %s; once lagotto is not in use there, "+
+					"'lagotto teardown --region %s' clears it)", name, m.At.UTC().Format(time.RFC3339), name)))
+			}
 		}
 		if !c.live {
 			continue
 		}
 		switch {
 		case c.liveErr != nil:
-			out = append(out, name+": could not read its poller or one-shot jobs")
+			out = append(out, unreadable(name+": could not read its poller or one-shot jobs"))
 		case c.poller:
-			out = append(out, name+": a poller is deployed")
+			out = append(out, inUse(name+": a poller is deployed"))
 		}
 		for _, j := range c.jobs {
-			out = append(out, name+": one-shot job "+j+" is pending")
+			out = append(out, inUse(name+": one-shot job "+j+" is pending"))
 		}
 	}
-	sort.Strings(out)
-	return out
+	return sortBlockers(out)
 }
 
 // stale reports whether the check's item's lease has gone stale.
@@ -562,36 +567,36 @@ func (c regionCheck) stale() bool { return c.staleLease }
 // accountWideBlockers says what in facts blocks the account-wide teardown,
 // and which regions hold only a dead lifecycle item (its lease stale, or
 // IDLE, with nothing of lagotto's left there).
-func accountWideBlockers(ctx context.Context, cfg AccountWideConfig, d AccountWideDeps, facts inventory.Facts) (blockers []string, dead []deadItem) {
+func accountWideBlockers(ctx context.Context, cfg AccountWideConfig, d AccountWideDeps, facts inventory.Facts) (blockers []blocker, dead []deadItem) {
 	if !facts.AllRegions || facts.AccountIncomplete {
-		blockers = append(blockers, "the footprint could not be read in full")
+		blockers = append(blockers, unreadable("the footprint could not be read in full"))
 	}
 	names := make([]string, len(facts.Regions))
 	for i, r := range facts.Regions {
 		names[i] = r.Region
 	}
 	checks := regionChecks(ctx, cfg, d, names, false)
-	blockers = append(blockers, itemBlockers(excluding(checks, cfg.Excluding))...)
+	blockers = append(blockers, itemBlockers(excluding(checks, cfg.Excluding), cfg.Now())...)
 	for i := range facts.Regions {
 		r, c := &facts.Regions[i], checks[i]
-		var b []string
+		var b []blocker
 		ours := r.Region == cfg.Excluding // its item and resources are the caller's to remove
 		switch {
 		case ours:
 		case r.ActivityUnknown:
-			b = append(b, r.Region+": could not be read in full")
+			b = append(b, unreadable(r.Region+": could not be read in full"))
 		case r.Active():
-			b = append(b, r.Region+": in use ("+strings.Join(r.ActiveReasons(), "; ")+")")
+			b = append(b, inUse(r.Region+": in use ("+strings.Join(r.ActiveReasons(), "; ")+")"))
 		}
 		if r.Function != nil {
-			b = append(b, r.Region+": a poller is deployed"+pollerGrace(r.Function, c, cfg.Now()))
+			b = append(b, inUse(r.Region+": a poller is deployed"+pollerGrace(r.Function, c, cfg.Now())))
 		}
 		for _, s := range r.Schedules {
 			if s.Group == runtimeiam.TeardownScheduleGroup {
-				b = append(b, r.Region+": one-shot job "+s.Name+" is pending")
+				b = append(b, inUse(r.Region+": one-shot job "+s.Name+" is pending"))
 			}
 		}
-		if !ours && c.hasItm && c.itemErr == nil && len(b) == 0 && len(itemBlockers([]regionCheck{c})) == 0 {
+		if !ours && c.hasItm && c.itemErr == nil && len(b) == 0 && len(itemBlockers([]regionCheck{c}, cfg.Now())) == 0 {
 			// No poller is left to carry it on: dead. What else of lagotto's
 			// is left there (a teardown that stopped partway) needs nothing
 			// account-wide; 'lagotto teardown --plan' removes it.
@@ -603,8 +608,7 @@ func accountWideBlockers(ctx context.Context, cfg AccountWideConfig, d AccountWi
 		}
 		blockers = append(blockers, b...)
 	}
-	sort.Strings(blockers)
-	return blockers, dead
+	return sortBlockers(blockers), dead
 }
 
 // pollerGrace says when a region's poller removes its region: its own idle
@@ -664,8 +668,8 @@ func accountWidePlan(ctx context.Context, cfg AccountWideConfig, d AccountWideDe
 			names[i] = r.Region
 		}
 		deleter = fencedAccountDeleter{Deleter: deleter, recheck: func(ctx context.Context) error {
-			if b := itemBlockers(regionChecks(ctx, cfg, d, names, true)); len(b) > 0 {
-				return fmt.Errorf("%w: %s", errAccountWideBlocked, strings.Join(b, "; "))
+			if b := itemBlockers(regionChecks(ctx, cfg, d, names, true), cfg.Now()); len(b) > 0 {
+				return &blockedError{blockers: b}
 			}
 			return nil
 		}}
@@ -703,6 +707,53 @@ func count(r *fp.Result, o fp.Outcome) int {
 // errAccountWideBlocked is a re-check's refusal before a delete.
 var errAccountWideBlocked = errors.New("the account-wide resources are needed again")
 
+// blockedError is a re-check's refusal, with what blocked it.
+type blockedError struct{ blockers []blocker }
+
+func (e *blockedError) Error() string {
+	texts := make([]string, len(e.blockers))
+	for i, b := range e.blockers {
+		texts[i] = b.text
+	}
+	return errAccountWideBlocked.Error() + ": " + strings.Join(texts, "; ")
+}
+
+func (e *blockedError) Unwrap() error { return errAccountWideBlocked }
+
+// blocker is one thing that keeps the account-wide resources: something in
+// use, or a read that failed (which is not "in use", and is reported as a
+// failure).
+type blocker struct {
+	text       string
+	readFailed bool
+}
+
+func inUse(text string) blocker      { return blocker{text: text} }
+func unreadable(text string) blocker { return blocker{text: text, readFailed: true} }
+
+func sortBlockers(b []blocker) []blocker {
+	sort.Slice(b, func(i, j int) bool { return b[i].text < b[j].text })
+	return b
+}
+
+// liveMark is an item's youngest creator mark younger than
+// CreatorMarkBound, if it is ACTIVE with one: a creator still running. An
+// older mark is a creator that died; none at all is ACTIVE with no creator
+// (a release, or a backstop's activity).
+func liveMark(it lifecycle.Item, now time.Time) (lifecycle.MarkInfo, bool) {
+	if it.State != lifecycle.StateActive {
+		return lifecycle.MarkInfo{}, false
+	}
+	var live lifecycle.MarkInfo
+	found := false
+	for _, m := range it.Marks {
+		if now.Sub(m.At) < CreatorMarkBound && (!found || m.At.After(live.At)) {
+			live, found = m, true
+		}
+	}
+	return live, found
+}
+
 // fencedAccountDeleter re-reads every region's lifecycle item before each
 // delete's re-check (footprint.Execute then heartbeats the global lease,
 // which a creator's mark has taken away).
@@ -724,7 +775,19 @@ func (f fencedAccountDeleter) Describe(ctx context.Context, r fp.Resource) (fp.R
 // finished, and the region's table closed if no tool is left in it. A table
 // that cannot be closed is only logged.
 func finishDeadRegion(ctx context.Context, cfg AccountWideConfig, lc *lifecycle.Client, r deadItem) error {
-	l, err := lc.ClaimIfUnchanged(ctx, Tool, r.region, 0, r.expect)
+	expect := r.expect
+	if expect.State == lifecycle.StateActive {
+		// ACTIVE with no live mark and no poller left: set IDLE first, as
+		// judged (a creator that marked it since keeps it).
+		if _, err := lc.SetIdleIfUnchanged(ctx, Tool, r.region, expect); err != nil {
+			if errors.Is(err, lifecycle.ErrChanged) {
+				return &lifecycle.NotClaimableError{Tool: Tool, Scope: r.region, Reason: "changed since it was judged"}
+			}
+			return err
+		}
+		expect = lifecycle.Expect{Exists: true, Epoch: expect.Epoch, State: lifecycle.StateIdle}
+	}
+	l, err := lc.ClaimIfUnchanged(ctx, Tool, r.region, 0, expect)
 	if err != nil {
 		return err
 	}

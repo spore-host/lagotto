@@ -35,12 +35,12 @@ func TestMarkGlobal(t *testing.T) {
 		t.Fatal(err)
 	}
 	c, _ := lifecycle.New(lifecycle.Options{DynamoDB: func(string) (lifecycle.API, error) { return table, nil }, ControlRegion: "us-east-1"})
-	if it, ok, _ := c.Get(ctx, inventory.Tool, lifecycle.ScopeGlobal); !ok || it.State != lifecycle.StateActive || it.Epoch != 1 || it.Mark == nil {
+	if it, ok, _ := c.Get(ctx, inventory.Tool, lifecycle.ScopeGlobal); !ok || it.State != lifecycle.StateActive || it.Epoch != 1 || len(it.Marks) != 1 {
 		t.Errorf("global item %+v", it)
 	}
 	// Setup's end: the scope goes idle from then (lagotto#340).
 	done()
-	if it, _, _ := c.Get(ctx, inventory.Tool, lifecycle.ScopeGlobal); it.State != lifecycle.StateIdle || it.Mark != nil {
+	if it, _, _ := c.Get(ctx, inventory.Tool, lifecycle.ScopeGlobal); it.State != lifecycle.StateIdle || len(it.Marks) != 0 {
 		t.Errorf("after done: %+v", it)
 	}
 	// A done that fails is a warning.
@@ -447,4 +447,95 @@ func TestCheckAccountWide(t *testing.T) {
 	if r := checkAccountWide(context.Background(), aws.Config{}, fpAcct, "eu-west-1"); r.Outcome != idle.AccountWideBlocked {
 		t.Errorf("another region's ACTIVE item: %+v", r)
 	}
+}
+
+// TestRunAccountWideUnfenced (lagotto#347): with no global scope, the
+// account-wide resources not in use go under the stand-in lease.
+func TestRunAccountWideUnfenced(t *testing.T) {
+	facts := func() inventory.Facts {
+		f := orphanFacts()
+		f.Regions = []inventory.Region{{Region: "us-gov-west-1"}}
+		return f
+	}
+	_, rec, _ := stubPlanTeardown(t, facts)
+	r := runAccountWideUnfenced(context.Background(), aws.Config{}, fpAcct, nil, func(string, ...any) {})
+	if r.Outcome != idle.AccountWideRemoved || len(rec.calls) != 1 || rec.calls[0] != "global policy" {
+		t.Fatalf("%+v %v", r, rec.calls)
+	}
+	// Nothing left, or the footprint unreadable.
+	empty := func() inventory.Facts { f := facts(); f.Account = inventory.Account{}; return f }
+	stubPlanTeardown(t, empty)
+	if r := runAccountWideUnfenced(context.Background(), aws.Config{}, fpAcct, nil, func(string, ...any) {}); r.Outcome != idle.AccountWideNothing {
+		t.Errorf("nothing: %+v", r)
+	}
+	gatherFootprint = func(context.Context, aws.Config, string, inventory.Scope) (inventory.Facts, error) {
+		return inventory.Facts{}, errors.New("AccessDenied")
+	}
+	if r := runAccountWideUnfenced(context.Background(), aws.Config{}, fpAcct, nil, func(string, ...any) {}); r.Outcome != idle.AccountWideFailed {
+		t.Errorf("unreadable: %+v", r)
+	}
+}
+
+// TestRunTeardown_IAMRolesWithoutAGlobalScope: outside the aws partition
+// --iam-roles still removes the account-wide resources (no lease there).
+func TestRunTeardown_IAMRolesWithoutAGlobalScope(t *testing.T) {
+	tables := &fakeTables{empty: true}
+	calls := stubTeardown(t, tables, &cmdRoleDeleter{exists: map[string]bool{}}, true, false)
+	stubPollerRegions(t, nil, nil)
+	teardownAccountWideCheck = func(context.Context, aws.Config, string, string) idle.AccountWideResult {
+		return idle.AccountWideResult{Outcome: idle.AccountWideSkipped, Why: "no control region for us-gov-west-1"}
+	}
+	unfenced := 0
+	prev := teardownAccountWideUnfenced
+	t.Cleanup(func() { teardownAccountWideUnfenced = prev })
+	teardownAccountWideUnfenced = func(context.Context, aws.Config, string, map[string]bool, func(string, ...any)) idle.AccountWideResult {
+		unfenced++
+		return idle.AccountWideResult{Outcome: idle.AccountWideRemoved}
+	}
+	if _, err := runTeardownForTest(t); err != nil || unfenced != 1 || len(*calls) != 0 || !tables.deleted {
+		t.Errorf("%v unfenced=%d calls=%v", err, unfenced, *calls)
+	}
+}
+
+// TestMarkCreatingEndsMarksOnRefusal: a watch refused after its marks (the
+// poller's schedule went while it waited) ends both marks, so nothing is
+// left in use (lagotto#340).
+func TestMarkCreatingEndsMarksOnRefusal(t *testing.T) {
+	ctx := context.Background()
+	table := lifecycletest.New()
+	installFakeLeases(t, table)
+	f := &flipSchedule{fakeTeardownJobs: fakeTeardownJobs{schedule: true, jobs: []string{"lagotto-teardown-function"}}}
+	newTeardownJobAPI = func(aws.Config, string) teardownJobAPI { return f }
+	if _, err := markCreating(ctx, aws.Config{}, "alice", "us-west-2", "create watch", creatorHosted, &bytes.Buffer{}); err == nil ||
+		!strings.Contains(err.Error(), "has been torn down") {
+		t.Fatalf("err = %v", err)
+	}
+	c, _ := lifecycle.New(lifecycle.Options{DynamoDB: func(string) (lifecycle.API, error) { return table, nil }, ControlRegion: "us-east-1"})
+	for _, scope := range []string{"us-west-2", lifecycle.ScopeGlobal} {
+		if it, ok, _ := c.Get(ctx, inventory.Tool, scope); !ok || len(it.Marks) != 0 || it.State != lifecycle.StateIdle {
+			t.Errorf("%s after the refusal: %+v", scope, it)
+		}
+	}
+	// A mark that cannot be ended is a warning.
+	var out bytes.Buffer
+	token, _ := c.Mark(ctx, inventory.Tool, "us-west-2")
+	table.Err = func(string, any) error { return errors.New("network down") }
+	endMark(c, "us-west-2", token, &out)
+	table.Err = nil
+	if !strings.Contains(out.String(), "could not end this command's mark") {
+		t.Errorf("warning %q", out.String())
+	}
+}
+
+// flipSchedule has the poller's schedule for the first look only.
+type flipSchedule struct {
+	fakeTeardownJobs
+	looks int
+}
+
+func (f *flipSchedule) GetSchedule(ctx context.Context, in *scheduler.GetScheduleInput, o ...func(*scheduler.Options)) (*scheduler.GetScheduleOutput, error) {
+	if f.looks++; f.looks > 1 {
+		f.schedule = false
+	}
+	return f.fakeTeardownJobs.GetSchedule(ctx, in, o...)
 }

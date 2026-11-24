@@ -359,7 +359,7 @@ func TestAccountWideGrace(t *testing.T) {
 	if r := w.run(true, DefaultGrace); r.Outcome != AccountWideWaiting {
 		t.Fatalf("a dead creator's mark: %+v", r)
 	}
-	if g, _ := w.global(); g.State != lifecycle.StateIdle || g.Mark != nil {
+	if g, _ := w.global(); g.State != lifecycle.StateIdle || len(g.Marks) != 0 {
 		t.Errorf("after a dead creator's mark: %+v", g)
 	}
 }

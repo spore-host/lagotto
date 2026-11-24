@@ -159,6 +159,7 @@ func runTeardown(cmd *cobra.Command, args []string) error {
 	// The role check runs before anything is deleted, so a refusal leaves the
 	// account exactly as it was.
 	var acct string
+	noGlobalScope := false
 	if teardownIAMRoles {
 		if err := checkNoPollerAnywhere(ctx, cfg); err != nil {
 			return err
@@ -172,6 +173,11 @@ func runTeardown(cmd *cobra.Command, args []string) error {
 		// lifecycle item) is this teardown's to remove first.
 		switch r := teardownAccountWideCheck(ctx, cfg, acct, cfg.Region); r.Outcome {
 		case idle.AccountWideWould, idle.AccountWideNothing:
+		case idle.AccountWideSkipped:
+			// Outside the aws partition there is no global scope (lagotto#347):
+			// the account-wide resources go as before lagotto#340, once no
+			// poller is left anywhere (checked above), with no lease.
+			noGlobalScope = true
 		default:
 			return fmt.Errorf("not deleting anything: %w", accountWideError(r))
 		}
@@ -217,11 +223,18 @@ func runTeardown(cmd *cobra.Command, args []string) error {
 		// global lease, and only while no region has a poller, a pending
 		// one-shot job or a live lifecycle item, each re-checked before each
 		// delete.
-		r := teardownAccountWide(ctx, cfg, acct, nil, func(f string, a ...any) {
+		logf := func(f string, a ...any) {
 			if verbose {
 				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "debug: "+f+"\n", a...)
 			}
-		})
+		}
+		run := teardownAccountWide
+		if noGlobalScope {
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s has no global teardown lease (outside the aws partition); "+
+				"deleting lagotto's account-wide resources without one, now that no poller is left in any region\n", cfg.Region)
+			run = teardownAccountWideUnfenced
+		}
+		r := run(ctx, cfg, acct, nil, logf)
 		writeAccountWide(out, r)
 		if err := accountWideError(r); err != nil {
 			return err

@@ -24,6 +24,8 @@ package idle
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -67,8 +69,19 @@ func ControlRegion(region string) (string, error) {
 	return "", fmt.Errorf("no control region for %s: lagotto's account-wide lease works only in the aws partition", region)
 }
 
-// PollerOwner is the lease owner a region's poller writes.
+// PollerOwner is the lease owner a region's poller writes, before RunOwner
+// makes it unique.
 func PollerOwner(region string) string { return "lagotto-poller/" + region }
+
+// RunOwner is base made unique to this process (a poller's container, a CLI
+// run): a lease another one wrote never passes for its own.
+func RunOwner(base string) string {
+	b := make([]byte, 6)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%s/%d", base, time.Now().UnixNano())
+	}
+	return base + "/" + hex.EncodeToString(b)
+}
 
 // NewClient returns a lifecycle client that reaches each region's
 // spore-host-lifecycle table with cfg's credentials, with lagotto's global
@@ -142,6 +155,19 @@ func MarkActive(ctx context.Context, c *lifecycle.Client, region, what string) e
 func Mark(ctx context.Context, c *lifecycle.Client, region, what string) (string, error) {
 	token, err := c.Mark(ctx, Tool, region)
 	return token, markErr(err, region, what)
+}
+
+// EndMark ends a creator's mark (lifecycle MarkDone), tried again on any
+// failure: a mark left keeps lagotto in use for CreatorMarkBound. A retry
+// after a removal that applied finds the mark gone, which is not an error.
+func EndMark(ctx context.Context, c *lifecycle.Client, scope, token string) error {
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		if _, err = c.MarkDone(ctx, Tool, scope, token); err == nil {
+			return nil
+		}
+	}
+	return err
 }
 
 // CreatorMarkBound is how long a creator's mark on lagotto's global scope

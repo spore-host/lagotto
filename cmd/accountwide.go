@@ -2,12 +2,9 @@ package cmd
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"strings"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	fp "github.com/spore-host/libs/footprint"
@@ -46,6 +43,9 @@ var (
 	teardownAccountWide = runAccountWide
 	// teardownAccountWideCheck is its check before anything is deleted.
 	teardownAccountWideCheck = checkAccountWide
+	// teardownAccountWideUnfenced is its path where there is no global
+	// scope (outside the aws partition).
+	teardownAccountWideUnfenced = runAccountWideUnfenced
 )
 
 // The lease owners the CLI's account-wide teardown writes, each made unique
@@ -57,13 +57,7 @@ const (
 
 // runOwner is base made unique to this run: a lease another CLI wrote, on
 // this machine or any other, never passes for this run's own.
-func runOwner(base string) string {
-	b := make([]byte, 6)
-	if _, err := rand.Read(b); err != nil {
-		return fmt.Sprintf("%s/%d", base, time.Now().UnixNano())
-	}
-	return base + "/" + hex.EncodeToString(b)
-}
+func runOwner(base string) string { return idle.RunOwner(base) }
 
 // runAccountWide is an explicit `lagotto teardown`'s account-wide teardown:
 // reap mode, no grace, limited to only when set. Its rows go to logf.
@@ -77,6 +71,45 @@ func runAccountWide(ctx context.Context, cfg aws.Config, account string, only ma
 		AccountID: account, Owner: owner, Reap: true, Only: only,
 		Options: footprintOptions(), Now: footprintNow, Logf: logf,
 	}, idle.AccountWideDeps{Lifecycle: c, Source: accountWideSource(cfg, account), Deleters: newTeardownDeleters(cfg, account)})
+}
+
+// runAccountWideUnfenced removes the account-wide resources where there is
+// no global scope, so no global lease (outside the aws partition,
+// lagotto#347): from a footprint of every region, what is lagotto's and not
+// in use (the footprint's classes, as the account-wide teardown plans them),
+// under the local stand-in lease, which fences nothing. `teardown
+// --iam-roles` runs it only once no poller is left in any region.
+func runAccountWideUnfenced(ctx context.Context, cfg aws.Config, account string, only map[string]bool, logf func(string, ...any)) idle.AccountWideResult {
+	facts, err := gatherFootprint(ctx, cfg, account, inventory.Scope{AllRegions: true})
+	if err != nil {
+		return idle.AccountWideResult{Outcome: idle.AccountWideFailed, Why: "could not read the footprint", Err: err}
+	}
+	live := inventory.Classify(facts, footprintOptions(), footprintNow())
+	scoped := *live
+	scoped.Resources = nil
+	for _, r := range live.Resources {
+		if r.Region == inventory.Global && r.Deletable && r.Class != fp.ClassActive && (only == nil || only[r.ARN]) {
+			scoped.Resources = append(scoped.Resources, r)
+		}
+	}
+	if len(scoped.Resources) == 0 {
+		return idle.AccountWideResult{Outcome: idle.AccountWideNothing, Why: "nothing account-wide is left"}
+	}
+	plan, _, err := inventory.PlanTeardown(&scoped, live, footprintOptions())
+	if err != nil {
+		return idle.AccountWideResult{Outcome: idle.AccountWideFailed, Why: "could not plan", Err: err}
+	}
+	lease, err := unfencedLease(ctx)
+	if err != nil {
+		return idle.AccountWideResult{Outcome: idle.AccountWideFailed, Why: "no stand-in lease", Err: err}
+	}
+	res, err := fp.Execute(ctx, plan, fp.ModeReap, inventory.NewDeleter(live, newTeardownDeleters(cfg, account)), lease)
+	out := idle.AccountWideResult{Outcome: idle.AccountWideRemoved, Why: "removed without a global lease", Plan: plan, Result: res, Err: err}
+	if err != nil {
+		out.Outcome, out.Why = idle.AccountWideFailed, "a delete did not complete"
+	}
+	logf("account-wide REAP outcome=%s why=%q (no global lease)", out.Outcome, out.Why)
+	return out
 }
 
 // checkAccountWide is the account-wide teardown in report mode, with no

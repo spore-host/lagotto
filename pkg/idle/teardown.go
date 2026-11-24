@@ -75,6 +75,10 @@ type Config struct {
 	Logf func(format string, args ...any)
 	// Sleep waits for d or until ctx is done. Default a timer.
 	Sleep func(ctx context.Context, d time.Duration) error
+	// Owner is the lease owner the run's lifecycle client writes. Default
+	// PollerOwner(Region); the poller makes it unique to its container
+	// (RunOwner), so a concurrent invocation's lease is never its own.
+	Owner string
 }
 
 func (c Config) withDefaults() Config {
@@ -89,6 +93,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.Sleep == nil {
 		c.Sleep = sleep
+	}
+	if c.Owner == "" {
+		c.Owner = PollerOwner(c.Region)
 	}
 	return c
 }
@@ -262,6 +269,8 @@ type Result struct {
 	// committed: the run created its one-shot jobs and did not roll them
 	// back.
 	committed bool
+	// facts is the footprint the run read under its lease, if it did.
+	facts *inventory.Facts
 }
 
 // Tick runs one region's idle check: the verdict, Observe, and, once the
@@ -279,60 +288,112 @@ func Tick(ctx context.Context, cfg Config, d Deps) Result {
 	cfg = cfg.withDefaults()
 	res := tick(ctx, cfg, d)
 	if cfg.Reap && !res.committed {
-		cancelUncommittedJobs(ctx, cfg, d)
+		var seen *inventory.Region
+		// What this run read, unless it went on to create jobs itself.
+		if res.facts != nil && (res.Plan == nil || len(res.Plan.OneShots) == 0) {
+			seen = res.facts.RegionFacts(cfg.Region)
+			if seen == nil {
+				seen = &inventory.Region{Region: cfg.Region}
+			}
+		}
+		cancelUncommittedJobs(ctx, cfg, d, seen)
 	}
 	return res
 }
 
-// cancelUncommittedJobs deletes the region's one-shot jobs, unless another
-// run holds the region's lease, or the poller's rate schedule is gone: the
-// jobs are then a commit (a run that is finishing, or stranded after its
-// commit, or finished: this run is a retried or duplicate invocation), which
-// this run must not undo. A read or delete that fails is only logged: the next run tries again.
-func cancelUncommittedJobs(ctx context.Context, cfg Config, d Deps) {
+// cancelUncommittedJobs deletes the region's one-shot jobs a run that did
+// not commit leaves behind (an earlier run's, at their old time). It never
+// undoes a commit: it works under a lock on the region's lifecycle item
+// (lifecycle LockIfUnchanged, so no run can claim, and so commit, while it
+// deletes), only while the poller's rate schedule is still there (once it
+// is gone, the region's teardown committed and finished: this run is a
+// retried or duplicate invocation), and heartbeats the lock before each
+// delete. Another run's live lease, a lock it cannot take, or a read that
+// fails, leaves the jobs: the next run tries again. A run whose footprint
+// shows no job makes no call at all.
+func cancelUncommittedJobs(ctx context.Context, cfg Config, d Deps, seen *inventory.Region) {
+	skip := func(why string) {
+		cfg.Logf("idle-teardown %s region=%s phase=one-shot cancel=skipped reason=%q", cfg.label(), cfg.Region, why)
+	}
+	list := func() (names []string, scheduled bool, err error) {
+		var ss []inventory.Schedule
+		if seen != nil {
+			ss, seen = seen.Schedules, nil
+		} else if ss, err = d.Source.Region(cfg.Region).Schedules(ctx); err != nil {
+			return nil, false, err
+		}
+		for _, s := range ss {
+			switch {
+			case s.Group == runtimeiam.TeardownScheduleGroup:
+				names = append(names, s.Name)
+			case s.Name == deploy.PollerScheduleName:
+				scheduled = true
+			}
+		}
+		return names, scheduled, nil
+	}
+	names, scheduled, err := list()
+	switch {
+	case err != nil:
+		skip("could not list the region's schedules: " + err.Error())
+		return
+	case len(names) == 0:
+		return
+	case !scheduled:
+		skip("the poller's rate schedule is gone: the region's teardown committed, and its jobs are its own")
+		return
+	}
 	var (
 		it lifecycle.Item
 		ok bool
 	)
-	err := retryOp(ctx, cfg, func() error {
+	err = retryOp(ctx, cfg, func() error {
 		var err error
 		it, ok, err = d.Lifecycle.Get(ctx, Tool, cfg.Region)
 		return err
 	})
 	switch {
 	case err != nil:
-		cfg.Logf("idle-teardown %s region=%s phase=one-shot cancel=skipped error=%q", cfg.label(), cfg.Region, err.Error())
+		skip("could not read the region's lifecycle item: " + err.Error())
 		return
-	case ok && it.Lease != nil && !d.Lifecycle.LeaseStale(it):
-		cfg.Logf("idle-teardown %s region=%s phase=one-shot cancel=skipped reason=%q", cfg.label(), cfg.Region,
-			"another run holds the region's lease ("+it.Lease.Owner+"); its jobs are its own")
+	case !ok:
+		skip("the region has no lifecycle item to lock")
+		return
+	case it.Lease != nil && !d.Lifecycle.LeaseStale(it):
+		skip("another run holds the region's lease (" + it.Lease.Owner + "); its jobs are its own")
 		return
 	}
-	ss, err := d.Source.Region(cfg.Region).Schedules(ctx)
+	lock, err := d.Lifecycle.LockIfUnchanged(ctx, Tool, cfg.Region, lifecycle.ExpectOf(it, ok))
 	if err != nil {
-		cfg.Logf("idle-teardown %s region=%s phase=one-shot cancel=failed error=%q", cfg.label(), cfg.Region, err.Error())
+		skip("the region's lifecycle item could not be locked: " + err.Error())
 		return
 	}
-	var names []string
-	scheduled := false
-	for _, s := range ss {
-		switch {
-		case s.Group == runtimeiam.TeardownScheduleGroup:
-			names = append(names, s.Name)
-		case s.Name == deploy.PollerScheduleName:
-			scheduled = true
+	defer func() {
+		if err := retryOp(ctx, cfg, func() error {
+			if err := lock.Unlock(ctx); errors.Is(err, lifecycle.ErrLeaseLost) {
+				return &final{err}
+			} else {
+				return err
+			}
+		}); err != nil && !errors.Is(err, lifecycle.ErrLeaseLost) {
+			cfg.Logf("idle-teardown %s region=%s phase=one-shot unlock=failed error=%q", cfg.label(), cfg.Region, err.Error())
+		}
+	}()
+	// Under the lock, the region as it stands now.
+	if names, scheduled, err = list(); err != nil || !scheduled {
+		skip("the region's schedules changed, or could not be read, under the lock")
+		return
+	}
+	t := &run{cfg: cfg, d: d}
+	for _, name := range names {
+		if err := lock.Step(ctx, "delete one-shot "+name); err != nil {
+			skip("the lock was lost: " + err.Error())
+			return
+		}
+		if err := t.rollback(ctx, []string{name}); err != nil {
+			return
 		}
 	}
-	if !scheduled && len(names) > 0 {
-		// The poller's rate schedule is gone: its region finished, and this
-		// is a run nothing scheduled (a retried or duplicate invocation).
-		// Its jobs are the region's commit; deleting them would leave the
-		// function forever.
-		cfg.Logf("idle-teardown %s region=%s phase=one-shot cancel=skipped reason=%q", cfg.label(), cfg.Region,
-			"the poller's rate schedule is gone: the region's teardown committed, and its jobs are its own")
-		return
-	}
-	_ = (&run{cfg: cfg, d: d}).rollback(ctx, names)
 }
 
 func tick(ctx context.Context, cfg Config, d Deps) Result {
@@ -393,10 +454,10 @@ func tick(ctx context.Context, cfg Config, d Deps) Result {
 // did not apply) is tried again. Any other failure is not: the claim may
 // have been applied all the same, and a retry would then find this poller's
 // own lease and be refused. So after any failure it reads the item, and a
-// live lease in this poller's name (one poller per region) is recognised as
-// its own claim whose answer was lost: the lifecycle library cannot take up
-// a lease without its token, so the run stops, says so, and leaves the lease
-// to go stale (20 min); the next run claims again.
+// live lease in this run's owner name (Config.Owner, unique to the poller's
+// container) is recognised as its own claim whose answer was lost, and
+// given back (lifecycle AdoptLease): the run stops, and leaves nothing for
+// a creator to wait for.
 func claim(ctx context.Context, cfg Config, d Deps) (*lifecycle.Lease, error) {
 	var lease *lifecycle.Lease
 	err := retryOp(ctx, cfg, func() error {
@@ -407,14 +468,42 @@ func claim(ctx context.Context, cfg Config, d Deps) (*lifecycle.Lease, error) {
 		}
 		return err
 	})
-	if err != nil && ownLease(ctx, d.Lifecycle, cfg.Region, PollerOwner(cfg.Region)) {
-		err = fmt.Errorf("%w (%s)", err, ownLeaseNote)
+	if err != nil && ownLease(ctx, d.Lifecycle, cfg.Region, cfg.Owner) {
+		err = fmt.Errorf("%w (%s)", err, giveBackOwn(ctx, d.Lifecycle, cfg.Region, cfg.Sleep))
 	}
 	return lease, err
 }
 
 // ownLeaseNote says what a lease found in the claimant's own name is.
-const ownLeaseNote = "the lease is this claimant's own, from a claim whose answer was lost; it goes stale in 20 min and the next run claims again"
+const ownLeaseNote = "the lease is this claimant's own, from a claim whose answer was lost"
+
+// giveBackOwn gives back the lease a claim whose answer was lost left in the
+// claimant's own name (lifecycle AdoptLease, then Release, tried again on
+// failure), so no creator waits for a run that has stopped, and says what
+// became of it.
+func giveBackOwn(ctx context.Context, c *lifecycle.Client, scope string, sleep func(context.Context, time.Duration) error) string {
+	err := retryOp(ctx, Config{Sleep: sleep}, func() error {
+		l, err := c.AdoptLease(ctx, Tool, scope)
+		if errors.Is(err, lifecycle.ErrLeaseLost) {
+			return &final{err}
+		}
+		if err != nil {
+			return err
+		}
+		if err := l.Release(ctx); errors.Is(err, lifecycle.ErrLeaseLost) {
+			return &final{err}
+		} else {
+			return err
+		}
+	})
+	switch {
+	case err == nil:
+		return ownLeaseNote + "; it was given back"
+	case errors.Is(err, lifecycle.ErrLeaseLost):
+		return ownLeaseNote + "; it was gone already"
+	}
+	return ownLeaseNote + "; it could not be given back (" + err.Error() + "), and goes stale in 20 min"
+}
 
 // ownLease reports whether scope's lagotto item holds a live lease in
 // owner's name. A failed read is "no".
@@ -552,6 +641,7 @@ func teardown(ctx context.Context, cfg Config, d Deps, lease *lifecycle.Lease, r
 	// The post-claim re-check, and the footprint the plan is made from, read
 	// now that the lease keeps creators out of this region.
 	facts, err := gatherFacts(ctx, d.Source, cfg.AccountID, inventory.Scope{Regions: []string{cfg.Region}}, cfg.Options)
+	res.facts = &facts
 	if err != nil {
 		res.Outcome, res.Err = OutcomeReleased, err
 		_ = release(ctx, cfg, lease, "could not read the footprint: "+err.Error())

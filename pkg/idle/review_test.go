@@ -9,6 +9,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/scheduler"
 	"github.com/aws/smithy-go"
 	fp "github.com/spore-host/libs/footprint"
 	"github.com/spore-host/libs/lifecycle"
@@ -42,7 +43,7 @@ func TestAccountWideMarkBeforeTheClaim(t *testing.T) {
 		if r.Outcome != AccountWideBlocked || len(w.ev.list()) != 0 {
 			t.Fatalf("existing=%t: %+v %v\n%s", existing, r, w.ev.list(), w.log())
 		}
-		if g, _ := w.global(); g.Lease != nil || g.State != lifecycle.StateActive || g.Mark == nil {
+		if g, _ := w.global(); g.Lease != nil || g.State != lifecycle.StateActive || len(g.Marks) == 0 {
 			t.Errorf("existing=%t: the creator's mark was erased: %+v", existing, g)
 		}
 	}
@@ -79,7 +80,7 @@ func TestCancelSkipsAnotherRunsLease(t *testing.T) {
 		}
 		return nil
 	}
-	cancelUncommittedJobs(ctx, h.cfg(true).withDefaults(), h.deps())
+	cancelUncommittedJobs(ctx, h.cfg(true).withDefaults(), h.deps(), nil)
 	if strings.Contains(strings.Join(h.ev.list(), "\n"), "delete one-shot") {
 		t.Errorf("deleted with the item unreadable: %v", h.ev.list())
 	}
@@ -95,8 +96,8 @@ func TestCancelSkipsAnotherRunsLease(t *testing.T) {
 	// The schedules cannot be read: only logged.
 	h = newHarness(t)
 	h.src.Fail(region+" Schedules", errors.New("throttled"))
-	cancelUncommittedJobs(ctx, h.cfg(true).withDefaults(), h.deps())
-	if !strings.Contains(h.log(), "cancel=failed") {
+	cancelUncommittedJobs(ctx, h.cfg(true).withDefaults(), h.deps(), nil)
+	if !strings.Contains(h.log(), "cancel=skipped") || !strings.Contains(h.log(), "could not list") {
 		t.Errorf("log:\n%s", h.log())
 	}
 }
@@ -329,5 +330,167 @@ func TestAccountWideReleaseRetried(t *testing.T) {
 	}
 	if g, _ := w.global(); g.Lease != nil {
 		t.Errorf("the lease was left live: %+v", g)
+	}
+}
+
+// TestClaimGlobalGivesBackItsOwn: a claim whose answer was lost, but which
+// applied, leaves no live lease behind: it is adopted and given back.
+func TestClaimGlobalGivesBackItsOwn(t *testing.T) {
+	ctx := context.Background()
+	w := newAWWorld(t)
+	me := w.client(cliOwner)
+	g, err := me.SetIdleIfUnchanged(ctx, Tool, lifecycle.ScopeGlobal, lifecycle.Expect{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	judged := lifecycle.ExpectOf(g, true)
+	w.tables[region].Err = func(op string, _ any) error {
+		if op == "UpdateItem" {
+			w.tables[region].Err = nil
+			if _, err := w.client(cliOwner).ClaimIfUnchanged(ctx, Tool, lifecycle.ScopeGlobal, 0, judged); err != nil {
+				t.Error(err)
+			}
+			return errors.New("connection reset")
+		}
+		return nil
+	}
+	if _, err := claimGlobal(ctx, w.cfg(true, 0).withDefaults(), me, judged); err == nil || !strings.Contains(err.Error(), "it was given back") {
+		t.Errorf("own lease: %v", err)
+	}
+	if g, _ := w.global(); g.Lease != nil {
+		t.Errorf("the lease was left: %+v", g)
+	}
+	// Gone already, or not given back: said so.
+	if s := giveBackOwn(ctx, me, lifecycle.ScopeGlobal, func(context.Context, time.Duration) error { return nil }); !strings.Contains(s, "gone already") {
+		t.Errorf("gone: %s", s)
+	}
+	if _, _, err := me.Observe(ctx, Tool, "us-west-2", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := me.Claim(ctx, Tool, "us-west-2", 0); err != nil {
+		t.Fatal(err)
+	}
+	w.tables["us-west-2"].Err = func(op string, _ any) error {
+		if op == "UpdateItem" {
+			return errors.New("network down")
+		}
+		return nil
+	}
+	if s := giveBackOwn(ctx, me, "us-west-2", func(context.Context, time.Duration) error { return nil }); !strings.Contains(s, "goes stale") {
+		t.Errorf("not given back: %s", s)
+	}
+}
+
+// TestCancelUnderTheLock: the cancel takes a lock on the region's item (a
+// claim then refuses), refuses one that changed, stops when the lock is
+// lost, and makes no call at all when the run's footprint shows no job.
+func TestCancelUnderTheLock(t *testing.T) {
+	ctx := context.Background()
+	jobs := func(h *harness) {
+		h.src.Update(region, func(r *inventory.Region) {
+			r.Schedules = append(r.Schedules, inventory.Schedule{Group: runtimeiam.TeardownScheduleGroup, Name: FunctionJobName})
+		})
+	}
+	// Locked while it deletes: a claim in between is refused.
+	h := newHarness(t)
+	h.pastGrace(t, true)
+	jobs(h)
+	claimed := false
+	h.sched.e = &events{}
+	other, _ := lifecycle.New(lifecycle.Options{DynamoDB: func(string) (lifecycle.API, error) { return h.table, nil }, Owner: "another run", Now: h.clock})
+	cfg := h.cfg(true).withDefaults()
+	d := h.deps()
+	d.Scheduler = &hookScheduler{OneShotAPI: h.sched, before: func() {
+		if _, err := other.Claim(ctx, Tool, region, 0); err == nil {
+			claimed = true
+		}
+	}}
+	cancelUncommittedJobs(ctx, cfg, d, nil)
+	if claimed {
+		t.Error("a claim got in while the cancel held the lock")
+	}
+	if it := h.item(t); it.Lease != nil {
+		t.Errorf("the lock was left: %+v", it)
+	}
+	// The item changed between the read and the lock: nothing is deleted.
+	h = newHarness(t)
+	h.pastGrace(t, true)
+	jobs(h)
+	other2, _ := lifecycle.New(lifecycle.Options{DynamoDB: func(string) (lifecycle.API, error) { return h.table, nil }, Owner: "a creator", Now: h.clock})
+	h.table.Hook = func(ctx context.Context, op string) {
+		if op == "UpdateItem" && h.table.Hook != nil {
+			h.table.Hook = nil
+			if err := other2.MarkActive(ctx, Tool, region); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	cancelUncommittedJobs(ctx, h.cfg(true).withDefaults(), h.deps(), nil)
+	if strings.Contains(strings.Join(h.ev.list(), "\n"), "delete one-shot") || !strings.Contains(h.log(), "could not be locked") {
+		t.Errorf("changed: %v\n%s", h.ev.list(), h.log())
+	}
+	// The footprint the run read shows no job: no call at all.
+	h = newHarness(t)
+	reads := h.src.Reads(region+" Schedules") + h.table.Calls("GetItem")
+	cancelUncommittedJobs(ctx, h.cfg(true).withDefaults(), h.deps(), &inventory.Region{Region: region})
+	if n := h.src.Reads(region+" Schedules") + h.table.Calls("GetItem"); n != reads {
+		t.Errorf("%d calls with no job seen", n-reads)
+	}
+	// No item to lock.
+	h = newHarness(t)
+	jobs(h)
+	cancelUncommittedJobs(ctx, h.cfg(true).withDefaults(), h.deps(), nil)
+	if !strings.Contains(h.log(), "no lifecycle item to lock") {
+		t.Errorf("no item:\n%s", h.log())
+	}
+}
+
+// hookScheduler runs before ahead of each DeleteSchedule.
+type hookScheduler struct {
+	OneShotAPI
+	before func()
+}
+
+func (h *hookScheduler) DeleteSchedule(ctx context.Context, in *scheduler.DeleteScheduleInput, o ...func(*scheduler.Options)) (*scheduler.DeleteScheduleOutput, error) {
+	h.before()
+	return h.OneShotAPI.DeleteSchedule(ctx, in, o...)
+}
+
+// TestRegionalMarksAge: a region's ACTIVE item with a creator's fresh mark
+// blocks; one whose marks are all older than CreatorMarkBound, with no poller
+// there, is a creator that died: dead, set idle as judged, and finished.
+func TestRegionalMarksAge(t *testing.T) {
+	ctx := context.Background()
+	w := newAWWorld(t)
+	if _, err := Mark(ctx, w.client("a watch"), "us-west-2", "create watch"); err != nil {
+		t.Fatal(err)
+	}
+	if r := w.run(true, 0); r.Outcome != AccountWideBlocked || !strings.Contains(strings.Join(r.Blockers, ";"), "a creator marked it") {
+		t.Fatalf("fresh: %+v", r)
+	}
+	w.advance(CreatorMarkBound + time.Minute)
+	if r := w.run(true, 0); r.Outcome != AccountWideRemoved {
+		t.Fatalf("stale: %+v\n%s", r, w.log())
+	}
+	if _, ok, _ := w.client("x").Get(ctx, Tool, "us-west-2"); ok {
+		t.Error("the dead item is left")
+	}
+	// A dead ACTIVE item a creator marks again before it is idled: kept.
+	w = newAWWorld(t)
+	if _, err := Mark(ctx, w.client("a watch"), "us-west-2", "create watch"); err != nil {
+		t.Fatal(err)
+	}
+	w.advance(CreatorMarkBound + time.Minute)
+	f := w.tables["us-west-2"]
+	f.Hook = func(ctx context.Context, op string) {
+		if op == "TransactWriteItems" && f.Hook != nil {
+			f.Hook = nil
+			if _, err := Mark(ctx, w.client("another watch"), "us-west-2", "create watch"); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	if r := w.run(true, 0); r.Outcome != AccountWideBlocked || len(w.ev.list()) != 0 {
+		t.Errorf("marked again: %+v", r)
 	}
 }

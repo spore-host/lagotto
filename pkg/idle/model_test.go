@@ -392,6 +392,10 @@ type mworld struct {
 	pollerReport bool
 	// creating counts the creators past their marks and not yet done.
 	creating int
+	// runs counts poller invocations, for their owners.
+	runs int
+	// exitedMarks are the marks of creators that have returned.
+	exitedMarks []string
 	// regionMarkedAt[region] is the step of a creator's first mark there.
 	regionMarkedAt map[string]int
 	// markLive[region]: a creator's mark is the item's state, unchanged
@@ -644,6 +648,18 @@ func (m *mworld) cfg(r string) Config {
 
 func (m *mworld) deleters() inventory.Deleters {
 	return inventory.Deleters{AccountID: acct, Region: func(r string) inventory.RegionDeleter { return mRegion{m, r} }, Account: mAccount{m}}
+}
+
+// run is one poller invocation's config and deps, with an owner of its own
+// (as the poller's RunOwner makes one per container).
+func (m *mworld) run(r string) (Config, Deps) {
+	m.mu.Lock()
+	m.runs++
+	owner := fmt.Sprintf("%s/%d", PollerOwner(r), m.runs)
+	m.mu.Unlock()
+	cfg, d := m.cfg(r), m.deps(r)
+	cfg.Owner, d.Lifecycle = owner, m.client(owner)
+	return cfg, d
 }
 
 func (m *mworld) deps(r string) Deps {
@@ -1001,7 +1017,8 @@ func (s mScheduler) DeleteSchedule(ctx context.Context, in *scheduler.DeleteSche
 // tick is one run of region's poller.
 func (m *mworld) tick(region string) *actor {
 	return &actor{name: "poller " + region, run: func(ctx context.Context) {
-		Tick(ctx, m.cfg(region), m.deps(region))
+		cfg, d := m.run(region)
+		Tick(ctx, cfg, d)
 	}}
 }
 
@@ -1040,10 +1057,13 @@ func (m *mworld) mark(ctx context.Context, c *lifecycle.Client, region string, k
 	if kind == mHosted && !hasSchedule() {
 		return done, false // the region was torn down: refused, nothing written (cmd's pre-check)
 	}
+	regionToken := ""
 	if region != "" {
-		if MarkActive(ctx, c, region, "create") != nil {
+		tok, err := Mark(ctx, c, region, "create")
+		if err != nil {
 			return done, false
 		}
+		regionToken = tok
 		m.mu.Lock()
 		m.seq++
 		if m.regionMarkedAt[region] == 0 {
@@ -1052,8 +1072,18 @@ func (m *mworld) mark(ctx context.Context, c *lifecycle.Client, region string, k
 		m.markLive[region] = true
 		m.mu.Unlock()
 	}
+	endRegion := func() {
+		if regionToken != "" {
+			if EndMark(ctx, c, region, regionToken) == nil {
+				m.mu.Lock()
+				m.exitedMarks = append(m.exitedMarks, regionToken)
+				m.mu.Unlock()
+			}
+		}
+	}
 	token, err := Mark(ctx, c, lifecycle.ScopeGlobal, "create")
 	if err != nil {
+		endRegion()
 		// Refused by a global lease: a run that has exited never holds one
 		// a creator waits for, unless it crashed.
 		var tip *TeardownInProgressError
@@ -1066,7 +1096,14 @@ func (m *mworld) mark(ctx context.Context, c *lifecycle.Client, region string, k
 		}
 		return done, false
 	}
-	done = func() { _, _ = c.MarkDone(ctx, Tool, lifecycle.ScopeGlobal, token) }
+	done = func() {
+		endRegion()
+		if EndMark(ctx, c, lifecycle.ScopeGlobal, token) == nil {
+			m.mu.Lock()
+			m.exitedMarks = append(m.exitedMarks, token)
+			m.mu.Unlock()
+		}
+	}
 	if g, ok := m.item(lifecycle.ScopeGlobal); ok && g.Lease != nil {
 		m.mu.Lock()
 		m.passedUnder[g.Lease.Token] = true
@@ -1084,10 +1121,11 @@ func (m *mworld) mark(ctx context.Context, c *lifecycle.Client, region string, k
 			return
 		}
 		ended = true
-		mdone()
+		// Its work is over: ending the mark is its last step.
 		m.mu.Lock()
 		m.creating--
 		m.mu.Unlock()
+		mdone()
 	}
 	if region != "" && kind != mLocal {
 		if kind == mHosted && !hasSchedule() {
@@ -1195,7 +1233,12 @@ func (m *mworld) localWatchActor(region string) *actor {
 		}
 		defer done()
 		park(ctx, "watch --local stores the watch")
-		m.src.Update(region, func(r *inventory.Region) { r.ActiveWatches = 1 })
+		m.src.Update(region, func(r *inventory.Region) {
+			if len(r.Tables) == 0 {
+				r.Tables = inventorytest.Deployed(region, acct).Tables // watch --local creates them
+			}
+			r.ActiveWatches = 1
+		})
 	}}
 }
 
@@ -1358,6 +1401,24 @@ func (m *mworld) finish() {
 		return
 	}
 	m.roleWhileFunction("after the actors")
+	// No creator that has returned leaves its mark (lagotto#340: a watch
+	// refused after its marks would keep its region ACTIVE).
+	for _, scope := range append(m.allRegions(), lifecycle.ScopeGlobal) {
+		it, ok := m.item(scope)
+		if !ok {
+			continue
+		}
+		m.mu.Lock()
+		exited := append([]string(nil), m.exitedMarks...)
+		m.mu.Unlock()
+		for _, mk := range it.Marks {
+			for _, e := range exited {
+				if mk.Token == e {
+					m.violate("a creator returned leaving its mark on %s", scope)
+				}
+			}
+		}
+	}
 	// The drain: watches end, the clock moves past the grace, the due jobs
 	// fire, and every poller that can run runs, until nothing changes.
 	for _, r := range m.allRegions() {
@@ -1384,7 +1445,8 @@ func (m *mworld) finish() {
 				m.mu.Lock()
 				m.outside = "poller " + r
 				m.mu.Unlock()
-				Tick(ctx, m.cfg(r), m.deps(r))
+				cfg, d := m.run(r)
+				Tick(ctx, cfg, d)
 			}
 		}
 		if s := m.snapshot(); s != prev {
@@ -1550,6 +1612,18 @@ func modelScenarios(long bool) []scenario {
 			specs: []regionSpec{{name: mA, deployed: true, enabled: true, noSchedule: true, item: "absent",
 				jobs: []string{"lagotto-teardown-log-group", FunctionJobName}}},
 			actors: acts(tick(mA), cli("cli", 0)), maxPreempt: p, maxFail: 1, kinds: k},
+		// Two concurrent invocations of one region's poller (a duplicate
+		// delivery): one commits while the other, not committing, would
+		// cancel jobs.
+		scenario{name: "two concurrent runs of one poller", reap: true, specs: []regionSpec{idle(mA)},
+			actors: acts(tick(mA), tick(mA)), maxPreempt: p, maxFail: 1, kinds: k},
+		scenario{name: "two concurrent runs of one poller, jobs left", reap: true,
+			specs:  []regionSpec{{name: mA, deployed: true, enabled: true, item: "idle", jobs: []string{"lagotto-teardown-log-group", FunctionJobName}}},
+			actors: acts(tick(mA), tick(mA)), maxPreempt: p, maxFail: 1, kinds: k},
+		// A watch refused after its marks (the poller's schedule went while
+		// it waited): its marks end, and nothing is left ACTIVE.
+		scenario{name: "a watch while its region is torn down, and the CLI", reap: true, specs: []regionSpec{idle(mA)},
+			actors: acts(tick(mA), func(m *mworld) *actor { return m.watchActor(mA) }, cli("cli", 0)), maxPreempt: p, maxFail: 1, kinds: k},
 		// A CLI run that fails, and a creator after it.
 		scenario{name: "a failing CLI run and a setup", reap: true, specs: []regionSpec{empty(mA)},
 			actors: acts(cli("cli", 0), func(m *mworld) *actor { return m.setupActor() }), maxPreempt: p, maxCrash: 1, maxFail: 1, kinds: k},

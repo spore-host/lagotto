@@ -51,7 +51,9 @@ var creators = map[string]func(t *testing.T, f *fakeAWS) error{
 }
 
 // TestWatchMarksActive: a watch, and a --local one, record lagotto active in
-// the region (epoch 1) and then create the watch.
+// the region (epoch 1) and then create the watch; once it returns its mark
+// is ended (lagotto#340), and the poller's verdict says whether the region
+// is in use.
 func TestWatchMarksActive(t *testing.T) {
 	for _, name := range []string{"watch", "watch --local"} {
 		t.Run(name, func(t *testing.T) {
@@ -63,8 +65,8 @@ func TestWatchMarksActive(t *testing.T) {
 				t.Fatalf("%s did not mark lagotto active", name)
 			}
 			c, _ := lifecycle.New(lifecycle.Options{DynamoDB: func(string) (lifecycle.API, error) { return f.leaseTable(), nil }})
-			if it, ok, err := c.Get(context.Background(), inventory.Tool, "us-east-1"); !ok || err != nil || it.Epoch != 1 || it.State != lifecycle.StateActive {
-				t.Errorf("lease item %+v, %v, %v; want ACTIVE at epoch 1", it, ok, err)
+			if it, ok, err := c.Get(context.Background(), inventory.Tool, "us-east-1"); !ok || err != nil || it.Epoch != 1 || len(it.Marks) != 0 || it.ActiveAt.IsZero() {
+				t.Errorf("lease item %+v, %v, %v; want marked at epoch 1, the mark ended", it, ok, err)
 			}
 			if got := putStatuses(f); len(got) != 1 || got[0] != "active" {
 				t.Errorf("watch statuses %v", got)

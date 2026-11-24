@@ -74,17 +74,26 @@ func markCreating(ctx context.Context, cfg aws.Config, owner, region, what strin
 	if err != nil {
 		return done, fmt.Errorf("refusing to %s: %w. Nothing was created", what, err)
 	}
-	err = idle.MarkActive(ctx, c, region, what)
+	// The region's mark, ended with the global one (on a refusal too), so
+	// a creator that has returned leaves its region in use only as far as
+	// what it made is (a watch: the poller's verdict says).
+	endRegion := func() {}
+	token, err := idle.Mark(ctx, c, region, what)
 	switch {
 	case errors.Is(err, idle.ErrLeaseUnavailable):
 		_, _ = fmt.Fprintln(errOut, idle.LeaseWarning(err))
 	case err != nil:
 		return done, err
+	default:
+		endRegion = func() { endMark(c, region, token, errOut) }
 	}
 	// The global scope is marked even when the region's table was not
 	// reachable: the account-wide teardown reads it on its own.
-	if done, err = markGlobalWith(ctx, c, what, errOut); err != nil {
-		return done, err
+	endGlobal, err := markGlobalWith(ctx, c, what, errOut)
+	done = func() { endRegion(); endGlobal() }
+	if err != nil {
+		done()
+		return func() {}, err
 	}
 	if kind == creatorLocal {
 		return done, nil
@@ -94,6 +103,18 @@ func markCreating(ctx context.Context, cfg aws.Config, owner, region, what strin
 		return func() {}, err
 	}
 	return done, nil
+}
+
+// endMark ends a command's mark on scope (idle.EndMark), with a fresh
+// context: the command's own may be done. A failure is a warning: the mark
+// is in use for idle.CreatorMarkBound, then taken for a creator that died.
+func endMark(c *lifecycle.Client, scope, token string, errOut io.Writer) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := idle.EndMark(ctx, c, scope, token); err != nil {
+		_, _ = fmt.Fprintf(errOut, "warning: could not end this command's mark on lagotto's %s scope (%v); "+
+			"the account-wide teardown takes it as in use for %s\n", scope, err, idle.CreatorMarkBound)
+	}
 }
 
 // markGlobal marks lagotto's global scope active (lagotto#345) before setup
@@ -126,14 +147,7 @@ func markGlobalWith(ctx context.Context, c *lifecycle.Client, what string, errOu
 	if err != nil {
 		return noop, err
 	}
-	return func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if _, err := c.MarkDone(ctx, idle.Tool, lifecycle.ScopeGlobal, token); err != nil {
-			_, _ = fmt.Fprintf(errOut, "warning: could not end this command's mark on lagotto's global scope (%v); "+
-				"the account-wide teardown takes it as in use for %s\n", err, idle.CreatorMarkBound)
-		}
-	}, nil
+	return func() { endMark(c, lifecycle.ScopeGlobal, token, errOut) }, nil
 }
 
 // teardownJobAPI is the Scheduler API a creator cancels a region's one-shot
