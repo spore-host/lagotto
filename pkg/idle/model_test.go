@@ -1133,23 +1133,43 @@ func (m *mworld) mark(ctx context.Context, c *lifecycle.Client, region string, k
 		m.mu.Unlock()
 		mdone()
 	}
-	if region != "" && kind != mLocal {
-		if kind == mHosted && !hasSchedule() {
+	if region != "" && kind == mHosted {
+		if !hasSchedule() {
 			done()
 			return func() {}, false // torn down since the pre-check: refused
 		}
 		// As cmd's markCreating does (lagotto#340): the region's pending
 		// teardown jobs go before anything is created or changed there.
-		sch := mScheduler{m, region}
-		for _, j := range m.pendingJobs(region) {
-			if _, err := sch.DeleteSchedule(ctx, &scheduler.DeleteScheduleInput{Name: aws.String(j), GroupName: aws.String(runtimeiam.TeardownScheduleGroup)}); err != nil &&
-				!isNotFound(err) {
-				done()
-				return func() {}, false // refused: nothing created
-			}
+		if !m.cancelJobs(ctx, region) {
+			done()
+			return func() {}, false // refused: nothing created
 		}
 	}
 	return done, true
+}
+
+// cancelJobs deletes region's pending teardown jobs, as a creator does; false
+// when a delete failed.
+func (m *mworld) cancelJobs(ctx context.Context, region string) bool {
+	sch := mScheduler{m, region}
+	for _, j := range m.pendingJobs(region) {
+		if _, err := sch.DeleteSchedule(ctx, &scheduler.DeleteScheduleInput{Name: aws.String(j), GroupName: aws.String(runtimeiam.TeardownScheduleGroup)}); err != nil &&
+			!isNotFound(err) {
+			return false
+		}
+	}
+	return true
+}
+
+// settleJobs is cmd's settleDeployJobs: with the poller's rate schedule
+// there, the region's pending teardown jobs go; without it they stay.
+func (m *mworld) settleJobs(ctx context.Context, region string) {
+	for _, s := range m.regionFacts(region).Schedules {
+		if s.Name == deploy.PollerScheduleName {
+			_ = m.cancelJobs(ctx, region)
+			return
+		}
+	}
 }
 
 // creatorKindModel is cmd's creatorKind, in the model.
@@ -1172,15 +1192,30 @@ func (m *mworld) ensureIAM() {
 // deployActor is `lagotto deploy` in region (both marks, the IAM, the
 // tables, the poller, its rate schedule DISABLED) and then a watch, which
 // arms the schedule.
-func (m *mworld) deployActor(region string) *actor {
-	return &actor{name: "deploy " + region, noCrash: true, run: func(ctx context.Context) {
-		done, ok := m.mark(ctx, m.client("deploy "+region), region, mDeploy)
+func (m *mworld) deployActor(region string) *actor { return m.deployActorFailing(region, false) }
+
+// deployActorFailing is deployActor; fails: it fails (an artifact fetch
+// error, not a crash) after its marks and the IAM, before it replaces the
+// poller, and settles the region's jobs on the way out, as cmd's deploy
+// does on every path.
+func (m *mworld) deployActorFailing(region string, fails bool) *actor {
+	name := "deploy " + region
+	if fails {
+		name = "failing deploy " + region
+	}
+	return &actor{name: name, noCrash: true, run: func(ctx context.Context) {
+		done, ok := m.mark(ctx, m.client(name), region, mDeploy)
 		if !ok {
 			return
 		}
 		defer done()
+		defer m.settleJobs(ctx, region)
 		park(ctx, "deploy ensures the IAM")
 		m.ensureIAM()
+		if fails {
+			park(ctx, "deploy fails")
+			return
+		}
 		park(ctx, "deploy creates the region")
 		r := inventorytest.Deployed(region, acct)
 		r.Schedules[0].State = "DISABLED"
@@ -1297,7 +1332,9 @@ func (m *mworld) cliRegionActor(region string) *actor {
 
 func (m *mworld) setupActor() *actor {
 	return &actor{name: "setup", noCrash: true, run: func(ctx context.Context) {
-		done, ok := m.mark(ctx, m.client("setup"), "", mDeploy)
+		// setup marks its home region too (lagotto#351 review 5), so a
+		// teardown deleting meanwhile stops at its next re-check.
+		done, ok := m.mark(ctx, m.client("setup"), m.allRegions()[0], mLocal)
 		if !ok {
 			return
 		}
@@ -1660,6 +1697,12 @@ func modelScenarios(long bool) []scenario {
 			actors: acts(cli("cli", 0), func(m *mworld) *actor { return m.setupActor() }), maxPreempt: p, maxCrash: 1, maxFail: 1, kinds: k},
 		// A redeploy in the job window, the pollers in report mode: deploy
 		// deletes the region's jobs first.
+		// A deploy that fails (not a crash) in the job window: the jobs stay,
+		// and finish the region's teardown.
+		scenario{name: "a failing deploy in the job window", reap: true,
+			specs: []regionSpec{{name: mA, deployed: true, enabled: true, noSchedule: true, item: "absent",
+				jobs: []string{"lagotto-teardown-log-group", FunctionJobName}}},
+			actors: acts(func(m *mworld) *actor { return m.deployActorFailing(mA, true) }, cli("cli", 0)), maxPreempt: p, maxFail: 1, kinds: k},
 		scenario{name: "a deploy in the job window, pollers in report mode", reap: true, pollerReport: true,
 			specs: []regionSpec{{name: mA, deployed: true, enabled: true, noSchedule: true, item: "absent",
 				jobs: []string{"lagotto-teardown-log-group", FunctionJobName}}},

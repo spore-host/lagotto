@@ -13,6 +13,7 @@ import (
 
 	"github.com/spore-host/lagotto/pkg/idle"
 	"github.com/spore-host/lagotto/pkg/inventory"
+	"github.com/spore-host/lagotto/pkg/runtimeiam"
 )
 
 // The CLI is the single actor that removes lagotto's account-wide resources
@@ -83,6 +84,26 @@ func runAccountWideUnfenced(ctx context.Context, cfg aws.Config, account string,
 	facts, err := gatherFootprint(ctx, cfg, account, inventory.Scope{AllRegions: true})
 	if err != nil {
 		return idle.AccountWideResult{Outcome: idle.AccountWideFailed, Why: "could not read the footprint", Err: err}
+	}
+	// The invoke role is what the one-shot jobs run as: none may be left
+	// pending, in any region (as the fenced path checks before each delete).
+	var blockers []string
+	for _, r := range facts.Regions {
+		if r.Function != nil {
+			blockers = append(blockers, r.Region+": a poller is deployed")
+		}
+		for _, sch := range r.Schedules {
+			if sch.Group == runtimeiam.TeardownScheduleGroup {
+				blockers = append(blockers, r.Region+": one-shot job "+sch.Name+" is pending")
+			}
+		}
+	}
+	switch {
+	case !facts.AllRegions || facts.AccountIncomplete:
+		return idle.AccountWideResult{Outcome: idle.AccountWideBlocked, Why: "the account-wide resources are still needed",
+			Blockers: append(blockers, "the footprint could not be read in full"), ReadFailed: true}
+	case len(blockers) > 0:
+		return idle.AccountWideResult{Outcome: idle.AccountWideBlocked, Why: "the account-wide resources are still needed", Blockers: blockers}
 	}
 	live := inventory.Classify(facts, footprintOptions(), footprintNow())
 	scoped := *live

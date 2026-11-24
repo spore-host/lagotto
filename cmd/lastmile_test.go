@@ -1280,6 +1280,7 @@ func TestLastMileAccountWideReport(t *testing.T) {
 	w = newLMWorld(t)
 	lmAccountWide(w)
 	w.facts.Regions[1].Function = inventorytest.Deployed("us-west-2", "123456789012").Function
+	w.facts.Regions[1].Schedules = inventorytest.Deployed("us-west-2", "123456789012").Schedules
 	probeCmd(t, "lm-probe", "", nil)
 	if _, stderr, err = execRoot(t, "lm-probe", "--verbose"); err != nil {
 		t.Fatal(err)

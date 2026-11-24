@@ -12,6 +12,7 @@ import (
 	fp "github.com/spore-host/libs/footprint"
 	"github.com/spore-host/libs/lifecycle"
 
+	"github.com/spore-host/lagotto/pkg/deploy"
 	"github.com/spore-host/lagotto/pkg/inventory"
 	"github.com/spore-host/lagotto/pkg/runtimeiam"
 )
@@ -165,8 +166,10 @@ const (
 	// AccountWideHeld: reap mode stopped partway; the global lease is left
 	// held for the next run.
 	AccountWideHeld AccountWideOutcome = "held"
-	// AccountWideLeaseLost: a creator marked the global scope active while
-	// reap mode held its lease (the epoch moved); it stopped.
+	// AccountWideLeaseLost: reap mode's global lease was taken over while it
+	// held it (it went stale, or another run took it); it stopped. A
+	// creator's mark does not take it: the mark waits for the lease, and the
+	// creator's regional mark stops the run at its next re-check.
 	AccountWideLeaseLost AccountWideOutcome = "lease-lost"
 	// AccountWideFailed: a read failed before anything was decided.
 	AccountWideFailed AccountWideOutcome = "failed"
@@ -399,13 +402,7 @@ func TearDownAccountWide(ctx context.Context, cfg AccountWideConfig, d AccountWi
 		}
 		return suspend("a delete did not complete", err, plan, res)
 	}
-	if err := retryOp(ctx, Config{Sleep: cfg.Sleep}, func() error {
-		if err := gl.Finish(ctx); errors.Is(err, lifecycle.ErrLeaseLost) {
-			return &final{err}
-		} else {
-			return err
-		}
-	}); err != nil {
+	if err := finishLease(ctx, cfg.Sleep, lc, lifecycle.ScopeGlobal, gl); err != nil {
 		return suspend("could not finish the global lease", err, plan, res)
 	}
 	if _, err := lc.CloseTableIfEmpty(ctx, control); err != nil {
@@ -612,6 +609,11 @@ func accountWideBlockers(ctx context.Context, cfg AccountWideConfig, d AccountWi
 				// Its poller never removes it, so it never goes by itself.
 				b = append(b, inUse(fmt.Sprintf("%s: a function named %s is there that lagotto does not remove (%s); "+
 					"remove it, or tag it as lagotto's, and run 'lagotto teardown --region %s'", r.Region, r.Function.Name, why, r.Region)))
+			} else if !hasPollerSchedule(r) && !hasTeardownJob(r) {
+				// Nothing will remove it, or invoke it: a deploy (or a
+				// deploy --teardown) that did not finish.
+				b = append(b, inUse(fmt.Sprintf("%s: a poller function with no rate schedule and no teardown job (a deploy that did not finish); "+
+					"run 'lagotto deploy --region %s' again, or 'lagotto deploy --teardown --region %s'", r.Region, r.Region, r.Region)))
 			} else {
 				b = append(b, inUse(r.Region+": a poller is deployed"+pollerGrace(d.Lifecycle, r.Function, c, cfg.Now())))
 			}
@@ -661,6 +663,26 @@ func unremovable(live *fp.Report, arn string) (string, bool) {
 		return "", false
 	}
 	return "", false
+}
+
+// hasPollerSchedule reports whether r has the poller's rate schedule.
+func hasPollerSchedule(r *inventory.Region) bool {
+	for _, s := range r.Schedules {
+		if s.Name == deploy.PollerScheduleName && s.Group != runtimeiam.TeardownScheduleGroup {
+			return true
+		}
+	}
+	return false
+}
+
+// hasTeardownJob reports whether r has a pending lagotto-teardown job.
+func hasTeardownJob(r *inventory.Region) bool {
+	for _, s := range r.Schedules {
+		if s.Group == runtimeiam.TeardownScheduleGroup {
+			return true
+		}
+	}
+	return false
 }
 
 // lagottoLeft reports whether anything of lagotto's is left in r.
@@ -796,8 +818,9 @@ func sortBlockers(b []blocker) []blocker {
 }
 
 // fencedAccountDeleter re-reads every region's lifecycle item before each
-// delete's re-check (footprint.Execute then heartbeats the global lease,
-// which a creator's mark has taken away).
+// delete's re-check, which a creator's regional mark (every creator makes
+// one, setup in its home region) stops; footprint.Execute then heartbeats
+// the global lease.
 type fencedAccountDeleter struct {
 	fp.Deleter
 	recheck func(ctx context.Context) error
@@ -830,11 +853,15 @@ func finishDeadRegion(ctx context.Context, cfg AccountWideConfig, lc *lifecycle.
 	if err != nil {
 		return err
 	}
-	l, err := lc.ClaimIfUnchanged(ctx, Tool, r.region, 0, expect)
+	l, err := claimAsJudged(ctx, lc, r.region, expect, cfg.Sleep)
 	if err != nil {
 		return err
 	}
-	if err := l.Finish(ctx); err != nil {
+	if err := finishLease(ctx, cfg.Sleep, lc, r.region, l); err != nil {
+		// Given back, so no creator in that region waits for it.
+		if rerr := releaseLease(ctx, cfg.Sleep, l); rerr != nil {
+			err = errors.Join(err, fmt.Errorf("giving the lease back: %w (it goes stale in 20 min)", rerr))
+		}
 		return err
 	}
 	if _, err := lc.CloseTableIfEmpty(ctx, r.region); err != nil {

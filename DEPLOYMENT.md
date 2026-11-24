@@ -324,10 +324,19 @@ lagotto#345), as `lagotto setup` does before it writes any IAM. While a
 teardown holds either lease they wait (the CLI up to 10 minutes), then exit
 non-zero, having created nothing. `lagotto-cli-user` grants this on that table only
 (`UpdateItem`, `ConditionCheckItem`, `DescribeTable`, `CreateTable`,
-`TagResource`, and `DeleteItem` of the closing sentinel's key only). Then
-`deploy` deletes the region's pending one-shot teardown jobs (lagotto#340): a
-poller whose region was torn down leaves its function's job due 92 minutes
-later, which would delete a poller deployed in the meantime, in either mode.
+`TagResource`, and `DeleteItem` of the closing sentinel's key only). A
+creator that runs for long (a `watch --local`) refreshes its marks every 20
+minutes, so it is never taken for one that died; `setup`, which creates only
+account-wide resources, marks its home region as well as the global scope.
+`deploy` settles the region's pending one-shot teardown jobs (lagotto#340)
+on every path, once it has replaced the poller: a poller whose region was
+torn down leaves its function's job due 92 minutes later, which would delete
+a poller deployed in the meantime, in either mode. With the new rate schedule
+in place the jobs are deleted; a deploy that failed before it (an artifact it
+could not fetch) leaves them, and they finish the region's teardown, so a
+failed deploy never leaves a function with no schedule and no job. A job
+that fired during the deploy (and so removed the new function) makes the
+deploy fail: deploy again.
 `watch` and `launch` need the hosted poller: once its rate schedule is gone
 (the region was torn down, its function due for deletion) they are refused,
 with nothing created, and told to redeploy (lagotto#349); otherwise they
@@ -716,9 +725,13 @@ teardown --plan --mode reap` (lagotto#346). All three run one code path
 1. **The global scope.** lagotto's global scope is the item
    `tool#lagotto#global` in us-east-1's `spore-host-lifecycle` table. Every
    creator of something account-wide (`setup`, `deploy`, `watch`, `launch`)
-   marks it first (lagotto#345), adding a mark of its own (a token and the
-   time it was written) to the item's set of marks, and removes it when it
-   returns (libs `MarkDone`, on a refusal too); its region's mark likewise.
+   marks it first (lagotto#345), after its region (setup: its home region),
+   adding a mark of its own (a token and the time it was written) to the
+   item's set of marks, refreshes it every 20 minutes while it runs (libs
+   `RefreshMark`), and removes it when it returns (libs `MarkDone`, on a
+   refusal too); its region's mark likewise. A creator's global mark waits
+   for a teardown holding the global lease; its regional mark is what stops
+   that teardown, at its re-check before the next delete.
    **No writer ever sets an item idle.** Whether it is in use, and since when
    it has been idle, is read from what it holds and its times (libs `InUse`
    and `IdleSince`, with a mark bound of an hour): it is in use while a

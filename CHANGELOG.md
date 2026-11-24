@@ -103,12 +103,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The poller's mark before it fires a scheduled launch is activity with no
   end of its own** (libs `MarkActive`), in use for an hour; an idle
   observation leaves a creator's fresh mark alone.
-- **`deploy` deletes a region's pending one-shot teardown jobs before it
-  creates or changes anything there, and `watch` and `launch` do while the
-  poller's schedule is still there** (#340): a job due after a redeploy would
-  delete the new poller, whichever mode it runs in. `lagotto-cli-user` gains
-  `scheduler:DeleteSchedule` on the `lagotto-teardown` group's schedules.
-  **Re-run `lagotto setup` after upgrading.**
+- **`deploy` settles a region's pending one-shot teardown jobs on every path,
+  once it has replaced the poller, and `watch` and `launch` delete them
+  while the poller's schedule is still there** (#340): a job due after a
+  redeploy would delete the new poller, whichever mode it runs in. With the
+  new rate schedule in place the jobs go; a deploy that failed before it
+  leaves them to finish the region's teardown, so it never leaves a function
+  with no schedule and no job (the account-wide teardown names such a
+  function). `lagotto-cli-user` gains `scheduler:DeleteSchedule` on the
+  `lagotto-teardown` group's schedules. **Re-run `lagotto setup` after
+  upgrading.**
+- **`setup` marks its home region as well as the global scope**, so an
+  account-wide teardown already deleting stops at its next re-check (a
+  creator's global mark waits for the global lease; it does not take it).
+- **A creator refreshes its marks every 20 minutes while it runs** (libs
+  `RefreshMark`), so one running longer than an hour (a `watch --local`) is
+  never taken for one that died.
+- **A dead regional item whose finish fails gives its lease back**, and a
+  Finish whose delete applied though its answer was lost counts as done
+  (the account-wide teardown, and the poller's regional one).
+- **Outside the aws partition, `teardown --iam-roles` also refuses while a
+  lagotto-teardown job is pending in any region** (they run as the invoke
+  role), and its pre-check refuses a run whose plan failed.
 
 ### Fixed
 

@@ -83,7 +83,7 @@ func idleAsJudged(ctx context.Context, lc *lifecycle.Client, scope string, e lif
 // closer that died is cleared and tried once more.
 func ClaimJudged(ctx context.Context, lc *lifecycle.Client, scope string, acceptOlder bool) (*lifecycle.Lease, error) {
 	for attempt := 0; ; attempt++ {
-		l, err := claimJudged(ctx, lc, scope, acceptOlder)
+		l, err := claimJudged(ctx, lc, scope, acceptOlder, sleep)
 		if errors.Is(err, lifecycle.ErrTableClosing) && attempt == 0 {
 			// A closer that died left its sentinel (libs#88):
 			// CloseTableIfEmpty takes a stale one over (and drops it while
@@ -97,7 +97,7 @@ func ClaimJudged(ctx context.Context, lc *lifecycle.Client, scope string, accept
 	}
 }
 
-func claimJudged(ctx context.Context, lc *lifecycle.Client, scope string, acceptOlder bool) (*lifecycle.Lease, error) {
+func claimJudged(ctx context.Context, lc *lifecycle.Client, scope string, acceptOlder bool, sleep func(context.Context, time.Duration) error) (*lifecycle.Lease, error) {
 	it, ok, err := lc.Get(ctx, Tool, scope)
 	if err != nil {
 		return nil, err
@@ -111,5 +111,55 @@ func claimJudged(ctx context.Context, lc *lifecycle.Client, scope string, accept
 	if err != nil {
 		return nil, err
 	}
-	return lc.ClaimIfUnchanged(ctx, Tool, scope, 0, e)
+	return claimAsJudged(ctx, lc, scope, e, sleep)
+}
+
+// claimAsJudged claims scope exactly as e (with no grace: the judgement was
+// the grace). A failure other than a refusal may have applied all the same
+// (an answer lost): a live lease this very Client took is then given back
+// (giveBackOwn), so it leaves nothing for a creator to wait for.
+func claimAsJudged(ctx context.Context, lc *lifecycle.Client, scope string, e lifecycle.Expect, sleep func(context.Context, time.Duration) error) (*lifecycle.Lease, error) {
+	l, err := lc.ClaimIfUnchanged(ctx, Tool, scope, 0, e)
+	if err != nil && !errors.Is(err, lifecycle.ErrNotClaimable) {
+		if _, aerr := lc.AdoptLease(ctx, Tool, scope); aerr == nil {
+			err = fmt.Errorf("%w (%s)", err, giveBackOwn(ctx, lc, scope, sleep))
+		}
+	}
+	return l, err
+}
+
+// finishLease finishes l (lifecycle Finish), tried again on failure. A
+// retry after a Finish that applied, but whose answer was lost, finds its
+// lease gone (ErrLeaseLost): the item is then read, and an absent one is the
+// finish done.
+func finishLease(ctx context.Context, sleep func(context.Context, time.Duration) error, lc *lifecycle.Client, scope string, l *lifecycle.Lease) error {
+	err := retryOp(ctx, Config{Sleep: sleep}, func() error {
+		if err := l.Finish(ctx); errors.Is(err, lifecycle.ErrLeaseLost) {
+			return &final{err}
+		} else {
+			return err
+		}
+	})
+	if errors.Is(err, lifecycle.ErrLeaseLost) {
+		if _, ok, rerr := lc.Get(ctx, Tool, scope); rerr == nil && !ok {
+			return nil // finished: the first try applied
+		}
+	}
+	return err
+}
+
+// releaseLease gives l back (lifecycle Release), tried again on failure; a
+// lease already gone is not an error.
+func releaseLease(ctx context.Context, sleep func(context.Context, time.Duration) error, l *lifecycle.Lease) error {
+	err := retryOp(ctx, Config{Sleep: sleep}, func() error {
+		if err := l.Release(ctx); errors.Is(err, lifecycle.ErrLeaseLost) {
+			return &final{err}
+		} else {
+			return err
+		}
+	})
+	if errors.Is(err, lifecycle.ErrLeaseLost) {
+		return nil
+	}
+	return err
 }

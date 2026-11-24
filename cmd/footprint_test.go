@@ -289,7 +289,7 @@ func TestTeardownPlanReap(t *testing.T) {
 	if len(want) != 0 {
 		t.Errorf("not deleted: %v", want)
 	}
-	if !strings.Contains(out, "us-east-1: a poller is deployed") {
+	if !strings.Contains(out, "us-east-1: a poller function with no rate schedule") {
 		t.Errorf("the kept policy does not say why:\n%s", out)
 	}
 }

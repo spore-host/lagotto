@@ -857,13 +857,7 @@ func teardown(ctx context.Context, cfg Config, d Deps, lease *lifecycle.Lease, r
 		return t.strand(&res, plan, err, "the final deletes")
 	}
 	// 5. Its lease, and its table.
-	if err := retryOp(ctx, cfg, func() error {
-		if err := lease.Finish(ctx); errors.Is(err, lifecycle.ErrLeaseLost) {
-			return &final{err}
-		} else {
-			return err
-		}
-	}); err != nil {
+	if err := finishLease(ctx, cfg.Sleep, d.Lifecycle, cfg.Region, lease); err != nil {
 		return t.strand(&res, plan, err, "finishing its lease")
 	}
 	if _, err := d.Lifecycle.CloseTableIfEmpty(ctx, cfg.Region); err != nil {

@@ -196,6 +196,17 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer markDone()
+	// The region's pending teardown jobs are settled on every path, under
+	// the marks (lagotto#340): a deploy that fails before its schedule stands
+	// leaves them to finish the region's teardown.
+	settled := false
+	defer func() {
+		if !settled {
+			if serr := settleDeployJobs(ctx, cfg, region, false, os.Stderr); serr != nil {
+				fmt.Fprintf(os.Stderr, "warning: %v\n", serr)
+			}
+		}
+	}()
 
 	// Migration runs BEFORE the deploy, deliberately. The retain-update carries the
 	// stack's previous parameters across — including LambdaCodeKey — so a migration
@@ -267,6 +278,10 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		HoldScheduleMove: hold,
 	})
 	if err != nil {
+		return err
+	}
+	settled = true
+	if err := settleDeployJobs(ctx, cfg, region, true, os.Stderr); err != nil {
 		return err
 	}
 

@@ -156,7 +156,12 @@ func TestReview4LostGlobalMarkReplyEnded(t *testing.T) {
 	if _, err := markGlobal(ctx, aws.Config{}, "", "set up lagotto's IAM", &bytes.Buffer{}); err == nil {
 		t.Fatal("a lost answer is a refusal")
 	}
-	if it, ok, _ := c.Get(ctx, inventory.Tool, lifecycle.ScopeGlobal); !ok || len(it.Marks) != 0 || it.Epoch != 1 {
+	// setup marks its home region first (lagotto#351 review 5): that is the
+	// write whose answer was lost here.
+	if it, ok, _ := c.Get(ctx, inventory.Tool, "us-east-1"); !ok || len(it.Marks) != 0 || it.Epoch != 1 {
 		t.Errorf("the orphan mark was left: %+v", it)
+	}
+	if it, _, _ := c.Get(ctx, inventory.Tool, lifecycle.ScopeGlobal); len(it.Marks) != 0 {
+		t.Errorf("a global mark after the refusal: %+v", it)
 	}
 }

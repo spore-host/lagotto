@@ -176,6 +176,13 @@ func EndMark(ctx context.Context, c *lifecycle.Client, scope, token string) erro
 	return err
 }
 
+// RefreshMark re-stamps a creator's mark (lifecycle RefreshMark): a creator
+// that may run longer than CreatorMarkBound calls it well within it. False
+// means the mark is gone, or a teardown holds the scope.
+func RefreshMark(ctx context.Context, c *lifecycle.Client, scope, token string) (bool, error) {
+	return c.RefreshMark(ctx, Tool, scope, token)
+}
+
 // CreatorMarkBound is how long a creator's mark keeps lagotto's scope (a
 // region, or the global one) in use (lagotto#340): the bound lagotto judges
 // with (lifecycle InUse and IdleSince), and the one an idle Observe leaves a

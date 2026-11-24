@@ -197,7 +197,7 @@ func TestAccountWideLeftovers(t *testing.T) {
 	w = newAWWorld(t)
 	idle(w)
 	w.src.SetRegion(inventory.Region{Region: "us-west-2", Function: inventorytest.Deployed("us-west-2", acct).Function})
-	if r := w.run(true, 0); r.Outcome != AccountWideBlocked || !strings.Contains(strings.Join(r.Blockers, ";"), "us-west-2: a poller is deployed") ||
+	if r := w.run(true, 0); r.Outcome != AccountWideBlocked || !strings.Contains(strings.Join(r.Blockers, ";"), "us-west-2: a poller function with no rate schedule and no teardown job") ||
 		len(w.ev.list()) != 0 {
 		t.Errorf("a function left: %+v", r)
 	}

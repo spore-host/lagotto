@@ -300,11 +300,12 @@ func TestCancelTeardownJobs(t *testing.T) {
 		}
 	}
 
-	// markCreating: the marks, then the jobs.
+	// markCreating: for a deploy, only the marks (it settles the jobs
+	// once its schedule stands, settleDeployJobs).
 	installFakeLeases(t, lifecycletest.New())
 	f = &fakeTeardownJobs{jobs: []string{"lagotto-teardown-function"}}
 	newTeardownJobAPI = func(aws.Config, string) teardownJobAPI { return f }
-	if done, err := markCreating(ctx, aws.Config{}, "alice", "us-west-2", "deploy", creatorDeploy, &bytes.Buffer{}); err != nil || len(f.deleted) != 1 {
+	if done, err := markCreating(ctx, aws.Config{}, "alice", "us-west-2", "deploy", creatorDeploy, &bytes.Buffer{}); err != nil || len(f.deleted) != 0 {
 		t.Errorf("markCreating: %v %v", err, f.deleted)
 	} else {
 		done()

@@ -171,9 +171,12 @@ func runTeardown(cmd *cobra.Command, args []string) error {
 		// The account-wide teardown's own check, in report mode, before
 		// anything regional goes: what this region holds (its tables and
 		// lifecycle item) is this teardown's to remove first.
-		switch r := teardownAccountWideCheck(ctx, cfg, acct, cfg.Region); r.Outcome {
-		case idle.AccountWideWould, idle.AccountWideNothing:
-		case idle.AccountWideSkipped:
+		switch r := teardownAccountWideCheck(ctx, cfg, acct, cfg.Region); {
+		case r.Outcome == idle.AccountWideWould && r.Err != nil:
+			// It would go ahead, but its plan failed: nothing is deleted.
+			return fmt.Errorf("not deleting anything: the account-wide check could not plan its deletes: %w", r.Err)
+		case r.Outcome == idle.AccountWideWould, r.Outcome == idle.AccountWideNothing:
+		case r.Outcome == idle.AccountWideSkipped:
 			// Outside the aws partition there is no global scope (lagotto#347):
 			// the account-wide resources go as before lagotto#340, once no
 			// poller is left anywhere (checked above), with no lease.
