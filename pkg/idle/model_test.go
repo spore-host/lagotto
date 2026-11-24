@@ -392,6 +392,7 @@ type mworld struct {
 	pollerReport bool
 	// waitAdvances: see scenario.waitAdvances.
 	waitAdvances bool
+	creatorWait  time.Duration // the creators' WaitTimeout, with waitAdvances
 	// creating counts the creators past their marks and not yet done.
 	creating int
 	// runs counts poller invocations, for their owners.
@@ -640,6 +641,9 @@ func (m *mworld) client(owner string) *lifecycle.Client {
 		// A creator's wait takes time, as lagotto's does (CreatorWait, past
 		// the stale bound), in two polls.
 		o.WaitTimeout, o.PollInterval = CreatorWait, CreatorWait/2
+		m.mu.Lock()
+		m.creatorWait = o.WaitTimeout
+		m.mu.Unlock()
 		o.Sleep = func(ctx context.Context, d time.Duration) error {
 			park(ctx, "wait")
 			if a, _ := ctx.Value(actorKey{}).(*actor); a != nil && a.noCrash {
@@ -1101,6 +1105,7 @@ func (m *mworld) mark(ctx context.Context, c *lifecycle.Client, region string, k
 			}
 		}
 	}
+	waitStart := m.clock()
 	token, err := Mark(ctx, c, lifecycle.ScopeGlobal, "create")
 	if err != nil {
 		// Refused by a global lease: a run that has exited never holds one
@@ -1111,8 +1116,13 @@ func (m *mworld) mark(ctx context.Context, c *lifecycle.Client, region string, k
 			// Waiting past the stale bound, a killed teardown's lease never
 			// refuses a creator: it is taken over. (A live one may, in the
 			// model, whose polls are not time when another actor is busy.)
+			// Only a wait that took its whole time in the model counts: the
+			// model's polls are not time while another actor is mid-write.
+			m.mu.Lock()
+			waited := m.now.Sub(waitStart) >= m.creatorWait
+			m.mu.Unlock()
 			for _, a := range m.actors {
-				if a.name == tip.Wait.Owner && a.crashed {
+				if waited && a.name == tip.Wait.Owner && a.crashed {
 					m.violate("a creator was refused by the global lease of %s, killed after its claim, which it should have outwaited", a.name)
 				}
 			}
