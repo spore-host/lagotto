@@ -1083,9 +1083,9 @@ func (m *mworld) mark(ctx context.Context, c *lifecycle.Client, region string, k
 	}
 	token, err := Mark(ctx, c, lifecycle.ScopeGlobal, "create")
 	if err != nil {
-		endRegion()
 		// Refused by a global lease: a run that has exited never holds one
-		// a creator waits for, unless it crashed.
+		// a creator waits for, unless it crashed. (Judged at the refusal,
+		// before this creator's own region mark is ended.)
 		var tip *TeardownInProgressError
 		if errors.As(err, &tip) {
 			for _, a := range m.actors {
@@ -1094,6 +1094,7 @@ func (m *mworld) mark(ctx context.Context, c *lifecycle.Client, region string, k
 				}
 			}
 		}
+		endRegion()
 		return done, false
 	}
 	done = func() {
