@@ -646,8 +646,12 @@ func (m *mworld) client(owner string) *lifecycle.Client {
 		m.mu.Unlock()
 		o.Sleep = func(ctx context.Context, d time.Duration) error {
 			park(ctx, "wait")
-			if a, _ := ctx.Value(actorKey{}).(*actor); a != nil && a.noCrash {
-				m.advanceIfQuiet(a, d)
+			// Its time passes only while no other actor is running: the
+			// model's steps take no time, so a poll that advanced the clock
+			// past a teardown still running would age that teardown's
+			// lease by a wait it never had.
+			if a, _ := ctx.Value(actorKey{}).(*actor); a != nil && a.noCrash && m.othersDone(a) {
+				m.advance(d)
 			}
 			return nil
 		}
@@ -1389,6 +1393,17 @@ func (m *mworld) clockActor() *actor {
 		park(ctx, "+21m")
 		m.advanceIfQuiet(nil, 21*time.Minute)
 	}}
+}
+
+// othersDone reports whether every actor but self has finished (or
+// crashed).
+func (m *mworld) othersDone(self *actor) bool {
+	for _, a := range m.actors {
+		if a != self && !a.done {
+			return false
+		}
+	}
+	return true
 }
 
 // advanceIfQuiet moves the clock by d, unless an actor other than self is
