@@ -283,11 +283,23 @@ func TestCancelSkipsAFinishedRegion(t *testing.T) {
 }
 
 // TestAccountWideExcluding: `teardown --iam-roles`' check ignores the
-// caller's own region's item and regional resources (it removes them
-// first), but not its poller.
+// caller's own region's regional resources and an item it will finish (it
+// removes them first), but not its poller, and not a creator still running
+// there (the seventh review's G2: a refusal must change nothing).
 func TestAccountWideExcluding(t *testing.T) {
 	w := newAWWorld(t)
-	if err := w.client("deploy").MarkActive(context.Background(), Tool, "us-west-2"); err != nil {
+	deployer := w.client("deploy")
+	tok, err := Mark(context.Background(), deployer, "us-west-2", "deploy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := w.cfg(false, 0)
+	live.Excluding = "us-west-2"
+	if r := TearDownAccountWide(context.Background(), live, w.deps()); r.Outcome != AccountWideBlocked ||
+		!strings.Contains(strings.Join(r.Blockers, ";"), "us-west-2: its lifecycle item is in use (a creator marked it") {
+		t.Errorf("a creator running in the caller's own region: %+v", r)
+	}
+	if err := EndMark(context.Background(), deployer, "us-west-2", tok); err != nil {
 		t.Fatal(err)
 	}
 	w.src.SetRegion(inventory.Region{Region: "us-west-2", Tables: inventorytest.Deployed("us-west-2", acct).Tables, ActiveWatches: 1})

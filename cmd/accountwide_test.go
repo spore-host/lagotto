@@ -446,7 +446,11 @@ func TestCheckAccountWide(t *testing.T) {
 	table := lifecycletest.New()
 	installFakeLeases(t, table)
 	c, _ := newLifecycleClient(aws.Config{}, "a deploy")
-	if err := c.MarkActive(context.Background(), inventory.Tool, "us-east-1"); err != nil {
+	tok, err := c.Mark(context.Background(), inventory.Tool, "us-east-1") // what a deploy leaves: its mark, ended
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.MarkDone(context.Background(), inventory.Tool, "us-east-1", tok); err != nil {
 		t.Fatal(err)
 	}
 	writes := table.Calls("TransactWriteItems") + table.Calls("UpdateItem") + table.Calls("PutItem") + table.Calls("DeleteItem")
@@ -457,8 +461,14 @@ func TestCheckAccountWide(t *testing.T) {
 	if n := table.Calls("TransactWriteItems") + table.Calls("UpdateItem") + table.Calls("PutItem") + table.Calls("DeleteItem"); n != writes {
 		t.Errorf("the check wrote %d times", n-writes)
 	}
+	if _, err := c.Mark(context.Background(), inventory.Tool, "us-east-1"); err != nil { // a creator running there
+		t.Fatal(err)
+	}
 	if r := checkAccountWide(context.Background(), aws.Config{}, fpAcct, "eu-west-1"); r.Outcome != idle.AccountWideBlocked {
-		t.Errorf("another region's ACTIVE item: %+v", r)
+		t.Errorf("another region's item in use: %+v", r)
+	}
+	if r := checkAccountWide(context.Background(), aws.Config{}, fpAcct, "us-east-1"); r.Outcome != idle.AccountWideBlocked {
+		t.Errorf("the caller's own region with a creator running (G2): %+v", r)
 	}
 }
 

@@ -101,7 +101,8 @@ func init() {
 }
 
 func runDeploy(cmd *cobra.Command, args []string) error {
-	ctx := commandContext(cmd)
+	ctx, stop := commandContext(cmd)
+	defer stop()
 	out := cmd.OutOrStdout()
 
 	if deployTeardown && deployMigrate {

@@ -146,7 +146,8 @@ func runTeardown(cmd *cobra.Command, args []string) error {
 	if teardownPlan != "" {
 		return runTeardownPlan(cmd)
 	}
-	ctx := commandContext(cmd)
+	ctx, stop := commandContext(cmd)
+	defer stop()
 
 	cfg, err := awscfg.Load(ctx, "")
 	if err != nil {

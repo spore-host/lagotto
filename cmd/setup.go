@@ -114,7 +114,8 @@ func init() {
 }
 
 func runSetup(cmd *cobra.Command, args []string) error {
-	ctx := commandContext(cmd)
+	ctx, stop := commandContext(cmd)
+	defer stop()
 	out := cmd.OutOrStdout()
 
 	cfg, err := awscfg.Load(ctx, "")

@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/spf13/cobra"
 	"github.com/spore-host/libs/lifecycle"
 	"github.com/spore-host/libs/lifecycle/lifecycletest"
 
@@ -67,15 +66,10 @@ func TestReview6PlanNoLeaseUnfencedChecks(t *testing.T) {
 	}
 }
 
-// TestReview6CommandContext (G2a): commands run with Execute's context,
-// which SIGINT and SIGTERM cancel; a give-back's fresh context outlives it.
-func TestReview6CommandContext(t *testing.T) {
+// TestReview6FreshCtx (G2a): a give-back's fresh context outlives the
+// command's cancelled one.
+func TestReview6FreshCtx(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	c := &cobra.Command{}
-	c.SetContext(ctx)
-	if commandContext(c) != ctx || commandContext(nil) == nil || commandContext(&cobra.Command{}) == nil {
-		t.Error("commandContext")
-	}
 	cancel()
 	f, fcancel := freshCtx(ctx)
 	defer fcancel()

@@ -122,9 +122,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A dead regional item whose finish fails gives its lease back**, and a
   Finish whose delete applied though its answer was lost counts as done
   (the account-wide teardown, and the poller's regional one).
-- **An interrupted CLI gives its lease back** (#340): SIGINT and SIGTERM
-  cancel the command's work, and a teardown then releases or suspends the
-  lease it holds, and a creator ends its marks, each with a fresh context. A
+- **An interrupted CLI gives its lease back** (#340): in the commands that
+  hold a teardown lease or a creator's marks (setup, deploy, watch, launch,
+  teardown, teardown --plan), SIGINT and SIGTERM cancel the command's work,
+  and it then releases or suspends the lease it holds and ends its marks,
+  each with a fresh context; a second signal exits at once. Every other
+  command exits on a signal as before.
+- **`teardown --iam-roles` refuses before deleting anything while a creator
+  is running in its own region** (its lifecycle item has a fresh mark, a
+  hold or a live lease), so a refusal still changes nothing. A
   creator waits up to 22 minutes for a teardown's lease (was 10), past the
   20 minutes a lease takes to go stale, so a killed teardown's lease is taken
   over rather than refusing every creator in the account.

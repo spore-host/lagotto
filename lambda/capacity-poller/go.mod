@@ -11,7 +11,7 @@ require (
 	github.com/spore-host/truffle v0.63.0
 )
 
-require github.com/spore-host/libs v0.55.1-0.20261124131121-2b4b37eaca5f
+require github.com/spore-host/libs v0.55.1-0.20261125032344-7d8929e7380e
 
 require (
 	github.com/BurntSushi/toml v1.4.0 // indirect

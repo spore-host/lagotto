@@ -93,7 +93,8 @@ func runTeardownPlan(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
-	ctx := context.Background()
+	ctx, stop := commandContext(cmd)
+	defer stop()
 	cfg, err := awscfg.Load(ctx, "")
 	if err != nil {
 		return fmt.Errorf("load AWS config: %w", err)
@@ -343,7 +344,7 @@ func reapWithLeases(ctx context.Context, cfg aws.Config, acct string, plan *fp.P
 
 	// The account-wide steps, by the one account-wide teardown.
 	if len(global) > 0 {
-		errs = append(errs, reapAccountWide(ctx, cfg, acct, plan, global, deleter, byARN, errOut, run))
+		errs = append(errs, reapAccountWide(ctx, cfg, acct, global, byARN, errOut))
 	}
 
 	res := &fp.Result{Mode: fp.ModeReap, Tool: string(plan.Tool), Actions: make([]fp.Action, len(plan.Steps))}
@@ -361,8 +362,7 @@ func reapWithLeases(ctx context.Context, cfg aws.Config, acct string, plan *fp.P
 // account-wide teardown, limited to them, and records each step's action in
 // byARN. Outside the aws partition, where there is no global lease, it runs
 // them under the stand-in only with --i-understand-no-lease.
-func reapAccountWide(ctx context.Context, cfg aws.Config, acct string, plan *fp.Plan, global []fp.Resource, deleter fp.Deleter,
-	byARN map[string]fp.Action, errOut io.Writer, run func([]fp.Resource, fp.Deleter, *lifecycle.Lease)) error {
+func reapAccountWide(ctx context.Context, cfg aws.Config, acct string, global []fp.Resource, byARN map[string]fp.Action, errOut io.Writer) error {
 	only := map[string]bool{}
 	for _, r := range global {
 		only[r.ARN] = true
@@ -372,7 +372,7 @@ func reapAccountWide(ctx context.Context, cfg aws.Config, acct string, plan *fp.
 			_, _ = fmt.Fprintf(errOut, "debug: "+f+"\n", a...)
 		}
 	}
-	r := runAccountWide(ctx, cfg, acct, only, logf)
+	r := teardownAccountWide(ctx, cfg, acct, only, logf)
 	if r.Outcome == idle.AccountWideSkipped && teardownNoLease {
 		// The same checks as `teardown --iam-roles` there: no poller and no
 		// pending lagotto-teardown job in any region, read in full.

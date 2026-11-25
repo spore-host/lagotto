@@ -468,15 +468,18 @@ func claimGlobal(ctx context.Context, cfg AccountWideConfig, lc *lifecycle.Clien
 }
 
 // excluding drops region's checks (see AccountWideConfig.Excluding).
+// The excluded region's item is the caller's own to finish (ClaimJudged),
+// so it is judged by that rule: still a blocker while a creator's mark, a
+// hold or a live lease is on it, but not for an older lagotto's untimed
+// ACTIVE, which the caller's explicit teardown clears.
 func excluding(checks []regionCheck, region string) []regionCheck {
 	if region == "" {
 		return checks
 	}
-	var out []regionCheck
-	for _, c := range checks {
-		if c.region != region {
-			out = append(out, c)
-		}
+	out := make([]regionCheck, len(checks))
+	for i, c := range checks {
+		c.own = c.region == region
+		out[i] = c
 	}
 	return out
 }
@@ -499,6 +502,8 @@ type regionCheck struct {
 	poller  bool
 	jobs    []string
 	liveErr error
+	// own: the caller's own region (AccountWideConfig.Excluding).
+	own bool
 }
 
 // regionChecks reads every region's lagotto item, and with live each
@@ -569,7 +574,7 @@ func itemBlockers(lc *lifecycle.Client, checks []regionCheck) []blocker {
 			// In use as judged. A backstop's activity (an active Observe)
 			// is not: only its poller (a function, blocking) or the
 			// footprint's activity carries that on.
-			if why := WhyInUse(lc, c.item); why != "" {
+			if why := WhyInUse(lc, c.item); why != "" && (!c.own || !untimedOnly(lc, c.item)) {
 				out = append(out, inUse(fmt.Sprintf("%s: its lifecycle item is in use (%s; once lagotto is not in use there, "+
 					"'lagotto teardown --region %s' clears it)", name, why, name)))
 			}

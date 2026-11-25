@@ -88,7 +88,12 @@ func runAccountWideUnfenced(ctx context.Context, cfg aws.Config, account string,
 	// The invoke role is what the one-shot jobs run as: none may be left
 	// pending, in any region (as the fenced path checks before each delete).
 	var blockers []string
+	unread := !facts.AllRegions || facts.AccountIncomplete
 	for _, r := range facts.Regions {
+		if r.ActivityUnknown {
+			unread = true
+			blockers = append(blockers, r.Region+": could not be read in full")
+		}
 		if r.Function != nil {
 			blockers = append(blockers, r.Region+": a poller is deployed")
 		}
@@ -99,7 +104,7 @@ func runAccountWideUnfenced(ctx context.Context, cfg aws.Config, account string,
 		}
 	}
 	switch {
-	case !facts.AllRegions || facts.AccountIncomplete:
+	case unread:
 		return idle.AccountWideResult{Outcome: idle.AccountWideBlocked, Why: "the account-wide resources are still needed",
 			Blockers: append(blockers, "the footprint could not be read in full"), ReadFailed: true}
 	case len(blockers) > 0:
