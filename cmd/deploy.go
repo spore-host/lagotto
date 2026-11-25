@@ -137,7 +137,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 			return true
 		}
 		fmt.Fprintf(os.Stderr, "%s [y/N] ", prompt)
-		return readYes(os.Stdin)
+		return readYesCtx(ctx, os.Stdin)
 	}
 
 	// Every poller resource name is derived from the account ID, so nothing below

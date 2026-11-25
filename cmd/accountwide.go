@@ -132,7 +132,8 @@ func runAccountWideUnfenced(ctx context.Context, cfg aws.Config, account string,
 	}
 	res, err := fp.Execute(ctx, plan, fp.ModeReap, inventory.NewDeleter(live, newTeardownDeleters(cfg, account)), lease)
 	out := idle.AccountWideResult{Outcome: idle.AccountWideRemoved, Why: "removed without a global lease", Plan: plan, Result: res, Err: err, Kept: kept}
-	if err != nil {
+	if err != nil || idle.Incomplete(res) {
+		// Anything of lagotto's left (failed, refused, skipped) is not done.
 		out.Outcome, out.Why = idle.AccountWideFailed, "a delete did not complete"
 	}
 	logf("account-wide REAP outcome=%s why=%q (no global lease)", out.Outcome, out.Why)

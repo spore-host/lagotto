@@ -146,10 +146,12 @@ func TestReview6BlockedLogsTheRelease(t *testing.T) {
 	}
 	r := w.run(true, 0)
 	w.tables[region].Err = nil
-	if r.Outcome != AccountWideBlocked || r.Err == nil {
+	// Stopped after a delete: suspended, and the suspend's failure is in
+	// the result's log line.
+	if r.Outcome != AccountWideHeld || r.Err == nil {
 		t.Fatalf("%+v", r)
 	}
-	if !strings.Contains(w.log(), `outcome=blocked`) || !strings.Contains(w.log(), `error="`) {
-		t.Errorf("the blocked line lacks the release error:\n%s", w.log())
+	if !strings.Contains(w.log(), `outcome=held`) || !strings.Contains(w.log(), `network down`) {
+		t.Errorf("the line lacks the give-back's error:\n%s", w.log())
 	}
 }

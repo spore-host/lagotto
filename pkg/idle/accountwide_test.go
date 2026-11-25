@@ -427,7 +427,8 @@ func TestAccountWideRecheckBeforeEachDelete(t *testing.T) {
 				}
 			}
 			r := w.run(true, 0)
-			if r.Outcome != AccountWideBlocked || len(r.Blockers) != 1 || !strings.Contains(r.Blockers[0], "us-west-2") {
+			// Stopped after deletes: suspended (Held), saying why.
+			if r.Outcome != AccountWideHeld || len(r.Blockers) != 1 || !strings.Contains(r.Blockers[0], "us-west-2") {
 				t.Fatalf("%+v\n%s", r, w.log())
 			}
 			// The hook runs inside the second delete; the third's re-check
@@ -435,10 +436,10 @@ func TestAccountWideRecheckBeforeEachDelete(t *testing.T) {
 			if len(w.ev.list()) != 2 || strings.Contains(strings.Join(w.ev.list(), ","), runtimeiam.RoleName) {
 				t.Errorf("deletes %v", w.ev.list())
 			}
-			// The lease goes back at once (ACTIVE), so a creator's global
-			// mark is not kept waiting for 20 min.
-			if g, ok := w.global(); !ok || g.Lease != nil || g.State != lifecycle.StateActive {
-				t.Errorf("the global lease was not given back: %+v", g)
+			// No lease is left (suspended: IDLE, incomplete), so a creator's
+			// global mark is not kept waiting for 20 min.
+			if g, ok := w.global(); !ok || g.Lease != nil || !g.Incomplete {
+				t.Errorf("the global lease was not suspended: %+v", g)
 			}
 			if err := MarkActive(context.Background(), w.client("bob"), lifecycle.ScopeGlobal, "deploy"); err != nil {
 				t.Errorf("a creator after it: %v", err)

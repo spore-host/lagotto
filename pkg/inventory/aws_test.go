@@ -239,10 +239,22 @@ func (fakeIAM) ListInstanceProfilesForRole(context.Context, *iam.ListInstancePro
 }
 
 func (fakeIAM) GetInstanceProfile(_ context.Context, in *iam.GetInstanceProfileInput, _ ...func(*iam.Options)) (*iam.GetInstanceProfileOutput, error) {
+	name := aws.ToString(in.InstanceProfileName)
+	t := []iamtypes.Tag{{Key: aws.String(tags.ManagedBy), Value: aws.String("lagotto")}}
+	if name == "team-gpu" {
+		t = append(t, iamtypes.Tag{Key: aws.String(runtimeiam.ManagedProfileTagKey), Value: aws.String(runtimeiam.ManagedProfileTagValue)})
+	}
 	return &iam.GetInstanceProfileOutput{InstanceProfile: &iamtypes.InstanceProfile{
-		Arn: aws.String(IAMARN(acct, "instance-profile", aws.ToString(in.InstanceProfileName))), Roles: []iamtypes.Role{{RoleName: aws.String(runtimeiam.InstanceRoleName)}},
-		Tags: []iamtypes.Tag{{Key: aws.String(tags.ManagedBy), Value: aws.String("lagotto")}},
+		Arn: aws.String(IAMARN(acct, "instance-profile", name)), Roles: []iamtypes.Role{{RoleName: aws.String(runtimeiam.InstanceRoleName)}},
+		Tags: t,
 	}}, nil
+}
+
+// ListInstanceProfiles lists lagotto's own profile, setup's for an
+// authorized role (team-gpu, tagged), and someone else's (untagged).
+func (fakeIAM) ListInstanceProfiles(context.Context, *iam.ListInstanceProfilesInput, ...func(*iam.Options)) (*iam.ListInstanceProfilesOutput, error) {
+	return &iam.ListInstanceProfilesOutput{InstanceProfiles: []iamtypes.InstanceProfile{
+		{InstanceProfileName: aws.String(runtimeiam.InstanceRoleName)}, {InstanceProfileName: aws.String("team-gpu")}, {InstanceProfileName: aws.String("someone-elses")}}}, nil
 }
 
 func TestAWSAccount(t *testing.T) {

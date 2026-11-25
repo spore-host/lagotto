@@ -66,6 +66,7 @@ import (
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/aws-sdk-go-v2/service/scheduler"
 	schedulertypes "github.com/aws/aws-sdk-go-v2/service/scheduler/types"
+	fp "github.com/spore-host/libs/footprint"
 	"github.com/spore-host/libs/lifecycle"
 	"github.com/spore-host/libs/lifecycle/lifecycletest"
 
@@ -1058,14 +1059,38 @@ func (m *mworld) cli(owner string, grace time.Duration) *actor {
 		m.failedRuns[owner] = true // until it ends without a failure (a crash is one)
 		m.mu.Unlock()
 		r := m.awRun(ctx, owner, m.reap, grace)
+		// A re-check's refusal stops the run: no delete after it; and a run
+		// that had deleted something is suspended, not released (lagotto#351
+		// ninth review).
+		if r.Result != nil {
+			refusedAt, deleted := -1, 0
+			for i, act := range r.Result.Actions {
+				if refusedAt < 0 && errors.Is(act.Err, errAccountWideBlocked) {
+					refusedAt = i
+				}
+				if act.Outcome == fp.OutcomeDeleted {
+					deleted++
+					if refusedAt >= 0 && i > refusedAt {
+						m.violate("%s deleted %s after a re-check refused", owner, act.Name)
+					}
+				}
+			}
+			if refusedAt >= 0 && deleted > 0 && r.Outcome != AccountWideHeld && r.Outcome != AccountWideLeaseLost {
+				m.violate("%s was refused after %d delete(s) but ended %s, not suspended", owner, deleted, r.Outcome)
+			}
+		}
 		a, _ := ctx.Value(actorKey{}).(*actor)
 		m.mu.Lock()
 		m.failedRuns[owner] = r.Outcome == AccountWideHeld && a != nil && a.injected
 		m.mu.Unlock()
 		if r.Outcome == AccountWideHeld && a != nil && !a.injected {
-			// Held is for failures: a creator that came along gets the
-			// lease back at once, or its own mark waits for nothing.
-			m.violate("%s ended leaving the global lease held without a failure: %s", owner, accountWideWhyModel(r))
+			// Held without a failure is only a run a creator stopped after
+			// it had deleted something: suspended, with no lease, so the
+			// creator's own mark waits for nothing.
+			g, _ := m.item(lifecycle.ScopeGlobal)
+			if !strings.HasPrefix(r.Why, "a creator arrived mid-run") || g.Lease != nil {
+				m.violate("%s ended leaving the global lease held without a failure: %s (lease %+v)", owner, accountWideWhyModel(r), g.Lease)
+			}
 		}
 	}}
 }

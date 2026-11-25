@@ -128,27 +128,30 @@ func TestEnsurePolicyPropagatesErrors(t *testing.T) {
 	}
 }
 
-// TestDeletePolicyDetachesThenDeletes: IAM refuses DeletePolicy while the
-// policy is attached or has non-default versions (the fake enforces both), so
-// the order is every detach, then every non-default version, then the policy.
-func TestDeletePolicyDetachesThenDeletes(t *testing.T) {
+// TestDeletePolicyRefusesWhileAttached (lagotto#351): a policy attached to
+// anything is left in place, untouched, and says to what; never detached.
+// Unattached, its non-default versions go, then the policy (IAM refuses the
+// other order; the fake enforces it).
+func TestDeletePolicyRefusesWhileAttached(t *testing.T) {
 	f := withPolicy(3, doc(t))
 	f.users, f.groups, f.roles = []string{"alice"}, []string{"researchers"}, []string{"ci"}
 	res, err := DeletePolicy(context.Background(), f, testAccount)
+	if !errors.Is(err, ErrAttached) || res.Deleted || strings.Join(res.Attached, ",") != "user/alice,group/researchers,role/ci" || len(f.calls) != 0 {
+		t.Errorf("attached: %+v %v calls %v", res, err, f.calls)
+	}
+	if !f.exists {
+		t.Error("the policy was deleted")
+	}
+	f.users, f.groups, f.roles = nil, nil, nil
+	res, err = DeletePolicy(context.Background(), f, testAccount)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "DetachUserPolicy alice,DetachGroupPolicy researchers,DetachRolePolicy ci," +
-		"DeletePolicyVersion v1,DeletePolicyVersion v2,DeletePolicy"
-	if got := strings.Join(f.calls, ","); got != want {
+	if got, want := strings.Join(f.calls, ","), "DeletePolicyVersion v1,DeletePolicyVersion v2,DeletePolicy"; got != want {
 		t.Errorf("calls:\n got %s\nwant %s", got, want)
 	}
-	if !res.Deleted || strings.Join(res.Detached, ",") != "user/alice,group/researchers,role/ci" ||
-		strings.Join(res.DeletedVersions, ",") != "v1,v2" {
+	if !res.Deleted || strings.Join(res.DeletedVersions, ",") != "v1,v2" || f.exists {
 		t.Errorf("result = %+v", res)
-	}
-	if f.exists {
-		t.Error("the policy still exists")
 	}
 }
 

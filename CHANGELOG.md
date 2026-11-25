@@ -128,6 +128,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and it then releases or suspends the lease it holds and ends its marks,
   each with a fresh context; a second signal exits at once. Every other
   command exits on a signal as before.
+- **`lagotto-cli-user` is never detached** (#340): the account-wide teardown
+  lists what it is attached to right before the delete and refuses if
+  anything is, so a policy attached since the footprint was read is left.
+- **The account-wide teardown stops at a re-check that finds something in
+  use**, and a run that had deleted something then suspends its lease (the
+  next run finishes it) instead of releasing it. A run that left any of
+  lagotto's resources (refused, skipped, failed) is reported incomplete, on
+  both the fenced and the unfenced path, and keeps the global item.
+- **A profile setup made for an authorized role is deleted before the poller
+  role**, whose policy is how it is found, and is otherwise found by setup's
+  `lagotto:managed=instance-profile` tag, so a failed delete never leaks it.
+- A `[y/N]` prompt in deploy or watch ends on the first Ctrl-C.
 - Outside the aws partition, `teardown --iam-roles` also refuses while any
   region is in use (an active watch, a scheduled launch), as the fenced path
   does. A deploy whose pending teardown jobs cannot be deleted afterwards

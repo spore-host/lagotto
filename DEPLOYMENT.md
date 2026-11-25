@@ -442,8 +442,9 @@ aws iam attach-group-policy --group-name <group> \
 - `lagotto doctor`'s `caller-permissions` check simulates your identity against
   the policy and lists what you lack (a warning; "unknown" if you may not call
   `iam:SimulatePrincipalPolicy`).
-- `lagotto teardown --iam-roles` deletes it, detaching it from every user, group
-  and role first.
+- `lagotto teardown --iam-roles` deletes it once nothing is attached to it: it
+  lists what the policy is attached to right before the delete, refuses if
+  anything is, and never detaches it from anyone.
 
 ## Default subnets
 
@@ -778,10 +779,17 @@ teardown --plan --mode reap` (lagotto#346). All three run one code path
    partway) needs nothing account-wide; `lagotto teardown --plan` removes it. A
    function left there is a poller, and blocks; one lagotto does not remove
    (untagged, or permanent) is named as such.
-5. **The deletes**, in dependency order (a profile before its role).
-   `lagotto-cli-user` is deleted only while nothing is attached to it (owner
-   decision); attached, it stays, and does not keep the global item. What a
-   run keeps it reports, with why.
+5. **The deletes**, in dependency order (a profile before its role; a profile
+   setup made for an authorized role before the poller role, whose policy is
+   how it is found, and which is otherwise found by setup's
+   `lagotto:managed=instance-profile` tag). `lagotto-cli-user` is deleted only
+   while nothing is attached to it (owner decision), as listed right before
+   the delete, never detaching it; attached, it stays, and does not keep the
+   global item. What a run keeps it reports, with why. A re-check that finds
+   something in use stops the run: nothing more is re-checked or deleted, and
+   a run that had deleted something suspends its lease (the next run finishes
+   it). A run that left anything of lagotto's (a delete failed, refused
+   because it changed, or skipped behind one that was left) is not complete.
 6. **The end.** It finishes the global lease, which deletes the global item,
    and closes us-east-1's table if no tool's item is left in it. **A run that
    has exited never makes a creator wait.** One that fails before deleting

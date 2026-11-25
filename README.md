@@ -629,7 +629,8 @@ s3:// spawn configs are readable only from buckets named with
 `lagotto setup --config-bucket <bucket>` (kept on later runs;
 `--revoke-config-bucket` removes one). `lagotto doctor` simulates your identity
 against the policy (`iam:SimulatePrincipalPolicy`) and lists what you lack.
-`lagotto teardown --iam-roles` detaches the policy from everyone and deletes it.
+`lagotto teardown --iam-roles` deletes the policy once nothing is attached to it
+(it checks right before the delete, and never detaches it from anyone).
 Without the Scheduler permissions a watch is refused rather than stored for a
 poller that may not run (lagotto#231); `lagotto doctor` reports a schedule left
 DISABLED (by a poller older than lagotto#323) while watches are active.

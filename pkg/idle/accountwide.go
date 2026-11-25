@@ -397,13 +397,29 @@ func TearDownAccountWide(ctx context.Context, cfg AccountWideConfig, d AccountWi
 	kept = append(kept, deps...)
 	var be *blockedError
 	if errors.As(err, &be) {
-		// A creator arrived mid-run: the lease goes back at once, so its
-		// global mark does not wait for it.
+		// A creator arrived mid-run: the run stopped at its re-check. With
+		// nothing deleted the lease goes back at once, so the creator's
+		// global mark does not wait for it; with something deleted it is
+		// suspended (incomplete, no lease), so the next run, once the
+		// creator is done, finishes what this one started.
+		if count(res, fp.OutcomeDeleted) > 0 {
+			r := blockedResult("a creator arrived mid-run", be.blockers)
+			r.Outcome, r.Err, r.Plan, r.Result = AccountWideHeld, err, plan, res
+			lease := "suspended"
+			if serr := leaseWrite(gl.Suspend); serr != nil {
+				lease, r.Err = "left held (the suspend failed: it goes stale in 20 min)", errors.Join(r.Err, serr)
+			}
+			cfg.Logf("account-wide %s lease=%s reason=%q", cfg.label(), lease, "a creator arrived after a delete; the next run resumes it")
+			return log(r)
+		}
 		r := blockedResult("the account-wide resources are needed again", be.blockers)
 		r.Plan, r.Result = plan, res
 		return giveBack(r)
 	}
-	if err != nil || count(res, fp.OutcomeFailed)+count(res, fp.OutcomeStopped)+count(res, fp.OutcomeNotRun) > 0 {
+	// Anything of lagotto's left (a delete that failed, stopped or was not
+	// run; one refused because it changed since the plan; one skipped
+	// because what depends on it is left) is incomplete.
+	if err != nil || incomplete(res) {
 		if err == nil {
 			err = errors.New("a delete did not complete")
 		}
@@ -757,6 +773,7 @@ func accountWidePlan(ctx context.Context, cfg AccountWideConfig, d AccountWideDe
 		cfg.Logf("account-wide %s outcome=kept type=%s name=%q reason=%q", cfg.label(), k.Resource.Type, k.Resource.Name, k.Reason)
 	}
 	var deleter fp.Deleter = inventory.NewDeleter(live, d.Deleters)
+	var refused *blockedError
 	mode := fp.ModeReport
 	if gl != nil {
 		mode = fp.ModeReap
@@ -764,14 +781,24 @@ func accountWidePlan(ctx context.Context, cfg AccountWideConfig, d AccountWideDe
 		for i, r := range facts.Regions {
 			names[i] = r.Region
 		}
-		deleter = fencedAccountDeleter{Deleter: deleter, recheck: func(ctx context.Context) error {
-			if b := itemBlockers(d.Lifecycle, regionChecks(ctx, cfg, d, names, true)); len(b) > 0 {
-				return &blockedError{blockers: b}
+		// A re-check's refusal stops the run (no later step is re-checked
+		// or deleted): it cancels the context Execute runs with.
+		var stop context.CancelFunc
+		ctx, stop = context.WithCancel(ctx)
+		defer stop()
+		deleter = fencedAccountDeleter{Deleter: deleter, recheck: func(rctx context.Context) error {
+			if b := itemBlockers(d.Lifecycle, regionChecks(rctx, cfg, d, names, true)); len(b) > 0 {
+				refused = &blockedError{blockers: b}
+				stop()
+				return refused
 			}
 			return nil
 		}}
 	}
 	res, err := execute(ctx, plan, mode, deleter, gl)
+	if refused != nil {
+		err = errors.Join(refused, err) // the refusal, not the cancellation it caused
+	}
 	if res == nil {
 		return plan, nil, kept, err
 	}
@@ -792,6 +819,16 @@ func accountWidePlan(ctx context.Context, cfg AccountWideConfig, d AccountWideDe
 // for a plan it cannot run at all (a nil plan or deleter, reap with no
 // lease). A seam for tests.
 var execute = fp.Execute
+
+// incomplete reports whether r left any of the plan's resources: failed,
+// stopped, not run, refused (changed since the plan) or skipped (something
+// that depends on it was left).
+func incomplete(r *fp.Result) bool {
+	return count(r, fp.OutcomeFailed)+count(r, fp.OutcomeStopped)+count(r, fp.OutcomeNotRun)+count(r, fp.OutcomeRefused)+count(r, fp.OutcomeSkipped) > 0
+}
+
+// Incomplete is incomplete, for the unfenced path (cmd).
+func Incomplete(r *fp.Result) bool { return incomplete(r) }
 
 // count is r.Count(o), and 0 for a nil r.
 func count(r *fp.Result, o fp.Outcome) int {

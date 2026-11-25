@@ -237,6 +237,21 @@ func confirmCancel(prompt string) bool {
 // readYes returns true only when r yields an explicit yes. A read error or EOF
 // (e.g. a non-interactive/piped stdin) reads as "no", so a piped invocation
 // without --yes aborts rather than cancelling silently.
+//
+// readYesCtx is readYes that also reads as "no" once ctx is done: a command
+// under commandContext (whose signal handler would otherwise keep Ctrl-C
+// from ending a prompt) aborts on the first Ctrl-C.
+func readYesCtx(ctx context.Context, r io.Reader) bool {
+	answer := make(chan bool, 1)
+	go func() { answer <- readYes(r) }()
+	select {
+	case yes := <-answer:
+		return yes
+	case <-ctx.Done():
+		return false
+	}
+}
+
 func readYes(r io.Reader) bool {
 	line, err := bufio.NewReader(r).ReadString('\n')
 	if err != nil && line == "" {

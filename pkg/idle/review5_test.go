@@ -153,7 +153,7 @@ func TestReview5SetupStopsADelete(t *testing.T) {
 		}
 	}
 	r := w.run(true, 0)
-	if r.Outcome != AccountWideBlocked || len(w.ev.list()) != 1 {
+	if r.Outcome != AccountWideHeld || len(w.ev.list()) != 1 {
 		t.Fatalf("%+v %v\n%s", r, w.ev.list(), w.log())
 	}
 	if g, _ := w.global(); g.Lease != nil {

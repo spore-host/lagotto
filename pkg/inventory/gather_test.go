@@ -100,6 +100,9 @@ func (a *fakeAccountSource) InstanceProfile(_ context.Context, name string) (*Pr
 	}
 	return nil, nil
 }
+func (a *fakeAccountSource) TaggedInstanceProfiles(context.Context) ([]Profile, error) {
+	return nil, a.s.errs["global TaggedInstanceProfiles"]
+}
 func (a *fakeAccountSource) AuthorizedRoles(context.Context) ([]string, error) {
 	return a.s.authorized, nil
 }

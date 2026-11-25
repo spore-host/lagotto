@@ -88,7 +88,7 @@ func TestReview8CommitFailureResumes(t *testing.T) {
 func TestReview8WhyInUseUntimedMark(t *testing.T) {
 	w := newAWWorld(t)
 	c := w.client("reader")
-	it := lifecycle.Item{State: lifecycle.StateActive, StampState: lifecycle.StateActive, LastActivityAt: t0,
+	it := lifecycle.Item{State: lifecycle.StateActive, StampState: lifecycle.StateActive, ActiveAt: t0,
 		Marks: []lifecycle.MarkInfo{{Token: "no time"}}}
 	if why := WhyInUse(c, it); !strings.HasPrefix(why, "a creator marked it") {
 		t.Errorf("%q", why)

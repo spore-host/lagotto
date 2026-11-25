@@ -86,6 +86,7 @@ type iamReader interface {
 	runtimeiam.IAMAPI
 	ListInstanceProfilesForRole(ctx context.Context, in *iam.ListInstanceProfilesForRoleInput, optFns ...func(*iam.Options)) (*iam.ListInstanceProfilesForRoleOutput, error)
 	GetInstanceProfile(ctx context.Context, in *iam.GetInstanceProfileInput, optFns ...func(*iam.Options)) (*iam.GetInstanceProfileOutput, error)
+	ListInstanceProfiles(ctx context.Context, in *iam.ListInstanceProfilesInput, optFns ...func(*iam.Options)) (*iam.ListInstanceProfilesOutput, error)
 	GetPolicy(ctx context.Context, in *iam.GetPolicyInput, optFns ...func(*iam.Options)) (*iam.GetPolicyOutput, error)
 }
 
@@ -555,6 +556,8 @@ func (a pollerAWSAccount) InstanceProfile(ctx context.Context, name string) (*Pr
 
 func (pollerAWSAccount) AuthorizedRoles(context.Context) ([]string, error) { return nil, nil }
 
+func (pollerAWSAccount) TaggedInstanceProfiles(context.Context) ([]Profile, error) { return nil, nil }
+
 func (pollerAWSAccount) CLIPolicy(context.Context) (*Item, int32, error) { return nil, 0, nil }
 
 func (a *awsAccount) Role(ctx context.Context, name string) (*Item, error) {
@@ -622,6 +625,34 @@ func readInstanceProfile(ctx context.Context, client iamReader, name string) (*P
 		p.Roles = append(p.Roles, aws.ToString(r.RoleName))
 	}
 	return p, nil
+}
+
+func (a *awsAccount) TaggedInstanceProfiles(ctx context.Context) ([]Profile, error) {
+	var names []string
+	pages := 0
+	for p := iam.NewListInstanceProfilesPaginator(a.iam, &iam.ListInstanceProfilesInput{}); p.HasMorePages() && pages < maxPages; pages++ {
+		page, err := p.NextPage(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, ip := range page.InstanceProfiles {
+			if n := aws.ToString(ip.InstanceProfileName); n != runtimeiam.InstanceRoleName {
+				names = append(names, n)
+			}
+		}
+	}
+	var out []Profile
+	for _, n := range names {
+		// The list does not carry tags; GetInstanceProfile does.
+		p, err := readInstanceProfile(ctx, a.iam, n)
+		if err != nil {
+			return out, err
+		}
+		if p != nil && p.Tags[runtimeiam.ManagedProfileTagKey] == runtimeiam.ManagedProfileTagValue {
+			out = append(out, *p)
+		}
+	}
+	return out, nil
 }
 
 func (a *awsAccount) AuthorizedRoles(ctx context.Context) ([]string, error) {

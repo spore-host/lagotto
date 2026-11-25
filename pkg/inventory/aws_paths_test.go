@@ -418,6 +418,13 @@ func (a accountIAM) ListInstanceProfilesForRole(ctx context.Context, in *iam.Lis
 	return a.fakeIAM.ListInstanceProfilesForRole(ctx, in, o...)
 }
 
+func (a accountIAM) ListInstanceProfiles(ctx context.Context, in *iam.ListInstanceProfilesInput, o ...func(*iam.Options)) (*iam.ListInstanceProfilesOutput, error) {
+	if a.failOn == "ListInstanceProfiles" {
+		return nil, errDenied
+	}
+	return a.fakeIAM.ListInstanceProfiles(ctx, in, o...)
+}
+
 func (a accountIAM) GetInstanceProfile(ctx context.Context, in *iam.GetInstanceProfileInput, o ...func(*iam.Options)) (*iam.GetInstanceProfileOutput, error) {
 	if a.failOn == "GetInstanceProfile" {
 		return nil, errDenied

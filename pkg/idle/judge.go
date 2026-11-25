@@ -36,7 +36,7 @@ func WhyInUse(lc *lifecycle.Client, it lifecycle.Item) string {
 			}
 		}
 		if at.IsZero() {
-			return "a creator marked it (a mark with no time, aged from the item's last activity)"
+			return "a creator marked it (a mark with no time, aged from the item's activation)"
 		}
 		return "a creator marked it at " + at.UTC().Format(time.RFC3339)
 	case lc.InUse(lifecycle.Item{PulseAt: it.PulseAt}, CreatorMarkBound):

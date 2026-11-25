@@ -318,7 +318,7 @@ func TestAccountWideExcluding(t *testing.T) {
 	}
 }
 
-// TestAccountWideReleaseRetried: a release that fails once (a throttle) is
+// TestAccountWideReleaseRetried: a give-back (here a suspend, after a delete) that fails once (a throttle) is
 // tried again, so a creator after the run is not kept waiting (the model
 // check found the single failure).
 func TestAccountWideReleaseRetried(t *testing.T) {
@@ -331,13 +331,13 @@ func TestAccountWideReleaseRetried(t *testing.T) {
 	failed := false
 	w.tables[region].Err = func(op string, in any) error {
 		if u, ok := in.(*dynamodb.UpdateItemInput); ok && op == "UpdateItem" && !failed &&
-			strings.Contains(aws.ToString(u.UpdateExpression), "SET #state = :active, #lastActivityAt = :now") {
+			strings.Contains(aws.ToString(u.UpdateExpression), "#incomplete = :true") {
 			failed = true
 			return &smithy.GenericAPIError{Code: "ThrottlingException", Message: "slow down"}
 		}
 		return nil
 	}
-	if r := w.run(true, 0); r.Outcome != AccountWideBlocked || !failed {
+	if r := w.run(true, 0); r.Outcome != AccountWideHeld || !failed {
 		t.Fatalf("%+v (failed %t)", r, failed)
 	}
 	if g, _ := w.global(); g.Lease != nil {

@@ -228,7 +228,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		}
 		exp := cliExposure(&watcher.Watch{Service: service, Action: action, InstanceTypePattern: pattern,
 			Regions: watchRegions, Spot: watchSpot, MaxPrice: watchMaxPrice, DesiredCount: watchMaintain})
-		if err := confirmUntilLanded(os.Stdin, os.Stderr, stdinIsTerminal(), watchYes, action, pattern, ul, exp); err != nil {
+		if err := confirmUntilLanded(ctx, os.Stdin, os.Stderr, stdinIsTerminal(), watchYes, action, pattern, ul, exp); err != nil {
 			return err
 		}
 	}

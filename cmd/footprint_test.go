@@ -144,6 +144,8 @@ type recordingDeleters struct {
 	calls []string
 	// failTable fails DeleteTable for this table.
 	failTable string
+	// failPolicy fails DeletePolicy (attached since the plan, say).
+	failPolicy error
 }
 
 func (r *recordingDeleters) rec(s string) {
@@ -200,6 +202,9 @@ func (d recAccount) DeleteInstanceProfile(_ context.Context, n string) (bool, er
 	return true, nil
 }
 func (d recAccount) DeletePolicy(context.Context) (cliiam.Deletion, error) {
+	if d.r.failPolicy != nil {
+		return cliiam.Deletion{}, d.r.failPolicy
+	}
 	d.r.rec("global policy")
 	return cliiam.Deletion{Deleted: true}, nil
 }
