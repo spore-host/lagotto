@@ -25,8 +25,10 @@ type Source struct {
 	account inventory.Account
 	// authorized are the instance roles the poller policy authorizes.
 	authorized []string
-	errs       map[string]error // "<region> <Method>" or "global <Method>"
-	reads      map[string]int   // "<region> <Method>" -> calls
+	// tagged are the profiles TaggedInstanceProfiles lists.
+	tagged []inventory.Profile
+	errs   map[string]error // "<region> <Method>" or "global <Method>"
+	reads  map[string]int   // "<region> <Method>" -> calls
 }
 
 // New returns a Source with these regions enabled and holding nothing.
@@ -236,6 +238,22 @@ func (a *accountSource) AuthorizedRoles(context.Context) ([]string, error) {
 	err := a.s.read("global AuthorizedRoles")
 	_, authorized := a.acct()
 	return authorized, err
+}
+
+func (a *accountSource) TaggedInstanceProfiles(context.Context) ([]inventory.Profile, error) {
+	err := a.s.read("global TaggedInstanceProfiles")
+	a.s.mu.Lock()
+	defer a.s.mu.Unlock()
+	return a.s.tagged, err
+}
+
+// SetTaggedProfiles sets the instance profiles TaggedInstanceProfiles
+// lists (setup's, found by its tag).
+func (s *Source) SetTaggedProfiles(p ...inventory.Profile) *Source {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tagged = p
+	return s
 }
 
 func (a *accountSource) CLIPolicy(context.Context) (*inventory.Item, int32, error) {

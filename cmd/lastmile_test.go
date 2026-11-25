@@ -28,6 +28,7 @@ import (
 
 	"github.com/spore-host/lagotto/pkg/awscfg"
 	"github.com/spore-host/lagotto/pkg/inventory"
+	"github.com/spore-host/lagotto/pkg/inventory/inventorytest"
 	"github.com/spore-host/lagotto/pkg/runtimeiam"
 )
 
@@ -606,8 +607,9 @@ func TestLastMileOptionsWiring(t *testing.T) {
 		t.Errorf("Budget %s, StatePath %q, Logf set %v", o.Budget, o.StatePath, o.Logf != nil)
 	}
 
-	role := runtimeiam.SchedulerInvokeRoleARN(lmAccount)
-	want := map[string]string{role: inventory.Global}
+	// Only the regional groups: nothing account-wide is lastmile's to judge;
+	// the account-wide teardown is the one actor for those (lagotto#340).
+	want := map[string]string{}
 	for _, r := range w.regions {
 		want[inventory.ScheduleGroupARN(r, lmAccount, runtimeiam.TeardownScheduleGroup)] = r
 	}
@@ -617,8 +619,8 @@ func TestLastMileOptionsWiring(t *testing.T) {
 		if ok, why := fp.Deletable(r, tags.ToolLagotto, o.Patterns); !ok {
 			t.Errorf("residue %s would be kept by lagotto's own guard: %s", r.ARN, why)
 		}
-		if r.Type == inventory.TypeScheduleGroup && !reflect.DeepEqual(r.DependsOn, []string{role}) {
-			t.Errorf("%s DependsOn %v, want the invoke role, so a live teardown job keeps it", r.ARN, r.DependsOn)
+		if r.Region == inventory.Global {
+			t.Errorf("residue lists the account-wide %s", r.ARN)
 		}
 		if r.Name == lifecycle.TableName {
 			t.Errorf("residue lists %s: the suite's table is lastmile's to report (CloseTableIfEmpty), not lagotto's to delete", r.ARN)
@@ -664,9 +666,10 @@ func TestLastMileReportsStaleLeaseWithoutWriting(t *testing.T) {
 	}
 }
 
-// TestLastMileResidueAndEmptyTable: with no lagotto item left anywhere, the
-// shared invoke role is reported removable, from lagotto's own footprint, and
-// an empty lifecycle table is reported to be closed.
+// TestLastMileResidueAndEmptyTable: with no lagotto item left anywhere, an
+// empty lifecycle table is reported to be closed; the shared invoke role is
+// not lastmile's residue but the account-wide teardown's, which reports it
+// (the global grace not started), and nothing is written.
 func TestLastMileResidueAndEmptyTable(t *testing.T) {
 	w := newLMWorld(t)
 	w.facts.Account.Roles = []inventory.Item{{
@@ -686,16 +689,20 @@ func TestLastMileResidueAndEmptyTable(t *testing.T) {
 	f.SetStatus(lifecycle.TableName, types.TableStatusActive, 0)
 	before := w.writes()
 	probeCmd(t, "lm-probe", "", nil)
-	if _, _, err := execRoot(t, "lm-probe"); err != nil {
+	_, stderr, err := execRoot(t, "lm-probe", "--verbose")
+	if err != nil {
 		t.Fatal(err)
 	}
 	var role, table bool
 	for _, a := range w.result.WouldDo {
-		role = role || (a.Kind == lastmile.KindDelete && a.Target == runtimeiam.SchedulerInvokeRoleARN(lmAccount))
+		role = role || a.Target == runtimeiam.SchedulerInvokeRoleARN(lmAccount)
 		table = table || (a.Kind == lastmile.KindCloseTable && a.Region == lmWest)
 	}
-	if !role || !table {
-		t.Errorf("would delete the invoke role: %v, close the empty table: %v; got %+v (warnings %v)", role, table, w.result.WouldDo, w.result.Warnings)
+	if role || !table {
+		t.Errorf("lastmile would act on the invoke role: %v, close the empty table: %v; got %+v (warnings %v)", role, table, w.result.WouldDo, w.result.Warnings)
+	}
+	if !strings.Contains(stderr, `debug: lastmile: account-wide REPORT outcome=waiting why="the global scope's grace has not started`) {
+		t.Errorf("no account-wide report:\n%s", stderr)
 	}
 	if w.writes() != before {
 		t.Errorf("%d write(s); report mode writes none", w.writes()-before)
@@ -897,11 +904,17 @@ func TestLastMileMaybeDue(t *testing.T) {
 }
 
 // TestLastMileControlRegion: the global scope is read in the partition's
-// home region, whatever region the command used.
+// home region, whatever region the command used; outside the aws partition
+// there is none (lagotto#340, lagotto#347).
 func TestLastMileControlRegion(t *testing.T) {
-	for in, want := range map[string]string{"": "us-east-1", "eu-west-1": "us-east-1", "us-gov-east-1": "us-gov-west-1", "cn-northwest-1": "cn-north-1"} {
-		if got := lastMileControlRegion(in); got != want {
-			t.Errorf("lastMileControlRegion(%q) = %q, want %q", in, got, want)
+	for in, want := range map[string]string{"": "us-east-1", "eu-west-1": "us-east-1", "ap-south-1": "us-east-1"} {
+		if got, err := lastMileControlRegion(in); got != want || err != nil {
+			t.Errorf("lastMileControlRegion(%q) = %q, %v, want %q", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"us-iso-east-1", "eu-isoe-west-1", "us-gov-east-1", "cn-northwest-1"} {
+		if got, err := lastMileControlRegion(in); got != "" || err == nil {
+			t.Errorf("%s: %q, %v", in, got, err)
 		}
 	}
 }
@@ -1212,5 +1225,113 @@ func TestLastMileDefaultSeams(t *testing.T) {
 	}
 	if ok, _ := lmDefaultPollerExists(ctx, cfg, lmAccount, lmWest); ok {
 		t.Error("a poller reported present through a refusing client")
+	}
+}
+
+// ---- the account-wide teardown (lagotto#340) --------------------------------
+
+// lmAccountWide gives the world lagotto's account-wide IAM and nothing else.
+func lmAccountWide(w *lmWorld) {
+	w.facts.Account = inventory.Account{
+		Roles: []inventory.Item{
+			{ARN: runtimeiam.RoleARN(lmAccount), Name: runtimeiam.RoleName, Tags: map[string]string{tags.ManagedBy: string(tags.ToolLagotto)}},
+			{ARN: runtimeiam.SchedulerInvokeRoleARN(lmAccount), Name: runtimeiam.SchedulerInvokeRoleName, Tags: map[string]string{tags.ManagedBy: string(tags.ToolLagotto)}},
+		},
+	}
+}
+
+// idleGlobal records the global scope idle since d ago, as a reap-mode run
+// of the account-wide teardown would have.
+func (w *lmWorld) idleGlobal(d time.Duration) {
+	w.t.Helper()
+	w.advance(-d)
+	if _, _, err := w.participant("earlier run").Observe(context.Background(), tags.ToolLagotto, lifecycle.ScopeGlobal, false); err != nil {
+		w.t.Fatal(err)
+	}
+	w.advance(d)
+}
+
+// TestLastMileAccountWideReport: past the global grace, with no poller, job
+// or item anywhere, the last mile reports what the account-wide teardown
+// would remove, and writes nothing; with a poller left, it reports the
+// blocker.
+func TestLastMileAccountWideReport(t *testing.T) {
+	w := newLMWorld(t)
+	lmAccountWide(w)
+	w.idleGlobal(25 * time.Hour)
+	before := w.writes()
+	probeCmd(t, "lm-probe", "", nil)
+	_, stderr, err := execRoot(t, "lm-probe", "--verbose")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`debug: lastmile: account-wide REPORT outcome=would-delete type=AWS::IAM::Role name="lagotto-capacity-poller-role"`,
+		`debug: lastmile: account-wide REPORT outcome=would-remove why="nothing needs them"`,
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr lacks %q:\n%s", want, stderr)
+		}
+	}
+	if w.writes() != before {
+		t.Errorf("%d write(s); report mode writes none", w.writes()-before)
+	}
+
+	w = newLMWorld(t)
+	lmAccountWide(w)
+	w.facts.Regions[1].Function = inventorytest.Deployed("us-west-2", "123456789012").Function
+	w.facts.Regions[1].Schedules = inventorytest.Deployed("us-west-2", "123456789012").Schedules
+	probeCmd(t, "lm-probe", "", nil)
+	if _, stderr, err = execRoot(t, "lm-probe", "--verbose"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr, `account-wide REPORT outcome=blocked`) || !strings.Contains(stderr, "us-west-2: a poller is deployed") {
+		t.Errorf("no blocker reported:\n%s", stderr)
+	}
+	// A function lagotto does not remove (untagged: an older lagotto's, or
+	// not lagotto's) is named as such: no poller will ever remove it.
+	w = newLMWorld(t)
+	lmAccountWide(w)
+	w.facts.Regions[1].Function = &inventory.Item{Name: "lagotto-capacity-poller"}
+	probeCmd(t, "lm-probe", "", nil)
+	if _, stderr, err = execRoot(t, "lm-probe", "--verbose"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr, "us-west-2: a function named lagotto-capacity-poller is there that lagotto does not remove") {
+		t.Errorf("an unremovable function not named:\n%s", stderr)
+	}
+}
+
+// TestLastMileAccountWideReapIsGated: SPORE_LASTMILE=reap alone still only
+// reports (this release ships report-only); with the gate open (C8, libs#79)
+// the same run removes the account-wide resources under the global lease.
+func TestLastMileAccountWideReapIsGated(t *testing.T) {
+	for _, gate := range []bool{false, true} {
+		t.Run(map[bool]string{false: "gate closed", true: "gate open"}[gate], func(t *testing.T) {
+			w := newLMWorld(t)
+			lmAccountWide(w)
+			w.idleGlobal(25 * time.Hour)
+			t.Setenv(lastmile.EnvVar, "reap")
+			prev := lastMileAccountWideReap
+			lastMileAccountWideReap = gate
+			t.Cleanup(func() { lastMileAccountWideReap = prev })
+			_, rec, _ := stubPlanTeardown(t, func() inventory.Facts { return w.facts })
+			installFakeLeases(t, w.fake(lmEast))
+			before := w.writes()
+			probeCmd(t, "lm-probe", "", nil)
+			_, stderr, err := execRoot(t, "lm-probe", "--verbose")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gate {
+				if len(rec.calls) != 2 || !strings.Contains(stderr, "account-wide REAP outcome=removed") {
+					t.Errorf("deleted %v\n%s", rec.calls, stderr)
+				}
+				return
+			}
+			if len(rec.calls) != 0 || w.writes() != before || !strings.Contains(stderr, "account-wide REPORT outcome=would-remove") {
+				t.Errorf("gate closed: deleted %v, %d writes\n%s", rec.calls, w.writes()-before, stderr)
+			}
+		})
 	}
 }

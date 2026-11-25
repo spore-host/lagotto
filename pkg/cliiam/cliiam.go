@@ -301,6 +301,12 @@ func statements(accountID string, configBuckets []string) []statement {
 		// scheduler:ListSchedules, below (no resource-level permissions).
 		{Sid: "LaunchSchedules", Action: []string{"scheduler:CreateSchedule", "scheduler:DeleteSchedule"},
 			Resource: schedgroupARNs(regional, launchSchedulePrefix+"*")},
+		// deploy, watch and launch delete a region's pending one-shot teardown
+		// jobs before they create or change anything there (lagotto#340):
+		// a job due after a redeploy would delete the new poller. Delete
+		// only, in lagotto's teardown group only.
+		{Sid: "CancelTeardownJobs", Action: []string{"scheduler:DeleteSchedule"},
+			Resource: regional("scheduler", "schedule/"+runtimeiam.TeardownScheduleGroup+"/*")},
 		// Creating or updating a schedule passes the role it assumes. Only
 		// lagotto's invoke role, and only to EventBridge Scheduler.
 		{Sid: "PassSchedulerInvokeRole", Action: []string{"iam:PassRole"},

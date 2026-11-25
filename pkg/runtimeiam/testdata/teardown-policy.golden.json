@@ -18,15 +18,6 @@
       ]
     },
     {
-      "Effect": "Allow",
-      "Action": [
-        "iam:DeleteRolePolicy",
-        "iam:DetachRolePolicy",
-        "iam:DeleteRole"
-      ],
-      "Resource": "arn:aws:iam::123456789012:role/lagotto-capacity-poller-role"
-    },
-    {
       "Effect": "Deny",
       "Action": [
         "*"

@@ -29,45 +29,11 @@ func TestGatherActivityIsTheFootprintsRule(t *testing.T) {
 	}
 }
 
-func TestLastRegion(t *testing.T) {
+// TestRegionFacts: a region the footprint read, and one it did not.
+func TestRegionFacts(t *testing.T) {
 	f, err := Gather(context.Background(), realAccount(), acct, Scope{AllRegions: true}, Options{})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if last, why := LastRegion(f, "us-west-2"); last || !strings.Contains(why, "ap-southeast-2, eu-west-1, us-east-1") {
-		t.Errorf("four regions with tables: %v %q", last, why)
-	}
-
-	one := func() *fakeSource {
-		s := realAccount()
-		s.regions = map[string]Region{"us-west-2": deployed("us-west-2")}
-		return s
-	}
-	f, _ = Gather(context.Background(), one(), acct, Scope{AllRegions: true}, Options{})
-	if last, why := LastRegion(f, "us-west-2"); !last {
-		t.Errorf("the only region: %q", why)
-	}
-	// Fail closed: an unreadable other region, an incomplete account, or
-	// facts of fewer than every region.
-	s := one()
-	s.errs = map[string]error{"eu-west-1 Tables": errors.New("AccessDenied")}
-	f, _ = Gather(context.Background(), s, acct, Scope{AllRegions: true}, Options{})
-	if last, why := LastRegion(f, "us-west-2"); last || !strings.Contains(why, "eu-west-1") {
-		t.Errorf("an unreadable region: %v %q", last, why)
-	}
-	s = one()
-	s.errs = map[string]error{"global Role " + "lagotto-instance-role": errors.New("AccessDenied")}
-	f, _ = Gather(context.Background(), s, acct, Scope{AllRegions: true}, Options{})
-	if last, _ := LastRegion(f, "us-west-2"); last {
-		t.Error("an unreadable account counted as the last region")
-	}
-	f, _ = Gather(context.Background(), one(), acct, Scope{Regions: []string{"us-west-2"}}, Options{})
-	if last, _ := LastRegion(f, "us-west-2"); last {
-		t.Error("a one-region footprint counted as the last region")
-	}
-	f, _ = Gather(context.Background(), one(), acct, Scope{AllRegions: true}, Options{})
-	if last, _ := LastRegion(f, "mars-north-1"); last {
-		t.Error("a region that is not enabled counted as the last")
 	}
 	if f.RegionFacts("us-west-2") == nil || f.RegionFacts("mars-north-1") != nil {
 		t.Error("RegionFacts")

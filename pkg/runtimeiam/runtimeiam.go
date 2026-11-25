@@ -780,7 +780,7 @@ func PolicyDocumentFor(accountID string, auth Authorizations) (string, error) {
 		// two schedule groups (lagotto, lagotto-teardown) and their tags, and
 		// the legacy CloudFormation stack (a region a stack still owns is
 		// reported, never torn down), and the poller's own role, read (never
-		// written) for the last region's plan, whose one-shot jobs delete it.
+		// written) for the footprint: the CLI removes it (lagotto#340).
 		// One statement to stay well inside the role's inline-policy limit:
 		// each action belongs to one service, so it matches only the resource
 		// of that service. GetFunction returns the function's tags only to a
@@ -803,22 +803,19 @@ func PolicyDocumentFor(accountID string, auth Authorizations) (string, error) {
 		{Effect: "Allow", Action: []string{"scheduler:DeleteScheduleGroup"},
 			Resource: RegionalARN("scheduler", accountID, "schedule-group/"+schedgroup.Name)},
 		// The one-shot teardown jobs (#326) that remove what the poller cannot
-		// remove from inside itself: its function, its log group and, in the last
-		// region, its role. They run as the Scheduler invoke role (iam:PassRole on
+		// remove from inside itself: its function and its log group. They run as the Scheduler invoke role (iam:PassRole on
 		// it is the statement above, still conditioned on the Scheduler service)
 		// with [SchedulerTeardownPolicyDocument]'s grants.
 		{Effect: "Allow", Action: []string{"scheduler:CreateSchedule", "scheduler:DeleteSchedule"},
 			Resource: RegionalARN("scheduler", accountID, "schedule/"+TeardownScheduleGroup+"/*")},
 		{Effect: "Allow", Action: []string{"scheduler:CreateScheduleGroup", "scheduler:TagResource"},
 			Resource: RegionalARN("scheduler", accountID, "schedule-group/"+TeardownScheduleGroup)},
-		// lagotto's own instance role and its profile, read for the footprint
-		// and deleted in the last region. Only those: never the poller's role
-		// (the invoke role's teardown job deletes it) and never the invoke role.
+		// lagotto's own instance role and its profile, read for the footprint,
+		// never written: nothing account-wide is the poller's to delete; the
+		// CLI removes it once no poller is left (lagotto#340).
 		{Effect: "Allow", Action: []string{
 			"iam:GetRole", "iam:ListRolePolicies", "iam:ListAttachedRolePolicies", "iam:ListInstanceProfilesForRole",
 			"iam:GetInstanceProfile", "iam:ListInstanceProfileTags",
-			"iam:DeleteRole", "iam:DeleteRolePolicy", "iam:DetachRolePolicy",
-			"iam:RemoveRoleFromInstanceProfile", "iam:DeleteInstanceProfile",
 		}, Resource: []string{
 			arn("arn:aws:iam::%s:role/%s", accountID, InstanceRoleName),
 			arn("arn:aws:iam::%s:instance-profile/%s", accountID, InstanceRoleName),

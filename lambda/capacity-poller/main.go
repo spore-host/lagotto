@@ -130,7 +130,10 @@ func setup() {
 	schedulerClient = scheduler.NewFromConfig(cfg)
 
 	region := cfg.Region
-	leases, err = idle.NewClient(cfg, "lagotto-poller/"+region, func(o *lifecycle.Options) { o.WaitTimeout = leaseWaitTimeout })
+	// Unique to this container: a concurrent invocation's lease is never
+	// taken for this one's own (lagotto#340).
+	owner := idle.RunOwner(idle.PollerOwner(region))
+	leases, err = idle.NewClient(cfg, owner, func(o *lifecycle.Options) { o.WaitTimeout = leaseWaitTimeout })
 	if err != nil {
 		log.Printf("Warning: idle teardown and the teardown lease are off: %v", err)
 		return
@@ -145,7 +148,7 @@ func setup() {
 		log.Printf("Warning: %s", warn)
 	}
 	opts := inventory.Options{WatchesTable: watchesTable, HistoryTable: historyTable, ScheduledTable: scheduledTable}
-	idleCfg = idle.Config{Region: region, AccountID: acct, Grace: grace, Reap: reapIdle, Options: opts, Logf: log.Printf}
+	idleCfg = idle.Config{Region: region, AccountID: acct, Grace: grace, Reap: reapIdle, Options: opts, Logf: log.Printf, Owner: owner}
 	idleDeps = &idle.Deps{
 		Lifecycle: leases,
 		Source:    inventory.NewPollerAWSSource(cfg, acct),

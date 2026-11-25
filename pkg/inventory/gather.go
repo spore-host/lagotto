@@ -63,6 +63,11 @@ type AccountSource interface {
 	InstanceProfile(ctx context.Context, name string) (*Profile, error)
 	// AuthorizedRoles are the instance roles the poller policy authorizes.
 	AuthorizedRoles(ctx context.Context) ([]string, error)
+	// TaggedInstanceProfiles are the instance profiles setup made and
+	// tagged (lagotto:managed=instance-profile), other than lagotto's own
+	// instance role's: how an authorized role's profile is still found
+	// once the poller role, whose policy names the roles, is gone.
+	TaggedInstanceProfiles(ctx context.Context) ([]Profile, error)
 	// CLIPolicy returns lagotto-cli-user and how many principals it is
 	// attached to, or nil when there is none.
 	CLIPolicy(ctx context.Context) (*Item, int32, error)
@@ -236,6 +241,28 @@ func gatherAccount(ctx context.Context, as AccountSource, warnings []string) (Ac
 	}
 	a.Policy, a.PolicyAttachments, err = as.CLIPolicy(ctx)
 	fail("IAM policy lagotto-cli-user", err)
+	// With the poller role gone, its policy names no authorized role: a
+	// profile setup made for one (left by a teardown that stopped) is found
+	// by setup's tag, while anything else account-wide of lagotto's is left
+	// (after a full teardown, nothing is listed).
+	hasPollerRole := false
+	for _, r := range a.Roles {
+		hasPollerRole = hasPollerRole || r.Name == runtimeiam.RoleName
+	}
+	if !hasPollerRole && (len(a.Roles) > 0 || len(a.InstanceProfiles) > 0 || a.Policy != nil) {
+		tagged, err := as.TaggedInstanceProfiles(ctx)
+		if !fail("the instance profiles setup tagged", err) {
+			known := map[string]bool{}
+			for _, p := range a.AuthorizedProfiles {
+				known[p.Name] = true
+			}
+			for _, p := range tagged {
+				if !known[p.Name] && p.Name != runtimeiam.InstanceRoleName {
+					a.AuthorizedProfiles = append(a.AuthorizedProfiles, p)
+				}
+			}
+		}
+	}
 	return a, incomplete, warnings
 }
 

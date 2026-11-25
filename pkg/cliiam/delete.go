@@ -2,7 +2,9 @@ package cliiam
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
@@ -14,9 +16,6 @@ import (
 type DeleteAPI interface {
 	GetPolicy(ctx context.Context, in *iam.GetPolicyInput, optFns ...func(*iam.Options)) (*iam.GetPolicyOutput, error)
 	ListEntitiesForPolicy(ctx context.Context, in *iam.ListEntitiesForPolicyInput, optFns ...func(*iam.Options)) (*iam.ListEntitiesForPolicyOutput, error)
-	DetachUserPolicy(ctx context.Context, in *iam.DetachUserPolicyInput, optFns ...func(*iam.Options)) (*iam.DetachUserPolicyOutput, error)
-	DetachGroupPolicy(ctx context.Context, in *iam.DetachGroupPolicyInput, optFns ...func(*iam.Options)) (*iam.DetachGroupPolicyOutput, error)
-	DetachRolePolicy(ctx context.Context, in *iam.DetachRolePolicyInput, optFns ...func(*iam.Options)) (*iam.DetachRolePolicyOutput, error)
 	ListPolicyVersions(ctx context.Context, in *iam.ListPolicyVersionsInput, optFns ...func(*iam.Options)) (*iam.ListPolicyVersionsOutput, error)
 	DeletePolicyVersion(ctx context.Context, in *iam.DeletePolicyVersionInput, optFns ...func(*iam.Options)) (*iam.DeletePolicyVersionOutput, error)
 	DeletePolicy(ctx context.Context, in *iam.DeletePolicyInput, optFns ...func(*iam.Options)) (*iam.DeletePolicyOutput, error)
@@ -31,21 +30,25 @@ type Deletion struct {
 	// Unmanaged: a policy of that name exists without lagotto's tag and was
 	// left in place.
 	Unmanaged bool
-	// Detached are the principals it was detached from, as "user/NAME",
-	// "group/NAME" or "role/NAME".
-	Detached []string
+	// Attached are the principals it is attached to, as "user/NAME",
+	// "group/NAME" or "role/NAME", when DeletePolicy refused for them.
+	Attached []string
 	// DeletedVersions are the non-default versions deleted before the policy.
 	DeletedVersions []string
 }
 
-// DeletePolicy is the named deleter for [PolicyName] (#232). IAM refuses
-// DeletePolicy while the policy is attached to anything or has non-default
-// versions, so it detaches it from every user, group and role, deletes each
-// non-default version, then deletes the policy. Idempotent: an absent policy is
-// reported as Absent. A same-named policy without lagotto's tag is left alone.
-//
-// Detaching removes the policy's permissions from everyone it was attached to.
-// That is the point of a teardown, and the caller says so.
+// ErrAttached is DeletePolicy's refusal of a policy that something is
+// attached to (Deletion.Attached says what).
+var ErrAttached = errors.New("cliiam: the policy is attached")
+
+// DeletePolicy is the named deleter for [PolicyName] (#232), only once
+// nothing is attached to it (an owner decision, lagotto#340): it lists what
+// the policy is attached to immediately before the delete, and refuses
+// (ErrAttached) if anything is, so a policy attached since a footprint was
+// read is never taken from anyone. It never detaches. Otherwise it deletes
+// each non-default version, then the policy. Idempotent: an absent policy is
+// reported as Absent. A same-named policy without lagotto's tag is left
+// alone.
 func DeletePolicy(ctx context.Context, client DeleteAPI, accountID string) (Deletion, error) {
 	var d Deletion
 	arn := aws.String(PolicyARN(accountID))
@@ -62,30 +65,24 @@ func DeletePolicy(ctx context.Context, client DeleteAPI, accountID string) (Dele
 		return d, nil
 	}
 
-	// 1. Detach from every principal.
+	// 1. Nothing may be attached to it, now.
 	for pg := iam.NewListEntitiesForPolicyPaginator(client, &iam.ListEntitiesForPolicyInput{PolicyArn: arn}); pg.HasMorePages(); {
 		page, err := pg.NextPage(ctx)
 		if err != nil {
 			return d, fmt.Errorf("cliiam: list what %s is attached to: %w", PolicyName, err)
 		}
 		for _, u := range page.PolicyUsers {
-			if _, err := client.DetachUserPolicy(ctx, &iam.DetachUserPolicyInput{UserName: u.UserName, PolicyArn: arn}); err != nil && !isNoSuchEntity(err) {
-				return d, fmt.Errorf("cliiam: detach %s from user %s: %w", PolicyName, aws.ToString(u.UserName), err)
-			}
-			d.Detached = append(d.Detached, "user/"+aws.ToString(u.UserName))
+			d.Attached = append(d.Attached, "user/"+aws.ToString(u.UserName))
 		}
 		for _, g := range page.PolicyGroups {
-			if _, err := client.DetachGroupPolicy(ctx, &iam.DetachGroupPolicyInput{GroupName: g.GroupName, PolicyArn: arn}); err != nil && !isNoSuchEntity(err) {
-				return d, fmt.Errorf("cliiam: detach %s from group %s: %w", PolicyName, aws.ToString(g.GroupName), err)
-			}
-			d.Detached = append(d.Detached, "group/"+aws.ToString(g.GroupName))
+			d.Attached = append(d.Attached, "group/"+aws.ToString(g.GroupName))
 		}
 		for _, r := range page.PolicyRoles {
-			if _, err := client.DetachRolePolicy(ctx, &iam.DetachRolePolicyInput{RoleName: r.RoleName, PolicyArn: arn}); err != nil && !isNoSuchEntity(err) {
-				return d, fmt.Errorf("cliiam: detach %s from role %s: %w", PolicyName, aws.ToString(r.RoleName), err)
-			}
-			d.Detached = append(d.Detached, "role/"+aws.ToString(r.RoleName))
+			d.Attached = append(d.Attached, "role/"+aws.ToString(r.RoleName))
 		}
+	}
+	if len(d.Attached) > 0 {
+		return d, fmt.Errorf("cliiam: %s left in place: attached to %s: %w", PolicyName, strings.Join(d.Attached, ", "), ErrAttached)
 	}
 
 	// 2. Delete the non-default versions (the default goes with the policy).

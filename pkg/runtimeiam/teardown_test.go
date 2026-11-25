@@ -95,8 +95,6 @@ func TestPollerTeardownGrants(t *testing.T) {
 	lease := table("spore-host-lifecycle")
 	bucket := "arn:aws:s3:::lagotto-lambda-" + tdAccount + "-*"
 	topic := RegionalARN("sns", tdAccount, "lagotto-capacity-alerts")
-	instanceRole := "arn:aws:iam::" + tdAccount + ":role/lagotto-instance-role"
-	instanceProfile := "arn:aws:iam::" + tdAccount + ":instance-profile/lagotto-instance-role"
 
 	want := map[string][]string{
 		"dynamodb:DeleteTable":        append(append([]string{}, tables...), lease),
@@ -119,15 +117,10 @@ func TestPollerTeardownGrants(t *testing.T) {
 			RegionalARN("scheduler", tdAccount, "schedule/lagotto/*"),
 			RegionalARN("scheduler", tdAccount, "schedule/lagotto-teardown/*"),
 		},
-		"scheduler:DeleteScheduleGroup":     {RegionalARN("scheduler", tdAccount, "schedule-group/lagotto")},
-		"scheduler:CreateSchedule":          {RegionalARN("scheduler", tdAccount, "schedule/lagotto-teardown/*")},
-		"scheduler:CreateScheduleGroup":     {RegionalARN("scheduler", tdAccount, "schedule-group/lagotto-teardown")},
-		"scheduler:TagResource":             {RegionalARN("scheduler", tdAccount, "schedule-group/lagotto-teardown")},
-		"iam:DeleteRole":                    {instanceProfile, instanceRole},
-		"iam:DeleteRolePolicy":              {instanceProfile, instanceRole},
-		"iam:DetachRolePolicy":              {instanceProfile, instanceRole},
-		"iam:RemoveRoleFromInstanceProfile": {instanceProfile, instanceRole},
-		"iam:DeleteInstanceProfile":         {instanceProfile, instanceRole},
+		"scheduler:DeleteScheduleGroup": {RegionalARN("scheduler", tdAccount, "schedule-group/lagotto")},
+		"scheduler:CreateSchedule":      {RegionalARN("scheduler", tdAccount, "schedule/lagotto-teardown/*")},
+		"scheduler:CreateScheduleGroup": {RegionalARN("scheduler", tdAccount, "schedule-group/lagotto-teardown")},
+		"scheduler:TagResource":         {RegionalARN("scheduler", tdAccount, "schedule-group/lagotto-teardown")},
 	}
 	for action, resources := range want {
 		if !hasAll(got[action], resources...) {
@@ -139,8 +132,7 @@ func TestPollerTeardownGrants(t *testing.T) {
 	exact := map[string]bool{
 		"dynamodb:DeleteTable": true, "dynamodb:CreateTable": true, "s3:DeleteBucket": true, "s3:DeleteObject": true,
 		"s3:DeleteObjectVersion": true, "sns:DeleteTopic": true, "scheduler:DeleteScheduleGroup": true,
-		"scheduler:CreateScheduleGroup": true, "iam:DeleteRole": true, "iam:DeleteRolePolicy": true,
-		"iam:DetachRolePolicy": true, "iam:RemoveRoleFromInstanceProfile": true, "iam:DeleteInstanceProfile": true,
+		"scheduler:CreateScheduleGroup": true,
 	}
 	for action := range exact {
 		w := append([]string{}, want[action]...)
@@ -159,27 +151,36 @@ func TestPollerTeardownGrants(t *testing.T) {
 	}
 }
 
-// TestPollerCannotDeleteThePollerRoles: neither the poller's own role nor
-// the invoke role is in reach of the poller's IAM deletes (#325). The
-// poller's role is the invoke role's teardown job's to delete.
-func TestPollerCannotDeleteThePollerRoles(t *testing.T) {
+// TestPollerCannotDeleteAnythingAccountWide: no IAM role, profile or policy
+// of lagotto's is in reach of the poller's IAM writes, nor of its teardown
+// jobs' (the invoke role's) (lagotto#340): the CLI removes them.
+func TestPollerCannotDeleteAnythingAccountWide(t *testing.T) {
 	doc, err := PolicyDocument(tdAccount, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	grants := mustGrants(t, doc)
-	for _, role := range []string{RoleARN(tdAccount), SchedulerInvokeRoleARN(tdAccount)} {
-		for _, a := range []string{"iam:DeleteRole", "iam:DeleteRolePolicy", "iam:DetachRolePolicy", "iam:PutRolePolicy"} {
-			if Allows(grants, a, role) {
-				t.Errorf("the poller is allowed %s on %s", a, role)
+	jobs, err := SchedulerTeardownPolicyDocument(tdAccount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	iamARN := func(kind, name string) string { return "arn:aws:iam::" + tdAccount + ":" + kind + "/" + name }
+	targets := []string{RoleARN(tdAccount), SchedulerInvokeRoleARN(tdAccount), iamARN("role", InstanceRoleName),
+		iamARN("instance-profile", InstanceRoleName), iamARN("policy", "lagotto-cli-user")}
+	for who, d := range map[string]string{"the poller": doc, "the teardown jobs": jobs} {
+		grants := mustGrants(t, d)
+		for _, r := range targets {
+			for _, a := range []string{"iam:DeleteRole", "iam:DeleteRolePolicy", "iam:DetachRolePolicy", "iam:PutRolePolicy",
+				"iam:RemoveRoleFromInstanceProfile", "iam:DeleteInstanceProfile", "iam:DeletePolicy", "iam:DeletePolicyVersion"} {
+				if Allows(grants, a, r) {
+					t.Errorf("%s is allowed %s on %s", who, a, r)
+				}
 			}
 		}
 	}
 }
 
 // TestSchedulerTeardownGrants: the invoke role's teardown policy deletes the
-// poller function, its log group and its role, and nothing else; never the
-// invoke role itself.
+// poller function and its log group, and nothing else.
 func TestSchedulerTeardownGrants(t *testing.T) {
 	doc, err := SchedulerTeardownPolicyDocument(tdAccount)
 	if err != nil {
@@ -190,9 +191,6 @@ func TestSchedulerTeardownGrants(t *testing.T) {
 	want := map[string][]string{
 		"lambda:DeleteFunction": {"arn:aws:lambda:*:" + tdAccount + ":function:lagotto-capacity-poller"},
 		"logs:DeleteLogGroup":   {logGroup, logGroup + ":*"},
-		"iam:DeleteRole":        {RoleARN(tdAccount)},
-		"iam:DeleteRolePolicy":  {RoleARN(tdAccount)},
-		"iam:DetachRolePolicy":  {RoleARN(tdAccount)},
 	}
 	if len(got) != len(want) {
 		t.Errorf("the teardown policy allows %v, want exactly %v", got, want)

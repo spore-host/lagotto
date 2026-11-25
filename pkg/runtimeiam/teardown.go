@@ -90,10 +90,9 @@ func guardStatements(accountID string) []statement {
 // SchedulerTeardownPolicyDocument is [SchedulerTeardownPolicyName], the
 // second inline policy on the Scheduler invoke role: what lagotto#326's
 // one-shot teardown jobs, which run as that role, delete once the poller has
-// planned its own removal. The poller function and its log group (in any
-// region, as the role is shared), and the poller's execution role, emptied
-// first. Never the invoke role itself, and nothing else in IAM. Plus
-// [guardStatements].
+// planned its own removal: the poller function and its log group (in any
+// region, as the role is shared). Nothing in IAM: the account-wide resources
+// are the CLI's to remove (lagotto#340). Plus [guardStatements].
 //
 // Like the InvokeLambda policy it is a function of the account alone, so
 // every region's setup or deploy writes the same bytes (#218).
@@ -107,8 +106,6 @@ func SchedulerTeardownPolicyDocument(accountID string) (string, error) {
 		// Both forms: CloudWatch Logs authorizes some actions against the
 		// group's ARN and some against it with a trailing ":*".
 		{Effect: "Allow", Action: []string{"logs:DeleteLogGroup"}, Resource: []string{logGroup, logGroup + ":*"}},
-		{Effect: "Allow", Action: []string{"iam:DeleteRolePolicy", "iam:DetachRolePolicy", "iam:DeleteRole"},
-			Resource: RoleARN(accountID)},
 	}
 	statements = append(statements, guardStatements(accountID)...)
 	b, err := json.Marshal(map[string]interface{}{"Version": "2012-10-17", "Statement": statements})

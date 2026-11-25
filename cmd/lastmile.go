@@ -21,6 +21,7 @@ import (
 	"github.com/spore-host/libs/tags"
 
 	"github.com/spore-host/lagotto/pkg/awscfg"
+	"github.com/spore-host/lagotto/pkg/idle"
 	"github.com/spore-host/lagotto/pkg/inventory"
 	"github.com/spore-host/lagotto/pkg/runtimeiam"
 )
@@ -109,8 +110,9 @@ var (
 const lastMileSlack = 250 * time.Millisecond
 
 // lastMileReserve is the fraction of the budget kept back from lastmile.Run
-// for the poller check after it (3 s of the default 30 s).
-const lastMileReserve = 10
+// for the poller check and the account-wide teardown after it (10 s of the
+// default 30 s, as 1/lastMileReserve).
+const lastMileReserve = 3
 
 // errLastMileReportOnly is what the last mile's lifecycle client and Deleter
 // return for any write: lagotto's last mile is report-only (libs#79 and
@@ -194,7 +196,14 @@ func lastMile(ctx context.Context, mode lastmile.Mode, logf func(string, ...any)
 		logf("lastmile: skipped: load AWS config: %v", err)
 		return
 	}
-	control := lastMileControlRegion(cfg.Region)
+	control, err := lastMileControlRegion(cfg.Region)
+	if err != nil {
+		// Outside the aws partition there is no global scope to read
+		// (lagotto#347): the regional checks still run, and the global
+		// scope's, and the account-wide teardown, are skipped.
+		logf("lastmile: the global scope is skipped: %v", err)
+		control = ""
+	}
 	if cfg.Region == "" {
 		cfg.Region = control
 	}
@@ -208,7 +217,10 @@ func lastMile(ctx context.Context, mode lastmile.Mode, logf func(string, ...any)
 		logf("lastmile: skipped: %v", err)
 		return
 	}
-	o := lastMileOptions(cfg, account, regions, lc)
+	live := &lastMileFootprint{load: func(ctx context.Context) (inventory.Facts, error) {
+		return gatherFootprint(ctx, cfg, account, inventory.Scope{AllRegions: true})
+	}}
+	o := lastMileOptions(account, regions, lc, live)
 	o.Mode, o.StatePath, o.Logf, o.Now = mode, statePath, logf, lastMileNow
 	if deadline, ok := ctx.Deadline(); ok {
 		left := time.Until(deadline)
@@ -222,17 +234,20 @@ func lastMile(ctx context.Context, mode lastmile.Mode, logf func(string, ...any)
 	logf("%s", res.Summary())
 	if res.Ran {
 		lastMilePollerless(ctx, cfg, account, seen.list(), logf)
+		lastMileAccountWide(ctx, mode, cfg, account, regions, lc, live, logf)
 	}
 }
 
 // lastMileOptions are the lastmile.Options for lagotto in account: everything
 // but the mode, state path, logger, clock and budget.
 //
-// The residue is what outlives every region's teardown: the Scheduler invoke
-// role every region's schedules share, and in each region the lagotto-teardown
-// schedule group the poller's self-removal jobs run from. The group depends on
-// the role, so a group still holding a teardown job (class active) keeps the
-// role too. The spore-host-lifecycle tables lagotto leaves, including the one
+// The residue is what outlives every region's teardown: in each region the
+// lagotto-teardown schedule group the poller's self-removal jobs run from.
+// Nothing account-wide is listed: lagotto's account-wide resources (the
+// Scheduler invoke role among them) are the account-wide teardown's alone
+// (lastMileAccountWide, lagotto#340), which runs after lastmile.Run and
+// checks every region's poller, jobs and lifecycle item before it would
+// delete one. The spore-host-lifecycle tables lagotto leaves, including the one
 // a `watch --local` makes in a region without a poller, are not listed: they
 // are the suite's (managed-by=spore-host), so lagotto's delete guard refuses
 // them, and lastmile already reports each empty one in every region of
@@ -242,10 +257,7 @@ func lastMile(ctx context.Context, mode lastmile.Mode, logf func(string, ...any)
 //
 // FullVisibility is false: the CLI cannot see every user's watches, so it
 // never judges lagotto idle; the poller in each region does.
-func lastMileOptions(cfg aws.Config, account string, regions []string, lc *lifecycle.Client) lastmile.Options {
-	live := &lastMileFootprint{load: func(ctx context.Context) (*fp.Report, error) {
-		return takeFootprint(ctx, cfg, account, inventory.Scope{AllRegions: true})
-	}}
+func lastMileOptions(account string, regions []string, lc *lifecycle.Client, live *lastMileFootprint) lastmile.Options {
 	return lastmile.Options{
 		Tool:           tags.ToolLagotto,
 		Account:        account,
@@ -261,57 +273,62 @@ func lastMileOptions(cfg aws.Config, account string, regions []string, lc *lifec
 
 // lastMileResidue is lagotto's residue in account (see lastMileOptions).
 func lastMileResidue(account string, regions []string) []fp.Resource {
-	tagged := func() map[string]string { return map[string]string{tags.ManagedBy: string(tags.ToolLagotto)} }
-	role := runtimeiam.SchedulerInvokeRoleARN(account)
-	out := []fp.Resource{{
-		ARN: role, Type: inventory.TypeRole, Region: inventory.Global, Name: runtimeiam.SchedulerInvokeRoleName,
-		Ownership: fp.OwnershipTagged, Class: fp.ClassResidue, Tags: tagged(),
-	}}
+	var out []fp.Resource
 	for _, r := range regions {
 		out = append(out, fp.Resource{
 			ARN: inventory.ScheduleGroupARN(r, account, runtimeiam.TeardownScheduleGroup), Type: inventory.TypeScheduleGroup,
 			Region: r, Name: runtimeiam.TeardownScheduleGroup, Ownership: fp.OwnershipTagged, Class: fp.ClassResidue,
-			DependsOn: []string{role}, Tags: tagged(),
+			Tags: map[string]string{tags.ManagedBy: string(tags.ToolLagotto)},
 		})
 	}
 	return out
 }
 
 // lastMileControlRegion is the region holding the global scope's lifecycle
-// items: the partition's IAM home region, so every invocation reads the same
-// one whatever --region says.
-func lastMileControlRegion(region string) string {
-	switch {
-	case strings.HasPrefix(region, "us-gov-"):
-		return "us-gov-west-1"
-	case strings.HasPrefix(region, "cn-"):
-		return "cn-north-1"
-	}
-	return "us-east-1"
-}
+// items, so every invocation reads the same one whatever --region says: the
+// account-wide teardown's (idle.ControlRegion), whose global lease lives
+// there (lagotto#340). Outside the aws partition there is none.
+func lastMileControlRegion(region string) (string, error) { return idle.ControlRegion(region) }
 
 // lastMileFootprint is lagotto's footprint of every region, read at most once
-// per run: lastmile's Footprint and the Deleter's re-checks share it.
+// per run: lastmile's Footprint, the Deleter's re-checks and the account-wide
+// teardown's first read share it.
 //
 // A mutex, not a sync.Once: the IAM inventory's call graph (internal/
 // iamcoverage) merges every function passed to sync.Once.Do, so a Once here
 // would charge the footprint's reads to every command that uses one.
 type lastMileFootprint struct {
-	load func(ctx context.Context) (*fp.Report, error)
-	mu   sync.Mutex
-	done bool
-	rep  *fp.Report
-	err  error
+	load  func(ctx context.Context) (inventory.Facts, error)
+	mu    sync.Mutex
+	done  bool
+	facts inventory.Facts
+	rep   *fp.Report
+	err   error
+}
+
+func (l *lastMileFootprint) read(ctx context.Context) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.done {
+		return
+	}
+	l.done = true
+	if l.facts, l.err = l.load(ctx); l.err != nil {
+		l.err = fmt.Errorf("footprint: %w", l.err)
+		return
+	}
+	l.rep = inventory.Classify(l.facts, footprintOptions(), footprintNow())
 }
 
 func (l *lastMileFootprint) get(ctx context.Context) (*fp.Report, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if !l.done {
-		l.done = true
-		l.rep, l.err = l.load(ctx)
-	}
+	l.read(ctx)
 	return l.rep, l.err
+}
+
+// facts is the footprint's facts, for the account-wide teardown.
+func (l *lastMileFootprint) factsOf(ctx context.Context) (inventory.Facts, error) {
+	l.read(ctx)
+	return l.facts, l.err
 }
 
 // reportOnlyDeleter re-checks a planned resource against the live footprint

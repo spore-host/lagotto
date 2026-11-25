@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -124,7 +125,7 @@ func TestConfirmUntilLanded_ShowsExposure(t *testing.T) {
 	w := expWatches(t)[2]
 	exp := cliExposure(&w)
 	var errOut bytes.Buffer
-	if err := confirmUntilLanded(strings.NewReader("y\n"), &errOut, true, false, watcher.ActionHold, "c7g.large", ul, exp); err != nil {
+	if err := confirmUntilLanded(context.Background(), strings.NewReader("y\n"), &errOut, true, false, watcher.ActionHold, "c7g.large", ul, exp); err != nil {
 		t.Fatalf("TTY yes: %v", err)
 	}
 	for _, want := range []string{"billed for 30 minutes", "  " + exp.Summary + "\n", "collected " + libpricing.PricesAsOf} {
@@ -132,7 +133,7 @@ func TestConfirmUntilLanded_ShowsExposure(t *testing.T) {
 			t.Errorf("prompt lacks %q:\n%s", want, errOut.String())
 		}
 	}
-	err := confirmUntilLanded(strings.NewReader(""), &errOut, false, false, watcher.ActionHold, "c7g.large", ul, exp)
+	err := confirmUntilLanded(context.Background(), strings.NewReader(""), &errOut, false, false, watcher.ActionHold, "c7g.large", ul, exp)
 	if err == nil || !strings.Contains(err.Error(), exp.Summary) || !strings.Contains(err.Error(), "--yes") {
 		t.Errorf("non-TTY refusal = %v", err)
 	}

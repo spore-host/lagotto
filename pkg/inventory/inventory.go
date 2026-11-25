@@ -177,6 +177,9 @@ type Item struct {
 	ARN  string
 	Name string
 	Tags map[string]string
+	// IdleGrace is set on the poller function only: its LAGOTTO_IDLE_GRACE,
+	// "" when unset (lagotto#340 judges another region's idleness by it).
+	IdleGrace string
 }
 
 // Table is one of lagotto's tables that exists.
@@ -516,7 +519,11 @@ func Classify(f Facts, o Options, now time.Time) *fp.Report {
 			// to delete, whatever lagotto's own tags say.
 			own = fp.OwnershipForeign
 		}
-		add(&global, Global, TypeInstanceProfile, p.Item, own, activeOr(everywhereActive, fp.ClassLitter), roleARNs(acct, p.Roles)...)
+		// It goes before the poller role, whose policy is how it is found:
+		// a profile delete that fails keeps the role (and so the profile
+		// findable) for the next run.
+		deps := append(roleARNs(acct, p.Roles), runtimeiam.RoleARN(acct))
+		add(&global, Global, TypeInstanceProfile, p.Item, own, activeOr(everywhereActive, fp.ClassLitter), deps...)
 	}
 	for _, role := range f.Account.Roles {
 		var c fp.Class

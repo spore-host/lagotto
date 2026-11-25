@@ -101,7 +101,8 @@ func init() {
 }
 
 func runDeploy(cmd *cobra.Command, args []string) error {
-	ctx := context.Background()
+	ctx, stop := commandContext(cmd)
+	defer stop()
 	out := cmd.OutOrStdout()
 
 	if deployTeardown && deployMigrate {
@@ -136,7 +137,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 			return true
 		}
 		fmt.Fprintf(os.Stderr, "%s [y/N] ", prompt)
-		return readYes(os.Stdin)
+		return readYesCtx(ctx, os.Stdin)
 	}
 
 	// Every poller resource name is derived from the account ID, so nothing below
@@ -191,9 +192,24 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	// Mark lagotto active in the region before anything is created or
 	// changed (lagotto#326): a teardown holding the lease there is waited
 	// out, and refuses the deploy if it does not finish.
-	if err := markActive(ctx, cfg, callerARN, region, "deploy the poller", os.Stderr); err != nil {
+	markDone, err := markCreating(ctx, cfg, callerARN, region, "deploy the poller", creatorDeploy, os.Stderr)
+	if err != nil {
 		return err
 	}
+	defer markDone()
+	// The region's pending teardown jobs are settled on every path, under
+	// the marks (lagotto#340): a deploy that fails before its schedule stands
+	// leaves them to finish the region's teardown.
+	settled := false
+	defer func() {
+		if !settled {
+			sctx, cancel := freshCtx(ctx) // also after an interrupt
+			defer cancel()
+			if serr := settleDeployJobs(sctx, cfg, region, false, os.Stderr); serr != nil {
+				fmt.Fprintf(os.Stderr, "warning: %v\n", serr)
+			}
+		}
+	}()
 
 	// Migration runs BEFORE the deploy, deliberately. The retain-update carries the
 	// stack's previous parameters across — including LambdaCodeKey — so a migration
@@ -265,6 +281,10 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		HoldScheduleMove: hold,
 	})
 	if err != nil {
+		return err
+	}
+	settled = true
+	if err := settleDeployJobs(ctx, cfg, region, true, os.Stderr); err != nil {
 		return err
 	}
 

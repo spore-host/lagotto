@@ -1,10 +1,14 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spore-host/lagotto/pkg/awscfg"
@@ -166,4 +170,30 @@ func updateCommandDescriptions() {
 
 func getOutputFormat() string {
 	return outputFormat
+}
+
+// commandContext is the context of a command that holds a teardown lease or
+// a creator's marks (setup, deploy, watch, launch, teardown): SIGINT and
+// SIGTERM cancel it, and the command then gives its lease back, or suspends
+// it, and ends its marks, each with a fresh context of its own (freshCtx),
+// before it exits; a second signal exits at once. Call stop when the command
+// returns. Every other command keeps Go's default: a signal exits at once.
+// Only signalCommands may call it (TestSignalHandlers).
+func commandContext(cmd *cobra.Command) (context.Context, context.CancelFunc) {
+	base := context.Background()
+	if cmd != nil && cmd.Context() != nil {
+		base = cmd.Context()
+	}
+	ctx, stop := signal.NotifyContext(base, os.Interrupt, syscall.SIGTERM)
+	go func() { <-ctx.Done(); stop() }() // after the first signal, the default again
+	return ctx, stop
+}
+
+// signalCommands are the RunE functions that run under commandContext.
+var signalCommands = []string{"runSetup", "runDeploy", "runWatch", "runLaunch", "runTeardown", "runTeardownPlan"}
+
+// freshCtx is a short context for giving a lease back after ctx was
+// cancelled (an interrupt): ctx's values, not its cancellation, and 30 s.
+func freshCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 }

@@ -131,7 +131,8 @@ func init() {
 
 func runWatch(cmd *cobra.Command, args []string) error {
 	pattern := args[0]
-	ctx := context.Background()
+	ctx, stop := commandContext(cmd)
+	defer stop()
 
 	// Parse TTL
 	ttl, err := parseTTLFlag(watchTTL)
@@ -227,7 +228,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		}
 		exp := cliExposure(&watcher.Watch{Service: service, Action: action, InstanceTypePattern: pattern,
 			Regions: watchRegions, Spot: watchSpot, MaxPrice: watchMaxPrice, DesiredCount: watchMaintain})
-		if err := confirmUntilLanded(os.Stdin, os.Stderr, stdinIsTerminal(), watchYes, action, pattern, ul, exp); err != nil {
+		if err := confirmUntilLanded(ctx, os.Stdin, os.Stderr, stdinIsTerminal(), watchYes, action, pattern, ul, exp); err != nil {
 			return err
 		}
 	}
@@ -315,9 +316,15 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	// Mark lagotto active in the region before anything is created
 	// (lagotto#326), --local included: a teardown that holds the lease is
 	// waited out, and refuses the watch if it does not finish.
-	if err := markActive(ctx, cfg, aws.ToString(identity.Arn), cfg.Region, armAction, os.Stderr); err != nil {
+	kind := creatorHosted
+	if watchLocal {
+		kind = creatorLocal
+	}
+	markDone, err := markCreating(ctx, cfg, aws.ToString(identity.Arn), cfg.Region, armAction, kind, os.Stderr)
+	if err != nil {
 		return err
 	}
+	defer markDone()
 
 	store := watcher.NewStore(cfg, watchesTable, historyTable)
 	// A table this creates is tagged with its creator as spore-host:owner (#324).

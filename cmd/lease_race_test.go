@@ -110,7 +110,7 @@ func TestRaceStaleLeaseStopsTheTeardown(t *testing.T) {
 		t.Fatalf("teardown %+v, want it stopped by the lost lease", res)
 	}
 	c, _ := lifecycle.New(lifecycle.Options{DynamoDB: func(string) (lifecycle.API, error) { return table, nil }})
-	if it, ok, _ := c.Get(context.Background(), inventory.Tool, "us-east-1"); !ok || it.State != lifecycle.StateActive || it.Lease != nil || it.Epoch != 1 {
+	if it, ok, _ := c.Get(context.Background(), inventory.Tool, "us-east-1"); !ok || it.Lease != nil || it.Epoch != 1 || len(it.Marks) != 0 {
 		t.Errorf("lease item %+v", it)
 	}
 }

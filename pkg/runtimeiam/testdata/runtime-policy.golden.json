@@ -337,12 +337,7 @@
         "iam:ListAttachedRolePolicies",
         "iam:ListInstanceProfilesForRole",
         "iam:GetInstanceProfile",
-        "iam:ListInstanceProfileTags",
-        "iam:DeleteRole",
-        "iam:DeleteRolePolicy",
-        "iam:DetachRolePolicy",
-        "iam:RemoveRoleFromInstanceProfile",
-        "iam:DeleteInstanceProfile"
+        "iam:ListInstanceProfileTags"
       ],
       "Resource": [
         "arn:aws:iam::123456789012:role/lagotto-instance-role",

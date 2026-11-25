@@ -14,8 +14,12 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
 
+	fp "github.com/spore-host/libs/footprint"
+
 	"github.com/spore-host/lagotto/pkg/cliiam"
 	"github.com/spore-host/lagotto/pkg/doctor"
+	"github.com/spore-host/lagotto/pkg/idle"
+	"github.com/spore-host/lagotto/pkg/inventory"
 )
 
 // ---- the inventory gate (#232) ---------------------------------------------
@@ -255,18 +259,6 @@ func (f *cmdPolicyFake) DeletePolicy(context.Context, *iam.DeletePolicyInput, ..
 	return &iam.DeletePolicyOutput{}, nil
 }
 
-// fakePolicyDeleter is the teardown default: no policy deployed.
-type fakePolicyDeleter = cmdPolicyFake
-
-// stubPolicyDeleter points teardown at f and at a fixed account.
-func stubPolicyDeleter(t *testing.T, f *cmdPolicyFake) {
-	t.Helper()
-	oldDel, oldAcct := newPolicyDeleter, setupCallerAccount
-	newPolicyDeleter = func(aws.Config) cliiam.DeleteAPI { return f }
-	setupCallerAccount = func(context.Context, aws.Config) (string, error) { return "123456789012", nil }
-	t.Cleanup(func() { newPolicyDeleter, setupCallerAccount = oldDel, oldAcct })
-}
-
 func setConfigBucketFlags(t *testing.T, add, revoke []string) {
 	t.Helper()
 	oldAdd, oldRevoke := setupConfigBuckets, setupRevokeConfigBuckets
@@ -345,60 +337,47 @@ func TestSetupHasConfigBucketFlags(t *testing.T) {
 			t.Errorf("setup has no --%s", name)
 		}
 	}
-	if newSetupPolicyClient(aws.Config{Region: "us-east-1"}) == nil || newPolicyDeleter(aws.Config{Region: "us-east-1"}) == nil {
+	if newSetupPolicyClient(aws.Config{Region: "us-east-1"}) == nil {
 		t.Error("a policy client seam is nil")
 	}
 }
 
 // ---- teardown --------------------------------------------------------------
 
-// TestRunTeardown_IAMRolesDeletesTheCLIUserPolicy: the named deleter (#232),
-// detaching from everyone first, and only with --iam-roles.
-func TestRunTeardown_IAMRolesDeletesTheCLIUserPolicy(t *testing.T) {
+// TestRunTeardown_IAMRolesRunsTheAccountWideTeardown: --iam-roles removes
+// the account-wide resources (the CLI-user policy among them, only once
+// nothing is attached to it) through the one account-wide teardown
+// (lagotto#340, #346), after the tables; without it, that never runs. A run
+// that does not remove them fails, saying why.
+func TestRunTeardown_IAMRolesRunsTheAccountWideTeardown(t *testing.T) {
 	tables := &fakeTables{empty: true}
-	stubTeardown(t, tables, &cmdRoleDeleter{exists: map[string]bool{}}, true, false)
+	calls := stubTeardown(t, tables, &cmdRoleDeleter{exists: map[string]bool{}}, true, false)
 	stubPollerRegions(t, nil, nil)
-	pol := &cmdPolicyFake{exists: true, tagged: true, versions: 2, attached: []string{"group/researchers", "role/ci"}}
-	stubPolicyDeleter(t, pol)
-
-	out, err := runTeardownForTest(t)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := "detach group/researchers,detach role/ci,DeletePolicyVersion v1,DeletePolicy"
-	if got := strings.Join(pol.calls, ","); got != want {
-		t.Errorf("calls %s, want %s", got, want)
-	}
-	for _, line := range []string{"Detached IAM policy lagotto-cli-user from group/researchers",
-		"Detached IAM policy lagotto-cli-user from role/ci", "Deleted IAM policy lagotto-cli-user"} {
-		if !strings.Contains(out, line) {
-			t.Errorf("output lacks %q:\n%s", line, out)
-		}
-	}
-
-	// Without --iam-roles the policy is untouched.
-	stubTeardown(t, tables, &cmdRoleDeleter{exists: map[string]bool{}}, false, false)
-	pol = &cmdPolicyFake{exists: true, tagged: true, versions: 1, attached: []string{"user/alice"}}
-	stubPolicyDeleter(t, pol)
 	if _, err := runTeardownForTest(t); err != nil {
 		t.Fatal(err)
 	}
-	if len(pol.calls) != 0 {
-		t.Errorf("teardown without --iam-roles touched the policy: %v", pol.calls)
+	if len(*calls) != 1 || (*calls)[0] != nil {
+		t.Errorf("account-wide teardown calls %v, want one for everything", *calls)
 	}
-}
 
-func TestDeleteCLIUserPolicyReportsAbsentAndUnmanaged(t *testing.T) {
-	var out bytes.Buffer
-	if err := deleteCLIUserPolicy(context.Background(), &cmdPolicyFake{}, "123456789012", &out); err != nil ||
-		!strings.Contains(out.String(), "No IAM policy lagotto-cli-user to delete") {
-		t.Errorf("absent: %v\n%s", err, out.String())
+	calls = stubTeardown(t, tables, &cmdRoleDeleter{exists: map[string]bool{}}, false, false)
+	if _, err := runTeardownForTest(t); err != nil {
+		t.Fatal(err)
 	}
-	out.Reset()
-	f := &cmdPolicyFake{exists: true, versions: 1}
-	if err := deleteCLIUserPolicy(context.Background(), f, "123456789012", &out); err != nil ||
-		!strings.Contains(out.String(), "Left IAM policy lagotto-cli-user in place") || len(f.calls) != 0 {
-		t.Errorf("unmanaged: %v, calls %v\n%s", err, f.calls, out.String())
+	if len(*calls) != 0 {
+		t.Errorf("teardown without --iam-roles ran the account-wide teardown: %v", *calls)
+	}
+
+	stubTeardown(t, tables, &cmdRoleDeleter{exists: map[string]bool{}}, true, false)
+	teardownAccountWide = func(context.Context, aws.Config, string, map[string]bool, func(string, ...any)) idle.AccountWideResult {
+		return idle.AccountWideResult{Outcome: idle.AccountWideBlocked, Why: "the account-wide resources are still needed",
+			Blockers: []string{"eu-west-1: one-shot job lagotto-teardown-function is pending"}, Result: &fp.Result{Actions: []fp.Action{
+				{Type: inventory.TypePolicy, Name: "lagotto-cli-user", Outcome: fp.OutcomeKept, Reason: "attached to 2"}}}}
+	}
+	out, err := runTeardownForTest(t)
+	if err == nil || !strings.Contains(err.Error(), "eu-west-1: one-shot job lagotto-teardown-function is pending") ||
+		!strings.Contains(out, "Not deleted: IAM policy lagotto-cli-user (kept: attached to 2)") {
+		t.Errorf("blocked: %v\n%s", err, out)
 	}
 }
 

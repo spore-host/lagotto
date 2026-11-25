@@ -134,6 +134,14 @@
       ]
     },
     {
+      "Sid": "CancelTeardownJobs",
+      "Effect": "Allow",
+      "Action": [
+        "scheduler:DeleteSchedule"
+      ],
+      "Resource": "arn:aws:scheduler:*:123456789012:schedule/lagotto-teardown/*"
+    },
+    {
       "Sid": "PassSchedulerInvokeRole",
       "Effect": "Allow",
       "Action": [

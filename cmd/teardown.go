@@ -10,14 +10,16 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
-	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
 	lambdatypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
 	"github.com/spf13/cobra"
+	"github.com/spore-host/libs/lifecycle"
+
 	"github.com/spore-host/lagotto/pkg/awscfg"
 	"github.com/spore-host/lagotto/pkg/cliiam"
 	"github.com/spore-host/lagotto/pkg/deploy"
-	"github.com/spore-host/lagotto/pkg/runtimeiam"
+	"github.com/spore-host/lagotto/pkg/idle"
+	"github.com/spore-host/lagotto/pkg/inventory"
 	"github.com/spore-host/lagotto/pkg/watcher"
 )
 
@@ -80,11 +82,26 @@ deleting anything, while a poller still exists in any of them (remove each with
 --force does not override that check.
 
 --iam-roles also deletes the customer-managed policy lagotto-cli-user that
-'lagotto setup' writes for the people who run lagotto (lagotto#232). IAM refuses
-to delete an attached policy, so teardown first DETACHES it from every user,
-group and role it is attached to (each is printed; they lose those permissions),
-then deletes its non-default versions, then the policy. A policy of that name
-without lagotto's lagotto:managed=cli tag is left in place and reported.
+'lagotto setup' writes for the people who run lagotto (lagotto#232), once nothing
+is attached to it: while any user, group or role has it, it is kept and reported
+(detach it yourself first if you mean to remove it). A policy of that name without
+lagotto's lagotto:managed=cli tag is left in place and reported.
+
+The account-wide resources are removed by one code path, the same one the lazy
+last mile uses (lagotto#340, #346): under lagotto's global teardown lease
+(tool#lagotto#global in us-east-1's spore-host-lifecycle table), and only while
+no region has a poller, a pending one-shot teardown job, or a lagotto lifecycle
+item that is in use or held by a live teardown, all re-checked before each
+delete; and never while a setup, deploy, watch or launch is running (one that
+starts meanwhile waits for it, and the re-check then gives the lease back).
+That check also runs before anything is deleted, so a refusal changes nothing.
+A run that fails partway leaves the teardown marked incomplete, with no lease:
+nothing waits for it, and the next run carries it on.
+
+Once the tables are gone, and no poller is left in the region, teardown also
+finishes lagotto's item in that region's spore-host-lifecycle table (left
+ACTIVE by deploy and watch), which would otherwise keep the account-wide
+resources.
 
 --plan <file|-> takes the other path (lagotto#325): it executes a footprint,
 the JSON 'lagotto footprint -o json' writes, through the shared spore.host
@@ -107,7 +124,10 @@ one is not removed, nothing it depends on is tried.
 (lagotto#326) in every region it deletes in, so another user's deploy, watch or
 launch there waits for it, or stops it before its next delete. A region where
 something is in use, or another teardown holds the lease, refuses the whole
-run before anything is deleted. Use -o json for the outcome of every step.`,
+run before anything is deleted. The plan's account-wide steps run last, through
+the account-wide teardown described above for --iam-roles: while any region
+still has a poller, a pending one-shot job or a live lifecycle item they are
+kept, and reported as such. Use -o json for the outcome of every step.`,
 	RunE: runTeardown,
 }
 
@@ -115,8 +135,8 @@ func init() {
 	rootCmd.AddCommand(teardownCmd)
 	teardownCmd.Flags().BoolVar(&teardownForce, "force", false, "Delete even if the tables still contain records")
 	teardownCmd.Flags().BoolVar(&teardownIAMRoles, "iam-roles", false,
-		"Also delete lagotto's account-global IAM roles (the poller's two and its instance role) and the lagotto-cli-user policy (detached from everyone first); "+
-			"refused while a poller exists in any region")
+		"Also delete lagotto's account-global IAM roles (the poller's two and its instance role) and the lagotto-cli-user policy (once nothing is attached to it), "+
+			"under the global teardown lease; refused while a poller, a pending teardown job or a live lifecycle item exists in any region")
 }
 
 func runTeardown(cmd *cobra.Command, args []string) error {
@@ -126,7 +146,8 @@ func runTeardown(cmd *cobra.Command, args []string) error {
 	if teardownPlan != "" {
 		return runTeardownPlan(cmd)
 	}
-	ctx := context.Background()
+	ctx, stop := commandContext(cmd)
+	defer stop()
 
 	cfg, err := awscfg.Load(ctx, "")
 	if err != nil {
@@ -139,6 +160,7 @@ func runTeardown(cmd *cobra.Command, args []string) error {
 	// The role check runs before anything is deleted, so a refusal leaves the
 	// account exactly as it was.
 	var acct string
+	noGlobalScope := false
 	if teardownIAMRoles {
 		if err := checkNoPollerAnywhere(ctx, cfg); err != nil {
 			return err
@@ -146,6 +168,22 @@ func runTeardown(cmd *cobra.Command, args []string) error {
 		// The CLI-user policy's ARN is account-scoped (#232).
 		if acct, err = setupCallerAccount(ctx, cfg); err != nil {
 			return fmt.Errorf("not deleting anything: resolve the account ID (the %s policy's ARN needs it): %w", cliiam.PolicyName, err)
+		}
+		// The account-wide teardown's own check, in report mode, before
+		// anything regional goes: what this region holds (its tables and
+		// lifecycle item) is this teardown's to remove first.
+		switch r := teardownAccountWideCheck(ctx, cfg, acct, cfg.Region); {
+		case r.Outcome == idle.AccountWideWould && r.Err != nil:
+			// It would go ahead, but its plan failed: nothing is deleted.
+			return fmt.Errorf("not deleting anything: the account-wide check could not plan its deletes: %w", r.Err)
+		case r.Outcome == idle.AccountWideWould, r.Outcome == idle.AccountWideNothing:
+		case r.Outcome == idle.AccountWideSkipped:
+			// Outside the aws partition there is no global scope (lagotto#347):
+			// the account-wide resources go as before lagotto#340, once no
+			// poller is left anywhere (checked above), with no lease.
+			noGlobalScope = true
+		default:
+			return fmt.Errorf("not deleting anything: %w", accountWideError(r))
 		}
 	}
 
@@ -180,16 +218,29 @@ func runTeardown(cmd *cobra.Command, args []string) error {
 		_, _ = fmt.Fprintf(out, "Left table %s in place: it lacks the lagotto:managed=cli tag, so lagotto did not create it. "+
 			"Delete it yourself if it is yours.\n", name)
 	}
+	// The region's lagotto lifecycle item: with its tables gone and no poller
+	// left, nothing will ever carry it on, and while it is in use it keeps the
+	// account-wide resources (lagotto#340).
+	finishRegionItem(ctx, cfg, out)
 	if teardownIAMRoles {
-		// The instance role and profiles first, while the poller role's policy
-		// still names the authorized roles whose profiles setup created.
-		if err := deleteInstanceRoles(ctx, newInstanceRoleTeardown(cfg), out); err != nil {
-			return err
+		// The one account-wide teardown (lagotto#340, #346): under the
+		// global lease, and only while no region has a poller, a pending
+		// one-shot job or a live lifecycle item, each re-checked before each
+		// delete.
+		logf := func(f string, a ...any) {
+			if verbose {
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "debug: "+f+"\n", a...)
+			}
 		}
-		if err := deleteCLIOwnedRoles(ctx, newRoleDeleter(cfg), out); err != nil {
-			return err
+		run := teardownAccountWide
+		if noGlobalScope {
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s has no global teardown lease (outside the aws partition); "+
+				"deleting lagotto's account-wide resources without one, now that no poller is left in any region\n", cfg.Region)
+			run = teardownAccountWideUnfenced
 		}
-		if err := deleteCLIUserPolicy(ctx, newPolicyDeleter(cfg), acct, out); err != nil {
+		r := run(ctx, cfg, acct, nil, logf)
+		writeAccountWide(out, r)
+		if err := accountWideError(r); err != nil {
 			return err
 		}
 	}
@@ -295,9 +346,6 @@ func pollerRegions(ctx context.Context, regions regionLister, lambdaIn func(regi
 	return found, nil
 }
 
-// newRoleDeleter builds the IAM client the role deletion uses. A seam for tests.
-var newRoleDeleter = func(cfg aws.Config) runtimeiam.RoleDeleteAPI { return iam.NewFromConfig(cfg) }
-
 // checkNoPollerAnywhere refuses `teardown --iam-roles` while any region runs a
 // poller, or when it cannot tell: the roles are shared by every region's
 // poller, so deleting them under a live one leaves it unable to run or be
@@ -319,111 +367,60 @@ func checkNoPollerAnywhere(ctx context.Context, cfg aws.Config) error {
 	return nil
 }
 
-// deleteCLIOwnedRoles deletes both CLI-owned roles and reports each one.
-func deleteCLIOwnedRoles(ctx context.Context, client runtimeiam.RoleDeleteAPI, out io.Writer) error {
-	deleted, err := runtimeiam.DeleteRoles(ctx, client)
-	for _, name := range deleted {
-		_, _ = fmt.Fprintf(out, "Deleted IAM role %s\n", name)
+// teardownPollerExists reports whether the poller runs in cfg's region. A
+// seam for tests.
+var teardownPollerExists = func(ctx context.Context, cfg aws.Config) (bool, error) {
+	info, err := deploy.New(cfg).InspectPoller(ctx)
+	return info.Exists, err
+}
+
+// finishRegionItem finishes lagotto's lifecycle item in cfg's region (and
+// closes the region's table if no tool is left in it) once `lagotto
+// teardown` has deleted the tables, unless a poller is still there or it
+// cannot tell. Anything that fails is a warning: the item only keeps the
+// account-wide resources, and running teardown again finishes it.
+func finishRegionItem(ctx context.Context, cfg aws.Config, out io.Writer) {
+	warn := func(err error) {
+		_, _ = fmt.Fprintf(out, "warning: lagotto's %s item in %s was left in place: %v; it keeps the account-wide resources until 'lagotto teardown' runs here again\n",
+			lifecycle.TableName, cfg.Region, err)
 	}
-	if err != nil {
-		return fmt.Errorf("delete IAM roles: %w", err)
-	}
-	if len(deleted) == 0 {
-		_, _ = fmt.Fprintf(out, "No lagotto IAM roles to delete (%s already absent).\n", strings.Join(runtimeiam.CLIOwnedRoles, ", "))
-	}
-	return nil
-}
-
-// instanceRoleTeardown is what `teardown --iam-roles` needs to remove the
-// instance roles and profiles `setup` created. A seam for tests.
-type instanceRoleTeardown interface {
-	// AuthorizedRoles are the instance roles the deployed poller policy
-	// authorizes (none when there is no policy).
-	AuthorizedRoles(ctx context.Context) ([]string, error)
-	DeleteInstanceRole(ctx context.Context) (bool, error)
-	DeleteManagedProfile(ctx context.Context, roleName string) (bool, error)
-}
-
-var newInstanceRoleTeardown = func(cfg aws.Config) instanceRoleTeardown {
-	return iamInstanceRoleTeardown{client: iam.NewFromConfig(cfg)}
-}
-
-type iamInstanceRoleTeardown struct{ client *iam.Client }
-
-func (t iamInstanceRoleTeardown) AuthorizedRoles(ctx context.Context) ([]string, error) {
-	doc, err := runtimeiam.ReadRuntimePolicy(ctx, t.client)
-	switch {
-	case err == nil:
-		return runtimeiam.AuthorizedInstanceRoles(doc)
-	case errors.Is(err, runtimeiam.ErrRoleNotFound), errors.Is(err, runtimeiam.ErrPolicyNotFound):
-		return nil, nil
-	default:
-		return nil, err
-	}
-}
-
-func (t iamInstanceRoleTeardown) DeleteInstanceRole(ctx context.Context) (bool, error) {
-	return runtimeiam.DeleteInstanceRole(ctx, t.client)
-}
-
-func (t iamInstanceRoleTeardown) DeleteManagedProfile(ctx context.Context, roleName string) (bool, error) {
-	return runtimeiam.DeleteManagedInstanceProfile(ctx, t.client, roleName)
-}
-
-// deleteInstanceRoles deletes lagotto's own instance role and profile, and
-// the instance profile setup created for each authorized role (never the
-// administrator's role itself), reporting each.
-func deleteInstanceRoles(ctx context.Context, t instanceRoleTeardown, out io.Writer) error {
-	authorized, err := t.AuthorizedRoles(ctx)
-	if err != nil {
-		return fmt.Errorf("read the authorized instance roles (to delete the profiles setup created for them): %w", err)
-	}
-	for _, name := range authorized {
-		gone, err := t.DeleteManagedProfile(ctx, name)
-		if errors.Is(err, runtimeiam.ErrClaimedByAnotherTool) {
-			_, _ = fmt.Fprintf(out, "warning: %v\n", err)
-			continue
+	if exists, err := teardownPollerExists(ctx, cfg); err != nil || exists {
+		if err == nil {
+			return // the poller carries it on
 		}
+		warn(fmt.Errorf("could not tell whether the poller is still deployed: %w", err))
+		return
+	}
+	c, err := newLifecycleClient(cfg, runOwner(teardownOwner))
+	if err != nil {
+		warn(err)
+		return
+	}
+	if _, ok, err := c.Get(ctx, inventory.Tool, cfg.Region); err != nil || !ok {
 		if err != nil {
-			return fmt.Errorf("delete instance profile %s: %w", name, err)
+			warn(err)
 		}
-		if gone {
-			_, _ = fmt.Fprintf(out, "Deleted instance profile %s (created by setup; the role is yours and was left)\n", name)
+		return
+	}
+	// As judged: a creator's live mark there (a watch --local, a deploy
+	// under way) refuses it, and is never erased.
+	l, err := idle.ClaimJudged(ctx, c, cfg.Region, true)
+	if err != nil {
+		warn(err)
+		return
+	}
+	if err := l.Finish(ctx); err != nil {
+		// Given back, so no creator waits for a teardown that has stopped.
+		rctx, cancel := freshCtx(ctx)
+		defer cancel()
+		if rerr := l.Release(rctx); rerr != nil && !errors.Is(rerr, lifecycle.ErrLeaseLost) {
+			err = errors.Join(err, fmt.Errorf("giving the lease back: %w (it goes stale in 20 min)", rerr))
 		}
+		warn(err)
+		return
 	}
-	gone, err := t.DeleteInstanceRole(ctx)
-	if err != nil {
-		return fmt.Errorf("delete instance role %s: %w", runtimeiam.InstanceRoleName, err)
+	if _, err := c.CloseTableIfEmpty(ctx, cfg.Region); err != nil {
+		_, _ = fmt.Fprintf(out, "warning: could not remove the empty %s table in %s: %v\n", lifecycle.TableName, cfg.Region, err)
 	}
-	if gone {
-		_, _ = fmt.Fprintf(out, "Deleted IAM role and instance profile %s\n", runtimeiam.InstanceRoleName)
-	}
-	return nil
-}
-
-// newPolicyDeleter builds the IAM client the CLI-user policy is deleted with.
-// A seam for tests.
-var newPolicyDeleter = func(cfg aws.Config) cliiam.DeleteAPI { return iam.NewFromConfig(cfg) }
-
-// deleteCLIUserPolicy is teardown's half of the lagotto-cli-user policy's
-// lifecycle (#232): it reports every principal the policy was detached from,
-// since each loses those permissions.
-func deleteCLIUserPolicy(ctx context.Context, client cliiam.DeleteAPI, accountID string, out io.Writer) error {
-	res, err := cliiam.DeletePolicy(ctx, client, accountID)
-	for _, p := range res.Detached {
-		_, _ = fmt.Fprintf(out, "Detached IAM policy %s from %s\n", cliiam.PolicyName, p)
-	}
-	if err != nil {
-		return fmt.Errorf("delete IAM policy %s: %w", cliiam.PolicyName, err)
-	}
-	switch {
-	case res.Deleted:
-		_, _ = fmt.Fprintf(out, "Deleted IAM policy %s\n", cliiam.PolicyName)
-	case res.Unmanaged:
-		_, _ = fmt.Fprintf(out, "Left IAM policy %s in place: it lacks the %s=%s tag, so lagotto did not create it.\n",
-			cliiam.PolicyName, cliiam.ManagedTagKey, cliiam.ManagedTagValue)
-	default:
-		_, _ = fmt.Fprintf(out, "No IAM policy %s to delete.\n", cliiam.PolicyName)
-	}
-	return nil
+	_, _ = fmt.Fprintf(out, "Finished lagotto's %s item in %s\n", lifecycle.TableName, cfg.Region)
 }

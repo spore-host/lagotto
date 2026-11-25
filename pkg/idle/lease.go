@@ -24,6 +24,8 @@ package idle
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -39,17 +41,69 @@ import (
 // Tool is the tool lagotto's lease items are kept under.
 const Tool = tags.ToolLagotto
 
+// ControlRegion is the region whose spore-host-lifecycle table holds lagotto's
+// global-scope lifecycle item (the account-wide teardown's lease, and the
+// creators' marks): the commercial partition's IAM home region, us-east-1, so
+// that every CLI reads the same one. An empty region is the commercial
+// partition's.
+//
+// Any other partition is an error, so the account-wide teardown fails closed
+// there: the ISO partitions and the European Sovereign Cloud cannot reach
+// us-east-1, and in aws-us-gov and aws-cn lagotto's IAM policies reach no
+// lifecycle table (runtimeiam.RegionalARN names the aws partition only;
+// lagotto#347).
+func ControlRegion(region string) (string, error) {
+	switch {
+	case region == "":
+		return "us-east-1", nil
+	case strings.Contains(region, "-iso"), strings.HasPrefix(region, "eusc-"):
+		return "", fmt.Errorf("no control region for %s: lagotto's account-wide lease works only in the aws partition", region)
+	case strings.HasPrefix(region, "us-gov-"), strings.HasPrefix(region, "cn-"):
+		return "", fmt.Errorf("no control region for %s: lagotto's IAM policies name only the aws partition's lifecycle tables (lagotto#347)", region)
+	}
+	for _, p := range []string{"us-", "eu-", "ap-", "ca-", "sa-", "me-", "af-", "il-", "mx-"} {
+		if strings.HasPrefix(region, p) {
+			return "us-east-1", nil
+		}
+	}
+	return "", fmt.Errorf("no control region for %s: lagotto's account-wide lease works only in the aws partition", region)
+}
+
+// PollerOwner is the lease owner a region's poller writes, before RunOwner
+// makes it unique.
+func PollerOwner(region string) string { return "lagotto-poller/" + region }
+
+// RunOwner is base made unique to this process (a poller's container, a CLI
+// run): a lease another one wrote never passes for its own.
+func RunOwner(base string) string {
+	b := make([]byte, 6)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%s/%d", base, time.Now().UnixNano())
+	}
+	return base + "/" + hex.EncodeToString(b)
+}
+
 // NewClient returns a lifecycle client that reaches each region's
-// spore-host-lifecycle table with cfg's credentials. owner names the caller in
-// a lease ("lagotto-poller/us-east-1", or the CLI caller's ARN).
+// spore-host-lifecycle table with cfg's credentials, with lagotto's global
+// scope in ControlRegion(cfg.Region) (none outside the aws partition: every
+// use of the global scope then fails, closed). owner names the caller in a
+// lease (PollerOwner(region), or the CLI caller's ARN).
 func NewClient(cfg aws.Config, owner string, opts ...func(*lifecycle.Options)) (*lifecycle.Client, error) {
+	control, _ := ControlRegion(cfg.Region)
 	o := lifecycle.Options{
 		DynamoDB: func(region string) (lifecycle.API, error) {
 			c := cfg.Copy()
 			c.Region = region
 			return dynamodb.NewFromConfig(c), nil
 		},
-		Owner: owner,
+		ControlRegion: control,
+		Owner:         owner,
+		// An idle Observe (the poller's) leaves a creator's mark this young
+		// alone: a creator it cannot see is running.
+		MarkBound: CreatorMarkBound,
+		// A creator waits out a lease longer than it takes to go stale, so
+		// one a teardown that was killed left is taken over, not a refusal.
+		WaitTimeout: CreatorWait,
 	}
 	for _, f := range opts {
 		f(&o)
@@ -77,10 +131,14 @@ func (e *TeardownInProgressError) Error() string {
 	if e.Wait.Owner != "" {
 		holder = fmt.Sprintf(" (lease held by %s, last heartbeat %s)", e.Wait.Owner, e.Wait.Heartbeat.UTC().Format(time.RFC3339))
 	}
-	return fmt.Sprintf("refusing to %s: lagotto is being torn down in %s%s, and the teardown still held the "+
+	where, footprint := "in "+e.Region, "--region "+e.Region
+	if e.Region == lifecycle.ScopeGlobal {
+		where, footprint = "account-wide (its IAM roles and policy)", "--all-regions"
+	}
+	return fmt.Sprintf("refusing to %s: lagotto is being torn down %s%s, and the teardown still held the "+
 		"spore-host-lifecycle lease after %s (blocked by %s). Nothing was created. Run it again once the teardown "+
-		"has finished; 'lagotto footprint --region %s' shows what is left",
-		e.What, e.Region, holder, e.Wait.Waited.Round(time.Second), e.Wait.Blocker, e.Region)
+		"has finished; 'lagotto footprint %s' shows what is left",
+		e.What, where, holder, e.Wait.Waited.Round(time.Second), e.Wait.Blocker, footprint)
 }
 
 func (e *TeardownInProgressError) Unwrap() error { return e.Wait }
@@ -93,8 +151,64 @@ func (e *TeardownInProgressError) Unwrap() error { return e.Wait }
 // teardown held the lease for the whole wait; an error wrapping
 // [ErrLeaseUnavailable] when the caller is not allowed to reach the table (it
 // should warn and carry on); and any other failure wrapped, which refuses.
+//
+// It records activity with no end of its own (lifecycle MarkActive: in use
+// for CreatorMarkBound), for the poller, which is its region's backstop and
+// sees what it created; a CLI creator uses Mark, and ends it.
 func MarkActive(ctx context.Context, c *lifecycle.Client, region, what string) error {
-	err := c.MarkActive(ctx, Tool, region)
+	return markErr(c.MarkActive(ctx, Tool, region), region, what)
+}
+
+// Mark is MarkActive, returning the token of the creator mark it wrote, for
+// lifecycle's MarkDone once the creator has finished (lagotto#340).
+func Mark(ctx context.Context, c *lifecycle.Client, region, what string) (string, error) {
+	token, err := c.Mark(ctx, Tool, region)
+	return token, markErr(err, region, what)
+}
+
+// EndMark ends a creator's mark (lifecycle MarkDone), tried again on any
+// failure: a mark left keeps lagotto in use for CreatorMarkBound. A retry
+// after a removal that applied finds the mark gone, which is not an error.
+func EndMark(ctx context.Context, c *lifecycle.Client, scope, token string) error {
+	var err error
+	for attempt := 0; attempt < readAttempts; attempt++ {
+		if attempt > 0 {
+			if serr := endMarkSleep(ctx, time.Second); serr != nil {
+				return errors.Join(err, serr)
+			}
+		}
+		if _, err = c.MarkDone(ctx, Tool, scope, token); err == nil {
+			return nil
+		}
+	}
+	return err
+}
+
+// endMarkSleep is EndMark's pause between tries. A seam for tests.
+var endMarkSleep = sleep
+
+// CreatorWait is how long a creator waits for a teardown's lease
+// (lifecycle Options.WaitTimeout): longer than the lease takes to go stale
+// (lifecycle DefaultStaleAfter, 20 min), so a lease that a teardown killed
+// mid-run left is taken over by the creator, never a refusal.
+const CreatorWait = lifecycle.DefaultStaleAfter + 2*time.Minute
+
+// RefreshMark re-stamps a creator's mark (lifecycle RefreshMark): a creator
+// that may run longer than CreatorMarkBound calls it well within it. False
+// means the mark is gone, or a teardown holds the scope.
+func RefreshMark(ctx context.Context, c *lifecycle.Client, scope, token string) (bool, error) {
+	return c.RefreshMark(ctx, Tool, scope, token)
+}
+
+// CreatorMarkBound is how long a creator's mark keeps lagotto's scope (a
+// region, or the global one) in use (lagotto#340): the bound lagotto judges
+// with (lifecycle InUse and IdleSince), and the one an idle Observe leaves a
+// mark alone for. A creator ends its mark when it finishes (MarkDone); one
+// still there after this is a creator that died, and the scope is idle from
+// then.
+const CreatorMarkBound = time.Hour
+
+func markErr(err error, region, what string) error {
 	var we *lifecycle.WaitError
 	switch {
 	case err == nil:

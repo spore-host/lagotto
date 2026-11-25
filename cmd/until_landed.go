@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -85,7 +86,7 @@ var stdinIsTerminal = func() bool {
 //
 // The prompt (and the refusal) carry the watch's cost exposure (#239 phase 5):
 // "if this lands: up to $X/hr", with its price basis and source.
-func confirmUntilLanded(in io.Reader, errOut io.Writer, isTTY, yes bool, action watcher.ActionMode, pattern string, ul untilLandedFlags, exp *watcher.Exposure) error {
+func confirmUntilLanded(ctx context.Context, in io.Reader, errOut io.Writer, isTTY, yes bool, action watcher.ActionMode, pattern string, ul untilLandedFlags, exp *watcher.Exposure) error {
 	if !ul.enabled || yes || (action != watcher.ActionSpawn && action != watcher.ActionHold) {
 		return nil
 	}
@@ -110,7 +111,7 @@ func confirmUntilLanded(in io.Reader, errOut io.Writer, isTTY, yes bool, action 
 	_, _ = fmt.Fprintf(errOut, "It pauses itself unless you run 'lagotto ack <id>' within %s (%d × the %s --remind interval).\n",
 		watcher.FormatSpan(ul.window()), ul.pauseAfter+1, watcher.FormatSpan(ul.remindEvery))
 	_, _ = fmt.Fprint(errOut, "Create it? [y/N] ")
-	if !readYes(in) {
+	if !readYesCtx(ctx, in) {
 		return fmt.Errorf("not confirmed; no watch was created")
 	}
 	return nil
