@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A poller run in a region already torn down no longer leaves a lifecycle
+  item behind** (#350). A run in flight while `lagotto teardown --plan --mode
+  reap` (or the poller's own committed run, or `deploy --teardown`) removed
+  its region used to observe after the teardown had finished the region's
+  lifecycle item, and so made the item (and the `spore-host-lifecycle` table)
+  again, IDLE, in a region with nothing else of lagotto's and no poller to
+  remove it. Each run now checks that its rate schedule is still there before
+  it observes, and records nothing if it is not (outcome `torn-down`). If the
+  schedule went while it observed, it finishes the item it found, as judged
+  (never one in use: a creator's mark, a hold, another run's live lease), in
+  report mode as well as reap mode; reap mode then closes the table if it is
+  empty. Each check costs one `scheduler:ListSchedules` read, which the
+  poller's runtime policy already grants.
+
+### Changed
+
+- **lagotto requires libs v0.56.1**, whose `Observe` takes over a closing
+  sentinel a crashed `CloseTableIfEmpty` left (libs#88). The workarounds that
+  called `CloseTableIfEmpty` on `ErrTableClosing` (in the poller, in
+  `teardown --plan`'s region claim and `lagotto teardown`'s region finish, and
+  in the account-wide teardown's dead-item finish and global idle write) are
+  removed: the library clears a dead closer's sentinel itself, in the same
+  call, and `ErrTableClosing` now means a live closer, which the next run
+  waits out. A poller run behind a dead closer's sentinel now observes in that
+  run rather than the next one.
+
 ## [0.73.0] - 2026-11-25
 
 ### Changed

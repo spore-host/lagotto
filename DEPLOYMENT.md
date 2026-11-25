@@ -711,6 +711,21 @@ and reads no other region.
    held to go stale: with no poller left to carry it on, the account-wide
    teardown finishes that dead item (below).
 
+**A run in a region already torn down** (lagotto#350). Every teardown of a
+region (this one, `lagotto teardown --plan`, `deploy --teardown`) deletes the
+poller's rate schedule before it finishes the region's lifecycle item, and a
+run already in flight, or a retried or duplicate invocation, carries on after
+the function is deleted. So each run checks that its rate schedule is still
+there before it observes, and records nothing if it is not (`observe=skipped`,
+outcome `torn-down`). It checks again after observing: an observation that
+landed after the teardown finished made the region's item, and the table,
+again, so the run finishes that item as it read it, in either mode (refused
+while it is in use: a creator's fresh mark, a hold, another run's live
+lease), and in reap mode closes the table if no tool is left in it. Report
+mode deletes no table; an empty one is the last mile's to report. A run
+killed in between leaves a dead item, which the account-wide teardown
+finishes.
+
 A failed step before the commit gives the lease back and nothing that depends
 on it is tried; the next grace period tries again. That includes a commit that
 fails after the direct deletes: the poller stays, in a region with no tables,

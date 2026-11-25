@@ -398,6 +398,17 @@ type mworld struct {
 	creating int
 	// runs counts poller invocations, for their owners.
 	runs int
+	// phantomBy[region] is the poller run that created the region's
+	// lifecycle item while its rate schedule was gone, the region torn down
+	// (lagotto#350), if no creator has written the item since.
+	phantomBy map[string]*actor
+	// currentActor is the actor whose lifecycle operation this is (nil
+	// outside the actors).
+	currentActor *actor
+	// planFailed[region]: a CLI plan teardown there failed or crashed after
+	// it began deleting: the user's failed command, which they run again
+	// (it may have left the poller's function without its rate schedule).
+	planFailed map[string]bool
 	// exitedMarks are the marks of creators that have returned.
 	exitedMarks []string
 	// regionMarkedAt[region] is the step of a creator's first mark there.
@@ -441,7 +452,7 @@ type globalSpec string
 
 func newMWorld(reap bool, global globalSpec, specs ...regionSpec) *mworld {
 	m := &mworld{now: t0, tables: map[string]*lifecycletest.Fake{}, reap: reap, acct: inventorytest.Account(acct), due: map[string]time.Time{},
-		read: map[string]map[string]int{}, changed: map[string]int{}, writesBy: map[string]int{}, passedUnder: map[string]bool{}, decidedAt: map[string]int{}, failedRuns: map[string]bool{}, regionMarkedAt: map[string]int{}, markLive: map[string]bool{}}
+		read: map[string]map[string]int{}, changed: map[string]int{}, writesBy: map[string]int{}, passedUnder: map[string]bool{}, decidedAt: map[string]int{}, failedRuns: map[string]bool{}, regionMarkedAt: map[string]int{}, markLive: map[string]bool{}, phantomBy: map[string]*actor{}, planFailed: map[string]bool{}}
 	enabled := []string{modelControl}
 	for _, s := range specs {
 		enabled = append(enabled, s.name)
@@ -559,8 +570,9 @@ func (m *mworld) table(region string) *lifecycletest.Fake {
 				m.mu.Unlock()
 			}
 			name := m.who(ctx)
+			a, _ := ctx.Value(actorKey{}).(*actor)
 			m.mu.Lock()
-			m.current = name
+			m.current, m.currentActor = name, a
 			m.mu.Unlock()
 			if op == "GetItem" {
 				m.mu.Lock()
@@ -596,6 +608,12 @@ func (m *mworld) table(region string) *lifecycletest.Fake {
 						continue
 					}
 					m.changed[region] = m.seq
+					switch {
+					case strings.HasPrefix(m.current, "poller ") && op != "DeleteItem" && f.Item(lifecycle.TableName, k) == nil && !m.hasRateSchedule(region):
+						m.phantomBy[region] = m.currentActor
+					case !strings.HasPrefix(m.current, "poller ") && !strings.HasPrefix(m.current, "cli"):
+						delete(m.phantomBy, region) // a creator's
+					}
 					cliRun := strings.HasPrefix(m.current, "cli")
 					if op == "DeleteItem" && cliRun && m.markLive[region] {
 						m.violations = append(m.violations, fmt.Sprintf("SAFETY: %s finished %s's lifecycle item, which a creator had marked since it was judged", m.current, region))
@@ -761,6 +779,16 @@ func (m *mworld) setAccount(f func(a *inventory.Account)) {
 func (m *mworld) hasRole(name string) bool {
 	for _, r := range m.account().Roles {
 		if r.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// hasRateSchedule reports whether region's poller's rate schedule is there.
+func (m *mworld) hasRateSchedule(region string) bool {
+	for _, s := range m.regionFacts(region).Schedules {
+		if s.Name == deploy.PollerScheduleName {
 			return true
 		}
 	}
@@ -1316,6 +1344,16 @@ func (m *mworld) watchActor(region string) *actor {
 		}
 		defer done()
 		park(ctx, "watch stores the watch")
+		// lagotto#349: never in a region whose poller's teardown has
+		// committed (its rate schedule gone, or its function's job pending).
+		if !m.hasRateSchedule(region) {
+			m.violate("lagotto#349: a watch was stored in %s, whose poller's rate schedule is gone [%s]", region, m.snapshot())
+		}
+		for _, j := range m.pendingJobs(region) {
+			if j == FunctionJobName {
+				m.violate("lagotto#349: a watch was stored in %s, whose poller's function is due for deletion [%s]", region, m.snapshot())
+			}
+		}
 		m.src.Update(region, func(r *inventory.Region) {
 			r.ActiveWatches = 1
 			for i := range r.Schedules {
@@ -1392,6 +1430,81 @@ func (m *mworld) cliRegionActor(region string) *actor {
 		}
 		_, _ = c.CloseTableIfEmpty(ctx, region)
 	}}
+}
+
+// cliPlanActor is `lagotto teardown --plan --mode reap` of region's
+// footprint (cmd executePlan and reapWithLeases): it reads the region
+// afresh, refuses while anything there is in use, claims the region's item
+// as judged (claimRegion: idle.ClaimJudged), deletes lagotto's regional
+// resources under that lease (footprint.Execute, a heartbeat before each
+// delete), the poller's own function and log group as well, and then
+// finishes the item and closes the region's table; with anything left, it
+// gives the lease back. A poller run already in flight carries on.
+func (m *mworld) cliPlanActor(region string) *actor {
+	name := "cli plan " + region
+	return &actor{name: name, run: func(ctx context.Context) {
+		facts, err := inventory.Gather(ctx, m.src, acct, inventory.Scope{Regions: []string{region}}, inventory.Options{})
+		if err != nil {
+			return
+		}
+		live := inventory.Classify(facts, inventory.Options{}, m.clock())
+		planned := *live
+		planned.Resources = nil
+		for _, r := range live.Resources {
+			if r.Region != region {
+				continue
+			}
+			if r.Class == fp.ClassActive {
+				return // claimRegion: something of lagotto's there is in use
+			}
+			planned.Resources = append(planned.Resources, r)
+		}
+		plan, _, err := inventory.PlanTeardown(&planned, live, inventory.Options{})
+		if err != nil {
+			return
+		}
+		c := m.client(name)
+		l, err := ClaimJudged(ctx, c, region, true)
+		if err != nil {
+			return
+		}
+		failed := func(f bool) {
+			m.mu.Lock()
+			m.planFailed[region] = f
+			m.mu.Unlock()
+		}
+		failed(true) // until it has finished (a crash is a failure)
+		del := inventory.NewDeleter(live, inventory.Deleters{AccountID: acct, Region: func(r string) inventory.RegionDeleter { return mCLIRegion{mRegion{m, r}} },
+			Account: mAccount{m}})
+		res, err := fp.Execute(ctx, plan, fp.ModeReap, del, l)
+		cleared := err == nil && res != nil
+		if res != nil {
+			for _, a := range res.Actions {
+				cleared = cleared && (a.Outcome == fp.OutcomeDeleted || a.Outcome == fp.OutcomeGone)
+			}
+		}
+		if !cleared {
+			_ = l.Release(ctx)
+			return
+		}
+		if err := l.Finish(ctx); err != nil {
+			return
+		}
+		failed(false)
+		_, _ = c.CloseTableIfEmpty(ctx, region)
+	}}
+}
+
+// mCLIRegion is the CLI's regional deleters (cmd regionDeleter): the
+// poller's function and log group too, which the CLI deletes itself.
+type mCLIRegion struct{ mRegion }
+
+func (d mCLIRegion) DeletePollerFunction(ctx context.Context) (bool, error) {
+	return true, d.del(ctx, "function", func(r *inventory.Region) { r.Function = nil })
+}
+
+func (d mCLIRegion) DeletePollerLogGroup(ctx context.Context, _ string) (bool, error) {
+	return true, d.del(ctx, "log group", func(r *inventory.Region) { r.LogGroup = nil })
 }
 
 func (m *mworld) setupActor() *actor {
@@ -1612,8 +1725,20 @@ func (m *mworld) finish() {
 			hasSchedule = hasSchedule || s.Name == deploy.PollerScheduleName
 			hasJob = hasJob || s.Name == FunctionJobName
 		}
-		if f.Function != nil && !hasSchedule && !hasJob {
+		m.mu.Lock()
+		planFailed := m.planFailed[r]
+		m.mu.Unlock()
+		if f.Function != nil && !hasSchedule && !hasJob && !planFailed {
 			m.violate("an orphaned poller in %s: its function, with no rate schedule and no job to delete it [%s]", r, m.snapshot())
+		}
+		// (A run killed after it made the item leaves a dead item, which
+		// the account-wide teardown finishes: LIVENESS.)
+		m.mu.Lock()
+		by, phantom := m.phantomBy[r]
+		m.mu.Unlock()
+		if _, ok := m.item(r); ok && phantom && (by == nil || !by.crashed) {
+			m.violate("lagotto#350: a poller run created %s's lifecycle item after the region was torn down (its rate schedule gone), and it is left [%s]",
+				r, m.snapshot())
 		}
 	}
 	m.report = m.snapshot()
@@ -1819,6 +1944,14 @@ func modelScenarios(long bool) []scenario {
 		scenario{name: "a CLI killed after its claim, and a setup", reap: true, global: "idle", specs: []regionSpec{empty(mA)}, waitAdvances: true,
 			actors: acts(cli("cli", 0), func(m *mworld) *actor { return m.setupActor() }), maxPreempt: p, maxCrash: 1, kinds: k,
 			crashAfter: modelControl + " UpdateItem"},
+		// `lagotto teardown --plan --mode reap` removing a region while its
+		// poller's run is in flight (lagotto#350): the run must not leave a
+		// lifecycle item behind in the region the CLI emptied. With the
+		// pollers in reap mode and in report mode (production).
+		scenario{name: "a CLI plan teardown and its region's poller run", reap: true, specs: []regionSpec{idle(mA)},
+			actors: acts(func(m *mworld) *actor { return m.cliPlanActor(mA) }, tick(mA)), maxPreempt: p, maxCrash: 1, maxFail: 1, kinds: k},
+		scenario{name: "a CLI plan teardown and its region's poller run, pollers in report mode", reap: true, pollerReport: true, specs: []regionSpec{idle(mA)},
+			actors: acts(func(m *mworld) *actor { return m.cliPlanActor(mA) }, tick(mA)), maxPreempt: p, maxCrash: 1, maxFail: 1, kinds: k},
 		scenario{name: "the CLI's report run", specs: []regionSpec{empty(mA)}, global: "idle",
 			actors: acts(cli("cli", 0), cli("cli last mile", DefaultGrace)), maxPreempt: p, maxFail: 1, kinds: k},
 	)

@@ -165,23 +165,23 @@ func TestTickObserveFailures(t *testing.T) {
 		t.Errorf("table closing: %+v\n%s", r, h.log())
 	}
 	// A live closer's sentinel is left alone; one gone stale (its closer
-	// died, libs#88) is cleared, in report mode too, and the next run
-	// observes.
+	// died) is taken over by the Observe itself (libs#88), in report mode
+	// too, and the same run observes; no table is deleted.
 	if r := Tick(ctx, h.cfg(false), h.deps()); !errors.Is(r.Err, lifecycle.ErrTableClosing) {
 		t.Errorf("a live closer's sentinel was cleared: %+v", r)
 	}
 	h.advance(21 * time.Minute)
-	if r := Tick(ctx, h.cfg(false), h.deps()); !errors.Is(r.Err, lifecycle.ErrTableClosing) {
-		t.Errorf("the stale sentinel's run: %+v", r)
-	}
 	if r := Tick(ctx, h.cfg(false), h.deps()); r.Err != nil || r.Outcome != OutcomeActive {
-		t.Errorf("after the stale sentinel was cleared: %+v\n%s", r, h.log())
+		t.Errorf("the stale sentinel's run: %+v\n%s", r, h.log())
+	}
+	if h.table.Item(lifecycle.TableName, lifecycle.SentinelKey) != nil {
+		t.Error("the stale sentinel is still there")
 	}
 	if n := h.table.Calls("DeleteTable"); n != 0 {
 		t.Errorf("report mode deleted the table (%d)", n)
 	}
 
-	// Reap mode clears it the same way.
+	// Reap mode the same way.
 	h = newHarness(t)
 	if r := Tick(ctx, h.cfg(true), h.deps()); r.Outcome != OutcomeWaiting {
 		t.Fatalf("%+v", r)
@@ -191,11 +191,11 @@ func TestTickObserveFailures(t *testing.T) {
 	}
 	h.src.Update(region, func(r *inventory.Region) { r.ActiveWatches = 1 })
 	h.advance(21 * time.Minute)
-	if r := Tick(ctx, h.cfg(true), h.deps()); !errors.Is(r.Err, lifecycle.ErrTableClosing) {
-		t.Errorf("reap, the stale sentinel's run: %+v", r)
-	}
 	if r := Tick(ctx, h.cfg(true), h.deps()); r.Err != nil || r.Outcome != OutcomeActive {
-		t.Errorf("reap, after the stale sentinel was cleared: %+v\n%s", r, h.log())
+		t.Errorf("reap, the stale sentinel's run: %+v\n%s", r, h.log())
+	}
+	if h.table.Item(lifecycle.TableName, lifecycle.SentinelKey) != nil || h.table.Calls("DeleteTable") != 0 {
+		t.Error("reap: the stale sentinel is still there, or the table was deleted")
 	}
 }
 
