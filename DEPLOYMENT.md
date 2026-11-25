@@ -711,7 +711,9 @@ and reads no other region.
    teardown finishes that dead item (below).
 
 A failed step before the commit gives the lease back and nothing that depends
-on it is tried; the next grace period tries again.
+on it is tried; the next grace period tries again. That includes a commit that
+fails after the direct deletes: the poller stays, in a region with no tables,
+bucket or topic left, judges it idle, and a grace period later finishes it.
 
 ### The account-wide resources: one actor, the CLI
 

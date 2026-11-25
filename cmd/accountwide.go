@@ -93,6 +93,10 @@ func runAccountWideUnfenced(ctx context.Context, cfg aws.Config, account string,
 		if r.ActivityUnknown {
 			unread = true
 			blockers = append(blockers, r.Region+": could not be read in full")
+		} else if r.Active() {
+			// As the fenced path: in use (a watch --local region's active
+			// watches, a scheduled launch).
+			blockers = append(blockers, r.Region+": in use ("+strings.Join(r.ActiveReasons(), "; ")+")")
 		}
 		if r.Function != nil {
 			blockers = append(blockers, r.Region+": a poller is deployed")

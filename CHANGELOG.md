@@ -128,6 +128,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and it then releases or suspends the lease it holds and ends its marks,
   each with a fresh context; a second signal exits at once. Every other
   command exits on a signal as before.
+- Outside the aws partition, `teardown --iam-roles` also refuses while any
+  region is in use (an active watch, a scheduled launch), as the fenced path
+  does. A deploy whose pending teardown jobs cannot be deleted afterwards
+  says the poller was deployed and the jobs will delete it.
 - **`teardown --iam-roles` refuses before deleting anything while a creator
   is running in its own region** (its lifecycle item has a fresh mark, a
   hold or a live lease), so a refusal still changes nothing. A
@@ -172,8 +176,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   command.
 - A poller's claim that fails with anything but a throttle is not tried again
   (it may have been applied), and a lease then found in the claimant's own name
-  is reported as its own (#340). The account-wide teardown's wait for the
-  global lease is bounded by time and by a count of polls.
+  is reported as its own (#340). The account-wide teardown waits for nothing:
+  a global lease another run holds means "later".
 - A closing sentinel a crashed `CloseTableIfEmpty` left is cleared in report
   mode as well as reap mode, by the poller and by `teardown --plan` (libs#88).
 - The account-wide teardown names, for each region whose poller keeps the

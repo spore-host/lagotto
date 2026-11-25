@@ -27,12 +27,16 @@ func WhyInUse(lc *lifecycle.Client, it lifecycle.Item) string {
 		return "a teardown holds its lease (" + it.Lease.Owner + ")"
 	case len(it.Holds) > 0:
 		return fmt.Sprintf("held by %v", it.Holds)
-	case lc.InUse(lifecycle.Item{Marks: it.Marks}, CreatorMarkBound):
+	case lc.InUse(lifecycle.Item{Marks: it.Marks, ActiveAt: it.ActiveAt, LastActivityAt: it.LastActivityAt}, CreatorMarkBound):
+		// (The item's times too: a mark with no time is aged from them.)
 		var at time.Time
 		for _, m := range it.Marks {
 			if m.At.After(at) {
 				at = m.At
 			}
+		}
+		if at.IsZero() {
+			return "a creator marked it (a mark with no time, aged from the item's last activity)"
 		}
 		return "a creator marked it at " + at.UTC().Format(time.RFC3339)
 	case lc.InUse(lifecycle.Item{PulseAt: it.PulseAt}, CreatorMarkBound):
@@ -64,6 +68,8 @@ func idleAsJudged(ctx context.Context, lc *lifecycle.Client, scope string, e lif
 	switch {
 	case errors.Is(err, lifecycle.ErrChanged):
 		return e, &lifecycle.NotClaimableError{Tool: Tool, Scope: scope, Reason: "changed since it was judged"}
+	case errors.Is(err, lifecycle.ErrInUse):
+		return e, &lifecycle.NotClaimableError{Tool: Tool, Scope: scope, Reason: "in use: a hold or a live lease"}
 	case err != nil && !errors.Is(err, lifecycle.ErrApplied):
 		return e, err
 	}

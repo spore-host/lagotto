@@ -293,6 +293,11 @@ func Tick(ctx context.Context, cfg Config, d Deps) Result {
 		if res.facts != nil && (res.Plan == nil || len(res.Plan.OneShots) == 0) {
 			seen = res.facts.RegionFacts(cfg.Region) // nil: listed
 		}
+		// Listed on every non-committing run (one ListSchedules) unless its
+		// footprint was read in full: limiting it to a claimed, TEARDOWN or
+		// incomplete item lets a leftover job fire (the model check's "a
+		// launch while jobs are left" and "leftover jobs, a watch and the
+		// CLI", lagotto#351's seventh review).
 		cancelUncommittedJobs(ctx, cfg, d, seen)
 	}
 	return res

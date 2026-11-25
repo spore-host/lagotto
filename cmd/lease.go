@@ -283,6 +283,11 @@ func cancelTeardownJobs(ctx context.Context, api teardownJobAPI, region, what st
 			"An administrator's 'lagotto setup' updates the lagotto-cli-user policy to grant it.\n", region, err)
 	}
 	refuse := func(err error) error {
+		if kind == creatorDeploy {
+			// After a deploy (settleDeployJobs): the poller is there now.
+			return fmt.Errorf("the poller was deployed in %s, but its pending lagotto-teardown jobs could not be deleted (%w), and they will "+
+				"delete it when they run. Run 'lagotto deploy --region %s' again", region, err, region)
+		}
 		return fmt.Errorf("refusing to %s: could not delete the pending lagotto-teardown jobs in %s: %w. Nothing was created", what, region, err)
 	}
 	if kind == creatorHosted {

@@ -285,8 +285,15 @@ func TestCancelTeardownJobs(t *testing.T) {
 			!strings.Contains(out.String(), "warning: could not delete the pending lagotto-teardown jobs") {
 			t.Errorf("denied (kind %d): %v %q", kind, err, out.String())
 		}
+		// A creator is refused with nothing created; a deploy (which settles
+		// its jobs after it deployed) is told the poller is there and the
+		// jobs will delete it.
+		want := "Nothing was created"
+		if kind == creatorDeploy {
+			want = "the poller was deployed in us-west-2, but its pending lagotto-teardown jobs could not be deleted"
+		}
 		if err := cancelTeardownJobs(ctx, &fakeTeardownJobs{err: errors.New("network down")}, "us-west-2", "x", kind, &out); err == nil ||
-			!strings.Contains(err.Error(), "Nothing was created") {
+			!strings.Contains(err.Error(), want) {
 			t.Errorf("failing (kind %d): %v", kind, err)
 		}
 	}
