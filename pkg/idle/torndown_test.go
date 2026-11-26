@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spore-host/libs/lifecycle"
 
@@ -74,7 +75,7 @@ func TestTickTornDownInUse(t *testing.T) {
 	h := newHarness(t)
 	creator := h.other("watch --local")
 	h.table.Hook = func(_ context.Context, op string) {
-		if op == "TransactWriteItems" {
+		if op == "GetItem" && h.table.Calls("TransactWriteItems") > 0 { // after the run's Observe made the item
 			h.table.Hook = nil
 			h.src.Update(region, noSchedule)
 			if _, err := creator.Mark(ctx, Tool, region); err != nil {
@@ -258,5 +259,125 @@ func TestTickReusesItsScheduleRead(t *testing.T) {
 	}
 	if n := h.src.Reads(region + " Schedules"); n != 3 || !strings.Contains(strings.Join(h.ev.list(), "\n"), "delete one-shot") {
 		t.Errorf("%d schedule reads, want 3 (the re-list under the lock); events %v\n%s", n, h.ev.list(), h.log())
+	}
+}
+
+// TestTickTornDownOlderItem (#354 re-review G1): an item this run's Observe
+// did not make (one `deploy --teardown` keeps, with its idle history) is
+// left when the region is found torn down, in either mode, and so is a
+// table the run did not make; one it made it closes only after finishing
+// its own item.
+func TestTickTornDownOlderItem(t *testing.T) {
+	ctx := context.Background()
+	for _, reap := range []bool{false, true} {
+		h := newHarness(t)
+		if r := Tick(ctx, h.cfg(reap), h.deps()); r.Outcome != OutcomeWaiting { // the older item, idle from now
+			t.Fatalf("%+v", r)
+		}
+		h.advance(time.Hour)
+		before := h.item(t)
+		h.table.Hook = func(_ context.Context, op string) {
+			if op == "GetItem" {
+				h.table.Hook = nil
+				h.src.Update(region, noSchedule) // deploy --teardown, while this run observes
+			}
+		}
+		r := Tick(ctx, h.cfg(reap), h.deps())
+		if r.Outcome != OutcomeTornDown || r.Err != nil || !strings.Contains(h.log(), "this run did not make the region's lifecycle item") {
+			t.Errorf("reap=%t: %+v\n%s", reap, r, h.log())
+		}
+		if it := h.item(t); !it.IdleSince.Equal(before.IdleSince) {
+			t.Errorf("reap=%t: the older item's history: %v, was %v", reap, it.IdleSince, before.IdleSince)
+		}
+		if n := h.table.Calls("DeleteItem") + h.table.Calls("DeleteTable"); n != 0 {
+			t.Errorf("reap=%t: %d deletes", reap, n)
+		}
+	}
+	// The table there (another tool's item in it), the item made by this
+	// run: the item is finished, the table left.
+	h := newHarness(t)
+	if err := h.other("spawn").MarkActive(ctx, "spawn", region); err != nil {
+		t.Fatal(err)
+	}
+	h.table.Hook = func(_ context.Context, op string) {
+		if op == "GetItem" && h.table.Calls("TransactWriteItems") > 0 {
+			h.table.Hook = nil
+			h.src.Update(region, noSchedule)
+		}
+	}
+	if r := Tick(ctx, h.cfg(false), h.deps()); r.Outcome != OutcomeTornDown || !strings.Contains(h.log(), "finish=ok") {
+		t.Errorf("its own item, another's table: %+v\n%s", r, h.log())
+	}
+	if _, ok, _ := h.client.Get(ctx, Tool, region); ok || h.table.Calls("DeleteTable") != 0 || h.table.Calls("PutItem") != 0 {
+		t.Errorf("its own item finished and the table left: item %v, deletes %d", ok, h.table.Calls("DeleteTable"))
+	}
+}
+
+// TestTickTornDownOwnLease (#354 re-review G2, G3): a finish that fails and
+// whose give-back fails too leaves this run's own live lease; the retry
+// adopts it and finishes the item. One that keeps failing is the run's
+// Result.Err.
+func TestTickTornDownOwnLease(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	deletes, updates := 0, 0
+	h.table.Hook = func(_ context.Context, op string) {
+		if op == "GetItem" && h.table.Calls("TransactWriteItems") > 0 {
+			h.table.Hook = nil
+			h.src.Update(region, noSchedule)
+			h.table.Err = func(op string, _ any) error {
+				switch {
+				case op == "DeleteItem" && deletes < readAttempts: // every try of the first finish
+					deletes++
+					return errors.New("finish failed")
+				case op == "UpdateItem" && h.table.Calls("DeleteItem") >= readAttempts && updates < readAttempts: // and its give-back
+					updates++
+					return errors.New("release failed")
+				}
+				return nil
+			}
+		}
+	}
+	r := Tick(ctx, h.cfg(false), h.deps())
+	if r.Outcome != OutcomeTornDown || r.Err != nil || !strings.Contains(h.log(), "finish=ok") {
+		t.Errorf("own lease: %+v\n%s", r, h.log())
+	}
+	if _, ok, _ := h.client.Get(ctx, Tool, region); ok {
+		t.Error("own lease: the item is left")
+	}
+
+	h = newHarness(t)
+	h.table.Hook = func(_ context.Context, op string) {
+		if op == "GetItem" && h.table.Calls("TransactWriteItems") > 0 {
+			h.table.Hook = nil
+			h.src.Update(region, noSchedule)
+			h.table.Err = func(op string, _ any) error {
+				if op == "DeleteItem" {
+					return errors.New("finish failed")
+				}
+				return nil
+			}
+		}
+	}
+	if r := Tick(ctx, h.cfg(false), h.deps()); r.Outcome != OutcomeTornDown || r.Err == nil || !strings.Contains(r.Err.Error(), "finish failed") {
+		t.Errorf("a finish that keeps failing: %+v", r)
+	}
+}
+
+// TestTickTornDownSecondVerdictWarnings (#354 re-review G4): the verdict
+// read again logs its warnings.
+func TestTickTornDownSecondVerdictWarnings(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	h.src.Update(region, func(r *inventory.Region) { r.ActiveWatches = 1 })
+	h.table.Hook = func(_ context.Context, op string) {
+		if op == "GetItem" && h.table.Calls("TransactWriteItems") > 0 {
+			h.table.Hook = nil
+			h.src.Update(region, noSchedule)
+			h.src.Fail(region+" Holds", errors.New("AccessDenied"))
+		}
+	}
+	if r := Tick(ctx, h.cfg(false), h.deps()); r.Outcome != OutcomeTornDown || !strings.Contains(h.log(), "torn_down=true warning=") {
+		t.Errorf("%+v\n%s", r, h.log())
 	}
 }

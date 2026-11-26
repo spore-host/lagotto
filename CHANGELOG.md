@@ -9,35 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **A poller run in a region already torn down no longer leaves a lifecycle
-  item behind** (#350). A run in flight while `lagotto teardown --plan --mode
-  reap` (or the poller's own committed run, or `deploy --teardown`) removed
-  its region used to observe after the teardown had finished the region's
-  lifecycle item, and so made the item (and the `spore-host-lifecycle` table)
-  again, IDLE, in a region with nothing else of lagotto's and no poller to
-  remove it. Each run now checks that its rate schedule is still there before
-  it observes, and records nothing if it is not (outcome `torn-down`). If the
-  schedule went while it observed, it finishes the item it found, as judged
-  (never one in use: a creator's mark, a hold, another run's live lease), and
-  closes the table if no tool is left in it, in report mode as well as reap
-  mode: they are the run's own writes, the one thing report mode deletes. A
-  run whose own verdict is active, read again (the teardown may have removed
-  what it saw), leaves the item for the account-wide teardown. Each run reads its region's schedules twice for this (each read
-  is the `scheduler:ListSchedules` calls over lagotto's schedule groups and
-  the default group's `lagotto-` schedules, which the runtime policy already
-  grants); a reap run's job cancel reuses the second read.
+- **Removing a region no longer leaves a stray lifecycle record behind**
+  (#350). When `lagotto teardown --plan --mode reap`, `lagotto deploy
+  --teardown`, or the poller's own idle teardown removed a region while a
+  poller run there was still in flight, that run could write the region's
+  `spore-host-lifecycle` record (and the table) again after the teardown had
+  finished. That left an idle record, in a region with nothing else of
+  lagotto's, that nothing removed until the next account-wide teardown. Now a
+  run that finds its poller's schedule gone records nothing; one whose region
+  was removed while it ran removes the record, and the table, only if it made
+  them itself. It never touches a record that was there before it (such as the
+  one `deploy --teardown` keeps, with its idle history), one a running command
+  holds, or one while it sees the region in use. This holds in report mode
+  too: undoing its own write is the one thing report mode deletes. Each poller
+  run makes two more `scheduler:ListSchedules` reads of its region, which its
+  role already grants.
 
 ### Changed
 
-- **lagotto requires libs v0.56.1**, whose `Observe` takes over a closing
-  sentinel a crashed `CloseTableIfEmpty` left (libs#88). The workarounds that
-  called `CloseTableIfEmpty` on `ErrTableClosing` (in the poller, in
-  `teardown --plan`'s region claim and `lagotto teardown`'s region finish, and
-  in the account-wide teardown's dead-item finish and global idle write) are
-  removed: the library clears a dead closer's sentinel itself, in the same
-  call, and `ErrTableClosing` now means a live closer, which the next run
-  waits out. A poller run behind a dead closer's sentinel now observes in that
-  run rather than the next one.
+- **A stuck closing marker no longer delays the poller, `lagotto teardown` or
+  the account-wide teardown** (libs#88). If a cleanup of the
+  `spore-host-lifecycle` table crashed partway, it left a marker that blocked
+  lagotto's lifecycle records until a later run cleared it. They now clear an
+  abandoned marker themselves, in the same run, and wait only while another
+  cleanup is really in progress. This needs libs v0.56.1. No IAM changes:
+  lagotto's poller role already grants the lifecycle-table reads and deletes
+  involved, and `lagotto-cli-user` the marker delete it already used.
 
 ## [0.73.0] - 2026-11-25
 

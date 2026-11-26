@@ -75,6 +75,7 @@ import (
 	"github.com/spore-host/lagotto/pkg/inventory"
 	"github.com/spore-host/lagotto/pkg/inventory/inventorytest"
 	"github.com/spore-host/lagotto/pkg/runtimeiam"
+	"github.com/spore-host/lagotto/pkg/schedgroup"
 	"github.com/spore-host/lagotto/pkg/watcher"
 )
 
@@ -413,6 +414,9 @@ type mworld struct {
 	// finishedBy are the poller runs that deleted their region's item;
 	// activeVerdict those whose last verdict was active.
 	finishedBy, activeVerdict map[*actor]bool
+	// createdBy[region] is the actor whose write last created the region's
+	// lifecycle item (nil outside the actors).
+	createdBy map[string]*actor
 	// exitedMarks are the marks of creators that have returned.
 	exitedMarks []string
 	// regionMarkedAt[region] is the step of a creator's first mark there.
@@ -456,7 +460,7 @@ type globalSpec string
 
 func newMWorld(reap bool, global globalSpec, specs ...regionSpec) *mworld {
 	m := &mworld{now: t0, tables: map[string]*lifecycletest.Fake{}, reap: reap, acct: inventorytest.Account(acct), due: map[string]time.Time{},
-		read: map[string]map[string]int{}, changed: map[string]int{}, writesBy: map[string]int{}, passedUnder: map[string]bool{}, decidedAt: map[string]int{}, failedRuns: map[string]bool{}, regionMarkedAt: map[string]int{}, markLive: map[string]bool{}, phantomBy: map[string]*actor{}, planOrphan: map[string]bool{}, finishedBy: map[*actor]bool{}, activeVerdict: map[*actor]bool{}}
+		read: map[string]map[string]int{}, changed: map[string]int{}, writesBy: map[string]int{}, passedUnder: map[string]bool{}, decidedAt: map[string]int{}, failedRuns: map[string]bool{}, regionMarkedAt: map[string]int{}, markLive: map[string]bool{}, phantomBy: map[string]*actor{}, planOrphan: map[string]bool{}, finishedBy: map[*actor]bool{}, activeVerdict: map[*actor]bool{}, createdBy: map[string]*actor{}}
 	enabled := []string{modelControl}
 	for _, s := range specs {
 		enabled = append(enabled, s.name)
@@ -632,6 +636,14 @@ func (m *mworld) table(region string) *lifecycletest.Fake {
 					}
 					if op == "DeleteItem" && m.currentActor != nil && strings.HasPrefix(m.current, "poller ") {
 						m.finishedBy[m.currentActor] = true
+						if (!m.reap || m.pollerReport) && m.createdBy[region] != m.currentActor {
+							// Report mode undoes only its own writes (#354
+							// re-review G1): an older item keeps its history.
+							m.violations = append(m.violations, fmt.Sprintf("%s, in report mode, finished %s's lifecycle item, which it did not create", m.current, region))
+						}
+					}
+					if op != "DeleteItem" && f.Item(lifecycle.TableName, k) == nil {
+						m.createdBy[region] = m.currentActor
 					}
 				}
 			}
@@ -1505,6 +1517,30 @@ func (m *mworld) cliPlanActor(region string) *actor {
 	}}
 }
 
+// deployTeardownActor is `lagotto deploy --teardown` in region (pkg/deploy
+// Teardown): no lease; the poller's rate schedule, its function, its log
+// group, the topic and the artifact bucket go, in that order; the tables and
+// the region's lifecycle item stay ('lagotto teardown' removes them). A
+// failure stops it (the user runs it again).
+func (m *mworld) deployTeardownActor(region string) *actor {
+	return &actor{name: "deploy --teardown " + region, noCrash: true, run: func(ctx context.Context) {
+		d := mCLIRegion{mRegion{m, region}}
+		if _, err := d.DeleteSchedule(ctx, schedgroup.Name, deploy.PollerScheduleName); err != nil {
+			return
+		}
+		if _, err := d.DeletePollerFunction(ctx); err != nil {
+			return
+		}
+		if _, err := d.DeletePollerLogGroup(ctx, region); err != nil {
+			return
+		}
+		if _, err := d.DeleteAlertsTopic(ctx, region, acct); err != nil {
+			return
+		}
+		_, _ = d.DeleteArtifactBucket(ctx, region, acct)
+	}}
+}
+
 // mCLIRegion is the CLI's regional deleters (cmd regionDeleter): the
 // poller's function and log group too, which the CLI deletes itself.
 type mCLIRegion struct{ mRegion }
@@ -1986,6 +2022,12 @@ func modelScenarios(long bool) []scenario {
 		scenario{name: "a CLI plan teardown, its region's poller run and a watch --local", reap: true, specs: []regionSpec{idle(mA)},
 			actors:     acts(func(m *mworld) *actor { return m.cliPlanActor(mA) }, func(m *mworld) *actor { return m.localWatchActor(mA) }, tick(mA)),
 			maxPreempt: p, maxFail: 1, kinds: k},
+		// `deploy --teardown` (which keeps the tables and the region's item,
+		// with its idle history) while the region's poller runs, in report
+		// mode: the run never finishes an item it did not make (#354
+		// re-review G1).
+		scenario{name: "deploy --teardown and its region's poller run, pollers in report mode", reap: true, pollerReport: true, specs: []regionSpec{idle(mA)},
+			actors: acts(func(m *mworld) *actor { return m.deployTeardownActor(mA) }, tick(mA)), maxPreempt: p, maxFail: 1, kinds: k},
 		scenario{name: "the CLI's report run", specs: []regionSpec{empty(mA)}, global: "idle",
 			actors: acts(cli("cli", 0), cli("cli last mile", DefaultGrace)), maxPreempt: p, maxFail: 1, kinds: k},
 	)

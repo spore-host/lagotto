@@ -121,6 +121,19 @@ func finishIfDead(ctx context.Context, lc *lifecycle.Client, scope string, sleep
 	case !ok:
 		return false, "no lifecycle item", nil
 	}
+	if it.Lease != nil && !lc.LeaseStale(it) {
+		// This very Client's own claim, from an earlier try whose finish
+		// and give-back both failed: it finishes it (AdoptLease).
+		if l, err := lc.AdoptLease(ctx, Tool, scope); err == nil {
+			if err := finishLease(ctx, sleep, lc, scope, l); err != nil {
+				if rerr := releaseLease(ctx, sleep, l); rerr != nil {
+					err = errors.Join(err, fmt.Errorf("giving the lease back: %w (it goes stale in 20 min)", rerr))
+				}
+				return false, "", err
+			}
+			return true, "", nil
+		}
+	}
 	if why := WhyInUse(lc, it); why != "" {
 		return false, "in use: " + why, nil
 	}

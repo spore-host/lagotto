@@ -719,19 +719,21 @@ run already in flight, or a retried or duplicate invocation, carries on after
 the function is deleted. So each run checks that its rate schedule is still
 there before it observes, and records nothing if it is not (`observe=skipped`,
 outcome `torn-down`). It checks again after observing: an observation that
-landed after the teardown finished made the region's item, and the table,
-again, so the run finishes that item as it read it (refused while it is in
-use: a creator's fresh mark, a hold, another run's live lease) and closes
-the table if no tool is left in it. It does this in report mode as well,
-the one thing report mode deletes: they are the run's own writes. A run
-whose own verdict is active (a watch it saw, a read that failed) reads it
-again, since the teardown may have removed what it saw; while it is still
-active the run leaves the item, ACTIVE, for the account-wide teardown to
-judge. A run killed in
-between leaves a dead item, which the account-wide teardown finishes. Each
-run reads its region's schedules twice for this (each read lists lagotto's
-schedule groups and the default group's `lagotto-` schedules); a reap run's
-job cancel reuses the second read.
+landed after the teardown finished made the region's item, and maybe the
+table, again. The run then undoes only what its own observation made: the
+item, finished as it read it (refused while it is in use: a creator's fresh
+mark, a hold, another run's live lease), and then the table, closed if no
+tool is left in it. An item that was there before the run (the one `deploy
+--teardown` keeps, with its idle history, or a stranded teardown's) and a
+table the run did not make are left, for the account-wide teardown. It does
+this in report mode as well, the one thing report mode deletes: they are the
+run's own writes. A run whose own verdict is active (a watch it saw, a read
+that failed) reads it again, since the teardown may have removed what it saw;
+while it is still active the run leaves the item, ACTIVE, for the account-wide
+teardown to judge. A run killed in between leaves a dead item, which the
+account-wide teardown finishes. Each run reads its region's schedules twice
+for this (each read lists lagotto's schedule groups and the default group's
+`lagotto-` schedules); a reap run's job cancel reuses the second read.
 
 A failed step before the commit gives the lease back and nothing that depends
 on it is tried; the next grace period tries again. That includes a commit that

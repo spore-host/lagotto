@@ -443,10 +443,14 @@ func tick(ctx context.Context, cfg Config, d Deps) Result {
 		logf("idle-verdict region=%s active=%t observe=skipped reason=%q", cfg.Region, v.Active, tornDownWhy)
 		return res
 	}
-	var idleFor time.Duration
+	var (
+		idleFor time.Duration
+		made    lifecycle.Observation // what of the item and table this run made
+	)
 	err := retryOp(ctx, cfg, func() error {
-		var err error
-		_, idleFor, err = d.Lifecycle.Observe(ctx, Tool, cfg.Region, v.Active)
+		o, err := d.Lifecycle.ObserveDetail(ctx, Tool, cfg.Region, v.Active)
+		idleFor = o.IdleFor
+		made.MadeItem, made.MadeTable = made.MadeItem || o.MadeItem, made.MadeTable || o.MadeTable
 		if errors.Is(err, lifecycle.ErrTableClosing) {
 			return &final{err}
 		}
@@ -477,6 +481,9 @@ func tick(ctx context.Context, cfg Config, d Deps) Result {
 			// run's observation made again would then be left for nothing.
 			v = ReadVerdict(ctx, d.Source.Region(cfg.Region), cfg.Region, cfg.Options)
 			res.Verdict = v
+			for _, w := range v.Warnings {
+				logf("idle-verdict region=%s torn_down=true warning=%q", cfg.Region, w)
+			}
 		}
 		if v.Active {
 			// Its own verdict is that something is in use: the item stays
@@ -486,7 +493,7 @@ func tick(ctx context.Context, cfg Config, d Deps) Result {
 				"the region is active by this run's own verdict ("+strings.Join(v.Reasons, "; ")+"): its lifecycle item is left for the account-wide teardown")
 			return res
 		}
-		finishTornDown(ctx, cfg, d)
+		res.Err = finishTornDown(ctx, cfg, d, made)
 		return res
 	}
 	line := fmt.Sprintf("idle-verdict region=%s active=%t idle_for=%s grace=%s", cfg.Region, v.Active, idleFor.Round(time.Second), cfg.Grace)
@@ -614,18 +621,25 @@ func tornDown(ctx context.Context, cfg Config, d Deps, when string) (bool, *inve
 }
 
 // finishTornDown ends a run whose region was torn down while it observed
-// (lagotto#350). Its Observe, coming after the teardown had finished the
-// region's lifecycle item, made it again (and the table, if the teardown
-// had closed it), in a region with nothing left to observe or to remove
-// it. The item is finished as judged (finishIfDead: refused while it is in
-// use, so a creator's mark, a hold or another run's live lease keeps it,
-// and only as it was read), and the region's table is then closed if no
-// tool is left in it (CloseTableIfEmpty), in either mode: they are this
-// run's own writes, in a region with nothing left of the poller's, not
-// something the region's teardown would report. A failure is tried again;
-// one that persists leaves a dead item, which the account-wide teardown
-// finishes once the region's poller is gone.
-func finishTornDown(ctx context.Context, cfg Config, d Deps) {
+// (lagotto#350). An Observe that came after the teardown had finished the
+// region's lifecycle item made it again (and the table, if the teardown had
+// closed it), in a region with nothing left to observe or to remove it.
+// Only what this run's own Observe made (made, as lifecycle ObserveDetail
+// reports it) is undone, in either mode: the item, finished as judged
+// (finishIfDead: refused while it is in use, so a creator's mark, a hold or
+// another run's live lease keeps it, and only as it was read), and then the
+// table, closed if no tool is left in it (CloseTableIfEmpty). An older item
+// (one `deploy --teardown` keeps, or a stranded teardown's), with its idle
+// history, and a table this run did not make, are left: the account-wide
+// teardown finishes a dead item once the region's poller is gone. A failure
+// is tried again; the error of one that persists is returned (it leaves a
+// dead item, the account-wide teardown's to finish).
+func finishTornDown(ctx context.Context, cfg Config, d Deps, made lifecycle.Observation) error {
+	if !made.MadeItem {
+		cfg.Logf("idle-verdict region=%s torn_down=true finish=skipped reason=%q", cfg.Region,
+			"this run did not make the region's lifecycle item: an older one is left, with its history, for the account-wide teardown")
+		return nil
+	}
 	var (
 		done bool
 		why  string
@@ -638,15 +652,20 @@ func finishTornDown(ctx context.Context, cfg Config, d Deps) {
 	switch {
 	case err != nil:
 		cfg.Logf("idle-verdict region=%s torn_down=true finish=failed error=%q", cfg.Region, err.Error())
-		return
+		return fmt.Errorf("finishing the lifecycle item this run made in a torn-down region: %w", err)
 	case !done:
 		cfg.Logf("idle-verdict region=%s torn_down=true finish=skipped reason=%q", cfg.Region, why)
-		return
+		return nil
 	}
 	cfg.Logf("idle-verdict region=%s torn_down=true finish=ok reason=%q", cfg.Region, tornDownWhy)
+	if !made.MadeTable {
+		return nil
+	}
 	if _, err := d.Lifecycle.CloseTableIfEmpty(ctx, cfg.Region); err != nil {
 		cfg.Logf("idle-verdict region=%s torn_down=true close_table=failed error=%q", cfg.Region, err.Error())
+		return fmt.Errorf("closing the lifecycle table this run made in a torn-down region: %w", err)
 	}
+	return nil
 }
 
 // final wraps an error retryOp must not retry.
