@@ -410,8 +410,9 @@ type mworld struct {
 	// killed in between is the user's failed command, which they run again,
 	// and that state its own.
 	planOrphan map[string]bool
-	// finishedBy are the poller runs that deleted their region's item.
-	finishedBy map[*actor]bool
+	// finishedBy are the poller runs that deleted their region's item;
+	// activeVerdict those whose last verdict was active.
+	finishedBy, activeVerdict map[*actor]bool
 	// exitedMarks are the marks of creators that have returned.
 	exitedMarks []string
 	// regionMarkedAt[region] is the step of a creator's first mark there.
@@ -455,7 +456,7 @@ type globalSpec string
 
 func newMWorld(reap bool, global globalSpec, specs ...regionSpec) *mworld {
 	m := &mworld{now: t0, tables: map[string]*lifecycletest.Fake{}, reap: reap, acct: inventorytest.Account(acct), due: map[string]time.Time{},
-		read: map[string]map[string]int{}, changed: map[string]int{}, writesBy: map[string]int{}, passedUnder: map[string]bool{}, decidedAt: map[string]int{}, failedRuns: map[string]bool{}, regionMarkedAt: map[string]int{}, markLive: map[string]bool{}, phantomBy: map[string]*actor{}, planOrphan: map[string]bool{}, finishedBy: map[*actor]bool{}}
+		read: map[string]map[string]int{}, changed: map[string]int{}, writesBy: map[string]int{}, passedUnder: map[string]bool{}, decidedAt: map[string]int{}, failedRuns: map[string]bool{}, regionMarkedAt: map[string]int{}, markLive: map[string]bool{}, phantomBy: map[string]*actor{}, planOrphan: map[string]bool{}, finishedBy: map[*actor]bool{}, activeVerdict: map[*actor]bool{}}
 	enabled := []string{modelControl}
 	for _, s := range specs {
 		enabled = append(enabled, s.name)
@@ -1087,6 +1088,7 @@ func (m *mworld) tick(region string) *actor {
 		a, _ := ctx.Value(actorKey{}).(*actor)
 		m.mu.Lock()
 		finished := m.finishedBy[a]
+		m.activeVerdict[a] = res.Verdict.Active
 		m.mu.Unlock()
 		if res.Verdict.Active && finished {
 			m.violate("poller %s finished its lifecycle item though its own verdict was active (%s) [%s]", region, strings.Join(res.Verdict.Reasons, "; "), m.snapshot())
@@ -1755,12 +1757,14 @@ func (m *mworld) finish() {
 		if f.Function != nil && !hasSchedule && !hasJob && !planOrphan {
 			m.violate("an orphaned poller in %s: its function, with no rate schedule and no job to delete it [%s]", r, m.snapshot())
 		}
-		// (A run killed after it made the item leaves a dead item, which
-		// the account-wide teardown finishes: LIVENESS.)
+		// (A run killed after it made the item, or one whose verdict, read
+		// again, is still active, leaves it on purpose: the account-wide
+		// teardown finishes it, LIVENESS.)
 		m.mu.Lock()
 		by, phantom := m.phantomBy[r]
+		left := by != nil && (by.crashed || m.activeVerdict[by])
 		m.mu.Unlock()
-		if _, ok := m.item(r); ok && phantom && (by == nil || !by.crashed) {
+		if _, ok := m.item(r); ok && phantom && !left {
 			m.violate("lagotto#350: a poller run created %s's lifecycle item after the region was torn down (its rate schedule gone), and it is left [%s]",
 				r, m.snapshot())
 		}

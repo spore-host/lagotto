@@ -724,8 +724,10 @@ again, so the run finishes that item as it read it (refused while it is in
 use: a creator's fresh mark, a hold, another run's live lease) and closes
 the table if no tool is left in it. It does this in report mode as well,
 the one thing report mode deletes: they are the run's own writes. A run
-whose own verdict is active (a watch it saw, a read that failed) leaves the
-item, ACTIVE, for the account-wide teardown to judge. A run killed in
+whose own verdict is active (a watch it saw, a read that failed) reads it
+again, since the teardown may have removed what it saw; while it is still
+active the run leaves the item, ACTIVE, for the account-wide teardown to
+judge. A run killed in
 between leaves a dead item, which the account-wide teardown finishes. Each
 run reads its region's schedules twice for this (each read lists lagotto's
 schedule groups and the default group's `lagotto-` schedules); a reap run's

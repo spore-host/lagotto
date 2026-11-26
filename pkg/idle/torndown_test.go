@@ -190,8 +190,10 @@ func (h *harness) other(owner string) *lifecycle.Client {
 }
 
 // TestTickTornDownActive (#354 review G3): a run whose own verdict is
-// active, in a region torn down while it observed, leaves the item (ACTIVE,
-// a record of that activity) for the account-wide teardown, in either mode.
+// active, in a region torn down while it observed, reads it again, and if
+// it is still active leaves the item (ACTIVE, a record of that activity)
+// for the account-wide teardown, in either mode; once the activity went
+// with the region (its tables deleted), it finishes the item.
 func TestTickTornDownActive(t *testing.T) {
 	ctx := context.Background()
 	for _, reap := range []bool{false, true} {
@@ -214,6 +216,22 @@ func TestTickTornDownActive(t *testing.T) {
 		if n := h.table.Calls("DeleteItem") + h.table.Calls("DeleteTable"); n != 0 {
 			t.Errorf("reap=%t: %d deletes", reap, n)
 		}
+	}
+	// The watch went with the region: the run's verdict, read again, is
+	// idle, and the item it made is finished.
+	h := newHarness(t)
+	h.src.Update(region, func(r *inventory.Region) { r.ActiveWatches = 1 })
+	h.table.Hook = func(_ context.Context, op string) {
+		if op == "TransactWriteItems" {
+			h.table.Hook = nil
+			h.src.Update(region, func(r *inventory.Region) { r.Schedules, r.ActiveWatches = nil, 0 })
+		}
+	}
+	if r := Tick(ctx, h.cfg(false), h.deps()); r.Outcome != OutcomeTornDown || r.Verdict.Active || !strings.Contains(h.log(), "finish=ok") {
+		t.Errorf("the activity gone with the region: %+v\n%s", r, h.log())
+	}
+	if _, ok, _ := h.client.Get(ctx, Tool, region); ok {
+		t.Error("the activity gone with the region: the item is left")
 	}
 }
 

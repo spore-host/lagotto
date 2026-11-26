@@ -21,8 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (never one in use: a creator's mark, a hold, another run's live lease), and
   closes the table if no tool is left in it, in report mode as well as reap
   mode: they are the run's own writes, the one thing report mode deletes. A
-  run whose own verdict is active leaves the item for the account-wide
-  teardown. Each run reads its region's schedules twice for this (each read
+  run whose own verdict is active, read again (the teardown may have removed
+  what it saw), leaves the item for the account-wide teardown. Each run reads its region's schedules twice for this (each read
   is the `scheduler:ListSchedules` calls over lagotto's schedule groups and
   the default group's `lagotto-` schedules, which the runtime policy already
   grants); a reap run's job cancel reuses the second read.

@@ -472,6 +472,13 @@ func tick(ctx context.Context, cfg Config, d Deps) Result {
 	if gone {
 		res.Outcome = OutcomeTornDown
 		if v.Active {
+			// Read again: the teardown that removed the region may have
+			// removed what made it active (its tables), and the item this
+			// run's observation made again would then be left for nothing.
+			v = ReadVerdict(ctx, d.Source.Region(cfg.Region), cfg.Region, cfg.Options)
+			res.Verdict = v
+		}
+		if v.Active {
 			// Its own verdict is that something is in use: the item stays
 			// (ACTIVE), a record of that activity, for the account-wide
 			// teardown to judge once nothing of the region is left.
