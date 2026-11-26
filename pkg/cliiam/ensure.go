@@ -65,16 +65,17 @@ func hasManagedTag(tags []iamtypes.Tag) bool {
 }
 
 // ReadPolicy returns the default version's document of the deployed CLI-user
-// policy (URL-decoded JSON as IAM returns it, which runtimeiam.ParsePolicy
-// accepts). found is false when the policy does not exist.
-func ReadPolicy(ctx context.Context, client PolicyAPI, accountID string) (doc string, found bool, err error) {
-	doc, _, found, err = readPolicy(ctx, client, accountID)
+// policy of accountID, in partition (URL-decoded JSON as IAM returns it, which
+// runtimeiam.ParsePolicy accepts). found is false when the policy does not
+// exist.
+func ReadPolicy(ctx context.Context, client PolicyAPI, partition, accountID string) (doc string, found bool, err error) {
+	doc, _, found, err = readPolicy(ctx, client, partition, accountID)
 	return doc, found, err
 }
 
 // readPolicy is [ReadPolicy], also returning the policy's tags.
-func readPolicy(ctx context.Context, client PolicyAPI, accountID string) (doc string, tags map[string]string, found bool, err error) {
-	p, err := client.GetPolicy(ctx, &iam.GetPolicyInput{PolicyArn: aws.String(PolicyARN(accountID))})
+func readPolicy(ctx context.Context, client PolicyAPI, partition, accountID string) (doc string, tags map[string]string, found bool, err error) {
+	p, err := client.GetPolicy(ctx, &iam.GetPolicyInput{PolicyArn: aws.String(PolicyARN(partition, accountID))})
 	if err != nil {
 		if isNoSuchEntity(err) {
 			return "", nil, false, nil
@@ -86,7 +87,7 @@ func readPolicy(ctx context.Context, client PolicyAPI, accountID string) (doc st
 	}
 	tags = iamtags.ToMap(p.Policy.Tags)
 	v, err := client.GetPolicyVersion(ctx, &iam.GetPolicyVersionInput{
-		PolicyArn: aws.String(PolicyARN(accountID)), VersionId: p.Policy.DefaultVersionId,
+		PolicyArn: aws.String(PolicyARN(partition, accountID)), VersionId: p.Policy.DefaultVersionId,
 	})
 	if err != nil {
 		return "", tags, true, fmt.Errorf("cliiam: read the default version of %s: %w", PolicyName, err)
@@ -107,7 +108,8 @@ func PolicyTags(stamp ...managedtags.Stamp) map[string]string {
 	}, managedtags.FirstStamp(stamp).Infrastructure(managedtags.ScopeGlobal, managedtags.ComponentCLIPolicy))
 }
 
-// EnsurePolicy creates [PolicyName] with doc, or, when it exists with a
+// EnsurePolicy creates [PolicyName] with doc in accountID, in partition, or,
+// when it exists with a
 // different default document, writes doc as a new default version. A deployed
 // document that is semantically identical (runtimeiam.DiffPolicy) is left
 // alone, so a re-run of setup does not churn versions. When the policy already
@@ -115,9 +117,9 @@ func PolicyTags(stamp ...managedtags.Stamp) map[string]string {
 //
 // The policy carries [PolicyTags] (#324): set at create, and the ones an
 // existing policy lacks added to it. stamp (optional) is the owner and clock.
-func EnsurePolicy(ctx context.Context, client PolicyAPI, accountID, doc string, stamp ...managedtags.Stamp) (Outcome, error) {
-	out := Outcome{ARN: PolicyARN(accountID)}
-	deployed, have, found, err := readPolicy(ctx, client, accountID)
+func EnsurePolicy(ctx context.Context, client PolicyAPI, partition, accountID, doc string, stamp ...managedtags.Stamp) (Outcome, error) {
+	out := Outcome{ARN: PolicyARN(partition, accountID)}
+	deployed, have, found, err := readPolicy(ctx, client, partition, accountID)
 	if err != nil {
 		return out, err
 	}

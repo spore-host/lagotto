@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spf13/cobra"
+	"github.com/spore-host/lagotto/pkg/awsarn"
 	"github.com/spore-host/lagotto/pkg/awscfg"
 	"github.com/spore-host/lagotto/pkg/deploy"
 	"github.com/spore-host/lagotto/pkg/doctor"
@@ -168,7 +169,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	appendLaunchScheduleCheck(ctx, report, cfg.Region, deploy.New(cfg), store.ScheduledLaunchScheduleNames)
 	appendNotifyWatchCheck(ctx, report, store.ListActiveWatches)
 	appendLaunchConfigCheck(ctx, report, store.ListActiveWatches, store.ListScheduledLaunches,
-		newRoleCheck(ctx, iam.NewFromConfig(cfg), *acct.Account))
+		newRoleCheck(ctx, iam.NewFromConfig(cfg), awsarn.PartitionOrAWS(cfg.Region), *acct.Account))
 	appendArtifactBucketCheck(ctx, report, *acct.Account, deploy.New(cfg), regionalArtifactProbe{cfg})
 	appendCallerCheck(ctx, report, iam.NewFromConfig(cfg), aws.ToString(acct.Arn), *acct.Account, cfg.Region)
 

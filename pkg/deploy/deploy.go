@@ -48,6 +48,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 
 	cfn "github.com/spore-host/lagotto/deployment/cloudformation"
+	"github.com/spore-host/lagotto/pkg/awsarn"
 	"github.com/spore-host/lagotto/pkg/managedtags"
 	"github.com/spore-host/lagotto/pkg/schedgroup"
 )
@@ -227,6 +228,12 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) (*Result, error) {
 	if opts.Region == "" {
 		return nil, fmt.Errorf("deploy: Region is required (the poller's ARNs are derived from it)")
 	}
+	// Every ARN the poller is wired with is in the region's partition
+	// (lagotto#347): one lagotto does not support is refused before anything
+	// is created.
+	if _, err := awsarn.Partition(opts.Region); err != nil {
+		return nil, fmt.Errorf("deploy: %w", err)
+	}
 	d.owner = opts.Owner
 	d.holdScheduleMove = opts.HoldScheduleMove
 
@@ -265,7 +272,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) (*Result, error) {
 	}
 
 	fnARN, fnAction, err := d.EnsurePollerFunction(ctx, PollerFunctionInput{
-		RoleARN:    runtimeRoleARN(opts.AccountID),
+		RoleARN:    runtimeRoleARN(opts.Region, opts.AccountID),
 		Bucket:     bucket,
 		Key:        key,
 		CodeSHA256: digest,
@@ -290,7 +297,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) (*Result, error) {
 		return nil, err
 	}
 
-	schedRoleARN := schedulerInvokeRoleARN(opts.AccountID)
+	schedRoleARN := schedulerInvokeRoleARN(opts.Region, opts.AccountID)
 	schedAction, err := d.EnsurePollerSchedule(ctx, fnARN, schedRoleARN)
 	if err != nil {
 		return nil, err

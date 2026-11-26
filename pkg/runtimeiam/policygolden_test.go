@@ -23,7 +23,7 @@ const runtimePolicyGolden = "testdata/runtime-policy.golden.json"
 // the poller may do shows up as a reviewed diff of this file; regenerate with
 // `go test ./pkg/runtimeiam -run TestPolicyDocumentGolden -args -update-runtime-policy`.
 func TestPolicyDocumentGolden(t *testing.T) {
-	doc, err := PolicyDocumentFor("123456789012", Authorizations{
+	doc, err := PolicyDocumentFor("aws", "123456789012", Authorizations{
 		InstanceRoles:  []string{"my-instance-role"},
 		SageMakerRoles: []string{"arn:aws:iam::123456789012:role/service-role/my-sagemaker-role"},
 	})
@@ -58,7 +58,7 @@ func TestPolicyDocumentGolden(t *testing.T) {
 // simulator but fails a real PutRolePolicy ("failed legacy parsing"), which broke
 // every spawn launch in spawn#1069. The account is always a literal here.
 func TestPolicyHasNoPolicyVariables(t *testing.T) {
-	doc, err := PolicyDocument("123456789012", []string{"my-instance-role"})
+	doc, err := PolicyDocument("aws", "123456789012", []string{"my-instance-role"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ var policyConditionKeyPrefixes = []string{"ec2:ResourceTag/", "aws:RequestTag/",
 // deny, the bug that once disarmed spawn's production reaper (an ec2: key on an
 // ssm: action, spawn#665). Global aws: keys may appear on any action.
 func TestPolicyConditionKeysMatchActionService(t *testing.T) {
-	doc, err := PolicyDocument("123456789012", []string{"my-instance-role"})
+	doc, err := PolicyDocument("aws", "123456789012", []string{"my-instance-role"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +134,7 @@ func TestPolicyConditionKeysMatchActionService(t *testing.T) {
 // what spawn created, on the tag spawn stamps, with the key of the action's own
 // service.
 func TestDestructiveGrantsAreTagGated(t *testing.T) {
-	doc, err := PolicyDocument("123456789012", nil)
+	doc, err := PolicyDocument("aws", "123456789012", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ func TestS3GrantsAreScopedToTheFSxPrefix(t *testing.T) {
 		t.Fatalf("runtimeiam.FSxBucketPrefix %q != watcher.FSxBucketPrefix %q: the poller would be granted one prefix "+
 			"and lagotto would enforce another", FSxBucketPrefix, watcher.FSxBucketPrefix)
 	}
-	doc, err := PolicyDocument("123456789012", []string{"my-instance-role"})
+	doc, err := PolicyDocument("aws", "123456789012", []string{"my-instance-role"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,15 +190,15 @@ func TestS3GrantsAreScopedToTheFSxPrefix(t *testing.T) {
 	// The one exception: idle teardown (#325) empties and deletes the artifact
 	// bucket, so these actions, and only these, are granted on it instead.
 	artifact := map[string]string{
-		"s3:ListBucketVersions":  ArtifactBucketARN("123456789012"),
-		"s3:DeleteBucket":        ArtifactBucketARN("123456789012"),
-		"s3:DeleteObject":        ArtifactBucketARN("123456789012") + "/*",
-		"s3:DeleteObjectVersion": ArtifactBucketARN("123456789012") + "/*",
+		"s3:ListBucketVersions":  ArtifactBucketARN("aws", "123456789012"),
+		"s3:DeleteBucket":        ArtifactBucketARN("aws", "123456789012"),
+		"s3:DeleteObject":        ArtifactBucketARN("aws", "123456789012") + "/*",
+		"s3:DeleteObjectVersion": ArtifactBucketARN("aws", "123456789012") + "/*",
 	}
 	// The idle teardown's footprint (#326) also reads the artifact bucket's
 	// tags, and lists the account's buckets (no resource-level permission).
 	alsoOn := map[string]string{
-		"s3:GetBucketTagging": ArtifactBucketARN("123456789012"),
+		"s3:GetBucketTagging": ArtifactBucketARN("aws", "123456789012"),
 		"s3:ListAllMyBuckets": "*",
 	}
 	seen := map[string]bool{}
@@ -237,7 +237,7 @@ func TestS3GrantsAreScopedToTheFSxPrefix(t *testing.T) {
 // API reference), and the idle teardown's delete guard needs them (#326). The
 // coverage gate cannot see this: no code calls ListTags.
 func TestPollerReadsItsFunctionsTags(t *testing.T) {
-	doc, err := PolicyDocument("123456789012", nil)
+	doc, err := PolicyDocument("aws", "123456789012", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

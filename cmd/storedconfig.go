@@ -19,11 +19,12 @@ import (
 // is never reported as a problem.
 type roleCheck func(role string) (missing []string, known bool)
 
-// newRoleCheck reads the deployed poller's runtime policy on first use, once:
+// newRoleCheck reads the deployed poller's runtime policy on first use, once
+// (its ARNs in partition, the account's):
 // only a config that names an iam_role needs it. (No sync.Once: the IAM
 // inventory resolves a func handed to Once.Do as reachable from every Do in
 // the binary, startup included.)
-func newRoleCheck(ctx context.Context, client runtimeiam.IAMAPI, accountID string) roleCheck {
+func newRoleCheck(ctx context.Context, client runtimeiam.IAMAPI, partition, accountID string) roleCheck {
 	var (
 		loaded bool
 		grants []runtimeiam.Grant
@@ -37,7 +38,7 @@ func newRoleCheck(ctx context.Context, client runtimeiam.IAMAPI, accountID strin
 		if !ok {
 			return nil, false
 		}
-		return runtimeiam.MissingInstanceRoleGrants(grants, accountID, role), true
+		return runtimeiam.MissingInstanceRoleGrants(grants, partition, accountID, role), true
 	}
 }
 

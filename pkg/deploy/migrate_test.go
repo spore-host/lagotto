@@ -240,7 +240,7 @@ func (w *world) populate(rs []cfntypes.StackResourceSummary) {
 		case "AWS::Scheduler::Schedule":
 			w.schedules[id] = &scheduler.GetScheduleOutput{Name: aws.String(id), State: schedulertypes.ScheduleStateEnabled,
 				ScheduleExpression: aws.String("rate(5 minutes)"),
-				Target:             &schedulertypes.Target{Arn: aws.String(PollerFunctionARN("us-east-1", acct)), RoleArn: aws.String(schedulerInvokeRoleARN(acct))}}
+				Target:             &schedulertypes.Target{Arn: aws.String(PollerFunctionARN("us-east-1", acct)), RoleArn: aws.String(schedulerInvokeRoleARN("us-east-1", acct))}}
 		case "AWS::SNS::Topic":
 			w.topics[id] = map[string]string{"TopicArn": id, "DisplayName": "Lagotto Capacity Alerts", "SubscriptionsConfirmed": "1"}
 		case "AWS::IAM::Role":

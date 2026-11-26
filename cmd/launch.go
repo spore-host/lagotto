@@ -14,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
+	"github.com/spore-host/lagotto/pkg/awsarn"
 	"github.com/spore-host/lagotto/pkg/awscfg"
 	"github.com/spore-host/lagotto/pkg/deploy"
 	"github.com/spore-host/lagotto/pkg/managedtags"
@@ -218,7 +219,7 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 	// constructs these same ARNs with !Sub. RequirePollerDeployed then checks the
 	// thing this command actually needs: that the function is really there.
 	fnArn := deploy.PollerFunctionARN(region, acctID)
-	roleArn := runtimeiam.SchedulerInvokeRoleARN(acctID)
+	roleArn := runtimeiam.SchedulerInvokeRoleARN(awsarn.PartitionOrAWS(region), acctID)
 	if err := deploy.New(cfg).RequirePollerDeployed(ctx, region, acctID); err != nil {
 		return err
 	}

@@ -49,9 +49,9 @@ var ErrAttached = errors.New("cliiam: the policy is attached")
 // each non-default version, then the policy. Idempotent: an absent policy is
 // reported as Absent. A same-named policy without lagotto's tag is left
 // alone.
-func DeletePolicy(ctx context.Context, client DeleteAPI, accountID string) (Deletion, error) {
+func DeletePolicy(ctx context.Context, client DeleteAPI, partition, accountID string) (Deletion, error) {
 	var d Deletion
-	arn := aws.String(PolicyARN(accountID))
+	arn := aws.String(PolicyARN(partition, accountID))
 	p, err := client.GetPolicy(ctx, &iam.GetPolicyInput{PolicyArn: arn})
 	if err != nil {
 		if isNoSuchEntity(err) {

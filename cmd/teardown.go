@@ -89,7 +89,8 @@ lagotto's lagotto:managed=cli tag is left in place and reported.
 
 The account-wide resources are removed by one code path, the same one the lazy
 last mile uses (lagotto#340, #346): under lagotto's global teardown lease
-(tool#lagotto#global in us-east-1's spore-host-lifecycle table), and only while
+(tool#lagotto#global in the spore-host-lifecycle table of the partition's control
+region: us-east-1, us-gov-west-1 in GovCloud, cn-north-1 in China), and only while
 no region has a poller, a pending one-shot teardown job, or a lagotto lifecycle
 item that is in use or held by a live teardown, all re-checked before each
 delete; and never while a setup, deploy, watch or launch is running (one that
@@ -178,9 +179,11 @@ func runTeardown(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("not deleting anything: the account-wide check could not plan its deletes: %w", r.Err)
 		case r.Outcome == idle.AccountWideWould, r.Outcome == idle.AccountWideNothing:
 		case r.Outcome == idle.AccountWideSkipped:
-			// Outside the aws partition there is no global scope (lagotto#347):
-			// the account-wide resources go as before lagotto#340, once no
-			// poller is left anywhere (checked above), with no lease.
+			// Outside aws, aws-us-gov and aws-cn (the ISO partitions, the
+			// European Sovereign Cloud) there is no global scope
+			// (lagotto#347): the account-wide resources go as before
+			// lagotto#340, once no poller is left anywhere (checked above),
+			// with no lease.
 			noGlobalScope = true
 		default:
 			return fmt.Errorf("not deleting anything: %w", accountWideError(r))
@@ -234,7 +237,7 @@ func runTeardown(cmd *cobra.Command, args []string) error {
 		}
 		run := teardownAccountWide
 		if noGlobalScope {
-			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s has no global teardown lease (outside the aws partition); "+
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s has no global teardown lease (outside the aws, aws-us-gov and aws-cn partitions); "+
 				"deleting lagotto's account-wide resources without one, now that no poller is left in any region\n", cfg.Region)
 			run = teardownAccountWideUnfenced
 		}

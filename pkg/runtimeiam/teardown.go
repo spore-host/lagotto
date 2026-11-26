@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"github.com/spore-host/libs/tags"
+
+	"github.com/spore-host/lagotto/pkg/awsarn"
 )
 
 // The IAM for leave-no-trace idle teardown (lagotto#325, for lagotto#326):
@@ -47,14 +49,15 @@ const (
 )
 
 // ArtifactBucketARN is the ARN pattern of every region's artifact bucket in
-// accountID: lagotto-lambda-<account>-<region>, with the region a wildcard.
-func ArtifactBucketARN(accountID string) string {
-	return fmt.Sprintf("arn:aws:s3:::%s%s-*", artifactBucketPrefix, accountID)
+// accountID, in partition: lagotto-lambda-<account>-<region>, with the region
+// a wildcard.
+func ArtifactBucketARN(partition, accountID string) string {
+	return awsarn.S3(partition, artifactBucketPrefix+accountID+"-*")
 }
 
-// BoundaryPolicyARN is [BoundaryPolicyName]'s ARN in accountID.
-func BoundaryPolicyARN(accountID string) string {
-	return fmt.Sprintf("arn:aws:iam::%s:policy/%s", accountID, BoundaryPolicyName)
+// BoundaryPolicyARN is [BoundaryPolicyName]'s ARN in accountID, in partition.
+func BoundaryPolicyARN(partition, accountID string) string {
+	return awsarn.IAM(partition, accountID, "policy/"+BoundaryPolicyName)
 }
 
 // serviceGuardCondition matches a resource tagged spore-host:role=service,
@@ -80,10 +83,10 @@ var boundaryWriteActions = []string{
 // IAM write on spawn's permissions boundary. An explicit Deny wins over every
 // Allow, so a later grant, written in error or wider than meant, cannot reach
 // either.
-func guardStatements(accountID string) []statement {
+func guardStatements(partition, accountID string) []statement {
 	return []statement{
 		{Effect: "Deny", Action: []string{"*"}, Resource: "*", Condition: serviceGuardCondition()},
-		{Effect: "Deny", Action: boundaryWriteActions, Resource: BoundaryPolicyARN(accountID)},
+		{Effect: "Deny", Action: boundaryWriteActions, Resource: BoundaryPolicyARN(partition, accountID)},
 	}
 }
 
@@ -94,20 +97,21 @@ func guardStatements(accountID string) []statement {
 // region, as the role is shared). Nothing in IAM: the account-wide resources
 // are the CLI's to remove (lagotto#340). Plus [guardStatements].
 //
-// Like the InvokeLambda policy it is a function of the account alone, so
-// every region's setup or deploy writes the same bytes (#218).
-func SchedulerTeardownPolicyDocument(accountID string) (string, error) {
-	if accountID == "" {
-		return "", fmt.Errorf("runtimeiam: accountID is required for the scheduler teardown policy")
+// Like the InvokeLambda policy it is a function of the account (and its
+// partition) alone, so every region's setup or deploy writes the same bytes
+// (#218).
+func SchedulerTeardownPolicyDocument(partition, accountID string) (string, error) {
+	if partition == "" || accountID == "" {
+		return "", fmt.Errorf("runtimeiam: partition and accountID are required for the scheduler teardown policy")
 	}
-	logGroup := RegionalARN("logs", accountID, "log-group:"+pollerLogGroupName)
+	logGroup := RegionalARN(partition, "logs", accountID, "log-group:"+pollerLogGroupName)
 	statements := []statement{
-		{Effect: "Allow", Action: []string{"lambda:DeleteFunction"}, Resource: SchedulerInvokeFunctionARN(accountID)},
+		{Effect: "Allow", Action: []string{"lambda:DeleteFunction"}, Resource: SchedulerInvokeFunctionARN(partition, accountID)},
 		// Both forms: CloudWatch Logs authorizes some actions against the
 		// group's ARN and some against it with a trailing ":*".
 		{Effect: "Allow", Action: []string{"logs:DeleteLogGroup"}, Resource: []string{logGroup, logGroup + ":*"}},
 	}
-	statements = append(statements, guardStatements(accountID)...)
+	statements = append(statements, guardStatements(partition, accountID)...)
 	b, err := json.Marshal(map[string]interface{}{"Version": "2012-10-17", "Statement": statements})
 	if err != nil {
 		return "", fmt.Errorf("runtimeiam: build scheduler teardown policy: %w", err)

@@ -320,8 +320,9 @@ the function's configuration drops a variable set by hand.
 **The lease.** `lagotto deploy`, `watch` (and `watch --local`) and `launch`,
 and the poller before it fires a scheduled launch, first mark lagotto active in
 the region's `spore-host-lifecycle` table; the CLI's commands then mark
-lagotto's global scope too (`tool#lagotto#global` in us-east-1's table,
-lagotto#345), as `lagotto setup` does before it writes any IAM. While a
+lagotto's global scope too (`tool#lagotto#global` in the control region's
+table: us-east-1, us-gov-west-1 in GovCloud, cn-north-1 in China; lagotto#345,
+lagotto#347), as `lagotto setup` does before it writes any IAM. While a
 teardown holds either lease they wait (the CLI up to 22 minutes, past the
 20 minutes a lease takes to go stale, so the lease a teardown that was killed
 left is taken over), then exit non-zero, having created nothing. An
@@ -753,7 +754,9 @@ teardown --plan --mode reap` (lagotto#346). All three run one code path
 (`idle.TearDownAccountWide`):
 
 1. **The global scope.** lagotto's global scope is the item
-   `tool#lagotto#global` in us-east-1's `spore-host-lifecycle` table. Every
+   `tool#lagotto#global` in the `spore-host-lifecycle` table of the
+   partition's control region (its IAM home region: us-east-1, us-gov-west-1
+   in GovCloud, cn-north-1 in China, whatever region a command runs in). Every
    creator of something account-wide (`setup`, `deploy`, `watch`, `launch`)
    marks it first (lagotto#345), after its region (setup: its home region),
    adding a mark of its own (a token and the time it was written) to the
@@ -815,7 +818,7 @@ teardown --plan --mode reap` (lagotto#346). All three run one code path
    it). A run that left anything of lagotto's (a delete failed, refused
    because it changed, or skipped behind one that was left) is not complete.
 6. **The end.** It finishes the global lease, which deletes the global item,
-   and closes us-east-1's table if no tool's item is left in it. **A run that
+   and closes the control region's table if no tool's item is left in it. **A run that
    has exited never makes a creator wait.** One that fails before deleting
    anything gives the lease back. One that fails partway suspends it (libs
    `Lease.Suspend`): the global item is left IDLE and marked incomplete, with
@@ -834,12 +837,21 @@ a `lagotto setup` that deploys no poller is not undone by the next command. An
 explicit `lagotto teardown` uses no grace, but never runs while a creator is
 running. `lagotto teardown --iam-roles` runs this check, in report mode,
 before it deletes anything, so a refusal leaves the account as it was.
-Outside the aws partition (GovCloud, China, the ISO partitions, the European
-Sovereign Cloud) there is no global scope, and the last mile's account-wide
-teardown does not run. There `lagotto teardown --iam-roles` removes the
-account-wide resources as it did before lagotto#340, with no lease, once no
-poller is left in any region (it says so); `lagotto teardown --plan --mode
-reap` does with `--i-understand-no-lease`.
+The whole protocol works the same way in AWS GovCloud (US) and the AWS China
+regions (lagotto#347): every ARN lagotto's IAM policies name is in the
+account's partition (`arn:aws-us-gov:`, `arn:aws-cn:`), so the creators'
+marks reach the control region's table under `lagotto-cli-user`, the poller's
+grants reach its region's table, and the account-wide teardown reads every
+enabled region of the partition. An account set up by an older lagotto there
+needs `lagotto setup` again: older releases wrote `arn:aws:` ARNs, which IAM
+refuses outside the aws partition. lagotto does not support the ISO
+partitions or the European Sovereign Cloud: `lagotto setup` and `lagotto
+deploy` refuse those regions before they write any IAM, there is no global
+scope, and the last mile's account-wide teardown does not run. There
+`lagotto teardown --iam-roles` removes the account-wide resources as it did
+before lagotto#340, with no lease, once no poller is left in any region (it
+says so); `lagotto teardown --plan --mode reap` does with
+`--i-understand-no-lease`.
 
 **What remains after the pollers finish, and why.** Once every poller has
 removed its region, **the account-wide IAM is still there, until the next

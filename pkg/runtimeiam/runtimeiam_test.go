@@ -12,7 +12,7 @@ import (
 )
 
 func TestPolicyDocument_ValidAndScoped(t *testing.T) {
-	doc, err := PolicyDocument("123456789012", nil)
+	doc, err := PolicyDocument("aws", "123456789012", nil)
 	if err != nil {
 		t.Fatalf("PolicyDocument: %v", err)
 	}
@@ -109,6 +109,8 @@ type fakeIAM struct {
 	existing map[string]bool
 	created  []string
 	attached []string
+	// policyARNs are the managed policies AttachRolePolicy attached.
+	policyARNs []string
 	// last PutRolePolicy (kept for existing assertions) + a per-call log.
 	role, policy, doc string
 	calls             int      // PutRolePolicy calls
@@ -174,6 +176,7 @@ func (f *fakeIAM) CreateRole(_ context.Context, in *iam.CreateRoleInput, _ ...fu
 
 func (f *fakeIAM) AttachRolePolicy(_ context.Context, in *iam.AttachRolePolicyInput, _ ...func(*iam.Options)) (*iam.AttachRolePolicyOutput, error) {
 	f.attached = append(f.attached, aws.ToString(in.RoleName))
+	f.policyARNs = append(f.policyARNs, aws.ToString(in.PolicyArn))
 	return &iam.AttachRolePolicyOutput{}, nil
 }
 
@@ -302,27 +305,27 @@ func TestEnsureRuntimeRole_RequiresRegionAndAccount(t *testing.T) {
 // than its own copy of the format string; a drift would silently mis-wire the
 // poller's execution role or the Scheduler target.
 func TestRoleARNs(t *testing.T) {
-	if got, want := RoleARN("123456789012"),
+	if got, want := RoleARN("aws", "123456789012"),
 		"arn:aws:iam::123456789012:role/lagotto-capacity-poller-role"; got != want {
 		t.Errorf("RoleARN = %q, want %q", got, want)
 	}
-	if got, want := SchedulerInvokeRoleARN("123456789012"),
+	if got, want := SchedulerInvokeRoleARN("aws", "123456789012"),
 		"arn:aws:iam::123456789012:role/lagotto-capacity-poller-scheduler-invoke"; got != want {
 		t.Errorf("SchedulerInvokeRoleARN = %q, want %q", got, want)
 	}
 	// IAM is global: the ARNs must carry no region.
-	for _, arn := range []string{RoleARN("1"), SchedulerInvokeRoleARN("1")} {
+	for _, arn := range []string{RoleARN("aws", "1"), SchedulerInvokeRoleARN("aws", "1")} {
 		if !strings.HasPrefix(arn, "arn:aws:iam:::role/") && !strings.Contains(arn, "iam::1:role/") {
 			t.Errorf("%q does not look like a region-less IAM role ARN", arn)
 		}
 	}
 	// The policy document already grants PassRole on the scheduler-invoke role by
 	// the same ARN; keep them in lockstep.
-	doc, err := PolicyDocument("123456789012", nil)
+	doc, err := PolicyDocument("aws", "123456789012", nil)
 	if err != nil {
 		t.Fatalf("PolicyDocument: %v", err)
 	}
-	if !strings.Contains(doc, SchedulerInvokeRoleARN("123456789012")) {
+	if !strings.Contains(doc, SchedulerInvokeRoleARN("aws", "123456789012")) {
 		t.Error("the runtime policy no longer references SchedulerInvokeRoleARN's exact ARN")
 	}
 }

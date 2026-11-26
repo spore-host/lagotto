@@ -8,6 +8,7 @@ import (
 	"errors"
 	"sync"
 
+	"github.com/spore-host/lagotto/pkg/awsarn"
 	"github.com/spore-host/lagotto/pkg/deploy"
 	"github.com/spore-host/lagotto/pkg/inventory"
 	"github.com/spore-host/lagotto/pkg/runtimeiam"
@@ -288,10 +289,10 @@ func Deployed(region, acct string) inventory.Region {
 			{Item: inventory.Item{ARN: inventory.TableARN(region, acct, "lagotto-match-history"), Name: "lagotto-match-history", Tags: with(t, "lagotto:managed", "cli")}, Records: 12},
 			{Item: inventory.Item{ARN: inventory.TableARN(region, acct, "lagotto-scheduled-launches"), Name: "lagotto-scheduled-launches", Tags: with(t, "lagotto:managed", "cli")}},
 		},
-		Bucket:       &inventory.Item{ARN: inventory.BucketARN(deploy.DefaultBucketName(acct, region)), Name: deploy.DefaultBucketName(acct, region), Tags: with(t, "lagotto:managed", "cli")},
+		Bucket:       &inventory.Item{ARN: inventory.BucketARN(awsarn.PartitionOrAWS(region), deploy.DefaultBucketName(acct, region)), Name: deploy.DefaultBucketName(acct, region), Tags: with(t, "lagotto:managed", "cli")},
 		Topic:        &inventory.Item{ARN: deploy.AlertsTopicARN(region, acct), Name: deploy.AlertsTopicName, Tags: t},
 		Function:     &inventory.Item{ARN: deploy.PollerFunctionARN(region, acct), Name: deploy.PollerFunctionName, Tags: t},
-		FunctionRole: runtimeiam.RoleARN(acct),
+		FunctionRole: runtimeiam.RoleARN(awsarn.PartitionOrAWS(region), acct),
 		LogGroup:     &inventory.Item{ARN: deploy.PollerLogGroupARN(region, acct), Name: deploy.PollerLogGroupName, Tags: with(t, "lagotto:managed", "cli")},
 		Groups:       []inventory.Item{{ARN: inventory.ScheduleGroupARN(region, acct, schedgroup.Name), Name: schedgroup.Name, Tags: t}},
 		Schedules: []inventory.Schedule{{Group: schedgroup.Name, Name: deploy.PollerScheduleName, State: "ENABLED",
@@ -301,19 +302,23 @@ func Deployed(region, acct string) inventory.Region {
 
 // Account is the account-wide resources `lagotto setup` and `deploy` create:
 // the poller's two roles, lagotto's instance role and its profile, and the
-// lagotto-cli-user policy with no attachment.
-func Account(acct string) inventory.Account {
+// lagotto-cli-user policy with no attachment, in the aws partition.
+func Account(acct string) inventory.Account { return AccountIn(awsarn.AWS, acct) }
+
+// AccountIn is [Account] in partition (aws-us-gov, aws-cn: the ARNs IAM
+// returns there).
+func AccountIn(partition, acct string) inventory.Account {
 	g := Tags(inventory.Global)
 	return inventory.Account{
 		Roles: []inventory.Item{
-			{ARN: runtimeiam.RoleARN(acct), Name: runtimeiam.RoleName, Tags: g},
-			{ARN: runtimeiam.SchedulerInvokeRoleARN(acct), Name: runtimeiam.SchedulerInvokeRoleName, Tags: g},
-			{ARN: inventory.IAMARN(acct, "role", runtimeiam.InstanceRoleName), Name: runtimeiam.InstanceRoleName, Tags: g},
+			{ARN: runtimeiam.RoleARN(partition, acct), Name: runtimeiam.RoleName, Tags: g},
+			{ARN: runtimeiam.SchedulerInvokeRoleARN(partition, acct), Name: runtimeiam.SchedulerInvokeRoleName, Tags: g},
+			{ARN: inventory.IAMARN(partition, acct, "role", runtimeiam.InstanceRoleName), Name: runtimeiam.InstanceRoleName, Tags: g},
 		},
 		InstanceProfiles: []inventory.Profile{{
-			Item:  inventory.Item{ARN: inventory.IAMARN(acct, "instance-profile", runtimeiam.InstanceRoleName), Name: runtimeiam.InstanceRoleName, Tags: with(g, "lagotto:managed", "instance-profile")},
+			Item:  inventory.Item{ARN: inventory.IAMARN(partition, acct, "instance-profile", runtimeiam.InstanceRoleName), Name: runtimeiam.InstanceRoleName, Tags: with(g, "lagotto:managed", "instance-profile")},
 			Roles: []string{runtimeiam.InstanceRoleName},
 		}},
-		Policy: &inventory.Item{ARN: inventory.IAMARN(acct, "policy", "lagotto-cli-user"), Name: "lagotto-cli-user", Tags: with(g, "lagotto:managed", "cli")},
+		Policy: &inventory.Item{ARN: inventory.IAMARN(partition, acct, "policy", "lagotto-cli-user"), Name: "lagotto-cli-user", Tags: with(g, "lagotto:managed", "cli")},
 	}
 }

@@ -56,8 +56,8 @@ func fpFacts() inventory.Facts {
 				Function: &inventory.Item{ARN: deploy.PollerFunctionARN("us-east-1", fpAcct), Name: deploy.PollerFunctionName, Tags: fpTags("us-east-1")}},
 		},
 		Account: inventory.Account{
-			Roles:  []inventory.Item{{ARN: runtimeiam.RoleARN(fpAcct), Name: runtimeiam.RoleName, Tags: fpTags("global")}},
-			Policy: &inventory.Item{ARN: cliiam.PolicyARN(fpAcct), Name: cliiam.PolicyName, Tags: fpTags("global")},
+			Roles:  []inventory.Item{{ARN: runtimeiam.RoleARN("aws", fpAcct), Name: runtimeiam.RoleName, Tags: fpTags("global")}},
+			Policy: &inventory.Item{ARN: cliiam.PolicyARN("aws", fpAcct), Name: cliiam.PolicyName, Tags: fpTags("global")},
 		},
 	}
 }

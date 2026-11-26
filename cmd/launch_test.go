@@ -69,7 +69,7 @@ func TestLaunchPollerARNDerivation(t *testing.T) {
 		"arn:aws:lambda:us-west-2:123456789012:function:lagotto-capacity-poller"; got != want {
 		t.Errorf("poller function ARN = %q, want %q", got, want)
 	}
-	if got, want := runtimeiam.SchedulerInvokeRoleARN(account),
+	if got, want := runtimeiam.SchedulerInvokeRoleARN("aws", account),
 		"arn:aws:iam::123456789012:role/lagotto-capacity-poller-scheduler-invoke"; got != want {
 		t.Errorf("scheduler invoke role ARN = %q, want %q", got, want)
 	}

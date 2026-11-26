@@ -150,7 +150,7 @@ func NewDeleter(live *fp.Report, d Deleters) fp.ByType {
 	}
 }
 
-// scheduleOf parses arn:aws:scheduler:<region>:<account>:schedule/<group>/<name>.
+// scheduleOf parses arn:<partition>:scheduler:<region>:<account>:schedule/<group>/<name>.
 func scheduleOf(arn string) (group, name string, ok bool) {
 	i := strings.Index(arn, ":schedule/")
 	if i < 0 {

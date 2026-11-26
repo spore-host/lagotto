@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spf13/cobra"
+	"github.com/spore-host/lagotto/pkg/awsarn"
 	"github.com/spore-host/lagotto/pkg/awscfg"
 	"github.com/spore-host/lagotto/pkg/cliiam"
 	"github.com/spore-host/lagotto/pkg/managedtags"
@@ -166,7 +167,9 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve account ID: %w", err)
 	}
-	if err := applyCLIUserPolicy(ctx, newSetupPolicyClient(cfg), acct, out); err != nil {
+	// In the region's partition (lagotto#347); step 2 refused a region outside
+	// aws, aws-us-gov and aws-cn.
+	if err := applyCLIUserPolicy(ctx, newSetupPolicyClient(cfg), awsarn.PartitionOrAWS(cfg.Region), acct, out); err != nil {
 		return err
 	}
 
@@ -302,19 +305,19 @@ var newSetupIAMClient = func(cfg aws.Config) runtimeiam.IAMAPI { return iam.NewF
 // with. A seam for tests.
 var newSetupPolicyClient = func(cfg aws.Config) cliiam.PolicyAPI { return iam.NewFromConfig(cfg) }
 
-// applyCLIUserPolicy writes the lagotto-cli-user managed policy (#232),
-// carrying the config buckets the deployed version grants forward, and tells
-// the administrator how to attach it.
-func applyCLIUserPolicy(ctx context.Context, client cliiam.PolicyAPI, accountID string, out io.Writer) error {
-	buckets, err := resolveConfigBuckets(ctx, client, accountID, out)
+// applyCLIUserPolicy writes the lagotto-cli-user managed policy (#232) of
+// accountID, in partition, carrying the config buckets the deployed version
+// grants forward, and tells the administrator how to attach it.
+func applyCLIUserPolicy(ctx context.Context, client cliiam.PolicyAPI, partition, accountID string, out io.Writer) error {
+	buckets, err := resolveConfigBuckets(ctx, client, partition, accountID, out)
 	if err != nil {
 		return err
 	}
-	doc, err := cliiam.PolicyDocument(accountID, buckets)
+	doc, err := cliiam.PolicyDocument(partition, accountID, buckets)
 	if err != nil {
 		return err
 	}
-	res, err := cliiam.EnsurePolicy(ctx, client, accountID, doc, setupStamp)
+	res, err := cliiam.EnsurePolicy(ctx, client, partition, accountID, doc, setupStamp)
 	if res.DeletedVersion != "" {
 		_, _ = fmt.Fprintf(out, "Deleted the oldest version (%s) of IAM policy %s to stay within IAM's five versions.\n",
 			res.DeletedVersion, cliiam.PolicyName)
@@ -342,14 +345,14 @@ func applyCLIUserPolicy(ctx context.Context, client cliiam.PolicyAPI, accountID 
 // deployed policy grants, plus --config-bucket, minus --revoke-config-bucket.
 // Revoke wins for the same name. A deployed policy that cannot be read is an
 // error, never "no buckets": guessing would narrow the grant being written.
-func resolveConfigBuckets(ctx context.Context, client cliiam.PolicyAPI, accountID string, out io.Writer) ([]string, error) {
+func resolveConfigBuckets(ctx context.Context, client cliiam.PolicyAPI, partition, accountID string, out io.Writer) ([]string, error) {
 	for _, name := range append(append([]string{}, setupConfigBuckets...), setupRevokeConfigBuckets...) {
 		if err := cliiam.ValidateConfigBucketName(name); err != nil {
 			return nil, err
 		}
 	}
 	var current []string
-	doc, found, err := cliiam.ReadPolicy(ctx, client, accountID)
+	doc, found, err := cliiam.ReadPolicy(ctx, client, partition, accountID)
 	if err != nil {
 		return nil, fmt.Errorf("read the deployed %s policy (needed to keep its config buckets): %w", cliiam.PolicyName, err)
 	}

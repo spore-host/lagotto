@@ -138,7 +138,7 @@ func (e *errDeleter) DeleteRole(ctx context.Context, in *iam.DeleteRoleInput, o 
 func TestDeleteRoles_EachStepFailsLoudly(t *testing.T) {
 	for _, call := range []string{"ListRolePolicies", "DeleteRolePolicy", "ListAttachedRolePolicies", "DetachRolePolicy", "DeleteRole"} {
 		f := &errDeleter{fakeRoleDeleter: setUpFakeRoles(), call: call, err: errors.New("AccessDenied")}
-		f.attached[SchedulerInvokeRoleName] = []string{lambdaBasicExecutionARN} // so both roles detach
+		f.attached[SchedulerInvokeRoleName] = []string{BasicExecutionPolicyARN("aws")} // so both roles detach
 		deleted, err := DeleteRoles(context.Background(), f)
 		if err == nil || !strings.Contains(err.Error(), "AccessDenied") || len(deleted) != 0 {
 			t.Errorf("%s fails: deleted %v, err %v; want nothing deleted and the error", call, deleted, err)

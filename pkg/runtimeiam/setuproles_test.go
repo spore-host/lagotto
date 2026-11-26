@@ -29,15 +29,15 @@ func TestEnsureSetupRoles_CreatesBothOnAFreshAccount(t *testing.T) {
 	if !reflect.DeepEqual(f.created, want) {
 		t.Errorf("CreateRole calls = %v, want %v", f.created, want)
 	}
-	runtimeDoc, _ := PolicyDocument("123456789012", nil)
-	invokeDoc, _ := SchedulerInvokePolicyDocument("123456789012")
+	runtimeDoc, _ := PolicyDocument("aws", "123456789012", nil)
+	invokeDoc, _ := SchedulerInvokePolicyDocument("aws", "123456789012")
 	if f.inline[RoleName+"/"+PolicyName] != runtimeDoc {
 		t.Error("the runtime policy was not written onto the poller role")
 	}
 	if f.inline[SchedulerInvokeRoleName+"/"+SchedulerInvokePolicyName] != invokeDoc {
 		t.Error("the invoke policy was not written onto the Scheduler invoke role")
 	}
-	teardownDoc, _ := SchedulerTeardownPolicyDocument("123456789012")
+	teardownDoc, _ := SchedulerTeardownPolicyDocument("aws", "123456789012")
 	if f.inline[SchedulerInvokeRoleName+"/"+SchedulerTeardownPolicyName] != teardownDoc {
 		t.Error("the teardown policy (#325) was not written onto the Scheduler invoke role")
 	}
@@ -162,7 +162,7 @@ func setUpFakeRoles() *fakeRoleDeleter {
 	return &fakeRoleDeleter{
 		exists:   map[string]bool{RoleName: true, SchedulerInvokeRoleName: true},
 		inline:   map[string][]string{RoleName: {PolicyName}, SchedulerInvokeRoleName: {SchedulerInvokePolicyName}},
-		attached: map[string][]string{RoleName: {lambdaBasicExecutionARN}},
+		attached: map[string][]string{RoleName: {BasicExecutionPolicyARN("aws")}},
 	}
 }
 

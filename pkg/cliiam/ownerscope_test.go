@@ -15,7 +15,7 @@ import (
 // simulate-principal-policy checks in the release notes, since the evaluator
 // is a model of IAM, not IAM.
 func TestOwnerScopedItemAccess(t *testing.T) {
-	doc, err := PolicyDocument(testAccount, nil)
+	doc, err := PolicyDocument("aws", testAccount, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestOwnerScopedItemAccess(t *testing.T) {
 // particular not a status, which would put the item in the status index the
 // poller lists active watches from.
 func TestPollerControlWritesOnlyTheEpoch(t *testing.T) {
-	doc, err := PolicyDocument(testAccount, nil)
+	doc, err := PolicyDocument("aws", testAccount, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

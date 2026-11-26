@@ -57,7 +57,8 @@ lagotto's lagotto:managed=cli tag is left in place and reported.
 
 The account-wide resources are removed by one code path, the same one the lazy
 last mile uses (lagotto#340, #346): under lagotto's global teardown lease
-(tool#lagotto#global in us-east-1's spore-host-lifecycle table), and only while
+(tool#lagotto#global in the spore-host-lifecycle table of the partition's control
+region: us-east-1, us-gov-west-1 in GovCloud, cn-north-1 in China), and only while
 no region has a poller, a pending one-shot teardown job, or a lagotto lifecycle
 item that is in use or held by a live teardown, all re-checked before each
 delete; and never while a setup, deploy, watch or launch is running (one that

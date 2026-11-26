@@ -16,7 +16,7 @@ import (
 
 func doc(t *testing.T, buckets ...string) string {
 	t.Helper()
-	d, err := PolicyDocument(testAccount, buckets)
+	d, err := PolicyDocument("aws", testAccount, buckets)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -25,11 +25,11 @@ func doc(t *testing.T, buckets ...string) string {
 
 func TestEnsurePolicyCreatesATaggedPolicy(t *testing.T) {
 	f := &fakeIAM{}
-	res, err := EnsurePolicy(context.Background(), f, testAccount, doc(t))
+	res, err := EnsurePolicy(context.Background(), f, "aws", testAccount, doc(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.Created || res.Updated || res.ARN != PolicyARN(testAccount) {
+	if !res.Created || res.Updated || res.ARN != PolicyARN("aws", testAccount) {
 		t.Errorf("outcome = %+v", res)
 	}
 	if !hasManagedTag(f.tags) {
@@ -44,7 +44,7 @@ func TestEnsurePolicyCreatesATaggedPolicy(t *testing.T) {
 // burn one of IAM's five versions per run.
 func TestEnsurePolicyLeavesAnIdenticalPolicyAlone(t *testing.T) {
 	f := withPolicy(2, doc(t))
-	res, err := EnsurePolicy(context.Background(), f, testAccount, doc(t))
+	res, err := EnsurePolicy(context.Background(), f, "aws", testAccount, doc(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +55,7 @@ func TestEnsurePolicyLeavesAnIdenticalPolicyAlone(t *testing.T) {
 
 func TestEnsurePolicyWritesANewDefaultVersion(t *testing.T) {
 	f := withPolicy(2, doc(t))
-	res, err := EnsurePolicy(context.Background(), f, testAccount, doc(t, "new-bucket"))
+	res, err := EnsurePolicy(context.Background(), f, "aws", testAccount, doc(t, "new-bucket"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestEnsurePolicyRotatesAtFiveVersions(t *testing.T) {
 	f := withPolicy(5, doc(t))
 	// List order is not age order: make v3 the oldest.
 	f.versions[2].CreateDate = aws.Time(f.versions[0].CreateDate.AddDate(-1, 0, 0))
-	res, err := EnsurePolicy(context.Background(), f, testAccount, doc(t, "new-bucket"))
+	res, err := EnsurePolicy(context.Background(), f, "aws", testAccount, doc(t, "new-bucket"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestEnsurePolicyRotatesAtFiveVersions(t *testing.T) {
 	// The default is never the one deleted, even when it is the oldest.
 	f = withPolicy(5, doc(t))
 	f.versions[4].CreateDate = aws.Time(f.versions[0].CreateDate.AddDate(-1, 0, 0))
-	res, err = EnsurePolicy(context.Background(), f, testAccount, doc(t, "new-bucket"))
+	res, err = EnsurePolicy(context.Background(), f, "aws", testAccount, doc(t, "new-bucket"))
 	if err != nil || res.DeletedVersion != "v1" {
 		t.Errorf("deleted %q (err %v), want v1: the oldest NON-default", res.DeletedVersion, err)
 	}
@@ -103,7 +103,7 @@ func TestEnsurePolicyRotatesAtFiveVersions(t *testing.T) {
 func TestEnsurePolicyRefusesAnUnmanagedPolicy(t *testing.T) {
 	f := withPolicy(1, doc(t))
 	f.tags = nil
-	if _, err := EnsurePolicy(context.Background(), f, testAccount, doc(t, "x-bucket")); !errors.Is(err, ErrUnmanagedPolicy) {
+	if _, err := EnsurePolicy(context.Background(), f, "aws", testAccount, doc(t, "x-bucket")); !errors.Is(err, ErrUnmanagedPolicy) {
 		t.Errorf("err = %v, want ErrUnmanagedPolicy", err)
 	}
 	if len(f.calls) != 0 {
@@ -113,12 +113,12 @@ func TestEnsurePolicyRefusesAnUnmanagedPolicy(t *testing.T) {
 
 func TestEnsurePolicyPropagatesErrors(t *testing.T) {
 	f := &fakeIAM{errs: map[string]error{"GetPolicy": apiErr("AccessDenied")}}
-	if _, err := EnsurePolicy(context.Background(), f, testAccount, doc(t)); err == nil || len(f.calls) != 0 {
+	if _, err := EnsurePolicy(context.Background(), f, "aws", testAccount, doc(t)); err == nil || len(f.calls) != 0 {
 		t.Errorf("a GetPolicy failure was not fatal (err %v, calls %v)", err, f.calls)
 	}
 	f = withPolicy(5, doc(t))
 	f.errs = map[string]error{"DeletePolicyVersion": apiErr("AccessDenied")}
-	if _, err := EnsurePolicy(context.Background(), f, testAccount, doc(t, "b-bucket")); err == nil {
+	if _, err := EnsurePolicy(context.Background(), f, "aws", testAccount, doc(t, "b-bucket")); err == nil {
 		t.Error("a failed rotation was not reported")
 	}
 	for _, c := range f.calls {
@@ -135,7 +135,7 @@ func TestEnsurePolicyPropagatesErrors(t *testing.T) {
 func TestDeletePolicyRefusesWhileAttached(t *testing.T) {
 	f := withPolicy(3, doc(t))
 	f.users, f.groups, f.roles = []string{"alice"}, []string{"researchers"}, []string{"ci"}
-	res, err := DeletePolicy(context.Background(), f, testAccount)
+	res, err := DeletePolicy(context.Background(), f, "aws", testAccount)
 	if !errors.Is(err, ErrAttached) || res.Deleted || strings.Join(res.Attached, ",") != "user/alice,group/researchers,role/ci" || len(f.calls) != 0 {
 		t.Errorf("attached: %+v %v calls %v", res, err, f.calls)
 	}
@@ -143,7 +143,7 @@ func TestDeletePolicyRefusesWhileAttached(t *testing.T) {
 		t.Error("the policy was deleted")
 	}
 	f.users, f.groups, f.roles = nil, nil, nil
-	res, err = DeletePolicy(context.Background(), f, testAccount)
+	res, err = DeletePolicy(context.Background(), f, "aws", testAccount)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +156,7 @@ func TestDeletePolicyRefusesWhileAttached(t *testing.T) {
 }
 
 func TestDeletePolicyIsIdempotent(t *testing.T) {
-	res, err := DeletePolicy(context.Background(), &fakeIAM{}, testAccount)
+	res, err := DeletePolicy(context.Background(), &fakeIAM{}, "aws", testAccount)
 	if err != nil || !res.Absent || res.Deleted {
 		t.Errorf("absent policy: %+v, %v", res, err)
 	}
@@ -166,7 +166,7 @@ func TestDeletePolicyLeavesAnUnmanagedPolicy(t *testing.T) {
 	f := withPolicy(1, doc(t))
 	f.tags = []iamtypes.Tag{{Key: aws.String("owner"), Value: aws.String("someone-else")}}
 	f.users = []string{"alice"}
-	res, err := DeletePolicy(context.Background(), f, testAccount)
+	res, err := DeletePolicy(context.Background(), f, "aws", testAccount)
 	if err != nil || !res.Unmanaged || res.Deleted || len(f.calls) != 0 {
 		t.Errorf("an unmanaged policy was touched: %+v, %v, calls %v", res, err, f.calls)
 	}
@@ -175,7 +175,7 @@ func TestDeletePolicyLeavesAnUnmanagedPolicy(t *testing.T) {
 func TestDeletePolicyStopsBeforeDeletingOnAListFailure(t *testing.T) {
 	f := withPolicy(2, doc(t))
 	f.errs = map[string]error{"ListEntitiesForPolicy": apiErr("AccessDenied")}
-	if _, err := DeletePolicy(context.Background(), f, testAccount); err == nil {
+	if _, err := DeletePolicy(context.Background(), f, "aws", testAccount); err == nil {
 		t.Fatal("no error")
 	}
 	if len(f.calls) != 0 {
@@ -186,12 +186,12 @@ func TestDeletePolicyStopsBeforeDeletingOnAListFailure(t *testing.T) {
 // A policy an older lagotto created gains the spore.host tags (#324), with no
 // new version when the document is unchanged; a TagPolicy failure is an error.
 func TestEnsurePolicy_BackfillsTags(t *testing.T) {
-	doc, err := PolicyDocument(testAccount, nil)
+	doc, err := PolicyDocument("aws", testAccount, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	f := withPolicy(1, doc)
-	out, err := EnsurePolicy(context.Background(), f, testAccount, doc, managedtags.Stamp{Owner: "AIDAADMIN"})
+	out, err := EnsurePolicy(context.Background(), f, "aws", testAccount, doc, managedtags.Stamp{Owner: "AIDAADMIN"})
 	if err != nil || out.Created || out.Updated {
 		t.Fatalf("EnsurePolicy = %+v, %v", out, err)
 	}
@@ -202,13 +202,13 @@ func TestEnsurePolicy_BackfillsTags(t *testing.T) {
 	if !tags.IsManagedBy(got, tags.ToolLagotto) || got[ManagedTagKey] != ManagedTagValue || got[tags.Owner] != "AIDAADMIN" {
 		t.Errorf("policy tags = %v", got)
 	}
-	if _, err := EnsurePolicy(context.Background(), f, testAccount, doc); err != nil || len(f.tagCalls) != 1 {
+	if _, err := EnsurePolicy(context.Background(), f, "aws", testAccount, doc); err != nil || len(f.tagCalls) != 1 {
 		t.Errorf("re-run: err %v, TagPolicy calls %d; want no new call", err, len(f.tagCalls))
 	}
 
 	f = withPolicy(1, doc)
 	f.errs = map[string]error{"TagPolicy": errors.New("AccessDenied")}
-	if _, err := EnsurePolicy(context.Background(), f, testAccount, doc); err == nil || !strings.Contains(err.Error(), "tag policy") {
+	if _, err := EnsurePolicy(context.Background(), f, "aws", testAccount, doc); err == nil || !strings.Contains(err.Error(), "tag policy") {
 		t.Errorf("TagPolicy failure = %v", err)
 	}
 }

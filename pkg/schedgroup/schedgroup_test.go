@@ -116,3 +116,17 @@ func TestCreate(t *testing.T) {
 		t.Error("Create modified its input")
 	}
 }
+
+// TestARNInEachPartition: lagotto's group's ARN is in its region's partition
+// (lagotto#347).
+func TestARNInEachPartition(t *testing.T) {
+	for region, want := range map[string]string{
+		"us-east-1":      "arn:aws:scheduler:us-east-1:123456789012:schedule-group/lagotto",
+		"us-gov-west-1":  "arn:aws-us-gov:scheduler:us-gov-west-1:123456789012:schedule-group/lagotto",
+		"cn-northwest-1": "arn:aws-cn:scheduler:cn-northwest-1:123456789012:schedule-group/lagotto",
+	} {
+		if got := ARN(region, "123456789012"); got != want {
+			t.Errorf("ARN(%s) = %q, want %q", region, got, want)
+		}
+	}
+}

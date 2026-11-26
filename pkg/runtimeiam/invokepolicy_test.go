@@ -84,13 +84,13 @@ func TestEnsureRoles_InvokePolicyConvergesAcrossRegions(t *testing.T) {
 // TestSchedulerInvokePolicyDocument_RequiresAccount: an empty account would
 // render arn:aws:lambda:*::function:… — a policy that matches nothing.
 func TestSchedulerInvokePolicyDocument_RequiresAccount(t *testing.T) {
-	if _, err := SchedulerInvokePolicyDocument(""); err == nil {
+	if _, err := SchedulerInvokePolicyDocument("aws", ""); err == nil {
 		t.Error("want an error for an empty account ID")
 	}
 }
 
 func TestEvaluateInvokePolicy(t *testing.T) {
-	wildcard, err := SchedulerInvokePolicyDocument(invokeTestAccount)
+	wildcard, err := SchedulerInvokePolicyDocument("aws", invokeTestAccount)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestReadSchedulerInvokePolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadSchedulerInvokePolicy: %v", err)
 	}
-	if !strings.Contains(doc, SchedulerInvokeFunctionARN(invokeTestAccount)) {
+	if !strings.Contains(doc, SchedulerInvokeFunctionARN("aws", invokeTestAccount)) {
 		t.Errorf("read back %s, want the document deploy wrote", doc)
 	}
 

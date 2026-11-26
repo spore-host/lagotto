@@ -84,7 +84,7 @@ func watchWithIAMRole(t *testing.T, role string) *watcher.Watch {
 
 func irStockPolicy(t *testing.T) string {
 	t.Helper()
-	doc, err := runtimeiam.PolicyDocument(irTestAccount, nil)
+	doc, err := runtimeiam.PolicyDocument("aws", irTestAccount, nil)
 	if err != nil {
 		t.Fatalf("PolicyDocument: %v", err)
 	}
@@ -93,7 +93,7 @@ func irStockPolicy(t *testing.T) string {
 
 func irAuthorizedPolicy(t *testing.T, roles ...string) string {
 	t.Helper()
-	doc, err := runtimeiam.PolicyDocument(irTestAccount, roles)
+	doc, err := runtimeiam.PolicyDocument("aws", irTestAccount, roles)
 	if err != nil {
 		t.Fatalf("PolicyDocument: %v", err)
 	}
@@ -105,7 +105,7 @@ func irAuthorizedPolicy(t *testing.T, roles ...string) string {
 func TestCheckInstanceRoleRefusesUnauthorized(t *testing.T) {
 	var out bytes.Buffer
 	res, err := checkInstanceRoleAuthorized(context.Background(),
-		&fakeRoleIAM{policy: irStockPolicy(t)}, &out, watchWithIAMRole(t, irTestRole), irTestAccount)
+		&fakeRoleIAM{policy: irStockPolicy(t)}, &out, watchWithIAMRole(t, irTestRole), "aws", irTestAccount)
 
 	if err == nil {
 		t.Fatal("an unauthorized named iam_role must refuse watch creation")
@@ -133,7 +133,7 @@ func TestCheckInstanceRoleRefusesUnauthorized(t *testing.T) {
 func TestCheckInstanceRoleAcceptsAuthorized(t *testing.T) {
 	var out bytes.Buffer
 	res, err := checkInstanceRoleAuthorized(context.Background(),
-		&fakeRoleIAM{policy: irAuthorizedPolicy(t, irTestRole)}, &out, watchWithIAMRole(t, irTestRole), irTestAccount)
+		&fakeRoleIAM{policy: irAuthorizedPolicy(t, irTestRole)}, &out, watchWithIAMRole(t, irTestRole), "aws", irTestAccount)
 
 	if err != nil {
 		t.Fatalf("an authorized role must not refuse: %v", err)
@@ -152,7 +152,7 @@ func TestCheckInstanceRoleAcceptsAuthorized(t *testing.T) {
 func TestCheckInstanceRoleSkipsWithoutANamedRole(t *testing.T) {
 	var out bytes.Buffer
 	res, err := checkInstanceRoleAuthorized(context.Background(),
-		&fakeRoleIAM{getErr: fmt.Errorf("GetRolePolicy must not be called")}, &out, watchWithIAMRole(t, ""), irTestAccount)
+		&fakeRoleIAM{getErr: fmt.Errorf("GetRolePolicy must not be called")}, &out, watchWithIAMRole(t, ""), "aws", irTestAccount)
 	if err != nil || res != nil {
 		t.Errorf("no named role => no check; got res=%+v err=%v", res, err)
 	}
@@ -169,7 +169,7 @@ func TestCheckInstanceRoleSkipsWhenNoHostedPoller(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			var out bytes.Buffer
 			res, err := checkInstanceRoleAuthorized(context.Background(), fake, &out,
-				watchWithIAMRole(t, irTestRole), irTestAccount)
+				watchWithIAMRole(t, irTestRole), "aws", irTestAccount)
 			if err != nil {
 				t.Errorf("must not refuse when no hosted poller is deployed: %v", err)
 			}
@@ -190,7 +190,7 @@ func TestCheckInstanceRoleWarnsWhenPolicyUnreadable(t *testing.T) {
 	var out bytes.Buffer
 	res, err := checkInstanceRoleAuthorized(context.Background(),
 		&fakeRoleIAM{getErr: fmt.Errorf("AccessDenied: not authorized to perform iam:GetRolePolicy")},
-		&out, watchWithIAMRole(t, irTestRole), irTestAccount)
+		&out, watchWithIAMRole(t, irTestRole), "aws", irTestAccount)
 
 	if err != nil {
 		t.Errorf("an unreadable policy must not refuse: %v", err)
@@ -208,7 +208,7 @@ func TestCheckInstanceRoleWarnsWhenPolicyUnreadable(t *testing.T) {
 func TestCheckInstanceRoleSkipsWithoutAnAccountID(t *testing.T) {
 	var out bytes.Buffer
 	res, err := checkInstanceRoleAuthorized(context.Background(),
-		&fakeRoleIAM{policy: irStockPolicy(t)}, &out, watchWithIAMRole(t, irTestRole), "")
+		&fakeRoleIAM{policy: irStockPolicy(t)}, &out, watchWithIAMRole(t, irTestRole), "aws", "")
 	if err != nil || res != nil {
 		t.Errorf("no account id => no check; got res=%+v err=%v", res, err)
 	}

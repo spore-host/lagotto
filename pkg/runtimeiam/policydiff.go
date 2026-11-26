@@ -42,6 +42,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
+
+	"github.com/spore-host/lagotto/pkg/awsarn"
 )
 
 // ErrRoleNotFound / ErrPolicyNotFound distinguish the two ways the deployed
@@ -218,6 +220,8 @@ func DiffPolicy(deployed, expected string) (*PolicyDiff, error) {
 
 // DiffRuntimePolicy is DiffPolicy against this binary's own PolicyDocument for
 // the given region/account — the comparison `lagotto doctor` actually makes.
+// The expected policy is in region's partition (lagotto#347), so a deployed
+// policy in aws-us-gov or aws-cn compares against the ARNs it must carry there.
 //
 // The operator-authorized instance roles (#170) are recovered from the DEPLOYED
 // policy and folded into the expectation, because they are an operator decision
@@ -234,7 +238,11 @@ func DiffRuntimePolicy(deployed, region, accountID string) (*PolicyDiff, error) 
 	if err != nil {
 		return nil, fmt.Errorf("read authorized sagemaker roles: %w", err)
 	}
-	expected, err := PolicyDocumentFor(accountID, Authorizations{InstanceRoles: authorized, SageMakerRoles: smRoles})
+	partition, err := partitionOf(region)
+	if err != nil {
+		return nil, fmt.Errorf("build expected policy: %w", err)
+	}
+	expected, err := PolicyDocumentFor(partition, accountID, Authorizations{InstanceRoles: authorized, SageMakerRoles: smRoles})
 	if err != nil {
 		return nil, fmt.Errorf("build expected policy: %w", err)
 	}
@@ -525,11 +533,12 @@ func Allows(grants []Grant, action, resource string) bool {
 }
 
 // MissingInstanceRoleGrants returns what grants do NOT permit the poller to do
-// with roleName: pass it to EC2. Empty means the role is usable. That is the
-// poller's only IAM action on an instance role; the instance profile it names
-// is created by `lagotto setup --instance-role`, not by the poller.
-func MissingInstanceRoleGrants(grants []Grant, accountID, roleName string) []string {
-	roleARN := fmt.Sprintf("arn:aws:iam::%s:role/%s", accountID, roleName)
+// with roleName (a role of accountID, in partition): pass it to EC2. Empty
+// means the role is usable. That is the poller's only IAM action on an
+// instance role; the instance profile it names is created by `lagotto setup
+// --instance-role`, not by the poller.
+func MissingInstanceRoleGrants(grants []Grant, partition, accountID, roleName string) []string {
+	roleARN := awsarn.IAM(partition, accountID, "role/"+roleName)
 	// PassRole must be checked WITH its condition: a PassRole grant to
 	// sagemaker.amazonaws.com does not let the poller hand the role to EC2.
 	if !AllowsPassRoleTo(grants, roleARN, "ec2.amazonaws.com") {

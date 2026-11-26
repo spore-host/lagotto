@@ -270,7 +270,7 @@ func TestApplyCLIUserPolicyCreatesAndReportsTheAttachCommand(t *testing.T) {
 	setConfigBucketFlags(t, []string{"configs"}, nil)
 	f := &cmdPolicyFake{}
 	var out bytes.Buffer
-	if err := applyCLIUserPolicy(context.Background(), f, "123456789012", &out); err != nil {
+	if err := applyCLIUserPolicy(context.Background(), f, "aws", "123456789012", &out); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "Created IAM policy lagotto-cli-user") ||
@@ -289,13 +289,13 @@ func TestApplyCLIUserPolicyCreatesAndReportsTheAttachCommand(t *testing.T) {
 func TestApplyCLIUserPolicyCarriesConfigBucketsForward(t *testing.T) {
 	setConfigBucketFlags(t, []string{"first", "second"}, nil)
 	f := &cmdPolicyFake{}
-	if err := applyCLIUserPolicy(context.Background(), f, "123456789012", &bytes.Buffer{}); err != nil {
+	if err := applyCLIUserPolicy(context.Background(), f, "aws", "123456789012", &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
 
 	setConfigBucketFlags(t, nil, nil)
 	var out bytes.Buffer
-	if err := applyCLIUserPolicy(context.Background(), f, "123456789012", &out); err != nil {
+	if err := applyCLIUserPolicy(context.Background(), f, "aws", "123456789012", &out); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "is up to date") || strings.Join(f.calls, ",") != "CreatePolicy" {
@@ -304,7 +304,7 @@ func TestApplyCLIUserPolicyCarriesConfigBucketsForward(t *testing.T) {
 
 	setConfigBucketFlags(t, []string{"third", "second"}, []string{"second", "never-granted"})
 	out.Reset()
-	if err := applyCLIUserPolicy(context.Background(), f, "123456789012", &out); err != nil {
+	if err := applyCLIUserPolicy(context.Background(), f, "aws", "123456789012", &out); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(f.doc, "first/*") || !strings.Contains(f.doc, "third/*") || strings.Contains(f.doc, "second/*") {
@@ -318,15 +318,15 @@ func TestApplyCLIUserPolicyCarriesConfigBucketsForward(t *testing.T) {
 func TestApplyCLIUserPolicyRefusesToGuess(t *testing.T) {
 	setConfigBucketFlags(t, nil, nil)
 	f := &cmdPolicyFake{getErr: errors.New("AccessDenied: iam:GetPolicy")}
-	if err := applyCLIUserPolicy(context.Background(), f, "123456789012", &bytes.Buffer{}); err == nil || len(f.calls) != 0 {
+	if err := applyCLIUserPolicy(context.Background(), f, "aws", "123456789012", &bytes.Buffer{}); err == nil || len(f.calls) != 0 {
 		t.Errorf("an unreadable policy was overwritten (err %v, calls %v)", err, f.calls)
 	}
 	f = &cmdPolicyFake{exists: true, versions: 1, doc: `{"Version":"2012-10-17","Statement":[]}`}
-	if err := applyCLIUserPolicy(context.Background(), f, "123456789012", &bytes.Buffer{}); !errors.Is(err, cliiam.ErrUnmanagedPolicy) {
+	if err := applyCLIUserPolicy(context.Background(), f, "aws", "123456789012", &bytes.Buffer{}); !errors.Is(err, cliiam.ErrUnmanagedPolicy) {
 		t.Errorf("an untagged same-name policy: err %v", err)
 	}
 	setConfigBucketFlags(t, []string{"bad*"}, nil)
-	if err := applyCLIUserPolicy(context.Background(), &cmdPolicyFake{}, "123456789012", &bytes.Buffer{}); err == nil {
+	if err := applyCLIUserPolicy(context.Background(), &cmdPolicyFake{}, "aws", "123456789012", &bytes.Buffer{}); err == nil {
 		t.Error("a wildcard bucket was accepted")
 	}
 }

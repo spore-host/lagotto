@@ -497,12 +497,12 @@ func (m *migrator) scheduled(ctx context.Context) error {
 }
 
 // ResolveOwnerFromARN derives the principal id IAM exposes as ${aws:userid}
-// for sessions of the principal in arn:
+// for sessions of the principal in arn, in any partition:
 //
-//	arn:aws:iam::<acct>:user/[path/]<name>          -> the user's id (AIDA…)
-//	arn:aws:sts::<acct>:assumed-role/<role>/<sess>  -> <role id (AROA…)>:<sess>
-//	arn:aws:sts::<acct>:federated-user/<name>       -> <acct>:<name>
-//	arn:aws:iam::<acct>:root                        -> <acct>
+//	arn:<p>:iam::<acct>:user/[path/]<name>          -> the user's id (AIDA…)
+//	arn:<p>:sts::<acct>:assumed-role/<role>/<sess>  -> <role id (AROA…)>:<sess>
+//	arn:<p>:sts::<acct>:federated-user/<name>       -> <acct>:<name>
+//	arn:<p>:iam::<acct>:root                        -> <acct>
 //
 // userID and roleID look up a user's and a role's unique id by name.
 func ResolveOwnerFromARN(ctx context.Context, arn string, userID, roleID func(ctx context.Context, name string) (string, error)) (string, error) {

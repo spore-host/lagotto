@@ -21,7 +21,7 @@ import (
 func authorizedProfile() inventory.Profile {
 	tags := inventorytest.Tags(inventory.Global)
 	tags[runtimeiam.ManagedProfileTagKey] = runtimeiam.ManagedProfileTagValue
-	return inventory.Profile{Item: inventory.Item{ARN: inventory.IAMARN(acct, "instance-profile", "team-gpu"), Name: "team-gpu", Tags: tags},
+	return inventory.Profile{Item: inventory.Item{ARN: inventory.IAMARN("aws", acct, "instance-profile", "team-gpu"), Name: "team-gpu", Tags: tags},
 		Roles: []string{"team-gpu"}}
 }
 
@@ -32,7 +32,7 @@ func authorizedProfile() inventory.Profile {
 func TestReview9AuthorizedProfileKeepsThePollerRole(t *testing.T) {
 	w := newAWWorld(t)
 	a := inventorytest.Account(acct)
-	a.AuthorizedRoles = []inventory.Item{{ARN: inventory.IAMARN(acct, "role", "team-gpu"), Name: "team-gpu"}}
+	a.AuthorizedRoles = []inventory.Item{{ARN: inventory.IAMARN("aws", acct, "role", "team-gpu"), Name: "team-gpu"}}
 	a.AuthorizedProfiles = []inventory.Profile{authorizedProfile()}
 	w.src.SetAccount(a, "team-gpu")
 	w.acct.fail["profile team-gpu"] = errors.New("throttled")

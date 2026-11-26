@@ -59,7 +59,7 @@ type InvokeCoverage struct {
 }
 
 // EvaluateInvokePolicy evaluates doc for lambda:InvokeFunction on functionARN
-// (arn:aws:lambda:<region>:<account>:function:<name>) without calling IAM's
+// (arn:<partition>:lambda:<region>:<account>:function:<name>) without calling IAM's
 // policy simulator: IAM-style `*`/`?` globbing on action and resource, actions
 // case-insensitive, explicit Deny beating any Allow.
 //

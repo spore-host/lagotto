@@ -16,7 +16,7 @@ const testRegion = "us-east-1"
 
 func testPollerInput() PollerFunctionInput {
 	return PollerFunctionInput{
-		RoleARN:    runtimeRoleARN(testAccount),
+		RoleARN:    runtimeRoleARN("us-east-1", testAccount),
 		Bucket:     "lagotto-lambda-123456789012-us-east-1",
 		Key:        LambdaObjectKey("0.55.1"),
 		CodeSHA256: "sha-of-the-zip",

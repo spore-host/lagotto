@@ -28,6 +28,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
 	logstypes "github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs/types"
 
+	"github.com/spore-host/lagotto/pkg/awsarn"
 	"github.com/spore-host/lagotto/pkg/managedtags"
 )
 
@@ -50,10 +51,10 @@ type logsAPI interface {
 	DeleteLogGroup(ctx context.Context, in *cloudwatchlogs.DeleteLogGroupInput, optFns ...func(*cloudwatchlogs.Options)) (*cloudwatchlogs.DeleteLogGroupOutput, error)
 }
 
-// PollerLogGroupARN returns the ARN of the poller's log group, in the form
-// TagResource takes: no trailing ":*".
+// PollerLogGroupARN returns the ARN of the poller's log group, in region's
+// partition, in the form TagResource takes: no trailing ":*".
 func PollerLogGroupARN(region, accountID string) string {
-	return fmt.Sprintf("arn:aws:logs:%s:%s:log-group:%s", region, accountID, PollerLogGroupName)
+	return awsarn.InRegion("logs", region, accountID, "log-group:"+PollerLogGroupName)
 }
 
 // pollerLogGroupTags are the tags on the poller's log group: the managed tag

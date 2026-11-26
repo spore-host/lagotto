@@ -19,6 +19,7 @@ import (
 	"github.com/spore-host/libs/lifecycle"
 	"github.com/spore-host/libs/lifecycle/lifecycletest"
 
+	"github.com/spore-host/lagotto/pkg/awsarn"
 	"github.com/spore-host/lagotto/pkg/awscfg"
 	"github.com/spore-host/lagotto/pkg/cliiam"
 	"github.com/spore-host/lagotto/pkg/deploy"
@@ -236,7 +237,7 @@ type regionLease struct {
 // A region whose lease cannot be taken (something there is in use, or another
 // teardown holds it) refuses the whole run before anything is deleted, unless
 // --i-understand-no-lease, which falls back to the stand-in there (and, where
-// there is no global lease, outside the aws partition, for the account-wide
+// there is no global lease, outside aws, aws-us-gov and aws-cn, for the account-wide
 // steps). Once a region's steps are done its lease is finished, and its
 // lifecycle table closed if no tool is left in it, when nothing of lagotto's
 // is left there; otherwise it is released, and the grace period starts over.
@@ -360,7 +361,7 @@ func reapWithLeases(ctx context.Context, cfg aws.Config, acct string, plan *fp.P
 
 // reapAccountWide runs the plan's account-wide steps through the CLI's
 // account-wide teardown, limited to them, and records each step's action in
-// byARN. Outside the aws partition, where there is no global lease, it runs
+// byARN. Outside aws, aws-us-gov and aws-cn, where there is no global lease, it runs
 // them under the stand-in only with --i-understand-no-lease.
 func reapAccountWide(ctx context.Context, cfg aws.Config, acct string, global []fp.Resource, byARN map[string]fp.Action, errOut io.Writer) error {
 	only := map[string]bool{}
@@ -459,8 +460,10 @@ type regionDeleter struct {
 
 // iamAccountDeleter is the account-wide deleters: `teardown --iam-roles`'s.
 type iamAccountDeleter struct {
-	client    *iam.Client
-	accountID string
+	client *iam.Client
+	// partition is the account's, which lagotto-cli-user's ARN is in
+	// (lagotto#347).
+	partition, accountID string
 }
 
 func (d iamAccountDeleter) DeleteRole(ctx context.Context, name string) (bool, error) {
@@ -472,7 +475,7 @@ func (d iamAccountDeleter) DeleteInstanceProfile(ctx context.Context, name strin
 }
 
 func (d iamAccountDeleter) DeletePolicy(ctx context.Context) (cliiam.Deletion, error) {
-	return cliiam.DeletePolicy(ctx, d.client, d.accountID)
+	return cliiam.DeletePolicy(ctx, d.client, d.partition, d.accountID)
 }
 
 // newTeardownDeleters builds the deleters a plan is executed with. A seam for
@@ -494,7 +497,7 @@ var newTeardownDeleters = func(cfg aws.Config, accountID string) inventory.Delet
 			regions[region] = d
 			return d
 		},
-		Account: iamAccountDeleter{client: iam.NewFromConfig(cfg), accountID: accountID},
+		Account: iamAccountDeleter{client: iam.NewFromConfig(cfg), partition: awsarn.PartitionOrAWS(cfg.Region), accountID: accountID},
 	}
 }
 

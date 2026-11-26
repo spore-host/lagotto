@@ -46,7 +46,7 @@ func TestReview6PlanOwnerIsTheRun(t *testing.T) {
 }
 
 // TestReview6PlanNoLeaseUnfencedChecks (G4): `--plan --mode reap
-// --i-understand-no-lease` outside the aws partition goes through the same
+// --i-understand-no-lease` outside aws, aws-us-gov and aws-cn goes through the same
 // unfenced path as `teardown --iam-roles`: nothing account-wide is deleted
 // while a lagotto-teardown job is pending in any region.
 func TestReview6PlanNoLeaseUnfencedChecks(t *testing.T) {

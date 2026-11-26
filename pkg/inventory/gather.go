@@ -6,6 +6,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/spore-host/lagotto/pkg/awsarn"
 	"github.com/spore-host/lagotto/pkg/deploy"
 	"github.com/spore-host/lagotto/pkg/runtimeiam"
 )
@@ -141,7 +142,7 @@ func Gather(ctx context.Context, src Source, accountID string, scope Scope, o Op
 			r.ActivityUnknown = true
 			continue
 		}
-		r.Bucket = &Item{ARN: BucketARN(b.Name), Name: b.Name, Tags: b.Tags}
+		r.Bucket = &Item{ARN: BucketARN(awsarn.PartitionOrAWS(b.Region), b.Name), Name: b.Name, Tags: b.Tags}
 	}
 
 	f.Account, f.AccountIncomplete, f.Warnings = gatherAccount(ctx, src.Account(), f.Warnings)

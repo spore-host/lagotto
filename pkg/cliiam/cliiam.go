@@ -23,8 +23,8 @@
 // # No region, no policy variables
 //
 // Like the runtime policy (#219), the document is a function of the account
-// alone: lagotto's regional resources carry a `*` region so one `setup` serves
-// every region. The account is always a literal: a policy variable such as
+// (and its partition, lagotto#347) alone: lagotto's regional resources carry a
+// `*` region so one `setup` serves every region. The account is always a literal: a policy variable such as
 // ${aws:PrincipalAccount} in a Resource passes Access Analyzer and the policy
 // simulator but fails a real CreatePolicy ("failed legacy parsing", spawn#1069).
 // The one variable used, ${aws:userid}, is in Condition values only (the
@@ -40,6 +40,7 @@ import (
 
 	"github.com/spore-host/libs/lifecycle"
 
+	"github.com/spore-host/lagotto/pkg/awsarn"
 	"github.com/spore-host/lagotto/pkg/runtimeiam"
 	"github.com/spore-host/lagotto/pkg/schedgroup"
 	"github.com/spore-host/lagotto/pkg/watcher"
@@ -47,7 +48,7 @@ import (
 
 const (
 	// PolicyName is the customer-managed policy `lagotto setup` writes. Fixed, so
-	// its ARN is derivable from the account alone ([PolicyARN]).
+	// its ARN is derivable from the account and its partition ([PolicyARN]).
 	PolicyName = "lagotto-cli-user"
 	// PolicyPath is the policy's IAM path. The default path keeps the ARN short
 	// and predictable.
@@ -68,9 +69,10 @@ const (
 	maxManagedPolicyChars = 6144
 )
 
-// PolicyARN returns the policy's ARN in accountID. IAM is global.
-func PolicyARN(accountID string) string {
-	return fmt.Sprintf("arn:aws:iam::%s:policy%s%s", accountID, PolicyPath, PolicyName)
+// PolicyARN returns the policy's ARN in accountID, in partition. IAM is
+// global.
+func PolicyARN(partition, accountID string) string {
+	return awsarn.IAM(partition, accountID, "policy"+PolicyPath+PolicyName)
 }
 
 // EverydayCommands are the commands the policy covers: what a watch user runs
@@ -222,9 +224,11 @@ var leaseSentinel = map[string]interface{}{
 // watch/extend/update increment (watcher.Store.BumpPollerEpoch).
 var PollerControlAttributes = []string{"watch_id", watcher.PollerEpochAttr}
 
-func statements(accountID string, configBuckets []string) []statement {
-	regional := func(service, resource string) string { return runtimeiam.RegionalARN(service, accountID, resource) }
-	iamARN := func(resource string) string { return fmt.Sprintf("arn:aws:iam::%s:%s", accountID, resource) }
+func statements(partition, accountID string, configBuckets []string) []statement {
+	regional := func(service, resource string) string {
+		return runtimeiam.RegionalARN(partition, service, accountID, resource)
+	}
+	iamARN := func(resource string) string { return awsarn.IAM(partition, accountID, resource) }
 
 	var tableARNs []string
 	for _, t := range Tables {
@@ -310,14 +314,14 @@ func statements(accountID string, configBuckets []string) []statement {
 		// Creating or updating a schedule passes the role it assumes. Only
 		// lagotto's invoke role, and only to EventBridge Scheduler.
 		{Sid: "PassSchedulerInvokeRole", Action: []string{"iam:PassRole"},
-			Resource:  runtimeiam.SchedulerInvokeRoleARN(accountID),
+			Resource:  runtimeiam.SchedulerInvokeRoleARN(partition, accountID),
 			Condition: stringEquals("iam:PassedToService", "scheduler.amazonaws.com")},
 
 		// watch/update/list read the poller's runtime policy to check that a watch's
 		// iam_role is authorized (#170); doctor reads both roles and both
 		// policies for drift.
 		{Sid: "ReadLagottoRoles", Action: []string{"iam:GetRole", "iam:GetRolePolicy"},
-			Resource: []string{runtimeiam.RoleARN(accountID), runtimeiam.SchedulerInvokeRoleARN(accountID)}},
+			Resource: []string{runtimeiam.RoleARN(partition, accountID), runtimeiam.SchedulerInvokeRoleARN(partition, accountID)}},
 		// doctor's caller check (#232) needs the caller's role ARN, which the STS
 		// session ARN lacks the path of. IAM Identity Center roles all sit under
 		// one path; reading those is how doctor learns the full ARN.
@@ -353,7 +357,7 @@ func statements(accountID string, configBuckets []string) []statement {
 		// `cancel` of a fired hold releases its capacity reservation (#203). Only
 		// reservations the poller created, which it always tags.
 		{Sid: "ReleaseHolds", Action: []string{"ec2:CancelCapacityReservation"},
-			Resource:  fmt.Sprintf("arn:aws:ec2:*:%s:capacity-reservation/*", accountID),
+			Resource:  regional("ec2", "capacity-reservation/*"),
 			Condition: stringEquals("ec2:ResourceTag/"+holdTagKey, holdTagValue),
 			simSkip:   []string{"ec2:CancelCapacityReservation"}},
 
@@ -361,7 +365,7 @@ func statements(accountID string, configBuckets []string) []statement {
 		{Sid: "DoctorLegacyStack", Action: []string{"cloudformation:DescribeStacks"},
 			Resource: regional("cloudformation", legacyStackPattern)},
 		{Sid: "DoctorArtifactBuckets", Action: []string{"s3:GetBucketTagging"},
-			Resource: "arn:aws:s3:::" + artifactBucketPrefix + accountID + "-*"},
+			Resource: awsarn.S3(partition, artifactBucketPrefix+accountID+"-*")},
 
 		// Actions IAM authorizes only on Resource "*" (no resource-level
 		// permissions in the Service Authorization Reference). All are reads.
@@ -389,7 +393,7 @@ func statements(accountID string, configBuckets []string) []statement {
 	if buckets := NormalizeConfigBuckets(configBuckets); len(buckets) > 0 {
 		var res []string
 		for _, b := range buckets {
-			res = append(res, "arn:aws:s3:::"+b+"/*")
+			res = append(res, awsarn.S3(partition, b+"/*"))
 		}
 		sts = append(sts, statement{Sid: "SpawnConfigObjects", Action: []string{"s3:GetObject"}, Resource: res})
 	}
@@ -401,15 +405,19 @@ func statements(accountID string, configBuckets []string) []statement {
 	return sts
 }
 
-// PolicyDocument returns the CLI-user policy for accountID as JSON.
-// configBuckets are the buckets s3:// spawn configs may be read from (setup
-// --config-bucket); invalid names are dropped (validate them first with
+// PolicyDocument returns the CLI-user policy for accountID, in partition (aws,
+// aws-us-gov or aws-cn: every ARN in it is arn:<partition>:, lagotto#347), as
+// JSON. configBuckets are the buckets s3:// spawn configs may be read from
+// (setup --config-bucket); invalid names are dropped (validate them first with
 // [ValidateConfigBucketName]).
-func PolicyDocument(accountID string, configBuckets []string) (string, error) {
+func PolicyDocument(partition, accountID string, configBuckets []string) (string, error) {
 	if !accountIDPattern.MatchString(accountID) {
 		return "", fmt.Errorf("cliiam: %q is not a 12-digit AWS account ID", accountID)
 	}
-	doc := map[string]interface{}{"Version": "2012-10-17", "Statement": statements(accountID, configBuckets)}
+	if partition == "" {
+		return "", fmt.Errorf("cliiam: the partition is required")
+	}
+	doc := map[string]interface{}{"Version": "2012-10-17", "Statement": statements(partition, accountID, configBuckets)}
 	b, err := json.Marshal(doc)
 	if err != nil {
 		return "", fmt.Errorf("cliiam: build policy: %w", err)
@@ -466,7 +474,7 @@ func NormalizeConfigBuckets(names []string) []string {
 // ConfigBuckets recovers the config buckets a deployed CLI-user policy grants
 // s3:GetObject on, so `setup` carries them forward instead of revoking them
 // with a wholesale rewrite (the #170 footgun). doc may be URL-encoded, as IAM
-// returns it.
+// returns it, and in any partition.
 func ConfigBuckets(doc string) ([]string, error) {
 	grants, err := runtimeiam.ParsePolicy(doc)
 	if err != nil {
@@ -477,7 +485,7 @@ func ConfigBuckets(doc string) ([]string, error) {
 		if g.Action != "s3:GetObject" || !strings.EqualFold(g.Effect, "Allow") {
 			continue
 		}
-		name, ok := strings.CutPrefix(g.Resource, "arn:aws:s3:::")
+		name, ok := s3Resource(g.Resource)
 		if !ok {
 			continue
 		}
@@ -489,11 +497,22 @@ func ConfigBuckets(doc string) ([]string, error) {
 	return NormalizeConfigBuckets(out), nil
 }
 
+// s3Resource is the resource of an S3 ARN in any partition ("NAME/*" for
+// arn:aws-cn:s3:::NAME/*), and whether arn is one.
+func s3Resource(arn string) (string, bool) {
+	partition, err := awsarn.PartitionOfARN(arn)
+	if err != nil {
+		return "", false
+	}
+	return strings.CutPrefix(arn, awsarn.S3(partition, ""))
+}
+
 // GrantedActions returns the distinct actions [PolicyDocument] grants, sorted.
+// They are the same in every partition.
 func GrantedActions(accountID string, configBuckets []string) []string {
 	seen := map[string]bool{}
 	var out []string
-	for _, st := range statements(accountID, configBuckets) {
+	for _, st := range statements(awsarn.AWS, accountID, configBuckets) {
 		for _, a := range st.Action {
 			if !seen[a] {
 				seen[a] = true

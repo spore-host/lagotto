@@ -215,7 +215,7 @@ func TestReapKeepsActive(t *testing.T) {
 	for _, k := range kept {
 		keptARNs[k.Resource.ARN] = k.Reason
 	}
-	if r := keptARNs[runtimeiam.SchedulerInvokeRoleARN(acct)]; !strings.Contains(r, "depends on it") {
+	if r := keptARNs[runtimeiam.SchedulerInvokeRoleARN("aws", acct)]; !strings.Contains(r, "depends on it") {
 		t.Errorf("invoke role (residue) kept for %q, want: an active schedule depends on it", r)
 	}
 	if r := keptARNs[TableARN("us-east-1", acct, "lagotto-watches")]; r != "active" {

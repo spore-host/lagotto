@@ -30,6 +30,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/scheduler"
 	schedulertypes "github.com/aws/aws-sdk-go-v2/service/scheduler/types"
 	"github.com/aws/smithy-go"
+
+	"github.com/spore-host/lagotto/pkg/awsarn"
 )
 
 const (
@@ -43,9 +45,10 @@ const (
 // Groups are the groups lagotto's schedules may be in, in lookup order.
 var Groups = []string{Name, Default}
 
-// ARN returns the ARN of lagotto's schedule group in region and account.
+// ARN returns the ARN of lagotto's schedule group in region and account, in
+// region's partition.
 func ARN(region, accountID string) string {
-	return fmt.Sprintf("arn:aws:scheduler:%s:%s:schedule-group/%s", region, accountID, Name)
+	return awsarn.InRegion("scheduler", region, accountID, "schedule-group/"+Name)
 }
 
 // GetAPI is the slice of EventBridge Scheduler [Find] needs.

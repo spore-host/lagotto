@@ -11,6 +11,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
+	"github.com/spore-host/lagotto/pkg/awsarn"
 	"github.com/spore-host/lagotto/pkg/runtimeiam"
 	"github.com/spore-host/lagotto/pkg/watcher"
 )
@@ -49,7 +50,7 @@ func checkInstanceRoleAuthorizedFromConfig(ctx context.Context, cfg aws.Config, 
 	if id, err := sts.NewFromConfig(cfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{}); err == nil {
 		accountID = aws.ToString(id.Account)
 	}
-	return checkInstanceRoleAuthorized(ctx, iam.NewFromConfig(cfg), out, w, accountID)
+	return checkInstanceRoleAuthorized(ctx, iam.NewFromConfig(cfg), out, w, awsarn.PartitionOrAWS(cfg.Region), accountID)
 }
 
 // watchSpawnConfigIAMRole returns the iam_role a watch's stored spawn config
@@ -99,7 +100,9 @@ func watchSageMakerRole(w *watcher.Watch) string {
 //	policy present, role NOT covered  -> error (refuse before the watch is stored)
 //	no role / no policy deployed      -> nil (no hosted poller to be wrong about)
 //	any other error (e.g. AccessDenied) -> nil + warning (nothing can be proven)
-func checkInstanceRoleAuthorized(ctx context.Context, client runtimeiam.IAMAPI, out io.Writer, w *watcher.Watch, accountID string) (*InstanceRoleCheck, error) {
+//
+// partition is the account's (lagotto#347): the role's ARN is built in it.
+func checkInstanceRoleAuthorized(ctx context.Context, client runtimeiam.IAMAPI, out io.Writer, w *watcher.Watch, partition, accountID string) (*InstanceRoleCheck, error) {
 	roleName := watchSpawnConfigIAMRole(w)
 	smRole := watchSageMakerRole(w)
 	if (roleName == "" && smRole == "") || client == nil || accountID == "" {
@@ -147,7 +150,7 @@ func checkInstanceRoleAuthorized(ctx context.Context, client runtimeiam.IAMAPI, 
 			"\n"+
 			"  Every lagotto user can then submit jobs with that role", smRole, smRole)
 	}
-	missing := runtimeiam.MissingInstanceRoleGrants(grants, accountID, roleName)
+	missing := runtimeiam.MissingInstanceRoleGrants(grants, partition, accountID, roleName)
 	if len(missing) == 0 {
 		res.Authorized = true
 		return res, nil

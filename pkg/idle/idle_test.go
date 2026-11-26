@@ -488,7 +488,7 @@ func TestReapHandsOffItsOwnRemoval(t *testing.T) {
 	}
 	for _, in := range h.sched.inputs {
 		if in.ActionAfterCompletion != schedulertypes.ActionAfterCompletionDelete || aws.ToString(in.GroupName) != runtimeiam.TeardownScheduleGroup ||
-			aws.ToString(in.Target.RoleArn) != runtimeiam.SchedulerInvokeRoleARN(acct) || !strings.HasPrefix(aws.ToString(in.Target.Arn), "arn:aws:scheduler:::aws-sdk:") ||
+			aws.ToString(in.Target.RoleArn) != runtimeiam.SchedulerInvokeRoleARN("aws", acct) || !strings.HasPrefix(aws.ToString(in.Target.Arn), "arn:aws:scheduler:::aws-sdk:") ||
 			in.FlexibleTimeWindow.Mode != schedulertypes.FlexibleTimeWindowModeOff {
 			t.Errorf("job %s: %+v", aws.ToString(in.Name), in)
 		}

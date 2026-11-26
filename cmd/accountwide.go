@@ -45,7 +45,8 @@ var (
 	// teardownAccountWideCheck is its check before anything is deleted.
 	teardownAccountWideCheck = checkAccountWide
 	// teardownAccountWideUnfenced is its path where there is no global
-	// scope (outside the aws partition).
+	// scope (outside aws, aws-us-gov and aws-cn: the ISO partitions and the
+	// European Sovereign Cloud).
 	teardownAccountWideUnfenced = runAccountWideUnfenced
 )
 
@@ -75,7 +76,7 @@ func runAccountWide(ctx context.Context, cfg aws.Config, account string, only ma
 }
 
 // runAccountWideUnfenced removes the account-wide resources where there is
-// no global scope, so no global lease (outside the aws partition,
+// no global scope, so no global lease (outside aws, aws-us-gov and aws-cn,
 // lagotto#347): from a footprint of every region, what is lagotto's and not
 // in use (the footprint's classes, as the account-wide teardown plans them),
 // under the local stand-in lease, which fences nothing. `teardown

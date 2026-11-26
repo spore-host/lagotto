@@ -82,7 +82,7 @@ func orphanFacts() inventory.Facts {
 			{Region: "eu-west-1", Tables: fpTables("eu-west-1")},
 			{Region: "ap-southeast-2", Tables: fpTables("ap-southeast-2")},
 		},
-		Account: inventory.Account{Policy: &inventory.Item{ARN: cliiam.PolicyARN(fpAcct), Name: cliiam.PolicyName, Tags: fpTags("global")}},
+		Account: inventory.Account{Policy: &inventory.Item{ARN: cliiam.PolicyARN("aws", fpAcct), Name: cliiam.PolicyName, Tags: fpTags("global")}},
 	}
 }
 

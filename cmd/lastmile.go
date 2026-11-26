@@ -198,8 +198,8 @@ func lastMile(ctx context.Context, mode lastmile.Mode, logf func(string, ...any)
 	}
 	control, err := lastMileControlRegion(cfg.Region)
 	if err != nil {
-		// Outside the aws partition there is no global scope to read
-		// (lagotto#347): the regional checks still run, and the global
+		// Outside aws, aws-us-gov and aws-cn there is no global scope to
+		// read (lagotto#347): the regional checks still run, and the global
 		// scope's, and the account-wide teardown, are skipped.
 		logf("lastmile: the global scope is skipped: %v", err)
 		control = ""
@@ -287,7 +287,8 @@ func lastMileResidue(account string, regions []string) []fp.Resource {
 // lastMileControlRegion is the region holding the global scope's lifecycle
 // items, so every invocation reads the same one whatever --region says: the
 // account-wide teardown's (idle.ControlRegion), whose global lease lives
-// there (lagotto#340). Outside the aws partition there is none.
+// there (lagotto#340): us-east-1, us-gov-west-1 or cn-north-1, by partition.
+// Outside aws, aws-us-gov and aws-cn there is none (lagotto#347).
 func lastMileControlRegion(region string) (string, error) { return idle.ControlRegion(region) }
 
 // lastMileFootprint is lagotto's footprint of every region, read at most once

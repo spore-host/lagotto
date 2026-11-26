@@ -35,6 +35,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cleanup is really in progress. This needs libs v0.57.0. No IAM changes:
   lagotto's poller role already grants the lifecycle-table reads and deletes
   involved, and `lagotto-cli-user` the marker delete it already used.
+### Changed
+
+- **lagotto's account-wide teardown now runs under its global lease in AWS
+  GovCloud (US) and the AWS China regions** (#347). The global scope
+  (`tool#lagotto#global`) lives in the partition's control region, its IAM
+  home region: us-east-1 in aws, us-gov-west-1 in aws-us-gov, cn-north-1 in
+  aws-cn, whatever region a command runs in. There, `setup`, `deploy`,
+  `watch` and `launch` mark it, the last mile reads it, and `lagotto teardown
+  --iam-roles` (and the account-wide steps of `--plan --mode reap`) remove the
+  account-wide resources only under that lease, with the same checks as in
+  aws, instead of without a lease. The unfenced path, and
+  `--i-understand-no-lease` for the account-wide steps, remain only for the
+  ISO partitions and the European Sovereign Cloud, which lagotto does not
+  support.
+- `lagotto setup` and `lagotto deploy` refuse a region in the ISO partitions
+  or the European Sovereign Cloud (or in no known partition) before they write
+  any IAM, rather than writing policies whose ARNs match nothing there (#347).
+- Go API: the ARN and policy builders of `pkg/runtimeiam`, `pkg/cliiam` and
+  `pkg/inventory` take the partition (`runtimeiam.RoleARN(partition,
+  account)`, `runtimeiam.PolicyDocumentFor(partition, account, auth)`,
+  `cliiam.PolicyDocument(partition, account, buckets)`, `cliiam.PolicyARN`,
+  `inventory.IAMARN`, `inventory.BucketARN`, ...), and
+  `runtimeiam.BasicExecutionPolicyARN` is a function of it. The new
+  `pkg/awsarn` maps a region to its partition and builds the ARNs (#347).
+
+### Fixed
+
+- **lagotto's IAM ARNs are in the account's partition** (#347). Every ARN
+  lagotto built started `arn:aws:`, so in aws-us-gov and aws-cn the poller's
+  runtime policy (its lifecycle lease table, its tables, topic and schedules),
+  the Scheduler invoke role's policies, the `lagotto-cli-user` policy, the
+  roles' and the managed basic-execution policy's ARNs, the one-shot jobs'
+  universal targets, and the footprint's and doctor's ARNs named nothing
+  there (IAM refuses such a policy). They are now `arn:aws-us-gov:` and
+  `arn:aws-cn:` there, derived from the region (or the caller's ARN); the aws
+  partition's policies are byte-for-byte unchanged. `lagotto doctor` compares
+  a deployed policy with the one for its region's partition, and
+  `deployment/cloudformation/lagotto-stack.yaml` names its roles and function
+  with `${AWS::Partition}`. An account set up there by an older lagotto needs
+  `lagotto setup` again.
 
 ## [0.73.0] - 2026-11-25
 

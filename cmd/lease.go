@@ -168,7 +168,7 @@ func markGlobal(ctx context.Context, cfg aws.Config, owner, what string, errOut 
 func markGlobalWith(ctx context.Context, c *lifecycle.Client, what string, errOut io.Writer) (func(), error) {
 	noop := func() {}
 	if _, err := c.RegionFor(lifecycle.ScopeGlobal); err != nil {
-		return noop, nil // no global scope outside the aws partition (lagotto#347): nothing removes the account-wide IAM there
+		return noop, nil // no global scope outside aws, aws-us-gov and aws-cn (lagotto#347): the account-wide teardown takes no lease there
 	}
 	token, err := idle.Mark(ctx, c, lifecycle.ScopeGlobal, what)
 	if errors.Is(err, idle.ErrLeaseUnavailable) {

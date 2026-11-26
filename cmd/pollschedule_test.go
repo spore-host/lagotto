@@ -233,7 +233,7 @@ func (f *fakeAWS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				"FlexibleTimeWindow": map[string]any{"Mode": "OFF"},
 				"Target": map[string]any{
 					"Arn":     "arn:aws:lambda:us-east-1:123456789012:function:lagotto-capacity-poller",
-					"RoleArn": runtimeiam.SchedulerInvokeRoleARN("123456789012"),
+					"RoleArn": runtimeiam.SchedulerInvokeRoleARN("aws", "123456789012"),
 				},
 			})
 		case http.MethodPut:

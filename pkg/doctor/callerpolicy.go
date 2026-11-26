@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/spore-host/lagotto/pkg/awsarn"
 	"github.com/spore-host/lagotto/pkg/cliiam"
 )
 
@@ -47,9 +48,14 @@ func EvalCallerPermissions(res cliiam.CallerResult, accountID string) Check {
 	return c
 }
 
-// attachFix is how an administrator gives principal the policy.
+// attachFix is how an administrator gives principal the policy, named by its
+// ARN in principal's partition (lagotto#347).
 func attachFix(principal, accountID string) []string {
-	arn := cliiam.PolicyARN(accountID)
+	partition, err := awsarn.PartitionOfARN(principal)
+	if err != nil {
+		partition = awsarn.AWS
+	}
+	arn := cliiam.PolicyARN(partition, accountID)
 	setup := "if the policy does not exist yet, an administrator runs: lagotto setup"
 	_, resource, _ := strings.Cut(principal, ":iam::"+accountID+":")
 	name := resource[strings.LastIndex(resource, "/")+1:]

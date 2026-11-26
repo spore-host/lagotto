@@ -28,6 +28,7 @@ import (
 	"github.com/spore-host/libs/tags/schedulertags"
 	"github.com/spore-host/libs/tags/snstags"
 
+	"github.com/spore-host/lagotto/pkg/awsarn"
 	"github.com/spore-host/lagotto/pkg/cliiam"
 	"github.com/spore-host/lagotto/pkg/deploy"
 	"github.com/spore-host/lagotto/pkg/runtimeiam"
@@ -112,7 +113,7 @@ func NewAWSSource(cfg aws.Config, accountID string) *AWSSource {
 }
 
 func newFullAccount(s *AWSSource) AccountSource {
-	return &awsAccount{iam: s.iam, accountID: s.accountID}
+	return &awsAccount{iam: s.iam, accountID: s.accountID, partition: awsarn.PartitionOrAWS(s.cfg.Region)}
 }
 
 func newAWSSource(cfg aws.Config, accountID string, account func(*AWSSource) AccountSource) *AWSSource {
@@ -520,6 +521,9 @@ func (r *awsRegion) BucketTags(ctx context.Context, region, accountID string) (m
 type awsAccount struct {
 	iam       iamReader
 	accountID string
+	// partition is the account's (its region's), which the lagotto-cli-user
+	// policy's ARN is in (lagotto#347).
+	partition string
 }
 
 // NewPollerAWSSource is the footprint as the capacity poller reads it for its
@@ -667,7 +671,7 @@ func (a *awsAccount) AuthorizedRoles(ctx context.Context) ([]string, error) {
 }
 
 func (a *awsAccount) CLIPolicy(ctx context.Context) (*Item, int32, error) {
-	arn := cliiam.PolicyARN(a.accountID)
+	arn := cliiam.PolicyARN(a.partition, a.accountID)
 	out, err := a.iam.GetPolicy(ctx, &iam.GetPolicyInput{PolicyArn: aws.String(arn)})
 	if isNotFound(err) {
 		return nil, 0, nil

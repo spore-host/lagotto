@@ -208,12 +208,12 @@ func sageMakerWatch(role string) *watcher.Watch {
 func TestCheckSageMakerRoleAuthorized(t *testing.T) {
 	ctx := context.Background()
 	role := "arn:aws:iam::" + irTestAccount + ":role/service-role/sm-exec"
-	_, err := checkInstanceRoleAuthorized(ctx, &fakeRoleIAM{policy: irStockPolicy(t)}, &bytes.Buffer{}, sageMakerWatch(role), irTestAccount)
+	_, err := checkInstanceRoleAuthorized(ctx, &fakeRoleIAM{policy: irStockPolicy(t)}, &bytes.Buffer{}, sageMakerWatch(role), "aws", irTestAccount)
 	if err == nil || !strings.Contains(err.Error(), "lagotto setup --sagemaker-role "+role) {
 		t.Errorf("unauthorized role: %v", err)
 	}
-	doc, _ := runtimeiam.PolicyDocumentFor(irTestAccount, runtimeiam.Authorizations{SageMakerRoles: []string{role}})
-	res, err := checkInstanceRoleAuthorized(ctx, &fakeRoleIAM{policy: doc}, &bytes.Buffer{}, sageMakerWatch(role), irTestAccount)
+	doc, _ := runtimeiam.PolicyDocumentFor("aws", irTestAccount, runtimeiam.Authorizations{SageMakerRoles: []string{role}})
+	res, err := checkInstanceRoleAuthorized(ctx, &fakeRoleIAM{policy: doc}, &bytes.Buffer{}, sageMakerWatch(role), "aws", irTestAccount)
 	if err != nil || res == nil || !res.Authorized {
 		t.Errorf("authorized role: %+v, %v", res, err)
 	}
@@ -228,7 +228,7 @@ func TestResolveAuthorizedSageMakerRoles(t *testing.T) {
 	oldA, oldR := setupSageMakerRoles, setupRevokeSageMaker
 	t.Cleanup(func() { setupSageMakerRoles, setupRevokeSageMaker = oldA, oldR })
 
-	doc, _ := runtimeiam.PolicyDocumentFor("123456789012", runtimeiam.Authorizations{SageMakerRoles: []string{role}})
+	doc, _ := runtimeiam.PolicyDocumentFor("aws", "123456789012", runtimeiam.Authorizations{SageMakerRoles: []string{role}})
 	setupSageMakerRoles, setupRevokeSageMaker = nil, nil
 	if got, err := resolveAuthorizedSageMakerRoles(ctx, &fakeRoleIAM{policy: doc}, "123456789012", &bytes.Buffer{}); err != nil || len(got) != 1 {
 		t.Errorf("carried forward: %v, %v", got, err)

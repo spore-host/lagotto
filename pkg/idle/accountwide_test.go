@@ -595,7 +595,7 @@ func TestAccountWideDeadItems(t *testing.T) {
 func TestAccountWideOnly(t *testing.T) {
 	w := newAWWorld(t)
 	cfg := w.cfg(true, 0)
-	cfg.Only = map[string]bool{runtimeiam.SchedulerInvokeRoleARN(acct): true}
+	cfg.Only = map[string]bool{runtimeiam.SchedulerInvokeRoleARN("aws", acct): true}
 	if r := TearDownAccountWide(context.Background(), cfg, w.deps()); r.Outcome != AccountWideRemoved {
 		t.Fatalf("%+v", r)
 	}
@@ -636,7 +636,7 @@ func TestAccountWideReadFailures(t *testing.T) {
 	if r := TearDownAccountWide(context.Background(), w.cfg(true, 0), d); r.Outcome != AccountWideFailed || reads != 1 {
 		t.Errorf("under the lease: %+v (%d cached reads)", r, reads)
 	}
-	// Outside the aws partition there is no global scope.
+	// Outside aws, aws-us-gov and aws-cn there is no global scope.
 	c, _ := lifecycle.New(lifecycle.Options{DynamoDB: func(string) (lifecycle.API, error) { return lifecycletest.New(), nil }})
 	d = w.deps()
 	d.Lifecycle = c
