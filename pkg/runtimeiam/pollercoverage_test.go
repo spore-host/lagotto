@@ -216,7 +216,7 @@ func TestPollerPolicyCoversItsCalls(t *testing.T) {
 		inventory[action] = fmt.Sprintf("%s at %s, via %s", s.Op, s.Pos, strings.Join(inv.PathTo(s.Func), " -> "))
 	}
 
-	doc, err := PolicyDocument("123456789012", nil)
+	doc, err := PolicyDocument("aws", "123456789012", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

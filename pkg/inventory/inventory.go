@@ -80,6 +80,7 @@ import (
 	fp "github.com/spore-host/libs/footprint"
 	"github.com/spore-host/libs/tags"
 
+	"github.com/spore-host/lagotto/pkg/awsarn"
 	"github.com/spore-host/lagotto/pkg/cliiam"
 	"github.com/spore-host/lagotto/pkg/deploy"
 	"github.com/spore-host/lagotto/pkg/managedtags"
@@ -298,28 +299,56 @@ type Facts struct {
 	Warnings []string
 }
 
-// ScheduleARN is a schedule's ARN.
+// ScheduleARN is a schedule's ARN, in region's partition (lagotto#347), as
+// are the ARNs of a region's other resources below.
 func ScheduleARN(region, accountID, group, name string) string {
-	return fmt.Sprintf("arn:aws:scheduler:%s:%s:schedule/%s/%s", region, accountID, group, name)
+	return awsarn.InRegion("scheduler", region, accountID, "schedule/"+group+"/"+name)
 }
 
 // ScheduleGroupARN is a schedule group's ARN.
 func ScheduleGroupARN(region, accountID, name string) string {
-	return fmt.Sprintf("arn:aws:scheduler:%s:%s:schedule-group/%s", region, accountID, name)
+	return awsarn.InRegion("scheduler", region, accountID, "schedule-group/"+name)
 }
 
 // TableARN is a table's ARN.
 func TableARN(region, accountID, name string) string {
-	return fmt.Sprintf("arn:aws:dynamodb:%s:%s:table/%s", region, accountID, name)
+	return awsarn.InRegion("dynamodb", region, accountID, "table/"+name)
 }
 
-// BucketARN is a bucket's ARN.
-func BucketARN(name string) string { return "arn:aws:s3:::" + name }
+// BucketARN is a bucket's ARN in partition.
+func BucketARN(partition, name string) string { return awsarn.S3(partition, name) }
 
 // IAMARN is the ARN of an IAM role, instance profile or policy (kind "role",
-// "instance-profile", "policy") at the root path.
-func IAMARN(accountID, kind, name string) string {
-	return fmt.Sprintf("arn:aws:iam::%s:%s/%s", accountID, kind, name)
+// "instance-profile", "policy") at the root path, in partition.
+func IAMARN(partition, accountID, kind, name string) string {
+	return awsarn.IAM(partition, accountID, kind+"/"+name)
+}
+
+// partition is the partition of f's account: that of an ARN IAM returned for
+// one of its account-wide resources, the ones the dependencies built here must
+// match; failing that, that of the regions f read (every region an account
+// lists is in its partition); aws when it read neither.
+func (f Facts) partition() string {
+	a := f.Account
+	var arns []string
+	for _, it := range append(append([]Item{}, a.Roles...), a.AuthorizedRoles...) {
+		arns = append(arns, it.ARN)
+	}
+	for _, p := range append(append([]Profile{}, a.InstanceProfiles...), a.AuthorizedProfiles...) {
+		arns = append(arns, p.ARN)
+	}
+	if a.Policy != nil {
+		arns = append(arns, a.Policy.ARN)
+	}
+	for _, arn := range arns {
+		if p, err := awsarn.PartitionOfARN(arn); err == nil {
+			return p
+		}
+	}
+	if len(f.Regions) > 0 {
+		return awsarn.PartitionOrAWS(f.Regions[0].Region)
+	}
+	return awsarn.AWS
 }
 
 // LaunchScheduleRecorded reports whether a per-launch schedule belongs to a
@@ -384,7 +413,16 @@ func Classify(f Facts, o Options, now time.Time) *fp.Report {
 	rep := fp.NewReport(Tool, f.AccountID, now)
 	rep.Warnings = append(rep.Warnings, f.Warnings...)
 	acct := f.AccountID
-	invokeRole := runtimeiam.SchedulerInvokeRoleARN(acct)
+	// The account-wide ARNs a resource depends on are built in the account's
+	// partition, so they match the ones IAM returned (lagotto#347): one that
+	// did not would leave an active schedule's invoke role unprotected.
+	part := f.partition()
+	invokeRole := runtimeiam.SchedulerInvokeRoleARN(part, acct)
+	// The regional ARNs it builds (for what has none read) are in that
+	// partition too: in an ISO partition no region's name gives it.
+	inRegion := func(service, region, resource string) string {
+		return awsarn.Regional(part, service, region, acct, resource)
+	}
 
 	var regional, logGroups []fp.Resource
 	add := func(dst *[]fp.Resource, region, typ string, it Item, own fp.Ownership, c fp.Class, deps ...string) {
@@ -406,7 +444,7 @@ func Classify(f Facts, o Options, now time.Time) *fp.Report {
 		}
 
 		var tableARNs []string
-		scheduledARN := TableARN(reg, acct, o.ScheduledTable)
+		scheduledARN := inRegion("dynamodb", reg, "table/"+o.ScheduledTable)
 		for _, t := range r.Tables {
 			add(&regional, reg, TypeTable, t.Item, ownership(t.Tags, true), activeOr(active, fp.ClassLitter))
 			tableARNs = append(tableARNs, t.ARN)
@@ -421,12 +459,12 @@ func Classify(f Facts, o Options, now time.Time) *fp.Report {
 			add(&regional, reg, TypeTopic, *r.Topic, ownership(r.Topic.Tags, true), activeOr(active, fp.ClassLitter))
 		}
 		fnClass := activeOr(active, fp.ClassLitter)
-		fnARN := deploy.PollerFunctionARN(reg, acct)
+		fnARN := inRegion("lambda", reg, "function:"+deploy.PollerFunctionName)
 		if r.Function != nil {
 			fnARN = r.Function.ARN
 			role := r.FunctionRole
 			if role == "" {
-				role = runtimeiam.RoleARN(acct)
+				role = runtimeiam.RoleARN(part, acct)
 			}
 			deps := append([]string{role}, tableARNs...)
 			if r.Topic != nil {
@@ -477,7 +515,7 @@ func Classify(f Facts, o Options, now time.Time) *fp.Report {
 			}
 			c = class(t, c)
 			groupActive[s.Group] = groupActive[s.Group] || c == fp.ClassActive
-			add(&regional, reg, TypeSchedule, Item{ARN: ScheduleARN(reg, acct, s.Group, s.Name), Name: s.Name, Tags: copyTags(t)}, own, c, deps...)
+			add(&regional, reg, TypeSchedule, Item{ARN: inRegion("scheduler", reg, "schedule/"+s.Group+"/"+s.Name), Name: s.Name, Tags: copyTags(t)}, own, c, deps...)
 		}
 		for _, g := range r.Groups {
 			add(&regional, reg, TypeScheduleGroup, g, ownership(g.Tags, true), activeOr(groupActive[g.Name], fp.ClassLitter))
@@ -510,7 +548,7 @@ func Classify(f Facts, o Options, now time.Time) *fp.Report {
 	everywhereActive := anyActive || !known
 	var global []fp.Resource
 	for _, p := range f.Account.InstanceProfiles {
-		add(&global, Global, TypeInstanceProfile, p.Item, ownership(p.Tags, true), activeOr(everywhereActive, fp.ClassLitter), roleARNs(acct, p.Roles)...)
+		add(&global, Global, TypeInstanceProfile, p.Item, ownership(p.Tags, true), activeOr(everywhereActive, fp.ClassLitter), roleARNs(part, acct, p.Roles)...)
 	}
 	for _, p := range f.Account.AuthorizedProfiles {
 		own := ownership(p.Tags, false)
@@ -522,7 +560,7 @@ func Classify(f Facts, o Options, now time.Time) *fp.Report {
 		// It goes before the poller role, whose policy is how it is found:
 		// a profile delete that fails keeps the role (and so the profile
 		// findable) for the next run.
-		deps := append(roleARNs(acct, p.Roles), runtimeiam.RoleARN(acct))
+		deps := append(roleARNs(part, acct, p.Roles), runtimeiam.RoleARN(part, acct))
 		add(&global, Global, TypeInstanceProfile, p.Item, own, activeOr(everywhereActive, fp.ClassLitter), deps...)
 	}
 	for _, role := range f.Account.Roles {
@@ -552,10 +590,10 @@ func Classify(f Facts, o Options, now time.Time) *fp.Report {
 	return rep
 }
 
-func roleARNs(acct string, names []string) []string {
+func roleARNs(partition, acct string, names []string) []string {
 	out := make([]string, len(names))
 	for i, n := range names {
-		out[i] = IAMARN(acct, "role", n)
+		out[i] = IAMARN(partition, acct, "role", n)
 	}
 	return out
 }

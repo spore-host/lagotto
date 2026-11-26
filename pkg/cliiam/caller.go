@@ -11,6 +11,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
 	"github.com/aws/smithy-go"
+
+	"github.com/spore-host/lagotto/pkg/awsarn"
 )
 
 // SimulateAPI is the slice of the IAM API [CheckCaller] needs. *iam.Client
@@ -125,18 +127,18 @@ func concreteARN(pattern, region string) string {
 }
 
 // simRequests builds the caller check's requests from the policy's statements,
-// so what doctor checks is exactly what setup grants.
-func simRequests(accountID, region string) []simRequest {
-	reqs, _ := simPlan(accountID, region)
+// in partition, so what doctor checks is exactly what setup grants.
+func simRequests(partition, accountID, region string) []simRequest {
+	reqs, _ := simPlan(partition, accountID, region)
 	return reqs
 }
 
 // simPlan is [simRequests] plus the actions it deliberately leaves out
 // (statement simSkip), sorted.
-func simPlan(accountID, region string) ([]simRequest, []string) {
+func simPlan(partition, accountID, region string) ([]simRequest, []string) {
 	var out []simRequest
 	var skipped []string
-	for _, st := range statements(accountID, nil) {
+	for _, st := range statements(partition, accountID, nil) {
 		if st.noSimulate {
 			continue
 		}
@@ -246,8 +248,13 @@ func CheckCaller(ctx context.Context, client SimulateAPI, callerARN, accountID, 
 		return res
 	}
 	res.PrincipalARN = principal
+	// The policy is simulated in the caller's own partition (lagotto#347).
+	partition, err := awsarn.PartitionOfARN(principal)
+	if err != nil {
+		partition = awsarn.PartitionOrAWS(region)
+	}
 
-	missing, checked, err := simulateAll(ctx, client, principal, accountID, region)
+	missing, checked, err := simulateAll(ctx, client, principal, partition, accountID, region)
 	if err != nil && roleName != "" && isNoSuchEntity(err) {
 		role, gerr := client.GetRole(ctx, &iam.GetRoleInput{RoleName: aws.String(roleName)})
 		if gerr != nil || role.Role == nil {
@@ -257,7 +264,7 @@ func CheckCaller(ctx context.Context, client SimulateAPI, callerARN, accountID, 
 		}
 		principal = aws.ToString(role.Role.Arn)
 		res.PrincipalARN = principal
-		missing, checked, err = simulateAll(ctx, client, principal, accountID, region)
+		missing, checked, err = simulateAll(ctx, client, principal, partition, accountID, region)
 	}
 	res.Checked = checked
 	switch {
@@ -270,7 +277,7 @@ func CheckCaller(ctx context.Context, client SimulateAPI, callerARN, accountID, 
 		return res
 	}
 	res.Missing = missing
-	_, res.NotSimulated = simPlan(accountID, region)
+	_, res.NotSimulated = simPlan(partition, accountID, region)
 	if len(missing) == 0 {
 		res.Status = CallerAllowed
 	} else {
@@ -281,10 +288,10 @@ func CheckCaller(ctx context.Context, client SimulateAPI, callerARN, accountID, 
 
 // simulateAll runs every request and returns the denied "action on pattern"
 // grants, sorted, and how many pairs were evaluated.
-func simulateAll(ctx context.Context, client SimulateAPI, principal, accountID, region string) ([]string, int, error) {
+func simulateAll(ctx context.Context, client SimulateAPI, principal, partition, accountID, region string) ([]string, int, error) {
 	seen := map[string]bool{}
 	checked := 0
-	for _, req := range simRequests(accountID, region) {
+	for _, req := range simRequests(partition, accountID, region) {
 		in := &iam.SimulatePrincipalPolicyInput{
 			PolicySourceArn: aws.String(principal),
 			ActionNames:     req.actions,

@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spf13/cobra"
+	"github.com/spore-host/lagotto/pkg/awsarn"
 	"github.com/spore-host/lagotto/pkg/awscfg"
 	"github.com/spore-host/lagotto/pkg/cliiam"
 	"github.com/spore-host/lagotto/pkg/deploy"
@@ -120,6 +121,12 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	if region == "" {
 		return fmt.Errorf("no AWS region set; pass --region or configure one")
 	}
+	// A deploy creates; --teardown only removes, so it runs anywhere.
+	if !deployTeardown {
+		if err := refuseUnsupportedRegion(region, "deploy the poller", true); err != nil {
+			return err
+		}
+	}
 
 	acctID, owner, callerARN := "", "", ""
 	if id, ierr := sts.NewFromConfig(cfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{}); ierr == nil && id.Account != nil {
@@ -147,6 +154,15 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	}
 
 	if deployTeardown {
+		// The ARNs it deletes by (the topic's) are in the account's
+		// partition: the region's, or in an ISO partition or the European
+		// Sovereign Cloud the caller's (lagotto#347).
+		callerPartition, _ := awsarn.PartitionOfARN(callerARN)
+		partition, perr := teardownPartition(region, callerPartition)
+		if perr != nil {
+			return fmt.Errorf("not deleting anything: %w", perr)
+		}
+		d.SetPartition(partition)
 		// Say exactly what survives. Each of these has burned somebody: the tables
 		// hold the watches, the IAM roles are shared with per-launch schedules
 		// (#146) and with the poller in every OTHER region of the account (#218 —
@@ -261,7 +277,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	// Whether the poller schedule may move into lagotto's schedule group yet
 	// (#324): not while a legacy stack owns it, nor before the IAM policies
 	// grant the group.
-	hold := scheduleMoveHold(ctx, d, iamClient, acctID, deployStackName)
+	hold := scheduleMoveHold(ctx, d, iamClient, awsarn.PartitionOrAWS(region), acctID, deployStackName)
 	if hold != "" {
 		fmt.Fprintf(os.Stderr, "Keeping the poller schedule in the default schedule group: %s.\n", hold)
 	}
@@ -415,7 +431,7 @@ Continue?`,
 //   - The poller's runtime policy, or the lagotto-cli-user policy, predates the
 //     group: re-running 'lagotto setup' rewrites both. An absent policy is no
 //     reason to hold (setup writes the current one when it runs).
-func scheduleMoveHold(ctx context.Context, d legacyStackChecker, client scheduleMoveIAM, accountID, stackName string) string {
+func scheduleMoveHold(ctx context.Context, d legacyStackChecker, client scheduleMoveIAM, partition, accountID, stackName string) string {
 	if stackName != "" {
 		exists, _, err := d.LegacyStackState(ctx, stackName)
 		switch {
@@ -434,7 +450,7 @@ func scheduleMoveHold(ctx context.Context, d legacyStackChecker, client schedule
 	case !grantsScheduleGroup(doc):
 		return "the poller's runtime IAM policy does not grant schedule group " + deploy.ScheduleGroupName + " yet; " + setupFix
 	}
-	doc, found, err := cliiam.ReadPolicy(ctx, client, accountID)
+	doc, found, err := cliiam.ReadPolicy(ctx, client, partition, accountID)
 	switch {
 	case errors.Is(err, cliiam.ErrUnmanagedPolicy), err == nil && !found:
 	case err != nil:

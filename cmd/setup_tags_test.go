@@ -161,7 +161,7 @@ func (m *memIAM) GetPolicyVersion(context.Context, *iam.GetPolicyVersionInput, .
 func (m *memIAM) CreatePolicy(_ context.Context, in *iam.CreatePolicyInput, _ ...func(*iam.Options)) (*iam.CreatePolicyOutput, error) {
 	m.policy, m.policyV = map[string]string{}, aws.ToString(in.PolicyDocument)
 	merge(m.policy, in.Tags)
-	return &iam.CreatePolicyOutput{Policy: &iamtypes.Policy{Arn: aws.String(cliiam.PolicyARN("123456789012"))}}, nil
+	return &iam.CreatePolicyOutput{Policy: &iamtypes.Policy{Arn: aws.String(cliiam.PolicyARN("aws", "123456789012"))}}, nil
 }
 
 func (m *memIAM) TagPolicy(_ context.Context, in *iam.TagPolicyInput, _ ...func(*iam.Options)) (*iam.TagPolicyOutput, error) {
@@ -216,7 +216,7 @@ func TestSetup_TagsEverythingItCreates(t *testing.T) {
 	if err := applySetupRoles(context.Background(), iam.NewFromConfig(cfg), spawnProfileSetup{cfg: cfg}, "us-west-2", "123456789012", &out); err != nil {
 		t.Fatalf("applySetupRoles: %v\n%s", err, out.String())
 	}
-	if err := applyCLIUserPolicy(context.Background(), iam.NewFromConfig(cfg), "123456789012", &out); err != nil {
+	if err := applyCLIUserPolicy(context.Background(), iam.NewFromConfig(cfg), "aws", "123456789012", &out); err != nil {
 		t.Fatalf("applyCLIUserPolicy: %v", err)
 	}
 
@@ -267,7 +267,7 @@ func TestSetup_BackfillsTagsOntoWhatAnOlderLagottoCreated(t *testing.T) {
 	if err := runtimeiam.EnsureRoles(ctx, iam.NewFromConfig(cfg), "us-west-2", "123456789012", setupStamp); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := cliiam.EnsurePolicy(ctx, iam.NewFromConfig(cfg), "123456789012", m.policyV, setupStamp); err != nil {
+	if _, err := cliiam.EnsurePolicy(ctx, iam.NewFromConfig(cfg), "aws", "123456789012", m.policyV, setupStamp); err != nil {
 		t.Fatal(err)
 	}
 
@@ -301,11 +301,11 @@ func TestSetup_BackfillsTagsOntoWhatAnOlderLagottoCreated(t *testing.T) {
 func TestScheduleMoveHold(t *testing.T) {
 	ctx := context.Background()
 	acct := "123456789012"
-	newPolicy, err := runtimeiam.PolicyDocument(acct, nil)
+	newPolicy, err := runtimeiam.PolicyDocument("aws", acct, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cliDoc, err := cliiam.PolicyDocument(acct, nil)
+	cliDoc, err := cliiam.PolicyDocument("aws", acct, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -338,7 +338,7 @@ func TestScheduleMoveHold(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := scheduleMoveHold(ctx, tc.stack, iam.NewFromConfig(aws.Config{Region: "us-west-2",
-				APIOptions: []func(*middleware.Stack) error{testutil.AnswerFrom(tc.iam)}}), acct, "lagotto")
+				APIOptions: []func(*middleware.Stack) error{testutil.AnswerFrom(tc.iam)}}), "aws", acct, "lagotto")
 			if (tc.expect == "") != (got == "") || !strings.Contains(got, tc.expect) {
 				t.Errorf("hold = %q, want %q", got, tc.expect)
 			}
@@ -365,11 +365,11 @@ func TestScheduleMoveHold_ReadErrorsHold(t *testing.T) {
 	} {
 		m := newMemIAM()
 		m.roles[runtimeiam.RoleName] = map[string]string{}
-		doc, _ := runtimeiam.PolicyDocument("123456789012", nil)
+		doc, _ := runtimeiam.PolicyDocument("aws", "123456789012", nil)
 		m.inline[runtimeiam.RoleName+"/"+runtimeiam.PolicyName] = doc
 		f := failingIAM{memIAM: m, op: op}
 		got := scheduleMoveHold(ctx, legacyStack{}, iam.NewFromConfig(aws.Config{Region: "us-west-2",
-			APIOptions: []func(*middleware.Stack) error{testutil.AnswerFrom(f)}}), "123456789012", "")
+			APIOptions: []func(*middleware.Stack) error{testutil.AnswerFrom(f)}}), "aws", "123456789012", "")
 		if !strings.Contains(got, want) {
 			t.Errorf("%s failing: hold = %q, want %q", op, got, want)
 		}

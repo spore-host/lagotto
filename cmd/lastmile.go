@@ -90,7 +90,7 @@ var (
 	lastMileNow       = time.Now
 	// lastMileRegions lists the regions enabled for the account.
 	lastMileRegions = func(ctx context.Context, cfg aws.Config, account string) ([]string, error) {
-		return inventory.NewAWSSource(cfg, account).EnabledRegions(ctx)
+		return newAWSSource(cfg, account).EnabledRegions(ctx)
 	}
 	// lastMileLifecycleAPI is the DynamoDB client of region's lifecycle table.
 	lastMileLifecycleAPI = func(cfg aws.Config, region string) (lifecycle.API, error) {
@@ -100,7 +100,7 @@ var (
 	}
 	// lastMilePollerExists reports whether lagotto's poller runs in region.
 	lastMilePollerExists = func(ctx context.Context, cfg aws.Config, account, region string) (bool, error) {
-		it, _, err := inventory.NewAWSSource(cfg, account).Region(region).Poller(ctx)
+		it, _, err := newAWSSource(cfg, account).Region(region).Poller(ctx)
 		return it != nil, err
 	}
 )
@@ -196,10 +196,14 @@ func lastMile(ctx context.Context, mode lastmile.Mode, logf func(string, ...any)
 		logf("lastmile: skipped: load AWS config: %v", err)
 		return
 	}
+	if err := refuseUnknownPartition(cfg.Region); err != nil {
+		logf("lastmile: skipped: %v", err)
+		return
+	}
 	control, err := lastMileControlRegion(cfg.Region)
 	if err != nil {
-		// Outside the aws partition there is no global scope to read
-		// (lagotto#347): the regional checks still run, and the global
+		// Outside aws and aws-us-gov there is no global scope to
+		// read (lagotto#347): the regional checks still run, and the global
 		// scope's, and the account-wide teardown, are skipped.
 		logf("lastmile: the global scope is skipped: %v", err)
 		control = ""
@@ -287,7 +291,8 @@ func lastMileResidue(account string, regions []string) []fp.Resource {
 // lastMileControlRegion is the region holding the global scope's lifecycle
 // items, so every invocation reads the same one whatever --region says: the
 // account-wide teardown's (idle.ControlRegion), whose global lease lives
-// there (lagotto#340). Outside the aws partition there is none.
+// there (lagotto#340): us-east-1, or us-gov-west-1 in aws-us-gov. Outside aws
+// and aws-us-gov there is none (lagotto#347).
 func lastMileControlRegion(region string) (string, error) { return idle.ControlRegion(region) }
 
 // lastMileFootprint is lagotto's footprint of every region, read at most once

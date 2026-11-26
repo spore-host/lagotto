@@ -76,7 +76,7 @@ func TestEnsureRuntimeRole_PolicyConvergesAcrossRegions(t *testing.T) {
 				region, diff.MissingSummary(), diff.ExtraSummary(), Summarize(diff.RegionOnly))
 		}
 	}
-	if missing := MissingInstanceRoleGrants(grants, account, "my-gpu-role"); len(missing) != 0 {
+	if missing := MissingInstanceRoleGrants(grants, "aws", account, "my-gpu-role"); len(missing) != 0 {
 		t.Errorf("the authorized instance role lost %v", missing)
 	}
 
@@ -107,7 +107,7 @@ func TestEnsureRuntimeRole_PolicyConvergesAcrossRegions(t *testing.T) {
 // re-running setup loses nothing.
 func TestDiffRuntimePolicy_SingleRegionPolicy(t *testing.T) {
 	const account = "123456789012"
-	wildcard, err := PolicyDocument(account, nil)
+	wildcard, err := PolicyDocument("aws", account, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

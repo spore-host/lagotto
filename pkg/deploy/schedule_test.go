@@ -14,7 +14,7 @@ import (
 
 var (
 	testFnARN   = PollerFunctionARN(testRegion, testAccount)
-	testRoleARN = schedulerInvokeRoleARN(testAccount)
+	testRoleARN = schedulerInvokeRoleARN("us-east-1", testAccount)
 )
 
 // liveSchedule returns a GetScheduleOutput matching the desired shape, in the

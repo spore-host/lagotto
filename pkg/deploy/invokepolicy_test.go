@@ -15,7 +15,7 @@ import (
 // the two copies of the function name drifting apart.
 func TestInvokePolicyCoversEveryPollerTarget(t *testing.T) {
 	const account = "123456789012"
-	doc, err := runtimeiam.SchedulerInvokePolicyDocument(account)
+	doc, err := runtimeiam.SchedulerInvokePolicyDocument("aws", account)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestTeardownGrantsNameDeploysResources(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	doc, err := runtimeiam.SchedulerTeardownPolicyDocument(account)
+	doc, err := runtimeiam.SchedulerTeardownPolicyDocument("aws", account)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestTeardownGrantsNameDeploysResources(t *testing.T) {
 
 func mustRuntimePolicy(t *testing.T, account string) string {
 	t.Helper()
-	doc, err := runtimeiam.PolicyDocument(account, nil)
+	doc, err := runtimeiam.PolicyDocument("aws", account, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -17,7 +17,7 @@ import (
 func TestReview7UnfencedActivityUnknown(t *testing.T) {
 	facts := func() inventory.Facts {
 		f := orphanFacts()
-		f.Regions = []inventory.Region{{Region: "us-gov-west-1", ActivityUnknown: true}}
+		f.Regions = []inventory.Region{{Region: "us-iso-east-1", ActivityUnknown: true}}
 		return f
 	}
 	_, rec, _ := stubPlanTeardown(t, facts)

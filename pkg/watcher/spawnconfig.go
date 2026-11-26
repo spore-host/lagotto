@@ -90,7 +90,7 @@ func (s *SpawnConfigFile) ValidateAndDefaultTTL() error {
 
 // FSxBucketPrefix is the name prefix every fsx_create backing bucket must
 // carry (#242). The hosted poller creates, lists and tags that bucket, and its
-// runtime policy grants those S3 actions only on arn:aws:s3:::lagotto-fsx-*, so
+// runtime policy grants those S3 actions only on arn:<partition>:s3:::lagotto-fsx-*, so
 // the poller can touch no bucket lagotto did not name for itself. spawn
 // (v0.161.0) has no naming convention for this bucket, and a spawn-* prefix
 // would cover buckets spawn's own CLI users create, so the prefix is lagotto's.

@@ -69,7 +69,7 @@ func (b *syncBuffer) Write(p []byte) (int, error) {
 }
 func (b *syncBuffer) String() string { b.mu.Lock(); defer b.mu.Unlock(); return b.b.String() }
 
-// TestReview5UnfencedPendingJobs (G4): outside the aws partition the
+// TestReview5UnfencedPendingJobs (G4): outside aws and aws-us-gov the
 // account-wide resources do not go while a lagotto-teardown job, which runs
 // as the invoke role, is pending in any region, or a poller is left, or the
 // footprint is incomplete.
@@ -85,7 +85,7 @@ func TestReview5UnfencedPendingJobs(t *testing.T) {
 	} {
 		facts := func() inventory.Facts {
 			f := orphanFacts()
-			r := inventory.Region{Region: "us-gov-west-1"}
+			r := inventory.Region{Region: "us-iso-east-1"}
 			set(&r, &f)
 			f.Regions = []inventory.Region{r}
 			return f

@@ -280,19 +280,23 @@ func TestSleep(t *testing.T) {
 	}
 }
 
+// TestControlRegion: each supported partition's IAM home region, whatever
+// region of it the caller is in: us-east-1, and, now that lagotto's ARNs are
+// in the account's partition (lagotto#347), us-gov-west-1 in aws-us-gov. A
+// region lagotto has not heard of is a commercial one.
 func TestControlRegion(t *testing.T) {
 	for in, want := range map[string]string{"us-west-2": "us-east-1", "eu-west-1": "us-east-1", "": "us-east-1",
-		"ap-southeast-4": "us-east-1", "il-central-1": "us-east-1", "mx-central-1": "us-east-1"} {
+		"ap-southeast-4": "us-east-1", "il-central-1": "us-east-1", "mx-central-1": "us-east-1", "xx-mars-1": "us-east-1",
+		"us-gov-east-1": "us-gov-west-1", "us-gov-west-1": "us-gov-west-1"} {
 		if got, err := ControlRegion(in); got != want || err != nil {
 			t.Errorf("ControlRegion(%q) = %q, %v, want %q", in, got, err, want)
 		}
 	}
-	// Any partition but aws fails closed: the ISO partitions (eu-isoe-west-1
-	// starts like a commercial region), the European Sovereign Cloud, and
-	// aws-us-gov and aws-cn, where the runtime policy reaches no lifecycle
-	// table (lagotto#347).
-	for _, in := range []string{"us-iso-east-1", "us-isob-east-1", "us-isof-south-1", "eu-isoe-west-1", "eusc-de-east-1",
-		"us-gov-east-1", "us-gov-west-1", "cn-north-1", "cn-northwest-1", "xx-mars-1"} {
+	// The partitions lagotto does not support fail closed: aws-cn (not yet),
+	// the ISO partitions (eu-isoe-west-1 starts like a commercial region), the
+	// European Sovereign Cloud, and a string that is no region name.
+	for _, in := range []string{"cn-north-1", "cn-northwest-1", "us-iso-east-1", "us-isob-east-1", "us-isof-south-1",
+		"eu-isoe-west-1", "eusc-de-east-1", "local"} {
 		if got, err := ControlRegion(in); got != "" || err == nil || !strings.Contains(err.Error(), in) {
 			t.Errorf("ControlRegion(%q) = %q, %v, want an error", in, got, err)
 		}

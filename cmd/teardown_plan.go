@@ -157,6 +157,9 @@ func executePlan(ctx context.Context, out io.Writer, cfg aws.Config, acct string
 	if planned.Account != "" && planned.Account != acct {
 		return fmt.Errorf("not deleting anything: the plan is for account %s, but these credentials are for %s", planned.Account, acct)
 	}
+	if err := refuseUnknownPartition(cfg.Region); err != nil {
+		return fmt.Errorf("not deleting anything: %w", err)
+	}
 	live, err := takeFootprint(ctx, cfg, acct, planScope(planned))
 	if err != nil {
 		return fmt.Errorf("not deleting anything: re-check the plan against the account: %w", err)
@@ -236,7 +239,7 @@ type regionLease struct {
 // A region whose lease cannot be taken (something there is in use, or another
 // teardown holds it) refuses the whole run before anything is deleted, unless
 // --i-understand-no-lease, which falls back to the stand-in there (and, where
-// there is no global lease, outside the aws partition, for the account-wide
+// there is no global lease, outside aws and aws-us-gov, for the account-wide
 // steps). Once a region's steps are done its lease is finished, and its
 // lifecycle table closed if no tool is left in it, when nothing of lagotto's
 // is left there; otherwise it is released, and the grace period starts over.
@@ -360,7 +363,7 @@ func reapWithLeases(ctx context.Context, cfg aws.Config, acct string, plan *fp.P
 
 // reapAccountWide runs the plan's account-wide steps through the CLI's
 // account-wide teardown, limited to them, and records each step's action in
-// byARN. Outside the aws partition, where there is no global lease, it runs
+// byARN. Outside aws and aws-us-gov, where there is no global lease, it runs
 // them under the stand-in only with --i-understand-no-lease.
 func reapAccountWide(ctx context.Context, cfg aws.Config, acct string, global []fp.Resource, byARN map[string]fp.Action, errOut io.Writer) error {
 	only := map[string]bool{}
@@ -459,8 +462,10 @@ type regionDeleter struct {
 
 // iamAccountDeleter is the account-wide deleters: `teardown --iam-roles`'s.
 type iamAccountDeleter struct {
-	client    *iam.Client
-	accountID string
+	client *iam.Client
+	// partition is the account's, which lagotto-cli-user's ARN is in
+	// (lagotto#347).
+	partition, accountID string
 }
 
 func (d iamAccountDeleter) DeleteRole(ctx context.Context, name string) (bool, error) {
@@ -472,12 +477,20 @@ func (d iamAccountDeleter) DeleteInstanceProfile(ctx context.Context, name strin
 }
 
 func (d iamAccountDeleter) DeletePolicy(ctx context.Context) (cliiam.Deletion, error) {
-	return cliiam.DeletePolicy(ctx, d.client, d.accountID)
+	if d.partition == "" {
+		return cliiam.Deletion{}, fmt.Errorf("not deleting %s: its partition is unknown (lagotto#347)", cliiam.PolicyName)
+	}
+	return cliiam.DeletePolicy(ctx, d.client, d.partition, d.accountID)
 }
 
 // newTeardownDeleters builds the deleters a plan is executed with. A seam for
 // tests.
+//
+// Every ARN they name is in the account's partition (lagotto#347): the
+// region's, or the caller's where no region name gives it. With neither,
+// lagotto-cli-user is not deleted (the commands refuse before this).
 var newTeardownDeleters = func(cfg aws.Config, accountID string) inventory.Deleters {
+	partition, _ := observedTeardownPartition(cfg.Region)
 	var mu sync.Mutex
 	regions := map[string]inventory.RegionDeleter{}
 	return inventory.Deleters{
@@ -490,11 +503,15 @@ var newTeardownDeleters = func(cfg aws.Config, accountID string) inventory.Delet
 			}
 			c := cfg.Copy()
 			c.Region = region
-			d := regionDeleter{Deployer: deploy.New(c), Store: watcher.NewStore(c, watchesTable, historyTable)}
+			dep := deploy.New(c)
+			if partition != "" {
+				dep.SetPartition(partition)
+			}
+			d := regionDeleter{Deployer: dep, Store: watcher.NewStore(c, watchesTable, historyTable)}
 			regions[region] = d
 			return d
 		},
-		Account: iamAccountDeleter{client: iam.NewFromConfig(cfg), accountID: accountID},
+		Account: iamAccountDeleter{client: iam.NewFromConfig(cfg), partition: partition, accountID: accountID},
 	}
 }
 

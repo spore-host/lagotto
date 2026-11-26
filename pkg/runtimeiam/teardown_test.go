@@ -23,7 +23,7 @@ const tdAccount = "123456789012"
 // (#325). Regenerate with
 // `go test ./pkg/runtimeiam -run TestSchedulerTeardownPolicyGolden -args -update-teardown-policy`.
 func TestSchedulerTeardownPolicyGolden(t *testing.T) {
-	doc, err := SchedulerTeardownPolicyDocument(tdAccount)
+	doc, err := SchedulerTeardownPolicyDocument("aws", tdAccount)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +48,7 @@ func TestSchedulerTeardownPolicyGolden(t *testing.T) {
 }
 
 func TestSchedulerTeardownPolicyNeedsAccount(t *testing.T) {
-	if _, err := SchedulerTeardownPolicyDocument(""); err == nil {
+	if _, err := SchedulerTeardownPolicyDocument("aws", ""); err == nil {
 		t.Error("an empty account was accepted")
 	}
 }
@@ -85,16 +85,16 @@ func hasAll(have []string, want ...string) bool {
 // TestPollerTeardownGrants (#325): every grant the poller needs to tear itself
 // down, on exactly lagotto's resources.
 func TestPollerTeardownGrants(t *testing.T) {
-	doc, err := PolicyDocument(tdAccount, nil)
+	doc, err := PolicyDocument("aws", tdAccount, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := allowsOn(t, doc)
-	table := func(n string) string { return RegionalARN("dynamodb", tdAccount, "table/"+n) }
+	table := func(n string) string { return RegionalARN("aws", "dynamodb", tdAccount, "table/"+n) }
 	tables := []string{table("lagotto-watches"), table("lagotto-match-history"), table("lagotto-scheduled-launches")}
 	lease := table("spore-host-lifecycle")
 	bucket := "arn:aws:s3:::lagotto-lambda-" + tdAccount + "-*"
-	topic := RegionalARN("sns", tdAccount, "lagotto-capacity-alerts")
+	topic := RegionalARN("aws", "sns", tdAccount, "lagotto-capacity-alerts")
 
 	want := map[string][]string{
 		"dynamodb:DeleteTable":        append(append([]string{}, tables...), lease),
@@ -114,13 +114,13 @@ func TestPollerTeardownGrants(t *testing.T) {
 		"s3:DeleteObjectVersion":      {bucket + "/*"},
 		"sns:DeleteTopic":             {topic},
 		"scheduler:DeleteSchedule": {
-			RegionalARN("scheduler", tdAccount, "schedule/lagotto/*"),
-			RegionalARN("scheduler", tdAccount, "schedule/lagotto-teardown/*"),
+			RegionalARN("aws", "scheduler", tdAccount, "schedule/lagotto/*"),
+			RegionalARN("aws", "scheduler", tdAccount, "schedule/lagotto-teardown/*"),
 		},
-		"scheduler:DeleteScheduleGroup": {RegionalARN("scheduler", tdAccount, "schedule-group/lagotto")},
-		"scheduler:CreateSchedule":      {RegionalARN("scheduler", tdAccount, "schedule/lagotto-teardown/*")},
-		"scheduler:CreateScheduleGroup": {RegionalARN("scheduler", tdAccount, "schedule-group/lagotto-teardown")},
-		"scheduler:TagResource":         {RegionalARN("scheduler", tdAccount, "schedule-group/lagotto-teardown")},
+		"scheduler:DeleteScheduleGroup": {RegionalARN("aws", "scheduler", tdAccount, "schedule-group/lagotto")},
+		"scheduler:CreateSchedule":      {RegionalARN("aws", "scheduler", tdAccount, "schedule/lagotto-teardown/*")},
+		"scheduler:CreateScheduleGroup": {RegionalARN("aws", "scheduler", tdAccount, "schedule-group/lagotto-teardown")},
+		"scheduler:TagResource":         {RegionalARN("aws", "scheduler", tdAccount, "schedule-group/lagotto-teardown")},
 	}
 	for action, resources := range want {
 		if !hasAll(got[action], resources...) {
@@ -144,7 +144,7 @@ func TestPollerTeardownGrants(t *testing.T) {
 	// PassRole for the teardown jobs is the existing grant: the invoke role
 	// only, to the Scheduler service only.
 	for _, g := range mustGrants(t, doc) {
-		if g.Action == "iam:PassRole" && g.Resource == SchedulerInvokeRoleARN(tdAccount) &&
+		if g.Action == "iam:PassRole" && g.Resource == SchedulerInvokeRoleARN("aws", tdAccount) &&
 			!strings.Contains(g.Condition, `"scheduler.amazonaws.com"`) {
 			t.Errorf("PassRole on the invoke role lost its Scheduler condition: %s", g)
 		}
@@ -155,16 +155,16 @@ func TestPollerTeardownGrants(t *testing.T) {
 // of lagotto's is in reach of the poller's IAM writes, nor of its teardown
 // jobs' (the invoke role's) (lagotto#340): the CLI removes them.
 func TestPollerCannotDeleteAnythingAccountWide(t *testing.T) {
-	doc, err := PolicyDocument(tdAccount, nil)
+	doc, err := PolicyDocument("aws", tdAccount, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	jobs, err := SchedulerTeardownPolicyDocument(tdAccount)
+	jobs, err := SchedulerTeardownPolicyDocument("aws", tdAccount)
 	if err != nil {
 		t.Fatal(err)
 	}
 	iamARN := func(kind, name string) string { return "arn:aws:iam::" + tdAccount + ":" + kind + "/" + name }
-	targets := []string{RoleARN(tdAccount), SchedulerInvokeRoleARN(tdAccount), iamARN("role", InstanceRoleName),
+	targets := []string{RoleARN("aws", tdAccount), SchedulerInvokeRoleARN("aws", tdAccount), iamARN("role", InstanceRoleName),
 		iamARN("instance-profile", InstanceRoleName), iamARN("policy", "lagotto-cli-user")}
 	for who, d := range map[string]string{"the poller": doc, "the teardown jobs": jobs} {
 		grants := mustGrants(t, d)
@@ -182,7 +182,7 @@ func TestPollerCannotDeleteAnythingAccountWide(t *testing.T) {
 // TestSchedulerTeardownGrants: the invoke role's teardown policy deletes the
 // poller function and its log group, and nothing else.
 func TestSchedulerTeardownGrants(t *testing.T) {
-	doc, err := SchedulerTeardownPolicyDocument(tdAccount)
+	doc, err := SchedulerTeardownPolicyDocument("aws", tdAccount)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +200,7 @@ func TestSchedulerTeardownGrants(t *testing.T) {
 			t.Errorf("%s is granted on %v, want exactly %v", action, got[action], resources)
 		}
 	}
-	if Allows(mustGrants(t, doc), "iam:DeleteRole", SchedulerInvokeRoleARN(tdAccount)) {
+	if Allows(mustGrants(t, doc), "iam:DeleteRole", SchedulerInvokeRoleARN("aws", tdAccount)) {
 		t.Error("the teardown policy lets the invoke role delete itself")
 	}
 }
@@ -209,11 +209,11 @@ func TestSchedulerTeardownGrants(t *testing.T) {
 // spore-host:role=service resources and on writes to spawn's permissions
 // boundary, with a key of the global aws: namespace (valid on every service).
 func TestGuardDeniesOnBothRoles(t *testing.T) {
-	runtime, err := PolicyDocumentFor(tdAccount, Authorizations{InstanceRoles: []string{"my-role"}})
+	runtime, err := PolicyDocumentFor("aws", tdAccount, Authorizations{InstanceRoles: []string{"my-role"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	teardown, err := SchedulerTeardownPolicyDocument(tdAccount)
+	teardown, err := SchedulerTeardownPolicyDocument("aws", tdAccount)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,16 +271,16 @@ func deniedOn(grants []Grant, action, resource string) bool {
 // watch's role check report every grant missing. It only matches resources
 // lagotto never tags; any other Deny still wins (the revert case).
 func TestServiceGuardDoesNotBlindTheEvaluators(t *testing.T) {
-	doc, err := PolicyDocument(tdAccount, nil)
+	doc, err := PolicyDocument("aws", tdAccount, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	grants := mustGrants(t, doc)
-	table := RegionalARN("dynamodb", tdAccount, "table/lagotto-watches")
+	table := RegionalARN("aws", "dynamodb", tdAccount, "table/lagotto-watches")
 	if !Allows(grants, "dynamodb:PutItem", table) {
 		t.Error("the service guard is read as denying lagotto's own table")
 	}
-	if missing := MissingInstanceRoleGrants(grants, tdAccount, InstanceRoleName); len(missing) != 0 {
+	if missing := MissingInstanceRoleGrants(grants, "aws", tdAccount, InstanceRoleName); len(missing) != 0 {
 		t.Errorf("the service guard blocks passing lagotto's instance role: %v", missing)
 	}
 	diff, err := DiffRuntimePolicy(doc, "us-east-1", tdAccount)
@@ -311,18 +311,18 @@ func TestRolePoliciesFitTheInlineLimit(t *testing.T) {
 		roles = append(roles, fmt.Sprintf("authorized-instance-role-%02d", i))
 		sm = append(sm, fmt.Sprintf("arn:aws:iam::%s:role/service-role/sagemaker-execution-%02d", tdAccount, i))
 	}
-	runtime, err := PolicyDocumentFor(tdAccount, Authorizations{InstanceRoles: roles, SageMakerRoles: sm})
+	runtime, err := PolicyDocumentFor("aws", tdAccount, Authorizations{InstanceRoles: roles, SageMakerRoles: sm})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if n := len(runtime); n > maxRoleInlineChars-1500 {
 		t.Errorf("the runtime policy is %d characters with 10 instance and 10 SageMaker roles, within 1500 of IAM's %d", n, maxRoleInlineChars)
 	}
-	invoke, err := SchedulerInvokePolicyDocument(tdAccount)
+	invoke, err := SchedulerInvokePolicyDocument("aws", tdAccount)
 	if err != nil {
 		t.Fatal(err)
 	}
-	teardown, err := SchedulerTeardownPolicyDocument(tdAccount)
+	teardown, err := SchedulerTeardownPolicyDocument("aws", tdAccount)
 	if err != nil {
 		t.Fatal(err)
 	}

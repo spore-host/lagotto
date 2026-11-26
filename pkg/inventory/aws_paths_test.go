@@ -385,7 +385,7 @@ func (a accountIAM) GetRole(ctx context.Context, in *iam.GetRoleInput, o ...func
 	if a.noRoles {
 		return nil, &iamtypes.NoSuchEntityException{Message: aws.String("no")}
 	}
-	return &iam.GetRoleOutput{Role: &iamtypes.Role{Arn: aws.String(IAMARN(acct, "role", aws.ToString(in.RoleName)))}}, nil
+	return &iam.GetRoleOutput{Role: &iamtypes.Role{Arn: aws.String(IAMARN("aws", acct, "role", aws.ToString(in.RoleName)))}}, nil
 }
 
 func (a accountIAM) GetRolePolicy(context.Context, *iam.GetRolePolicyInput, ...func(*iam.Options)) (*iam.GetRolePolicyOutput, error) {
@@ -437,7 +437,7 @@ func (a accountIAM) GetInstanceProfile(ctx context.Context, in *iam.GetInstanceP
 
 func TestAWSAccountPaths(t *testing.T) {
 	ctx := context.Background()
-	doc, err := runtimeiam.PolicyDocument(acct, []string{"team-gpu"})
+	doc, err := runtimeiam.PolicyDocument("aws", acct, []string{"team-gpu"})
 	if err != nil {
 		t.Fatal(err)
 	}

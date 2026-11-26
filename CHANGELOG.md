@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **A stuck closing marker no longer delays the poller, `lagotto teardown` or
+  the account-wide teardown** (libs#88). If a cleanup of the
+  `spore-host-lifecycle` table crashed partway, it left a marker that blocked
+  lagotto's lifecycle records until a later run cleared it. They now clear an
+  abandoned marker themselves, in the same run, and wait only while another
+  cleanup is really in progress. This needs libs v0.57.0. No IAM changes:
+  lagotto's poller role already grants the lifecycle-table reads and deletes
+  involved, and `lagotto-cli-user` the marker delete it already used.
+
+- **lagotto's account-wide teardown now runs under its global lease in AWS
+  GovCloud (US)** (#347). The global scope (`tool#lagotto#global`) lives in
+  the partition's control region, its IAM home region: us-east-1 in aws,
+  us-gov-west-1 in aws-us-gov, whatever region a command runs in. There,
+  `setup`, `deploy`, `watch` and `launch` mark it, the last mile reads it, and
+  `lagotto teardown --iam-roles` (and the account-wide steps of `--plan --mode
+  reap`) remove the account-wide resources only under that lease, with the
+  same checks as in aws, instead of without a lease. The unfenced path, and
+  `--i-understand-no-lease` for the account-wide steps, remain for aws-cn, the
+  ISO partitions and the European Sovereign Cloud.
+- **aws-cn is not supported yet** (#347): `lagotto setup` and `lagotto deploy`
+  refuse a China region ("aws-cn not yet supported; tracked in lagotto#347"),
+  and there is no global lease there. lagotto builds its ARNs there
+  (`arn:aws-cn:`), but whether the China regions want other service
+  principals or `iam:PassedToService` values is not verified.
+- **Every creating command refuses a region lagotto cannot work in before it
+  does anything** (#347): `setup`, `deploy`, `watch` (and `watch --local`),
+  `launch` and `poll` (and `poll --daemon`) stop right after loading their AWS
+  config, before any lease mark, table, IAM or other AWS call, in the ISO
+  partitions, the European Sovereign Cloud, or a region name that is not one;
+  `setup` and `deploy` also in aws-cn. Before, `deploy` there marked the
+  region's lease and created lagotto's tables before it failed at IAM, and
+  left them behind. `deploy --teardown` still runs anywhere.
+- **`lagotto watch` and `lagotto update` refuse `--regions` outside the
+  account's partition** (#347): a region in another partition than the
+  command's own (a GovCloud region from a commercial one, say), in the ISO
+  partitions or the European Sovereign Cloud, or a name that is no region, is
+  refused before anything is written. The account's credentials reach no
+  other partition, so such a watch would never be polled there.
+- Any well-formed region name outside GovCloud, China, the ISO partitions and
+  the European Sovereign Cloud is taken to be in the aws partition, so a new
+  commercial region needs no lagotto release.
+- `lagotto setup --sagemaker-role` refuses a role ARN in another partition than
+  the region's, and setup drops one the deployed policy carries from the
+  runtime policy, with a warning for each, instead of listing it as
+  authorized (#347).
+- Go API: the ARN and policy builders of `pkg/runtimeiam`, `pkg/cliiam` and
+  `pkg/inventory` take the partition (`runtimeiam.RoleARN(partition,
+  account)`, `runtimeiam.PolicyDocumentFor(partition, account, auth)`,
+  `runtimeiam.ValidateSageMakerRoleARN(arn, partition, account)`,
+  `cliiam.PolicyDocument(partition, account, buckets)`, `cliiam.PolicyARN`,
+  `inventory.IAMARN`, `inventory.BucketARN`, ...), and
+  `runtimeiam.BasicExecutionPolicyARN` is a function of it;
+  `doctor.EvalCallerPermissions` takes the region. The new `pkg/awsarn` maps a
+  region to its partition (`Partition`, `SupportedPartition`) and builds the
+  ARNs (#347).
+
 ### Fixed
 
 - **Removing a region no longer leaves a stray lifecycle record behind**
@@ -25,16 +83,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   run makes two more `scheduler:ListSchedules` reads of its region, which its
   role already grants.
 
-### Changed
-
-- **A stuck closing marker no longer delays the poller, `lagotto teardown` or
-  the account-wide teardown** (libs#88). If a cleanup of the
-  `spore-host-lifecycle` table crashed partway, it left a marker that blocked
-  lagotto's lifecycle records until a later run cleared it. They now clear an
-  abandoned marker themselves, in the same run, and wait only while another
-  cleanup is really in progress. This needs libs v0.57.0. No IAM changes:
-  lagotto's poller role already grants the lifecycle-table reads and deletes
-  involved, and `lagotto-cli-user` the marker delete it already used.
+- **lagotto's IAM ARNs are in the account's partition** (#347). Every ARN
+  lagotto built started `arn:aws:`, so in aws-us-gov the poller's runtime
+  policy (its lifecycle lease table, its tables, topic and schedules), the
+  Scheduler invoke role's policies, the `lagotto-cli-user` policy, the roles'
+  and the managed basic-execution policy's ARNs, the one-shot jobs' universal
+  targets, and the footprint's and doctor's ARNs named nothing there (IAM
+  asks for the `arn:aws-us-gov` prefix there). They are now in the account's
+  partition, derived from the region (or the caller's ARN); the aws
+  partition's policies are byte-for-byte unchanged. `lagotto doctor` compares
+  a deployed policy with the one for its region's partition, and
+  `deployment/cloudformation/lagotto-stack.yaml` names its roles and function
+  with `${AWS::Partition}`. A GovCloud account set up by an older lagotto
+  needs `lagotto setup` again.
+- **`deploy --teardown`, `teardown` and `footprint` name lagotto's resources in
+  the account's partition in the ISO partitions and the European Sovereign
+  Cloud too** (#347), where no region name gives it: the partition of the
+  caller's ARN, as STS reported it. They deleted (and read) by `arn:aws:`
+  ARNs there, which name nothing: the alerts topic, `lagotto-cli-user`, the
+  log group's tags. When STS reported no caller ARN they refuse, having
+  deleted nothing, and the last mile skips.
 
 ## [0.73.0] - 2026-11-25
 

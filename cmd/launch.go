@@ -14,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
+	"github.com/spore-host/lagotto/pkg/awsarn"
 	"github.com/spore-host/lagotto/pkg/awscfg"
 	"github.com/spore-host/lagotto/pkg/deploy"
 	"github.com/spore-host/lagotto/pkg/managedtags"
@@ -152,6 +153,9 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 	if region == "" {
 		return fmt.Errorf("no AWS region set; pass --region or configure one")
 	}
+	if err := refuseUnsupportedRegion(region, "arm a scheduled launch", false); err != nil {
+		return err
+	}
 
 	// --reservation-id (#210): the launch itself must target the reservation, not
 	// just be timed by it. Read the reservation and make the stored config launch
@@ -218,7 +222,7 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 	// constructs these same ARNs with !Sub. RequirePollerDeployed then checks the
 	// thing this command actually needs: that the function is really there.
 	fnArn := deploy.PollerFunctionARN(region, acctID)
-	roleArn := runtimeiam.SchedulerInvokeRoleARN(acctID)
+	roleArn := runtimeiam.SchedulerInvokeRoleARN(awsarn.PartitionOrAWS(region), acctID)
 	if err := deploy.New(cfg).RequirePollerDeployed(ctx, region, acctID); err != nil {
 		return err
 	}

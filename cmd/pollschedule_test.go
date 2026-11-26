@@ -68,6 +68,12 @@ type fakeAWS struct {
 	leases *lifecycletest.Fake
 	// leaseOpts adjust the commands' lifecycle client (a clock, say).
 	leaseOpts []func(*lifecycle.Options)
+	// region is the config's region; "" is us-east-1.
+	region string
+	// callerARN is the ARN GetCallerIdentity reports; "" is fakeCallerARN.
+	callerARN string
+	// requests counts every request the fake served, of any service.
+	requests int
 }
 
 // leaseTable is f's lifecycle table, made on first use.
@@ -119,6 +125,9 @@ func schedError(w http.ResponseWriter, code string) {
 }
 
 func (f *fakeAWS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	f.requests++
+	f.mu.Unlock()
 	body, _ := io.ReadAll(r.Body)
 	target := r.Header.Get("X-Amz-Target")
 	switch {
@@ -200,8 +209,12 @@ func (f *fakeAWS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case strings.Contains(string(body), "Action=GetCallerIdentity"):
 		f.record("sts:GetCallerIdentity")
 		w.Header().Set("Content-Type", "text/xml")
+		caller := f.callerARN
+		if caller == "" {
+			caller = fakeCallerARN
+		}
 		_, _ = io.WriteString(w, `<GetCallerIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><GetCallerIdentityResult><Arn>`+
-			fakeCallerARN+`</Arn><UserId>AIDFAKE</UserId><Account>123456789012</Account></GetCallerIdentityResult><ResponseMetadata><RequestId>r</RequestId></ResponseMetadata></GetCallerIdentityResponse>`)
+			caller+`</Arn><UserId>AIDFAKE</UserId><Account>123456789012</Account></GetCallerIdentityResult><ResponseMetadata><RequestId>r</RequestId></ResponseMetadata></GetCallerIdentityResponse>`)
 	case strings.HasPrefix(r.URL.Path, "/schedules/"):
 		name := strings.TrimPrefix(r.URL.Path, "/schedules/")
 		if name != "lagotto-capacity-poller" {
@@ -233,7 +246,7 @@ func (f *fakeAWS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				"FlexibleTimeWindow": map[string]any{"Mode": "OFF"},
 				"Target": map[string]any{
 					"Arn":     "arn:aws:lambda:us-east-1:123456789012:function:lagotto-capacity-poller",
-					"RoleArn": runtimeiam.SchedulerInvokeRoleARN("123456789012"),
+					"RoleArn": runtimeiam.SchedulerInvokeRoleARN("aws", "123456789012"),
 				},
 			})
 		case http.MethodPut:
@@ -288,9 +301,13 @@ func installFakeAWS(t *testing.T, f *fakeAWS) {
 	installFakeLeases(t, f.leaseTable(), f.leaseOpts...)
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
+	region := f.region
+	if region == "" {
+		region = "us-east-1"
+	}
 	awscfg.SetLoaderForTest(t, func(context.Context, ...func(*awsconfig.LoadOptions) error) (aws.Config, error) {
 		return aws.Config{
-			Region:       "us-east-1",
+			Region:       region,
 			Credentials:  credentials.NewStaticCredentialsProvider("fake", "fake", ""),
 			BaseEndpoint: aws.String(srv.URL),
 			HTTPClient:   srv.Client(),

@@ -41,10 +41,10 @@ func deployed(region string) Region {
 			{Item: Item{ARN: TableARN(region, acct, "lagotto-match-history"), Name: "lagotto-match-history", Tags: t}, Records: 12},
 			{Item: Item{ARN: TableARN(region, acct, "lagotto-scheduled-launches"), Name: "lagotto-scheduled-launches", Tags: t}},
 		},
-		Bucket:       &Item{ARN: BucketARN(deploy.DefaultBucketName(acct, region)), Name: deploy.DefaultBucketName(acct, region), Tags: with(t, "lagotto:managed", "cli")},
+		Bucket:       &Item{ARN: BucketARN("aws", deploy.DefaultBucketName(acct, region)), Name: deploy.DefaultBucketName(acct, region), Tags: with(t, "lagotto:managed", "cli")},
 		Topic:        &Item{ARN: deploy.AlertsTopicARN(region, acct), Name: deploy.AlertsTopicName, Tags: t},
 		Function:     &Item{ARN: deploy.PollerFunctionARN(region, acct), Name: deploy.PollerFunctionName, Tags: t},
-		FunctionRole: runtimeiam.RoleARN(acct),
+		FunctionRole: runtimeiam.RoleARN("aws", acct),
 		LogGroup:     &Item{ARN: deploy.PollerLogGroupARN(region, acct), Name: deploy.PollerLogGroupName, Tags: t},
 		Groups:       []Item{{ARN: ScheduleGroupARN(region, acct, schedgroup.Name), Name: schedgroup.Name, Tags: t}},
 		Schedules:    []Schedule{{Group: schedgroup.Name, Name: deploy.PollerScheduleName, State: "ENABLED", TargetARN: deploy.PollerFunctionARN(region, acct)}},
@@ -62,15 +62,15 @@ func account(attachments int32) Account {
 	g := lt(managedtagsGlobal)
 	return Account{
 		Roles: []Item{
-			{ARN: runtimeiam.RoleARN(acct), Name: runtimeiam.RoleName, Tags: g},
-			{ARN: runtimeiam.SchedulerInvokeRoleARN(acct), Name: runtimeiam.SchedulerInvokeRoleName, Tags: g},
-			{ARN: IAMARN(acct, "role", runtimeiam.InstanceRoleName), Name: runtimeiam.InstanceRoleName, Tags: g},
+			{ARN: runtimeiam.RoleARN("aws", acct), Name: runtimeiam.RoleName, Tags: g},
+			{ARN: runtimeiam.SchedulerInvokeRoleARN("aws", acct), Name: runtimeiam.SchedulerInvokeRoleName, Tags: g},
+			{ARN: IAMARN("aws", acct, "role", runtimeiam.InstanceRoleName), Name: runtimeiam.InstanceRoleName, Tags: g},
 		},
-		InstanceProfiles: []Profile{{Item: Item{ARN: IAMARN(acct, "instance-profile", runtimeiam.InstanceRoleName), Name: runtimeiam.InstanceRoleName, Tags: g},
+		InstanceProfiles: []Profile{{Item: Item{ARN: IAMARN("aws", acct, "instance-profile", runtimeiam.InstanceRoleName), Name: runtimeiam.InstanceRoleName, Tags: g},
 			Roles: []string{runtimeiam.InstanceRoleName}}},
-		AuthorizedRoles:    []Item{{ARN: IAMARN(acct, "role", "team-gpu"), Name: "team-gpu"}},
-		AuthorizedProfiles: []Profile{{Item: Item{ARN: IAMARN(acct, "instance-profile", "team-gpu"), Name: "team-gpu", Tags: with(g, "lagotto:managed", "instance-profile")}, Roles: []string{"team-gpu"}}},
-		Policy:             &Item{ARN: cliiam.PolicyARN(acct), Name: cliiam.PolicyName, Tags: with(g, "lagotto:managed", "cli")},
+		AuthorizedRoles:    []Item{{ARN: IAMARN("aws", acct, "role", "team-gpu"), Name: "team-gpu"}},
+		AuthorizedProfiles: []Profile{{Item: Item{ARN: IAMARN("aws", acct, "instance-profile", "team-gpu"), Name: "team-gpu", Tags: with(g, "lagotto:managed", "instance-profile")}, Roles: []string{"team-gpu"}}},
+		Policy:             &Item{ARN: cliiam.PolicyARN("aws", acct), Name: cliiam.PolicyName, Tags: with(g, "lagotto:managed", "cli")},
 		PolicyAttachments:  attachments,
 	}
 }
@@ -284,12 +284,12 @@ func TestPlanOrder(t *testing.T) {
 	}
 	fn := deploy.PollerFunctionARN("us-east-1", acct)
 	sched := ScheduleARN("us-east-1", acct, schedgroup.Name, deploy.PollerScheduleName)
-	before(IAMARN(acct, "instance-profile", runtimeiam.InstanceRoleName), IAMARN(acct, "role", runtimeiam.InstanceRoleName))
-	before(IAMARN(acct, "instance-profile", "team-gpu"), IAMARN(acct, "role", "team-gpu"))
+	before(IAMARN("aws", acct, "instance-profile", runtimeiam.InstanceRoleName), IAMARN("aws", acct, "role", runtimeiam.InstanceRoleName))
+	before(IAMARN("aws", acct, "instance-profile", "team-gpu"), IAMARN("aws", acct, "role", "team-gpu"))
 	before(sched, ScheduleGroupARN("us-east-1", acct, schedgroup.Name))
-	before(sched, runtimeiam.SchedulerInvokeRoleARN(acct))
+	before(sched, runtimeiam.SchedulerInvokeRoleARN("aws", acct))
 	before(sched, fn)
-	before(fn, runtimeiam.RoleARN(acct))
+	before(fn, runtimeiam.RoleARN("aws", acct))
 	before(fn, deploy.AlertsTopicARN("us-east-1", acct))
 	before(fn, TableARN("us-east-1", acct, "lagotto-scheduled-launches"))
 	// Both log groups come after every other step.
@@ -391,7 +391,7 @@ func TestClassifyRestOfRegion(t *testing.T) {
 func TestClassifyAuthorizedProfileClaimedByAnotherTool(t *testing.T) {
 	a := account(0)
 	a.AuthorizedProfiles = append(a.AuthorizedProfiles, Profile{
-		Item: Item{ARN: IAMARN(acct, "instance-profile", "aws-realign-gpu-instance"), Name: "aws-realign-gpu-instance",
+		Item: Item{ARN: IAMARN("aws", acct, "instance-profile", "aws-realign-gpu-instance"), Name: "aws-realign-gpu-instance",
 			Tags: with(with(with(lt(managedtagsGlobal), "lagotto:managed", "instance-profile"), "spawn:managed", "true"), "spawn:created-by", "spawn")},
 		Roles: []string{"aws-realign-gpu-instance"},
 	})

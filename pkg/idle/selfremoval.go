@@ -12,6 +12,7 @@ import (
 	schedulertypes "github.com/aws/aws-sdk-go-v2/service/scheduler/types"
 	"github.com/spore-host/libs/tags/schedulertags"
 
+	"github.com/spore-host/lagotto/pkg/awsarn"
 	"github.com/spore-host/lagotto/pkg/deploy"
 	"github.com/spore-host/lagotto/pkg/managedtags"
 	"github.com/spore-host/lagotto/pkg/runtimeiam"
@@ -54,7 +55,7 @@ type OneShot struct {
 	Name   string
 	Offset time.Duration
 	At     time.Time
-	// Target is the universal target, arn:aws:scheduler:::aws-sdk:<service>:<action>.
+	// Target is the universal target, arn:<partition>:scheduler:::aws-sdk:<service>:<action>.
 	Target string
 	Input  string
 	// Resource is the ARN the job deletes, Why why it is a job.
@@ -74,9 +75,10 @@ type SelfRemoval struct {
 	Function, LogGroup bool
 }
 
-// sdkTarget is a Scheduler universal target.
-func sdkTarget(service, action string) string {
-	return "arn:aws:scheduler:::aws-sdk:" + service + ":" + action
+// sdkTarget is a Scheduler universal target, in region's partition
+// (lagotto#347).
+func sdkTarget(region, service, action string) string {
+	return awsarn.SchedulerTarget(awsarn.PartitionOrAWS(region), service, action)
 }
 
 func input(v map[string]string) string {
@@ -94,7 +96,7 @@ func (s SelfRemoval) Plan(now time.Time) []OneShot {
 	if s.Function || s.LogGroup {
 		out = append(out, at(OneShot{
 			Name: "lagotto-teardown-log-group", Offset: LogGroupOffset,
-			Target:   sdkTarget("cloudwatchlogs", "deleteLogGroup"),
+			Target:   sdkTarget(s.Region, "cloudwatchlogs", "deleteLogGroup"),
 			Input:    input(map[string]string{"LogGroupName": deploy.PollerLogGroupName}),
 			Resource: deploy.PollerLogGroupARN(s.Region, s.AccountID),
 			Why:      "after the function's last log flush: deleted earlier, Lambda recreates it untagged",
@@ -103,7 +105,7 @@ func (s SelfRemoval) Plan(now time.Time) []OneShot {
 	if s.Function {
 		out = append(out, at(OneShot{
 			Name: FunctionJobName, Offset: FunctionOffset,
-			Target:   sdkTarget("lambda", "deleteFunction"),
+			Target:   sdkTarget(s.Region, "lambda", "deleteFunction"),
 			Input:    input(map[string]string{"FunctionName": deploy.PollerFunctionName}),
 			Resource: deploy.PollerFunctionARN(s.Region, s.AccountID),
 			Why:      "the poller cannot delete the function it runs in",
@@ -167,7 +169,7 @@ func CreateOneShots(ctx context.Context, api OneShotAPI, region, accountID strin
 	if err != nil && !isConflict(err) {
 		return nil, fmt.Errorf("create schedule group %s: %w", runtimeiam.TeardownScheduleGroup, err)
 	}
-	invoke := runtimeiam.SchedulerInvokeRoleARN(accountID)
+	invoke := runtimeiam.SchedulerInvokeRoleARN(awsarn.PartitionOrAWS(region), accountID)
 	for _, j := range jobs {
 		if before != nil {
 			if err := before(ctx, "create one-shot "+j.Name); err != nil {

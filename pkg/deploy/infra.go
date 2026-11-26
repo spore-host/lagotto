@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/scheduler"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 
+	"github.com/spore-host/lagotto/pkg/awsarn"
 	"github.com/spore-host/lagotto/pkg/runtimeiam"
 )
 
@@ -55,19 +56,21 @@ const (
 	pollerArch       = "arm64"
 )
 
-// PollerFunctionARN returns the constructed ARN of the poller Lambda.
+// PollerFunctionARN returns the constructed ARN of the poller Lambda, in
+// region's partition (lagotto#347).
 //
 // NOTE: pkg/runtimeiam carries its own copy of the function name, for its
 // scheduler-invoke inline policy (which matches this ARN in ANY region, #218) —
 // runtimeiam must not import pkg/deploy (deploy imports runtimeiam).
 // TestInvokePolicyCoversEveryPollerTarget asserts the two agree.
 func PollerFunctionARN(region, accountID string) string {
-	return fmt.Sprintf("arn:aws:lambda:%s:%s:function:%s", region, accountID, PollerFunctionName)
+	return awsarn.InRegion("lambda", region, accountID, "function:"+PollerFunctionName)
 }
 
-// AlertsTopicARN returns the constructed ARN of the capacity-alerts SNS topic.
+// AlertsTopicARN returns the constructed ARN of the capacity-alerts SNS topic,
+// in region's partition.
 func AlertsTopicARN(region, accountID string) string {
-	return fmt.Sprintf("arn:aws:sns:%s:%s:%s", region, accountID, AlertsTopicName)
+	return awsarn.InRegion("sns", region, accountID, AlertsTopicName)
 }
 
 // --- Test seams -------------------------------------------------------------
@@ -233,10 +236,12 @@ func (d *Deployer) retryTransient(ctx context.Context, attempts int, matches fun
 	return err
 }
 
-// runtimeRoleARN / schedulerInvokeRoleARN re-export the runtimeiam helpers so
-// callers inside pkg/deploy read consistently.
-func runtimeRoleARN(accountID string) string { return runtimeiam.RoleARN(accountID) }
+// runtimeRoleARN / schedulerInvokeRoleARN re-export the runtimeiam helpers, in
+// region's partition, so callers inside pkg/deploy read consistently.
+func runtimeRoleARN(region, accountID string) string {
+	return runtimeiam.RoleARN(awsarn.PartitionOrAWS(region), accountID)
+}
 
-func schedulerInvokeRoleARN(accountID string) string {
-	return runtimeiam.SchedulerInvokeRoleARN(accountID)
+func schedulerInvokeRoleARN(region, accountID string) string {
+	return runtimeiam.SchedulerInvokeRoleARN(awsarn.PartitionOrAWS(region), accountID)
 }

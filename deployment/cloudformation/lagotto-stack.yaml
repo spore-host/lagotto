@@ -89,8 +89,8 @@ Resources:
           # For the #62 Capacity-Block boundary retry: the poller re-arms a fresh
           # EventBridge schedule targeting itself. Construct its own ARN by name
           # (a !GetAtt self-reference would be a CFN circular dependency).
-          POLLER_FUNCTION_ARN: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:lagotto-capacity-poller'
-          SCHEDULER_INVOKE_ROLE_ARN: !Sub 'arn:aws:iam::${AWS::AccountId}:role/lagotto-capacity-poller-scheduler-invoke'
+          POLLER_FUNCTION_ARN: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:lagotto-capacity-poller'
+          SCHEDULER_INVOKE_ROLE_ARN: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/lagotto-capacity-poller-scheduler-invoke'
       # The runtime PERMISSIONS policy is owned by `lagotto setup`, not this
       # template (#16): lagotto codifies "what the poller may call" in Go
       # (pkg/runtimeiam) as the single source of truth, the same way it owns its
@@ -106,7 +106,7 @@ Resources:
       # stack, so the stack only references it by ARN. This avoids a fatal collision
       # under CloudFormation Early Validation when the role already exists from a
       # prior deploy/rollback (ResourceExistenceCheck, #145).
-      Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/lagotto-capacity-poller-role'
+      Role: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/lagotto-capacity-poller-role'
       Tags:
         Environment: !Ref Environment
         Application: lagotto
@@ -128,7 +128,7 @@ Resources:
         # The invoke role is CLI-owned (pkg/runtimeiam), referenced by ARN — not a
         # stack resource — so the stack never tries to create an already-existing
         # named role (#145). See CapacityPollerFunction.Role above.
-        RoleArn: !Sub 'arn:aws:iam::${AWS::AccountId}:role/lagotto-capacity-poller-scheduler-invoke'
+        RoleArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/lagotto-capacity-poller-scheduler-invoke'
       State: DISABLED
 
 Outputs:
@@ -166,6 +166,6 @@ Outputs:
   SchedulerInvokeRoleArn:
     Condition: DeployLambda
     Description: Role EventBridge Scheduler assumes to invoke the poller (reused by per-launch scheduled launches, #49). CLI-owned (pkg/runtimeiam), referenced by ARN (#145).
-    Value: !Sub 'arn:aws:iam::${AWS::AccountId}:role/lagotto-capacity-poller-scheduler-invoke'
+    Value: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/lagotto-capacity-poller-scheduler-invoke'
     Export:
       Name: !Sub '${AWS::StackName}-scheduler-invoke-role'

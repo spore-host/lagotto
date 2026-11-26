@@ -97,6 +97,10 @@ func runFootprint(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve the AWS account ID (every ARN in the footprint is derived from it): %w", err)
 	}
+	// And from the partition (lagotto#347).
+	if err := refuseUnknownPartition(cfg.Region); err != nil {
+		return fmt.Errorf("footprint: %w", err)
+	}
 	scope := inventory.Scope{AllRegions: footprintAllRegions}
 	if !scope.AllRegions {
 		if cfg.Region == "" {
@@ -113,7 +117,18 @@ func runFootprint(cmd *cobra.Command, _ []string) error {
 
 // gatherFootprint reads the footprint from AWS. A seam for tests.
 var gatherFootprint = func(ctx context.Context, cfg aws.Config, accountID string, scope inventory.Scope) (inventory.Facts, error) {
-	return inventory.Gather(ctx, inventory.NewAWSSource(cfg, accountID), accountID, scope, footprintOptions())
+	return inventory.Gather(ctx, newAWSSource(cfg, accountID), accountID, scope, footprintOptions())
+}
+
+// newAWSSource is inventory.NewAWSSource in the account's partition
+// (observedTeardownPartition, lagotto#347): in an ISO partition or the
+// European Sovereign Cloud the region's name alone gives none.
+func newAWSSource(cfg aws.Config, accountID string) *inventory.AWSSource {
+	src := inventory.NewAWSSource(cfg, accountID)
+	if p, err := observedTeardownPartition(cfg.Region); err == nil {
+		src.SetPartition(p)
+	}
+	return src
 }
 
 // footprintNow stamps the report. A seam for tests.

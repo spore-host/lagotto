@@ -24,7 +24,7 @@ import (
 
 // TestMarkGlobal (lagotto#345): setup's mark of the global scope bumps its
 // epoch and sets it ACTIVE; a caller whose IAM predates the table is warned
-// and carries on; outside the aws partition there is no global scope; a
+// and carries on; outside aws and aws-us-gov there is no global scope; a
 // client that cannot be built refuses.
 func TestMarkGlobal(t *testing.T) {
 	ctx := context.Background()
@@ -148,7 +148,7 @@ func TestWriteAccountWide(t *testing.T) {
 	}
 }
 
-// TestTeardownPlanReapNoGlobalScope: outside the aws partition there is no
+// TestTeardownPlanReapNoGlobalScope: outside aws and aws-us-gov there is no
 // global lease: the plan's account-wide steps are refused, and with
 // --i-understand-no-lease run under the stand-in.
 func TestTeardownPlanReapNoGlobalScope(t *testing.T) {
@@ -484,7 +484,7 @@ func TestCheckAccountWide(t *testing.T) {
 func TestRunAccountWideUnfenced(t *testing.T) {
 	facts := func() inventory.Facts {
 		f := orphanFacts()
-		f.Regions = []inventory.Region{{Region: "us-gov-west-1"}}
+		f.Regions = []inventory.Region{{Region: "us-iso-east-1"}}
 		return f
 	}
 	_, rec, _ := stubPlanTeardown(t, facts)
@@ -506,14 +506,14 @@ func TestRunAccountWideUnfenced(t *testing.T) {
 	}
 }
 
-// TestRunTeardown_IAMRolesWithoutAGlobalScope: outside the aws partition
+// TestRunTeardown_IAMRolesWithoutAGlobalScope: outside aws and aws-us-gov
 // --iam-roles still removes the account-wide resources (no lease there).
 func TestRunTeardown_IAMRolesWithoutAGlobalScope(t *testing.T) {
 	tables := &fakeTables{empty: true}
 	calls := stubTeardown(t, tables, &cmdRoleDeleter{exists: map[string]bool{}}, true, false)
 	stubPollerRegions(t, nil, nil)
 	teardownAccountWideCheck = func(context.Context, aws.Config, string, string) idle.AccountWideResult {
-		return idle.AccountWideResult{Outcome: idle.AccountWideSkipped, Why: "no control region for us-gov-west-1"}
+		return idle.AccountWideResult{Outcome: idle.AccountWideSkipped, Why: "no control region for us-iso-east-1"}
 	}
 	unfenced := 0
 	prev := teardownAccountWideUnfenced

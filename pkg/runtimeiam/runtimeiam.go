@@ -30,6 +30,7 @@ import (
 	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
 	"github.com/spore-host/libs/tags/iamtags"
 
+	"github.com/spore-host/lagotto/pkg/awsarn"
 	"github.com/spore-host/lagotto/pkg/managedtags"
 	"github.com/spore-host/lagotto/pkg/schedgroup"
 	"github.com/spore-host/lagotto/pkg/watcher"
@@ -53,29 +54,43 @@ const (
 	// same constant (deploy.PollerFunctionName) but imports this package, so it
 	// cannot be shared by reference; pkg/deploy's tests assert the two agree.
 	pollerFunctionName = "lagotto-capacity-poller"
-	// lambdaBasicExecutionARN is the AWS-managed policy giving the poller role
-	// CloudWatch Logs basic execution (matching the old CFN ManagedPolicyArns).
-	lambdaBasicExecutionARN = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+	// basicExecutionPolicy is the path and name of the AWS-managed policy giving
+	// the poller role CloudWatch Logs basic execution (matching the old CFN
+	// ManagedPolicyArns).
+	basicExecutionPolicy = "policy/service-role/AWSLambdaBasicExecutionRole"
 )
 
 // BasicExecutionPolicyARN is the AWS-managed policy attached to the poller
-// role, which the idle teardown's one-shot jobs detach before deleting the
-// role (lagotto#326).
-const BasicExecutionPolicyARN = lambdaBasicExecutionARN
+// role, in partition (an AWS-managed policy's account is "aws").
+func BasicExecutionPolicyARN(partition string) string {
+	return awsarn.IAM(partition, "aws", basicExecutionPolicy)
+}
 
-// RoleARN returns the constructed ARN of the poller execution role (RoleName).
-// IAM is global, so no region is needed. Exported here — next to the name it is
-// derived from — so pkg/deploy has a single source of truth for it rather than
-// its own copy of the format string. The dependency is one-way (deploy imports
-// runtimeiam; runtimeiam imports nothing of deploy's), so there is no cycle.
-func RoleARN(accountID string) string {
-	return fmt.Sprintf("arn:aws:iam::%s:role/%s", accountID, RoleName)
+// RoleARN returns the constructed ARN of the poller execution role (RoleName)
+// in partition. IAM is global, so no region is needed. Exported here — next to
+// the name it is derived from — so pkg/deploy has a single source of truth for
+// it rather than its own copy of the format string. The dependency is one-way
+// (deploy imports runtimeiam; runtimeiam imports nothing of deploy's), so there
+// is no cycle.
+func RoleARN(partition, accountID string) string {
+	return awsarn.IAM(partition, accountID, "role/"+RoleName)
 }
 
 // SchedulerInvokeRoleARN returns the constructed ARN of the EventBridge
-// Scheduler invoke role (SchedulerInvokeRoleName).
-func SchedulerInvokeRoleARN(accountID string) string {
-	return fmt.Sprintf("arn:aws:iam::%s:role/%s", accountID, SchedulerInvokeRoleName)
+// Scheduler invoke role (SchedulerInvokeRoleName) in partition.
+func SchedulerInvokeRoleARN(partition, accountID string) string {
+	return awsarn.IAM(partition, accountID, "role/"+SchedulerInvokeRoleName)
+}
+
+// partitionOf is region's partition for the Ensure* writers: an error, which
+// stops them before they write anything, for a region outside aws and
+// aws-us-gov (lagotto#347; aws-cn is not supported yet).
+func partitionOf(region string) (string, error) {
+	p, err := awsarn.SupportedPartition(region)
+	if err != nil {
+		return "", fmt.Errorf("runtimeiam: %w", err)
+	}
+	return p, nil
 }
 
 // trust returns an sts:AssumeRole trust policy JSON for a single AWS service.
@@ -175,11 +190,15 @@ func EnsureRoles(ctx context.Context, client IAMAPI, region, accountID string, s
 	if region == "" || accountID == "" {
 		return fmt.Errorf("runtimeiam: region and accountID are required")
 	}
-	st := managedtags.FirstStamp(stamp)
-	if _, err := ensurePollerRole(ctx, client, st); err != nil {
+	partition, err := partitionOf(region)
+	if err != nil {
 		return err
 	}
-	_, err := ensureSchedulerInvokeRole(ctx, client, accountID, st)
+	st := managedtags.FirstStamp(stamp)
+	if _, err := ensurePollerRole(ctx, client, partition, st); err != nil {
+		return err
+	}
+	_, err = ensureSchedulerInvokeRole(ctx, client, partition, accountID, st)
 	return err
 }
 
@@ -198,23 +217,31 @@ func EnsureRoles(ctx context.Context, client IAMAPI, region, accountID string, s
 // policies in place.
 //
 // Both roles carry the spore.host tags, as in [EnsureRoles].
+//
+// Every ARN they are written with is in region's partition (lagotto#347); a
+// region outside aws and aws-us-gov is refused before anything is
+// written.
 func EnsureSetupRoles(ctx context.Context, client IAMAPI, region, accountID string, auth Authorizations, stamp ...managedtags.Stamp) ([]string, error) {
 	if region == "" || accountID == "" {
 		return nil, fmt.Errorf("runtimeiam: region and accountID are required")
 	}
+	partition, err := partitionOf(region)
+	if err != nil {
+		return nil, err
+	}
 	st := managedtags.FirstStamp(stamp)
 	var created []string
-	made, err := ensurePollerRole(ctx, client, st)
+	made, err := ensurePollerRole(ctx, client, partition, st)
 	if err != nil {
 		return nil, err
 	}
 	if made {
 		created = append(created, RoleName)
 	}
-	if err := putRuntimePolicy(ctx, client, accountID, auth); err != nil {
+	if err := putRuntimePolicy(ctx, client, partition, accountID, auth); err != nil {
 		return created, err
 	}
-	made, err = ensureSchedulerInvokeRole(ctx, client, accountID, st)
+	made, err = ensureSchedulerInvokeRole(ctx, client, partition, accountID, st)
 	if made {
 		created = append(created, SchedulerInvokeRoleName)
 	}
@@ -222,11 +249,11 @@ func EnsureSetupRoles(ctx context.Context, client IAMAPI, region, accountID stri
 }
 
 // ensurePollerRole get-or-creates RoleName with the Lambda trust relationship
-// and the AWS-managed basic-execution policy (its permissions policy is added by
-// EnsureRuntimeRole), tagged (roleTags).
+// and the AWS-managed basic-execution policy of partition (its permissions
+// policy is added by EnsureRuntimeRole), tagged (roleTags).
 //
 // created reports whether this call created the role.
-func ensurePollerRole(ctx context.Context, client IAMAPI, stamp managedtags.Stamp) (created bool, err error) {
+func ensurePollerRole(ctx context.Context, client IAMAPI, partition string, stamp managedtags.Stamp) (created bool, err error) {
 	role, err := getRole(ctx, client, RoleName)
 	if err != nil {
 		return false, fmt.Errorf("runtimeiam: check role %s: %w", RoleName, err)
@@ -246,7 +273,7 @@ func ensurePollerRole(ctx context.Context, client IAMAPI, stamp managedtags.Stam
 	// AttachRolePolicy is idempotent (re-attaching the same managed policy is a no-op).
 	if _, err := client.AttachRolePolicy(ctx, &iam.AttachRolePolicyInput{
 		RoleName:  aws.String(RoleName),
-		PolicyArn: aws.String(lambdaBasicExecutionARN),
+		PolicyArn: aws.String(BasicExecutionPolicyARN(partition)),
 	}); err != nil {
 		return role == nil, fmt.Errorf("runtimeiam: attach basic-execution to %s: %w", RoleName, err)
 	}
@@ -271,12 +298,12 @@ func ensurePollerRole(ctx context.Context, client IAMAPI, stamp managedtags.Stam
 // the schedules' move into lagotto's group (#324) needs no change to it.
 //
 // created reports whether this call created the role.
-func ensureSchedulerInvokeRole(ctx context.Context, client IAMAPI, accountID string, stamp managedtags.Stamp) (created bool, err error) {
-	doc, err := SchedulerInvokePolicyDocument(accountID)
+func ensureSchedulerInvokeRole(ctx context.Context, client IAMAPI, partition, accountID string, stamp managedtags.Stamp) (created bool, err error) {
+	doc, err := SchedulerInvokePolicyDocument(partition, accountID)
 	if err != nil {
 		return false, err
 	}
-	teardownDoc, err := SchedulerTeardownPolicyDocument(accountID)
+	teardownDoc, err := SchedulerTeardownPolicyDocument(partition, accountID)
 	if err != nil {
 		return false, err
 	}
@@ -316,7 +343,7 @@ func ensureSchedulerInvokeRole(ctx context.Context, client IAMAPI, accountID str
 }
 
 // SchedulerInvokeFunctionARN is the Resource of the Scheduler invoke policy:
-// lagotto's poller function in this account, in ANY region (#218).
+// lagotto's poller function in this account, in ANY region of partition (#218).
 //
 // The region is a wildcard because the role is IAM-global and shared by every
 // region's poller schedule; the function name and the account stay exact, so the
@@ -324,24 +351,24 @@ func ensureSchedulerInvokeRole(ctx context.Context, client IAMAPI, accountID str
 // for invoke that function: the poller schedule, and the #49 per-launch
 // `lagotto-launch-*` schedules (and the poller's #62 re-arm of those), which
 // target the same function with a routing payload.
-func SchedulerInvokeFunctionARN(accountID string) string {
-	return fmt.Sprintf("arn:aws:lambda:*:%s:function:%s", accountID, pollerFunctionName)
+func SchedulerInvokeFunctionARN(partition, accountID string) string {
+	return RegionalARN(partition, "lambda", accountID, "function:"+pollerFunctionName)
 }
 
 // SchedulerInvokePolicyDocument returns the inline policy written onto the
-// Scheduler invoke role. It is a function of the account alone — never of the
-// region the writing command runs in — so every region's deploy writes the same
-// bytes (#218).
-func SchedulerInvokePolicyDocument(accountID string) (string, error) {
-	if accountID == "" {
-		return "", fmt.Errorf("runtimeiam: accountID is required for the scheduler-invoke policy")
+// Scheduler invoke role. It is a function of the account (and its partition)
+// alone — never of the region the writing command runs in — so every region's
+// deploy writes the same bytes (#218).
+func SchedulerInvokePolicyDocument(partition, accountID string) (string, error) {
+	if partition == "" || accountID == "" {
+		return "", fmt.Errorf("runtimeiam: partition and accountID are required for the scheduler-invoke policy")
 	}
 	doc := map[string]interface{}{
 		"Version": "2012-10-17",
 		"Statement": []map[string]interface{}{{
 			"Effect":   "Allow",
 			"Action":   SchedulerInvokeAction,
-			"Resource": SchedulerInvokeFunctionARN(accountID),
+			"Resource": SchedulerInvokeFunctionARN(partition, accountID),
 		}},
 	}
 	b, err := json.Marshal(doc)
@@ -363,16 +390,20 @@ func EnsureRuntimeRole(ctx context.Context, client IAMAPI, region, accountID str
 	if region == "" || accountID == "" {
 		return fmt.Errorf("runtimeiam: region and accountID are required")
 	}
-	if _, err := ensurePollerRole(ctx, client, managedtags.FirstStamp(stamp)); err != nil {
+	partition, err := partitionOf(region)
+	if err != nil {
 		return err
 	}
-	return putRuntimePolicy(ctx, client, accountID, auth)
+	if _, err := ensurePollerRole(ctx, client, partition, managedtags.FirstStamp(stamp)); err != nil {
+		return err
+	}
+	return putRuntimePolicy(ctx, client, partition, accountID, auth)
 }
 
 // putRuntimePolicy writes PolicyDocument onto RoleName (a wholesale,
 // idempotent PutRolePolicy).
-func putRuntimePolicy(ctx context.Context, client IAMAPI, accountID string, auth Authorizations) error {
-	doc, err := PolicyDocumentFor(accountID, auth)
+func putRuntimePolicy(ctx context.Context, client IAMAPI, partition, accountID string, auth Authorizations) error {
+	doc, err := PolicyDocumentFor(partition, accountID, auth)
 	if err != nil {
 		return fmt.Errorf("runtimeiam: build policy: %w", err)
 	}
@@ -458,13 +489,17 @@ func ValidateInstanceRoleName(name string) error {
 }
 
 // ValidateSageMakerRoleARN rejects anything that is not a concrete IAM role
-// ARN in accountID, and the reserved roles. An authorized ARN is interpolated
-// into a Resource, so a wildcard would let the poller pass every matching role
-// to SageMaker.
-func ValidateSageMakerRoleARN(roleARN, accountID string) error {
+// ARN in accountID and partition (each unchecked when empty), and the
+// reserved roles. An authorized ARN is interpolated into a Resource, so a
+// wildcard would let the poller pass every matching role to SageMaker, and
+// one in another partition would name no role at all (lagotto#347).
+func ValidateSageMakerRoleARN(roleARN, partition, accountID string) error {
 	acct, name, err := watcher.ParseRoleARN(roleARN)
 	if err != nil {
 		return fmt.Errorf("runtimeiam: --sagemaker-role: %w", err)
+	}
+	if p, _ := awsarn.PartitionOfARN(strings.TrimSpace(roleARN)); partition != "" && p != partition {
+		return fmt.Errorf("runtimeiam: --sagemaker-role %q is in the %s partition, not this region's (%s)", roleARN, p, partition)
 	}
 	if accountID != "" && acct != accountID {
 		return fmt.Errorf("runtimeiam: --sagemaker-role %q is in account %s, not this account (%s)", roleARN, acct, accountID)
@@ -475,13 +510,14 @@ func ValidateSageMakerRoleARN(roleARN, accountID string) error {
 	return nil
 }
 
-// normalizeSageMakerRoles trims, drops invalid ARNs, de-duplicates and sorts.
-func normalizeSageMakerRoles(arns []string, accountID string) []string {
+// normalizeSageMakerRoles trims, drops invalid ARNs (including one of another
+// partition), de-duplicates and sorts.
+func normalizeSageMakerRoles(arns []string, partition, accountID string) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, a := range arns {
 		t := strings.TrimSpace(a)
-		if t == "" || seen[t] || ValidateSageMakerRoleARN(t, accountID) != nil {
+		if t == "" || seen[t] || ValidateSageMakerRoleARN(t, partition, accountID) != nil {
 			continue
 		}
 		seen[t] = true
@@ -517,11 +553,16 @@ func normalizeInstanceRoles(names []string) []string {
 const anyRegion = "*"
 
 // RegionalARN builds an ARN for one of lagotto's fixed-name regional resources
-// in accountID, in ANY region (#219): arn:aws:<service>:*:<account>:<resource>.
-// The resource name and account stay exact, so the grant still reaches only
-// lagotto's own tables, topic and schedules.
-func RegionalARN(service, accountID, resource string) string {
-	return fmt.Sprintf("arn:aws:%s:%s:%s:%s", service, anyRegion, accountID, resource)
+// in accountID, in ANY region of partition (#219):
+// arn:<partition>:<service>:*:<account>:<resource>. The resource name and
+// account stay exact, so the grant still reaches only lagotto's own tables,
+// topic and schedules.
+//
+// The partition is the account's (lagotto#347): arn:aws: names nothing in
+// aws-us-gov or aws-cn, so the poller's grants there, the spore-host-lifecycle
+// table's included, matched nothing.
+func RegionalARN(partition, service, accountID, resource string) string {
+	return awsarn.Regional(partition, service, anyRegion, accountID, resource)
 }
 
 // ManagedTagKey is the tag spawn stamps on every instance it launches (spawn
@@ -553,7 +594,8 @@ type statement struct {
 }
 
 // PolicyDocument returns the runtime policy as a JSON string, scoped to
-// accountID. It is the Go source of truth mirroring the set previously in
+// accountID in partition (aws, aws-us-gov or aws-cn: every ARN in it is
+// arn:<partition>:, lagotto#347). It is the Go source of truth mirroring the set previously in
 // deployment/cloudformation/lagotto-stack.yaml (the poller's Policies: block):
 // DynamoDB CRUD (3 tables), SNS publish, EC2/SSM read discovery, scheduler
 // manage + PassRole, the spawn launch set (RunInstances/tags/SG + spored* role
@@ -575,28 +617,34 @@ type statement struct {
 // regional ARNs therefore carry a `*` region (see [RegionalARN]) while keeping
 // lagotto's fixed resource names and the account exact, so every region's
 // `setup` writes the same document and one run serves them all.
-func PolicyDocument(accountID string, instanceRoles []string) (string, error) {
-	return PolicyDocumentFor(accountID, Authorizations{InstanceRoles: instanceRoles})
+func PolicyDocument(partition, accountID string, instanceRoles []string) (string, error) {
+	return PolicyDocumentFor(partition, accountID, Authorizations{InstanceRoles: instanceRoles})
 }
 
 // PolicyDocumentFor is [PolicyDocument] with SageMaker execution roles too.
-func PolicyDocumentFor(accountID string, auth Authorizations) (string, error) {
-	arn := func(f string, a ...interface{}) string { return fmt.Sprintf(f, a...) }
+func PolicyDocumentFor(partition, accountID string, auth Authorizations) (string, error) {
+	if partition == "" {
+		return "", fmt.Errorf("runtimeiam: the partition is required for the runtime policy")
+	}
+	// Every regional ARN below is lagotto's resource in any region of the
+	// account's partition; every IAM one, the account's own.
+	regional := func(service, resource string) string { return RegionalARN(partition, service, accountID, resource) }
+	iamARN := func(resource string) string { return awsarn.IAM(partition, accountID, resource) }
 	// Each in lagotto's tagged schedule group and in the default one, where
 	// everything created before #324 still is (pkg/schedgroup).
 	var schedulerARNs, launchSchedARNs []string
 	for _, group := range schedgroup.Groups {
-		schedulerARNs = append(schedulerARNs, RegionalARN("scheduler", accountID, "schedule/"+group+"/lagotto-capacity-poller"))
-		launchSchedARNs = append(launchSchedARNs, RegionalARN("scheduler", accountID, "schedule/"+group+"/lagotto-launch-*"))
+		schedulerARNs = append(schedulerARNs, regional("scheduler", "schedule/"+group+"/lagotto-capacity-poller"))
+		launchSchedARNs = append(launchSchedARNs, regional("scheduler", "schedule/"+group+"/lagotto-launch-*"))
 	}
-	schedulerInvokeRoleARN := arn("arn:aws:iam::%s:role/lagotto-capacity-poller-scheduler-invoke", accountID)
+	schedulerInvokeRoleARN := SchedulerInvokeRoleARN(partition, accountID)
 	// The instance roles the poller may pass to EC2: lagotto's own, then each
 	// one an administrator authorized, by exact ARN. No prefix: spawn-instance*
 	// and spored* roles are created by spawn's own users, with policies they
 	// chose, so a prefix grant would let every lagotto user launch with them.
-	ec2PassRoles := []string{arn("arn:aws:iam::%s:role/%s", accountID, InstanceRoleName)}
+	ec2PassRoles := []string{iamARN("role/" + InstanceRoleName)}
 	for _, name := range normalizeInstanceRoles(auth.InstanceRoles) {
-		ec2PassRoles = append(ec2PassRoles, arn("arn:aws:iam::%s:role/%s", accountID, name))
+		ec2PassRoles = append(ec2PassRoles, iamARN("role/"+name))
 	}
 
 	passToService := func(svc string) interface{} {
@@ -611,7 +659,7 @@ func PolicyDocumentFor(accountID string, auth Authorizations) (string, error) {
 	fsxManagedRequest := map[string]interface{}{"StringEquals": map[string]string{"aws:RequestTag/" + ManagedTagKey: managedTagValue}}
 	fsxManagedResource := map[string]interface{}{"StringEquals": map[string]string{"aws:ResourceTag/" + ManagedTagKey: managedTagValue}}
 	viaFSx := map[string]interface{}{"ForAnyValue:StringEquals": map[string][]string{"aws:CalledVia": {"fsx.amazonaws.com"}}}
-	fsxFileSystemARN := RegionalARN("fsx", accountID, "file-system/*")
+	fsxFileSystemARN := regional("fsx", "file-system/*")
 
 	statements := []statement{
 		// Tables are CLI-owned (#59) — the poller only reads/writes them.
@@ -620,16 +668,16 @@ func PolicyDocumentFor(accountID string, auth Authorizations) (string, error) {
 			"dynamodb:Query", "dynamodb:Scan", "dynamodb:BatchGetItem", "dynamodb:BatchWriteItem",
 			"dynamodb:DescribeTable", "dynamodb:ConditionCheckItem",
 		}, Resource: []string{
-			RegionalARN("dynamodb", accountID, "table/lagotto-watches"),
-			RegionalARN("dynamodb", accountID, "table/lagotto-watches/index/*"),
-			RegionalARN("dynamodb", accountID, "table/lagotto-match-history"),
-			RegionalARN("dynamodb", accountID, "table/lagotto-match-history/index/*"),
-			RegionalARN("dynamodb", accountID, "table/lagotto-scheduled-launches"),
-			RegionalARN("dynamodb", accountID, "table/lagotto-scheduled-launches/index/*"),
+			regional("dynamodb", "table/lagotto-watches"),
+			regional("dynamodb", "table/lagotto-watches/index/*"),
+			regional("dynamodb", "table/lagotto-match-history"),
+			regional("dynamodb", "table/lagotto-match-history/index/*"),
+			regional("dynamodb", "table/lagotto-scheduled-launches"),
+			regional("dynamodb", "table/lagotto-scheduled-launches/index/*"),
 		}},
 		// SNS capacity alerts.
 		{Effect: "Allow", Action: []string{"sns:Publish"},
-			Resource: RegionalARN("sns", accountID, "lagotto-capacity-alerts")},
+			Resource: regional("sns", "lagotto-capacity-alerts")},
 		// Email subscription cleanup (#240): each sweep unsubscribes the
 		// per-address subscriptions no active watch names. SNS authorizes
 		// subscription calls against the topic; the topic's subscription ARNs
@@ -638,8 +686,8 @@ func PolicyDocumentFor(accountID string, auth Authorizations) (string, error) {
 		{Effect: "Allow", Action: []string{
 			"sns:ListSubscriptionsByTopic", "sns:GetSubscriptionAttributes", "sns:Unsubscribe",
 		}, Resource: []string{
-			RegionalARN("sns", accountID, "lagotto-capacity-alerts"),
-			RegionalARN("sns", accountID, "lagotto-capacity-alerts:*"),
+			regional("sns", "lagotto-capacity-alerts"),
+			regional("sns", "lagotto-capacity-alerts:*"),
 		}},
 		// Capacity discovery (truffle) + spawn launcher read APIs. Region-agnostic
 		// describe reads — Resource "*" as in the template.
@@ -706,9 +754,9 @@ func PolicyDocumentFor(accountID string, auth Authorizations) (string, error) {
 		// did not launch; an untagged one-time Spot request is refused, which is
 		// harmless (it closes with its instance; spawn only warns).
 		{Effect: "Allow", Action: []string{"ec2:TerminateInstances"},
-			Resource: arn("arn:aws:ec2:*:%s:instance/*", accountID), Condition: ec2Managed},
+			Resource: regional("ec2", "instance/*"), Condition: ec2Managed},
 		{Effect: "Allow", Action: []string{"ec2:CancelSpotInstanceRequests"},
-			Resource: arn("arn:aws:ec2:*:%s:spot-instances-request/*", accountID), Condition: ec2Managed},
+			Resource: regional("ec2", "spot-instances-request/*"), Condition: ec2Managed},
 		// fsx_create (#43, #242): spawn's startFSxCreate creates the filesystem
 		// WITH tags (spawn:managed=true among them), which FSx authorizes as
 		// fsx:TagResource too. Both are gated on that request tag, so the poller
@@ -722,7 +770,7 @@ func PolicyDocumentFor(accountID string, auth Authorizations) (string, error) {
 		// FSx creates its service-linked role on the first filesystem in an
 		// account, as the caller (AmazonFSxFullAccess "CreateSLRForFSx").
 		{Effect: "Allow", Action: []string{"iam:CreateServiceLinkedRole"},
-			Resource:  arn("arn:aws:iam::%s:role/aws-service-role/fsx.amazonaws.com/*", accountID),
+			Resource:  iamARN("role/aws-service-role/fsx.amazonaws.com/*"),
 			Condition: map[string]interface{}{"StringEquals": map[string]string{"iam:AWSServiceName": "fsx.amazonaws.com"}}},
 		// The VPC reads FSx makes with the caller's credentials while creating a
 		// filesystem (AmazonFSxFullAccess "DescribeEC2VpcResources"; the
@@ -741,7 +789,7 @@ func PolicyDocumentFor(accountID string, auth Authorizations) (string, error) {
 		// launching (watcher.SpawnConfigFile.ValidateFSxBucket).
 		{Effect: "Allow", Action: []string{
 			"s3:CreateBucket", "s3:ListBucket", "s3:GetBucketTagging", "s3:PutBucketTagging",
-		}, Resource: "arn:aws:s3:::" + FSxBucketPrefix + "*"},
+		}, Resource: awsarn.S3(partition, FSxBucketPrefix+"*")},
 		// hold: capacity reservations.
 		{Effect: "Allow", Action: []string{
 			"ec2:CreateCapacityReservation", "ec2:CancelCapacityReservation", "ec2:DescribeCapacityReservations",
@@ -754,9 +802,9 @@ func PolicyDocumentFor(accountID string, auth Authorizations) (string, error) {
 		{Effect: "Allow", Action: []string{
 			"dynamodb:DeleteTable", "dynamodb:ListTagsOfResource", "dynamodb:DescribeTable",
 		}, Resource: []string{
-			RegionalARN("dynamodb", accountID, "table/lagotto-watches"),
-			RegionalARN("dynamodb", accountID, "table/lagotto-match-history"),
-			RegionalARN("dynamodb", accountID, "table/lagotto-scheduled-launches"),
+			regional("dynamodb", "table/lagotto-watches"),
+			regional("dynamodb", "table/lagotto-match-history"),
+			regional("dynamodb", "table/lagotto-scheduled-launches"),
 		}},
 		// The shared spore.host lease table (libs#77): the poller claims the
 		// teardown lease there, and creates the table when it is the first
@@ -765,16 +813,16 @@ func PolicyDocumentFor(accountID string, auth Authorizations) (string, error) {
 			"dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem",
 			"dynamodb:ConditionCheckItem", "dynamodb:Scan", "dynamodb:DescribeTable",
 			"dynamodb:CreateTable", "dynamodb:DeleteTable", "dynamodb:TagResource", "dynamodb:ListTagsOfResource",
-		}, Resource: RegionalARN("dynamodb", accountID, "table/"+LifecycleTableName)},
+		}, Resource: regional("dynamodb", "table/"+LifecycleTableName)},
 		// The artifact bucket `lagotto deploy` creates (lagotto-lambda-<account>-<region>),
 		// its tags read for the delete guard, emptied of every version and
 		// then deleted.
 		{Effect: "Allow", Action: []string{"s3:GetBucketTagging", "s3:ListBucketVersions", "s3:DeleteBucket"},
-			Resource: ArtifactBucketARN(accountID)},
+			Resource: ArtifactBucketARN(partition, accountID)},
 		{Effect: "Allow", Action: []string{"s3:DeleteObject", "s3:DeleteObjectVersion"},
-			Resource: ArtifactBucketARN(accountID) + "/*"},
+			Resource: ArtifactBucketARN(partition, accountID) + "/*"},
 		{Effect: "Allow", Action: []string{"sns:GetTopicAttributes", "sns:ListTagsForResource", "sns:DeleteTopic"},
-			Resource: RegionalARN("sns", accountID, "lagotto-capacity-alerts")},
+			Resource: regional("sns", "lagotto-capacity-alerts")},
 		// The footprint's reads of the rest of a region's deployment
 		// (lagotto#326): the poller function, its log group's tags, lagotto's
 		// two schedule groups (lagotto, lagotto-teardown) and their tags, and
@@ -790,26 +838,26 @@ func PolicyDocumentFor(accountID string, auth Authorizations) (string, error) {
 			"lambda:GetFunction", "lambda:ListTags", "logs:ListTagsForResource", "scheduler:GetScheduleGroup",
 			"scheduler:ListTagsForResource", "cloudformation:DescribeStacks", "iam:GetRole",
 		}, Resource: []string{
-			RoleARN(accountID),
-			RegionalARN("lambda", accountID, "function:"+pollerFunctionName),
-			RegionalARN("logs", accountID, "log-group:"+pollerLogGroupName+"*"),
-			RegionalARN("scheduler", accountID, "schedule-group/"+schedgroup.Name+"*"),
-			RegionalARN("cloudformation", accountID, "stack/lagotto/*"),
+			RoleARN(partition, accountID),
+			regional("lambda", "function:"+pollerFunctionName),
+			regional("logs", "log-group:"+pollerLogGroupName+"*"),
+			regional("scheduler", "schedule-group/"+schedgroup.Name+"*"),
+			regional("cloudformation", "stack/lagotto/*"),
 		}},
 		// Every schedule in lagotto's group, the poller's own included, then the
 		// group itself.
 		{Effect: "Allow", Action: []string{"scheduler:DeleteSchedule"},
-			Resource: RegionalARN("scheduler", accountID, "schedule/"+schedgroup.Name+"/*")},
+			Resource: regional("scheduler", "schedule/"+schedgroup.Name+"/*")},
 		{Effect: "Allow", Action: []string{"scheduler:DeleteScheduleGroup"},
-			Resource: RegionalARN("scheduler", accountID, "schedule-group/"+schedgroup.Name)},
+			Resource: regional("scheduler", "schedule-group/"+schedgroup.Name)},
 		// The one-shot teardown jobs (#326) that remove what the poller cannot
 		// remove from inside itself: its function and its log group. They run as the Scheduler invoke role (iam:PassRole on
 		// it is the statement above, still conditioned on the Scheduler service)
 		// with [SchedulerTeardownPolicyDocument]'s grants.
 		{Effect: "Allow", Action: []string{"scheduler:CreateSchedule", "scheduler:DeleteSchedule"},
-			Resource: RegionalARN("scheduler", accountID, "schedule/"+TeardownScheduleGroup+"/*")},
+			Resource: regional("scheduler", "schedule/"+TeardownScheduleGroup+"/*")},
 		{Effect: "Allow", Action: []string{"scheduler:CreateScheduleGroup", "scheduler:TagResource"},
-			Resource: RegionalARN("scheduler", accountID, "schedule-group/"+TeardownScheduleGroup)},
+			Resource: regional("scheduler", "schedule-group/"+TeardownScheduleGroup)},
 		// lagotto's own instance role and its profile, read for the footprint,
 		// never written: nothing account-wide is the poller's to delete; the
 		// CLI removes it once no poller is left (lagotto#340).
@@ -817,25 +865,25 @@ func PolicyDocumentFor(accountID string, auth Authorizations) (string, error) {
 			"iam:GetRole", "iam:ListRolePolicies", "iam:ListAttachedRolePolicies", "iam:ListInstanceProfilesForRole",
 			"iam:GetInstanceProfile", "iam:ListInstanceProfileTags",
 		}, Resource: []string{
-			arn("arn:aws:iam::%s:role/%s", accountID, InstanceRoleName),
-			arn("arn:aws:iam::%s:instance-profile/%s", accountID, InstanceRoleName),
+			iamARN("role/" + InstanceRoleName),
+			iamARN("instance-profile/" + InstanceRoleName),
 		}},
 		// SageMaker submit and track, only the jobs lagotto names
 		// (lagotto-<watch>-<n>, SageMakerLauncher.submit). SageMaker ARNs carry
 		// the job name in lower case; lagotto's names are lower case already.
 		{Effect: "Allow", Action: []string{
 			"sagemaker:CreateTrainingJob", "sagemaker:AddTags", "sagemaker:DescribeTrainingJob",
-		}, Resource: RegionalARN("sagemaker", accountID, "training-job/lagotto-*")},
+		}, Resource: regional("sagemaker", "training-job/lagotto-*")},
 	}
 	// SageMaker execution roles: only those an administrator authorized with
 	// `setup --sagemaker-role`, by exact ARN. With none, no SageMaker PassRole
 	// at all, so a SageMaker watch fails at submit until one is authorized.
-	if smRoles := normalizeSageMakerRoles(auth.SageMakerRoles, accountID); len(smRoles) > 0 {
+	if smRoles := normalizeSageMakerRoles(auth.SageMakerRoles, partition, accountID); len(smRoles) > 0 {
 		statements = append(statements, statement{Effect: "Allow", Action: []string{InstanceRolePassAction},
 			Resource: smRoles, Condition: passToService("sagemaker.amazonaws.com")})
 	}
 
-	statements = append(statements, guardStatements(accountID)...)
+	statements = append(statements, guardStatements(partition, accountID)...)
 
 	doc := map[string]interface{}{"Version": "2012-10-17", "Statement": statements}
 	b, err := json.Marshal(doc)

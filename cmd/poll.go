@@ -97,6 +97,9 @@ func buildPoller(ctx context.Context) (*watcher.Poller, *watcher.WatchFilter, er
 	if err != nil {
 		return nil, nil, fmt.Errorf("load AWS config: %w", err)
 	}
+	if err := refuseUnsupportedRegion(cfg.Region, "run the poller", false); err != nil {
+		return nil, nil, err
+	}
 
 	truffleClient, err := truffleaws.NewClient(ctx)
 	if err != nil {

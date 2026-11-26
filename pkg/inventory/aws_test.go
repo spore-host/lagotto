@@ -227,7 +227,7 @@ func (fakeIAM) GetRole(_ context.Context, in *iam.GetRoleInput, _ ...func(*iam.O
 	if aws.ToString(in.RoleName) != runtimeiam.InstanceRoleName {
 		return nil, &iamtypes.NoSuchEntityException{Message: aws.String("no")}
 	}
-	return &iam.GetRoleOutput{Role: &iamtypes.Role{Arn: aws.String(IAMARN(acct, "role", runtimeiam.InstanceRoleName)), Tags: []iamtypes.Tag{{Key: aws.String(tags.ManagedBy), Value: aws.String("lagotto")}}}}, nil
+	return &iam.GetRoleOutput{Role: &iamtypes.Role{Arn: aws.String(IAMARN("aws", acct, "role", runtimeiam.InstanceRoleName)), Tags: []iamtypes.Tag{{Key: aws.String(tags.ManagedBy), Value: aws.String("lagotto")}}}}, nil
 }
 
 func (fakeIAM) GetPolicy(context.Context, *iam.GetPolicyInput, ...func(*iam.Options)) (*iam.GetPolicyOutput, error) {
@@ -245,7 +245,7 @@ func (fakeIAM) GetInstanceProfile(_ context.Context, in *iam.GetInstanceProfileI
 		t = append(t, iamtypes.Tag{Key: aws.String(runtimeiam.ManagedProfileTagKey), Value: aws.String(runtimeiam.ManagedProfileTagValue)})
 	}
 	return &iam.GetInstanceProfileOutput{InstanceProfile: &iamtypes.InstanceProfile{
-		Arn: aws.String(IAMARN(acct, "instance-profile", name)), Roles: []iamtypes.Role{{RoleName: aws.String(runtimeiam.InstanceRoleName)}},
+		Arn: aws.String(IAMARN("aws", acct, "instance-profile", name)), Roles: []iamtypes.Role{{RoleName: aws.String(runtimeiam.InstanceRoleName)}},
 		Tags: t,
 	}}, nil
 }
@@ -258,7 +258,7 @@ func (fakeIAM) ListInstanceProfiles(context.Context, *iam.ListInstanceProfilesIn
 }
 
 func TestAWSAccount(t *testing.T) {
-	a := &awsAccount{iam: fakeIAM{}, accountID: acct}
+	a := &awsAccount{iam: fakeIAM{}, accountID: acct, partition: "aws"}
 	ctx := context.Background()
 	if r, err := a.Role(ctx, runtimeiam.RoleName); r != nil || err != nil {
 		t.Errorf("absent role = %+v, %v", r, err)
@@ -267,7 +267,7 @@ func TestAWSAccount(t *testing.T) {
 		t.Errorf("instance role = %+v, %v", r, err)
 	}
 	p, n, err := a.CLIPolicy(ctx)
-	if err != nil || p == nil || p.ARN != cliiam.PolicyARN(acct) || n != 2 {
+	if err != nil || p == nil || p.ARN != cliiam.PolicyARN("aws", acct) || n != 2 {
 		t.Errorf("policy = %+v, %d attachments, %v", p, n, err)
 	}
 	profiles, err := a.InstanceProfilesForRole(ctx, runtimeiam.InstanceRoleName)

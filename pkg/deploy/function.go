@@ -63,7 +63,7 @@ func PollerEnvVars(region, accountID, watchesTable, historyTable, scheduledTable
 		"SNS_TOPIC_ARN":             topicARN,
 		"SCHEDULE_NAME":             PollerScheduleName,
 		"POLLER_FUNCTION_ARN":       PollerFunctionARN(region, accountID),
-		"SCHEDULER_INVOKE_ROLE_ARN": schedulerInvokeRoleARN(accountID),
+		"SCHEDULER_INVOKE_ROLE_ARN": schedulerInvokeRoleARN(region, accountID),
 	}
 }
 

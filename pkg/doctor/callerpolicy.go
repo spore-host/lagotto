@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/spore-host/lagotto/pkg/awsarn"
 	"github.com/spore-host/lagotto/pkg/cliiam"
 )
 
@@ -20,7 +21,10 @@ const CheckCallerPermissions = "caller-permissions"
 // each finding is a lead. An unknown result (the caller may not simulate, the
 // identity is the root user, ...) is a WARN that says so, never a list of
 // missing actions.
-func EvalCallerPermissions(res cliiam.CallerResult, accountID string) Check {
+//
+// region is the caller's, for the policy's ARN when the principal's names no
+// partition.
+func EvalCallerPermissions(res cliiam.CallerResult, accountID, region string) Check {
 	c := Check{Name: CheckCallerPermissions}
 	who := res.PrincipalARN
 	if who == "" {
@@ -34,7 +38,7 @@ func EvalCallerPermissions(res cliiam.CallerResult, accountID string) Check {
 		c.Status = StatusWarn
 		c.Summary = fmt.Sprintf("%s lacks %d permission(s) the everyday commands need (IAM policy simulator)", who, len(res.Missing))
 		c.Detail = append(c.Detail, res.Missing...)
-		c.Fix = attachFix(res.PrincipalARN, accountID)
+		c.Fix = attachFix(res.PrincipalARN, accountID, region)
 	default:
 		c.Status = StatusWarn
 		c.Summary = "unknown: " + res.Reason
@@ -47,9 +51,14 @@ func EvalCallerPermissions(res cliiam.CallerResult, accountID string) Check {
 	return c
 }
 
-// attachFix is how an administrator gives principal the policy.
-func attachFix(principal, accountID string) []string {
-	arn := cliiam.PolicyARN(accountID)
+// attachFix is how an administrator gives principal the policy, named by its
+// ARN in principal's partition (lagotto#347), else region's.
+func attachFix(principal, accountID, region string) []string {
+	partition, err := awsarn.PartitionOfARN(principal)
+	if err != nil {
+		partition = awsarn.PartitionOrAWS(region)
+	}
+	arn := cliiam.PolicyARN(partition, accountID)
 	setup := "if the policy does not exist yet, an administrator runs: lagotto setup"
 	_, resource, _ := strings.Cut(principal, ":iam::"+accountID+":")
 	name := resource[strings.LastIndex(resource, "/")+1:]

@@ -177,6 +177,9 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 	if err := validateWatchSearch(nw); err != nil {
 		return err
 	}
+	if err := refuseRegionsOutsidePartition(cfg.Region, nw.Regions); err != nil {
+		return err
+	}
 	pre, err := preflightWatch(ctx, cfg, os.Stderr, nw, o.requireQuota)
 	if err != nil {
 		return err

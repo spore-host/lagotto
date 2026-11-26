@@ -527,7 +527,7 @@ func TestDeploy_WiresTheTopicARNAndScheduleTarget(t *testing.T) {
 	wantKeys := map[string]string{
 		"CapacityAlertsTopicArn":    sn.arn,
 		"CapacityPollerFunctionArn": PollerFunctionARN("us-east-1", "123456789012"),
-		"SchedulerInvokeRoleArn":    schedulerInvokeRoleARN("123456789012"),
+		"SchedulerInvokeRoleArn":    schedulerInvokeRoleARN("us-east-1", "123456789012"),
 		"WatchesTableName":          DefaultWatchesTable,
 		"MatchHistoryTableName":     DefaultHistoryTable,
 		"ScheduledTableName":        DefaultScheduledTable,
@@ -557,7 +557,7 @@ func TestDeploy_WiresTheTopicARNAndScheduleTarget(t *testing.T) {
 			t.Errorf("env %s = %q, want the template's default %q", k, got, want)
 		}
 	}
-	if got := aws.ToString(l.createCalls[0].Role); got != runtimeRoleARN("123456789012") {
+	if got := aws.ToString(l.createCalls[0].Role); got != runtimeRoleARN("us-east-1", "123456789012") {
 		t.Errorf("function Role = %q, want the runtimeiam-owned role", got)
 	}
 
@@ -572,8 +572,8 @@ func TestDeploy_WiresTheTopicARNAndScheduleTarget(t *testing.T) {
 	if got := aws.ToString(target.Arn); got != PollerFunctionARN("us-east-1", "123456789012") {
 		t.Errorf("schedule target = %q, want the poller function ARN %q", got, PollerFunctionARN("us-east-1", "123456789012"))
 	}
-	if got := aws.ToString(target.RoleArn); got != schedulerInvokeRoleARN("123456789012") {
-		t.Errorf("schedule role = %q, want the Scheduler invoke role %q", got, schedulerInvokeRoleARN("123456789012"))
+	if got := aws.ToString(target.RoleArn); got != schedulerInvokeRoleARN("us-east-1", "123456789012") {
+		t.Errorf("schedule role = %q, want the Scheduler invoke role %q", got, schedulerInvokeRoleARN("us-east-1", "123456789012"))
 	}
 	if sc.createCalls[0].State != schedulertypes.ScheduleStateDisabled {
 		t.Errorf("schedule created in state %q, want DISABLED (nothing is watching yet)", sc.createCalls[0].State)
@@ -756,7 +756,7 @@ func TestSubstrate_EnsurePollerFunction(t *testing.T) {
 	}
 
 	arn, action, err := d.EnsurePollerFunction(ctx, PollerFunctionInput{
-		RoleARN:    runtimeRoleARN("123456789012"),
+		RoleARN:    runtimeRoleARN("us-east-1", "123456789012"),
 		Bucket:     bucket,
 		Key:        key,
 		CodeSHA256: sha,
@@ -790,7 +790,7 @@ func TestSubstrate_EnsurePollerFunction(t *testing.T) {
 	if aws.ToInt32(cfg.Timeout) != 900 || aws.ToInt32(cfg.MemorySize) != 512 {
 		t.Errorf("Timeout/MemorySize = %d/%d, want 900/512", aws.ToInt32(cfg.Timeout), aws.ToInt32(cfg.MemorySize))
 	}
-	if aws.ToString(cfg.Role) != runtimeRoleARN("123456789012") {
+	if aws.ToString(cfg.Role) != runtimeRoleARN("us-east-1", "123456789012") {
 		t.Errorf("Role = %q", aws.ToString(cfg.Role))
 	}
 	if cfg.Environment == nil {
@@ -836,7 +836,7 @@ func TestSubstrate_EnsurePollerFunction_IsIdempotent(t *testing.T) {
 		t.Fatalf("uploadArtifact: %v", err)
 	}
 	in := PollerFunctionInput{
-		RoleARN:    runtimeRoleARN("123456789012"),
+		RoleARN:    runtimeRoleARN("us-east-1", "123456789012"),
 		Bucket:     bucket,
 		Key:        key,
 		CodeSHA256: sha,
@@ -867,7 +867,7 @@ func TestSubstrate_EnsurePollerSchedule(t *testing.T) {
 	d := substrateDeployer(t)
 	ctx := context.Background()
 	fnARN := PollerFunctionARN("us-east-1", "123456789012")
-	roleARN := schedulerInvokeRoleARN("123456789012")
+	roleARN := schedulerInvokeRoleARN("us-east-1", "123456789012")
 	mustEnsureScheduleGroup(t, d)
 
 	action, err := d.EnsurePollerSchedule(ctx, fnARN, roleARN)
@@ -918,7 +918,7 @@ func TestSubstrate_EnsurePollerSchedule_PreservesEnabledState(t *testing.T) {
 	d := substrateDeployer(t)
 	ctx := context.Background()
 	fnARN := PollerFunctionARN("us-east-1", "123456789012")
-	roleARN := schedulerInvokeRoleARN("123456789012")
+	roleARN := schedulerInvokeRoleARN("us-east-1", "123456789012")
 	mustEnsureScheduleGroup(t, d)
 
 	if _, err := d.EnsurePollerSchedule(ctx, fnARN, roleARN); err != nil {
@@ -1000,7 +1000,7 @@ func TestSubstrate_DeleteHelpersTolerateAbsence(t *testing.T) {
 		t.Fatalf("uploadArtifact: %v", err)
 	}
 	fnARN, _, err := d.EnsurePollerFunction(ctx, PollerFunctionInput{
-		RoleARN: runtimeRoleARN("123456789012"), Bucket: bucket, Key: key, CodeSHA256: sha,
+		RoleARN: runtimeRoleARN("us-east-1", "123456789012"), Bucket: bucket, Key: key, CodeSHA256: sha,
 		EnvVars: PollerEnvVars("us-east-1", "123456789012", "", "", "", topicARN),
 		Tags:    PollerTags("production", "0.44.0"),
 	})
@@ -1008,7 +1008,7 @@ func TestSubstrate_DeleteHelpersTolerateAbsence(t *testing.T) {
 		t.Fatalf("EnsurePollerFunction: %v", err)
 	}
 	mustEnsureScheduleGroup(t, d)
-	if _, err := d.EnsurePollerSchedule(ctx, fnARN, schedulerInvokeRoleARN("123456789012")); err != nil {
+	if _, err := d.EnsurePollerSchedule(ctx, fnARN, schedulerInvokeRoleARN("us-east-1", "123456789012")); err != nil {
 		t.Fatalf("EnsurePollerSchedule: %v", err)
 	}
 
@@ -1052,7 +1052,7 @@ func TestSubstrate_EnsurePollerSchedule_MovesItOutOfTheDefaultGroup(t *testing.T
 	d := substrateDeployer(t)
 	ctx := context.Background()
 	fnARN := PollerFunctionARN("us-east-1", "123456789012")
-	roleARN := schedulerInvokeRoleARN("123456789012")
+	roleARN := schedulerInvokeRoleARN("us-east-1", "123456789012")
 	mustEnsureScheduleGroup(t, d)
 
 	if _, err := d.sched.CreateSchedule(ctx, &scheduler.CreateScheduleInput{

@@ -21,7 +21,7 @@ const goldenPath = "testdata/cli-user-policy.golden.json"
 
 func goldenDoc(t *testing.T) string {
 	t.Helper()
-	doc, err := PolicyDocument(testAccount, []string{"my-config-bucket"})
+	doc, err := PolicyDocument("aws", testAccount, []string{"my-config-bucket"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,8 +76,8 @@ func TestPolicyHasNoPolicyVariables(t *testing.T) {
 
 func TestPolicyDocumentRejectsABadAccount(t *testing.T) {
 	for _, acct := range []string{"", "12345", "${aws:PrincipalAccount}", "*"} {
-		if _, err := PolicyDocument(acct, nil); err == nil {
-			t.Errorf("PolicyDocument(%q) succeeded", acct)
+		if _, err := PolicyDocument("aws", acct, nil); err == nil {
+			t.Errorf("PolicyDocument(aws, %q) succeeded", acct)
 		}
 	}
 }
@@ -87,7 +87,7 @@ func TestPolicyDocumentRejectsABadAccount(t *testing.T) {
 // handful of config buckets.
 func TestPolicyFitsTheManagedPolicyLimit(t *testing.T) {
 	buckets := []string{"bucket-one", "bucket-two", "bucket-three", "bucket-four", "bucket-five"}
-	doc, err := PolicyDocument(testAccount, buckets)
+	doc, err := PolicyDocument("aws", testAccount, buckets)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +219,7 @@ func TestNoPrivilegeEscalation(t *testing.T) {
 			}
 		}
 		if g.Action == "iam:PassRole" {
-			if g.Resource != runtimeiam.SchedulerInvokeRoleARN(testAccount) ||
+			if g.Resource != runtimeiam.SchedulerInvokeRoleARN("aws", testAccount) ||
 				!strings.Contains(g.Condition, "iam:PassedToService") || !strings.Contains(g.Condition, "scheduler.amazonaws.com") {
 				t.Errorf("iam:PassRole must be on the scheduler invoke role, to Scheduler only: %s when %s", g.Resource, g.Condition)
 			}
@@ -281,7 +281,7 @@ func TestValidateConfigBucketName(t *testing.T) {
 // TestConfigBucketsRoundTrip: what setup writes, setup reads back, so a re-run
 // carries the buckets forward instead of revoking them.
 func TestConfigBucketsRoundTrip(t *testing.T) {
-	doc, err := PolicyDocument(testAccount, []string{"zeta", " alpha ", "alpha", "bad*"})
+	doc, err := PolicyDocument("aws", testAccount, []string{"zeta", " alpha ", "alpha", "bad*"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,7 +292,7 @@ func TestConfigBucketsRoundTrip(t *testing.T) {
 	if strings.Join(got, ",") != "alpha,zeta" {
 		t.Errorf("ConfigBuckets = %v, want [alpha zeta]", got)
 	}
-	none, _ := PolicyDocument(testAccount, nil)
+	none, _ := PolicyDocument("aws", testAccount, nil)
 	if strings.Contains(none, "s3:GetObject") {
 		t.Error("s3:GetObject is granted with no config bucket named")
 	}
@@ -314,7 +314,7 @@ func TestGrantedActionsMatchesTheDocument(t *testing.T) {
 }
 
 func TestPolicyARN(t *testing.T) {
-	if got := PolicyARN(testAccount); got != "arn:aws:iam::123456789012:policy/lagotto-cli-user" {
+	if got := PolicyARN("aws", testAccount); got != "arn:aws:iam::123456789012:policy/lagotto-cli-user" {
 		t.Errorf("PolicyARN = %s", got)
 	}
 }

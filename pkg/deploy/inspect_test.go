@@ -60,7 +60,7 @@ func TestInspectPoller_ReportsWhatIsDeployed(t *testing.T) {
 	if got.ARN != PollerFunctionARN(testRegion, testAccount) {
 		t.Errorf("ARN = %q", got.ARN)
 	}
-	if got.RoleARN != runtimeRoleARN(testAccount) {
+	if got.RoleARN != runtimeRoleARN("us-east-1", testAccount) {
 		t.Errorf("RoleARN = %q", got.RoleARN)
 	}
 	if got.IdleGrace != "" {

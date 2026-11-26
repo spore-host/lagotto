@@ -705,7 +705,7 @@ func evalRuntimePolicy(st State) (Check, *runtimeiam.PolicyDiff) {
 }
 
 // hasRegionalGrant reports whether any grant names one of lagotto's any-region
-// resources (arn:aws:<svc>:*:…) — i.e. the drift is the #219 shape.
+// resources (arn:<partition>:<svc>:*:…) — i.e. the drift is the #219 shape.
 func hasRegionalGrant(grants []runtimeiam.Grant) bool {
 	for _, g := range grants {
 		if parts := strings.SplitN(g.Resource, ":", 6); len(parts) == 6 && parts[0] == "arn" && parts[3] == "*" {

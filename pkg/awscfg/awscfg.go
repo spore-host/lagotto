@@ -19,6 +19,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/aws/smithy-go/middleware"
 	"github.com/spore-host/libs/sporeconfig"
+
+	"github.com/spore-host/lagotto/pkg/awsarn"
 )
 
 var (
@@ -76,13 +78,17 @@ func Load(ctx context.Context, regionOverride string) (aws.Config, error) {
 	return cfg, nil
 }
 
-// The account the command's own sts:GetCallerIdentity calls reported, recorded
-// passively (lagotto's last mile, libs#78, reads it so it makes no STS call
-// of its own). Guarded by observedMu.
+// The account the command's own sts:GetCallerIdentity calls reported, and
+// the partition of the caller's ARN, recorded passively (lagotto's last mile,
+// libs#78, reads them so it makes no STS call of its own; a teardown in a
+// partition no region name gives reads the partition, lagotto#347). Guarded
+// by observedMu.
 var (
-	observedMu       sync.Mutex
-	observedAccount  string
-	observedConflict bool
+	observedMu                sync.Mutex
+	observedAccount           string
+	observedConflict          bool
+	observedPartition         string
+	observedPartitionConflict bool
 )
 
 // observeCallerIdentityID names the middleware on each client's stack.
@@ -102,6 +108,9 @@ func observeCallerIdentity(stack *middleware.Stack) error {
 			if err == nil {
 				if id, ok := out.Result.(*sts.GetCallerIdentityOutput); ok && id != nil {
 					recordAccount(aws.ToString(id.Account))
+					if p, err := awsarn.PartitionOfARN(aws.ToString(id.Arn)); err == nil {
+						recordPartition(p)
+					}
 				}
 			}
 			return out, md, err
@@ -122,6 +131,38 @@ func recordAccount(account string) {
 	}
 }
 
+func recordPartition(p string) {
+	observedMu.Lock()
+	defer observedMu.Unlock()
+	switch {
+	case observedPartition == "":
+		observedPartition = p
+	case observedPartition != p:
+		observedPartitionConflict = true
+	}
+}
+
+// CallerPartition is the partition of the caller's ARN this process's
+// sts:GetCallerIdentity calls reported ("aws-iso" for
+// arn:aws-iso:iam::...), or "" when none has been made or two of them named
+// different partitions. It makes no call itself.
+func CallerPartition() string {
+	observedMu.Lock()
+	defer observedMu.Unlock()
+	if observedPartitionConflict {
+		return ""
+	}
+	return observedPartition
+}
+
+// SetCallerPartitionForTest records p as the caller's partition until t's
+// cleanup, as a GetCallerIdentity that reported it would.
+func SetCallerPartitionForTest(t testing.TB, p string) {
+	t.Helper()
+	ResetCallerAccountForTest(t)
+	recordPartition(p)
+}
+
 // CallerAccount is the AWS account this process's sts:GetCallerIdentity calls
 // reported, through any config Load built, or "" when none has been made or
 // two of them named different accounts. It makes no call itself.
@@ -134,13 +175,14 @@ func CallerAccount() string {
 	return observedAccount
 }
 
-// ResetCallerAccountForTest forgets the recorded account, and does again at
-// t's cleanup.
+// ResetCallerAccountForTest forgets the recorded account and partition, and
+// does again at t's cleanup.
 func ResetCallerAccountForTest(t testing.TB) {
 	t.Helper()
 	reset := func() {
 		observedMu.Lock()
 		observedAccount, observedConflict = "", false
+		observedPartition, observedPartitionConflict = "", false
 		observedMu.Unlock()
 	}
 	reset()

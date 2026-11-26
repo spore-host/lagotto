@@ -15,7 +15,7 @@ import (
 func TestReview8UnfencedActiveRegion(t *testing.T) {
 	facts := func() inventory.Facts {
 		f := orphanFacts()
-		f.Regions = []inventory.Region{{Region: "us-gov-west-1", ActiveWatches: 1}}
+		f.Regions = []inventory.Region{{Region: "us-iso-east-1", ActiveWatches: 1}}
 		return f
 	}
 	_, rec, _ := stubPlanTeardown(t, facts)

@@ -130,3 +130,25 @@ func TestCallerIdentityWithoutAccount(t *testing.T) {
 		t.Errorf("CallerAccount = %q, want empty", got)
 	}
 }
+
+// TestCallerPartitionIsObserved (lagotto#347): the partition of the caller's
+// ARN is recorded too, and two that differ leave it unknown.
+func TestCallerPartitionIsObserved(t *testing.T) {
+	ResetCallerAccountForTest(t)
+	stsServer(t)
+	if got := CallerPartition(); got != "" {
+		t.Fatalf("CallerPartition before any call = %q", got)
+	}
+	callerIdentity(t)
+	if got := CallerPartition(); got != "aws" {
+		t.Errorf("CallerPartition = %q, want aws", got)
+	}
+	recordPartition("aws-iso")
+	if got := CallerPartition(); got != "" {
+		t.Errorf("CallerPartition after two partitions = %q, want empty", got)
+	}
+	SetCallerPartitionForTest(t, "aws-iso-b")
+	if got := CallerPartition(); got != "aws-iso-b" {
+		t.Errorf("SetCallerPartitionForTest: %q", got)
+	}
+}

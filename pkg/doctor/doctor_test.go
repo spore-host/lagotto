@@ -28,7 +28,7 @@ const (
 
 func expectedInvokePolicy(t *testing.T) string {
 	t.Helper()
-	doc, err := runtimeiam.SchedulerInvokePolicyDocument(testAccount)
+	doc, err := runtimeiam.SchedulerInvokePolicyDocument("aws", testAccount)
 	if err != nil {
 		t.Fatalf("SchedulerInvokePolicyDocument: %v", err)
 	}
@@ -37,7 +37,7 @@ func expectedInvokePolicy(t *testing.T) string {
 
 func expectedPolicy(t *testing.T) string {
 	t.Helper()
-	doc, err := runtimeiam.PolicyDocument(testAccount, nil)
+	doc, err := runtimeiam.PolicyDocument("aws", testAccount, nil)
 	if err != nil {
 		t.Fatalf("PolicyDocument: %v", err)
 	}
@@ -65,7 +65,7 @@ func healthyState(t *testing.T) State {
 		},
 		TableOrder:      []string{"lagotto-watches", "lagotto-match-history", "lagotto-scheduled-launches"},
 		TableErrs:       map[string]error{},
-		Poller:          deploy.PollerInfo{Exists: true, Version: testVersion, RoleARN: runtimeiam.RoleARN(testAccount)},
+		Poller:          deploy.PollerInfo{Exists: true, Version: testVersion, RoleARN: runtimeiam.RoleARN("aws", testAccount)},
 		Schedule:        deploy.ScheduleInfo{Exists: true, State: "ENABLED", Expression: "rate(5 minutes)"},
 		TopicPresent:    true,
 		ActiveWatches:   2,

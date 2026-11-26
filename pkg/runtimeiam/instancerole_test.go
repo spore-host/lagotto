@@ -15,7 +15,7 @@ const (
 
 func irPolicy(t *testing.T, roles []string) string {
 	t.Helper()
-	doc, err := PolicyDocument(irAccount, roles)
+	doc, err := PolicyDocument("aws", irAccount, roles)
 	if err != nil {
 		t.Fatalf("PolicyDocument: %v", err)
 	}
@@ -36,12 +36,12 @@ func mustGrants(t *testing.T, doc string) []Grant {
 func TestStockPolicyDoesNotCoverANamedRole(t *testing.T) {
 	grants := mustGrants(t, irPolicy(t, nil))
 
-	missing := MissingInstanceRoleGrants(grants, irAccount, irRole)
+	missing := MissingInstanceRoleGrants(grants, "aws", irAccount, irRole)
 	if len(missing) != 1 || missing[0] != InstanceRolePassAction {
 		t.Fatalf("stock policy: missing = %v, want [%s]", missing, InstanceRolePassAction)
 	}
 	// lagotto's own instance role is always passable.
-	if missing := MissingInstanceRoleGrants(grants, irAccount, InstanceRoleName); len(missing) != 0 {
+	if missing := MissingInstanceRoleGrants(grants, "aws", irAccount, InstanceRoleName); len(missing) != 0 {
 		t.Errorf("stock policy must let the poller pass %s: missing %v", InstanceRoleName, missing)
 	}
 }
@@ -51,7 +51,7 @@ func TestStockPolicyDoesNotCoverANamedRole(t *testing.T) {
 // profile, with or without authorized roles, and PassRole is never on a
 // wildcard role.
 func TestPollerAuthorsNoIAM(t *testing.T) {
-	doc, err := PolicyDocumentFor(irAccount, Authorizations{
+	doc, err := PolicyDocumentFor("aws", irAccount, Authorizations{
 		InstanceRoles:  []string{irRole},
 		SageMakerRoles: []string{"arn:aws:iam::" + irAccount + ":role/service-role/sm-exec"},
 	})
@@ -116,14 +116,14 @@ func TestPollerAuthorsNoIAM(t *testing.T) {
 func TestAuthorizedRoleIsFullyCovered(t *testing.T) {
 	grants := mustGrants(t, irPolicy(t, []string{irRole}))
 
-	if missing := MissingInstanceRoleGrants(grants, irAccount, irRole); len(missing) != 0 {
+	if missing := MissingInstanceRoleGrants(grants, "aws", irAccount, irRole); len(missing) != 0 {
 		t.Errorf("authorized role still missing grants: %v", missing)
 	}
 	if AllowsPassRoleTo(grants, "arn:aws:iam::"+irAccount+":role/"+irRole, "sagemaker.amazonaws.com") {
 		t.Error("an EC2 instance-role authorization must not let the poller pass the role to SageMaker")
 	}
 	// Authorizing one role must not authorize another.
-	if missing := MissingInstanceRoleGrants(grants, irAccount, "some-other-role"); len(missing) == 0 {
+	if missing := MissingInstanceRoleGrants(grants, "aws", irAccount, "some-other-role"); len(missing) == 0 {
 		t.Error("authorizing one role must not cover a different role")
 	}
 	for _, r := range []string{"spored-instance-role", "spawn-instance-abc123"} {
@@ -138,7 +138,7 @@ func TestAuthorizedRoleIsFullyCovered(t *testing.T) {
 // is not carried forward.
 func TestSageMakerRolesRoundTrip(t *testing.T) {
 	sm := "arn:aws:iam::" + irAccount + ":role/service-role/sm-exec"
-	doc, err := PolicyDocumentFor(irAccount, Authorizations{InstanceRoles: []string{irRole}, SageMakerRoles: []string{sm}})
+	doc, err := PolicyDocumentFor("aws", irAccount, Authorizations{InstanceRoles: []string{irRole}, SageMakerRoles: []string{sm}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,10 +156,18 @@ func TestSageMakerRolesRoundTrip(t *testing.T) {
 		t.Errorf("legacy PassRole on * carried forward as %v", got)
 	}
 	for _, bad := range []string{"arn:aws:iam::" + irAccount + ":role/*", "arn:aws:iam::999999999999:role/x",
-		"arn:aws:iam::" + irAccount + ":role/spored-instance-role", "sm-exec"} {
-		if ValidateSageMakerRoleARN(bad, irAccount) == nil {
+		"arn:aws:iam::" + irAccount + ":role/spored-instance-role", "sm-exec",
+		"arn:aws-us-gov:iam::" + irAccount + ":role/sm-exec"} { // another partition (lagotto#347)
+		if ValidateSageMakerRoleARN(bad, "aws", irAccount) == nil {
 			t.Errorf("ValidateSageMakerRoleARN(%q) accepted", bad)
 		}
+	}
+	// The partition is checked only when given.
+	if err := ValidateSageMakerRoleARN("arn:aws-us-gov:iam::"+irAccount+":role/sm-exec", "", irAccount); err != nil {
+		t.Errorf("no partition given: %v", err)
+	}
+	if err := ValidateSageMakerRoleARN("arn:aws-us-gov:iam::"+irAccount+":role/sm-exec", "aws-us-gov", irAccount); err != nil {
+		t.Errorf("its own partition: %v", err)
 	}
 }
 
@@ -253,7 +261,7 @@ func TestValidateInstanceRoleNameRefusesWildcards(t *testing.T) {
 // reported usable and the watch dies at RunInstances anyway.
 func TestPassRoleConditionIsNotIgnored(t *testing.T) {
 	roleARN := "arn:aws:iam::" + irAccount + ":role/" + irRole
-	doc, err := PolicyDocumentFor(irAccount, Authorizations{SageMakerRoles: []string{roleARN}})
+	doc, err := PolicyDocumentFor("aws", irAccount, Authorizations{SageMakerRoles: []string{roleARN}})
 	if err != nil {
 		t.Fatal(err)
 	}

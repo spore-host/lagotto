@@ -40,7 +40,7 @@ func (d *Deployer) ensureScheduleGroup(ctx context.Context, region, accountID st
 		return "", fmt.Errorf("create schedule group %s: %w", ScheduleGroupName, err)
 	}
 
-	arn := schedgroup.ARN(region, accountID)
+	arn := d.arn("scheduler", region, accountID, "schedule-group/"+schedgroup.Name)
 	cur, err := d.sched.ListTagsForResource(ctx, &scheduler.ListTagsForResourceInput{ResourceArn: aws.String(arn)})
 	if err != nil {
 		return "", fmt.Errorf("read tags of schedule group %s: %w", ScheduleGroupName, err)

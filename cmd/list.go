@@ -14,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spf13/cobra"
+	"github.com/spore-host/lagotto/pkg/awsarn"
 	"github.com/spore-host/lagotto/pkg/awscfg"
 	"github.com/spore-host/lagotto/pkg/watcher"
 )
@@ -125,7 +126,7 @@ func runList(cmd *cobra.Command, args []string) error {
 	// Stored launch configs the poller will refuse when they match (#309): an
 	// inline IAM policy armed before 0.70.0, or an iam_role the deployed
 	// poller may not pass. The poller policy is read only if one names a role.
-	annotateLaunchConfigProblems(watches, newRoleCheck(ctx, iam.NewFromConfig(cfg), aws.ToString(identity.Account)))
+	annotateLaunchConfigProblems(watches, newRoleCheck(ctx, iam.NewFromConfig(cfg), awsarn.PartitionOrAWS(cfg.Region), aws.ToString(identity.Account)))
 
 	if getOutputFormat() == "json" {
 		enc := json.NewEncoder(cmd.OutOrStdout())

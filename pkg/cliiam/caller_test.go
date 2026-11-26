@@ -37,7 +37,7 @@ func TestPrincipalARN(t *testing.T) {
 // literally, so every simulated resource is concrete, in the caller's region,
 // in the account; and the setup-only statements are not simulated.
 func TestSimRequestsAreConcrete(t *testing.T) {
-	reqs := simRequests(testAccount, "eu-west-1")
+	reqs := simRequests("aws", testAccount, "eu-west-1")
 	if len(reqs) == 0 {
 		t.Fatal("no requests")
 	}
@@ -60,7 +60,7 @@ func TestSimRequestsAreConcrete(t *testing.T) {
 	}
 	// Every other granted action is checked, except the simulator's blind
 	// spots, which are reported as not simulated.
-	_, blind := simPlan(testAccount, "eu-west-1")
+	_, blind := simPlan("aws", testAccount, "eu-west-1")
 	skipped := map[string]bool{}
 	for _, a := range blind {
 		skipped[a] = true
@@ -179,7 +179,7 @@ func TestCheckCallerRootIsUnknown(t *testing.T) {
 // The simulator blind spots are skipped, reported, and each names an action
 // the policy actually grants (so a rename can't silently stop checking it).
 func TestSimPlanSkipsSimulatorBlindSpots(t *testing.T) {
-	reqs, skipped := simPlan(testAccount, "us-east-1")
+	reqs, skipped := simPlan("aws", testAccount, "us-east-1")
 	want := []string{"ec2:CancelCapacityReservation", "sns:GetSubscriptionAttributes", "sns:Unsubscribe"}
 	if strings.Join(skipped, ",") != strings.Join(want, ",") {
 		t.Fatalf("skipped = %v, want %v", skipped, want)
@@ -194,7 +194,7 @@ func TestSimPlanSkipsSimulatorBlindSpots(t *testing.T) {
 		}
 	}
 	granted := map[string]bool{}
-	for _, st := range statements(testAccount, nil) {
+	for _, st := range statements("aws", testAccount, nil) {
 		for _, a := range st.Action {
 			granted[a] = true
 		}
@@ -226,7 +226,7 @@ func TestSimPlanSkipsSimulatorBlindSpots(t *testing.T) {
 // so a principal missing it is reported rather than found out at cancel time.
 func TestSimRequestsCoverLaunchCancel(t *testing.T) {
 	want := "arn:aws:scheduler:eu-west-1:" + testAccount + ":schedule/default/" + launchSchedulePrefix + probeName
-	for _, r := range simRequests(testAccount, "eu-west-1") {
+	for _, r := range simRequests("aws", testAccount, "eu-west-1") {
 		if _, ok := r.resources[want]; !ok {
 			continue
 		}
