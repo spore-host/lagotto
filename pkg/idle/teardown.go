@@ -66,7 +66,9 @@ type Config struct {
 	// Grace is how long the region must be idle. Default DefaultGrace.
 	Grace time.Duration
 	// Reap deletes. False is report mode, the only mode this release's
-	// poller runs (lagotto#328 turns reap on).
+	// poller runs (lagotto#328 turns reap on), which deletes nothing but,
+	// in a region torn down while the run observed, the lifecycle item and
+	// the empty table its own observation made again (lagotto#350).
 	Reap    bool
 	Options inventory.Options
 	// Now is the clock. Default time.Now.
@@ -156,6 +158,11 @@ const (
 	OutcomeLeaseLost Outcome = "lease-lost"
 	// OutcomeFailed: something failed; the lease was given back.
 	OutcomeFailed Outcome = "failed"
+	// OutcomeTornDown: the poller's rate schedule is gone, so its region
+	// was torn down (by the CLI, or by a run of this poller that
+	// committed): the run recorded nothing, or finished the lifecycle item
+	// its own observation made again (lagotto#350).
+	OutcomeTornDown Outcome = "torn-down"
 )
 
 // Phase is when, and by whom, a planned resource is removed.
@@ -271,13 +278,18 @@ type Result struct {
 	committed bool
 	// facts is the footprint the run read under its lease, if it did.
 	facts *inventory.Facts
+	// listed is the region's schedules as the run read them after it
+	// observed (tornDown), if it did.
+	listed *inventory.Region
 }
 
 // Tick runs one region's idle check: the verdict, Observe, and, once the
 // region has been idle for the grace period, the region's teardown. It never
 // disables or slows the poller's schedule (pkg/pollcadence owns the cadence),
-// in report mode it deletes nothing, and in either mode it touches nothing
-// account-wide. Every step is logged.
+// in report mode it deletes nothing (but, in a region torn down while it
+// observed, the lifecycle item and the empty table its own observation made
+// again: lagotto#350), and in either mode it touches nothing account-wide.
+// Every step is logged.
 //
 // In reap mode a run that does not commit its region's removal (the region
 // is in use, within its grace, or the run stopped before its jobs stood)
@@ -287,17 +299,24 @@ type Result struct {
 func Tick(ctx context.Context, cfg Config, d Deps) Result {
 	cfg = cfg.withDefaults()
 	res := tick(ctx, cfg, d)
-	if cfg.Reap && !res.committed {
+	if cfg.Reap && !res.committed && res.Outcome != OutcomeTornDown {
+		// (A torn-down region's jobs are its teardown's own.)
 		var seen *inventory.Region
 		// What this run read, unless it went on to create jobs itself.
-		if res.facts != nil && (res.Plan == nil || len(res.Plan.OneShots) == 0) {
+		switch {
+		case res.facts != nil && (res.Plan == nil || len(res.Plan.OneShots) == 0):
 			seen = res.facts.RegionFacts(cfg.Region) // nil: listed
+		case res.Plan == nil && res.listed != nil:
+			// The schedules it read after observing (tornDown): a job that
+			// appeared since is a commit's, which the cancel leaves anyway,
+			// and the cancel lists again under its lock before it deletes.
+			seen = res.listed
 		}
-		// Listed on every non-committing run (one ListSchedules) unless its
-		// footprint was read in full: limiting it to a claimed, TEARDOWN or
-		// incomplete item lets a leftover job fire (the model check's "a
-		// launch while jobs are left" and "leftover jobs, a watch and the
-		// CLI", lagotto#351's seventh review).
+		// Listed on every non-committing run unless it read them already:
+		// limiting it to a claimed, TEARDOWN or incomplete item lets a
+		// leftover job fire (the model check's "a launch while jobs are
+		// left" and "leftover jobs, a watch and the CLI", lagotto#351's
+		// seventh review).
 		cancelUncommittedJobs(ctx, cfg, d, seen)
 	}
 	return res
@@ -327,14 +346,11 @@ func cancelUncommittedJobs(ctx context.Context, cfg Config, d Deps, seen *invent
 			return nil, false, err
 		}
 		for _, s := range ss {
-			switch {
-			case s.Group == runtimeiam.TeardownScheduleGroup:
+			if s.Group == runtimeiam.TeardownScheduleGroup {
 				names = append(names, s.Name)
-			case s.Name == deploy.PollerScheduleName:
-				scheduled = true
 			}
 		}
-		return names, scheduled, nil
+		return names, hasPollerSchedule(&inventory.Region{Schedules: ss}), nil
 	}
 	names, scheduled, err := list()
 	switch {
@@ -418,10 +434,23 @@ func tick(ctx context.Context, cfg Config, d Deps) Result {
 		logf("idle-verdict region=%s warning=%q", cfg.Region, w)
 	}
 
-	var idleFor time.Duration
+	// A run in a region that was torn down records nothing (lagotto#350):
+	// its Observe would make the region's lifecycle item again, and its
+	// table, with nothing left there to remove them. A read that fails
+	// observes as before.
+	if gone, _ := tornDown(ctx, cfg, d, "before observing"); gone {
+		res.Outcome = OutcomeTornDown
+		logf("idle-verdict region=%s active=%t observe=skipped reason=%q", cfg.Region, v.Active, tornDownWhy)
+		return res
+	}
+	var (
+		idleFor time.Duration
+		made    lifecycle.Observation // what of the item and table this run made
+	)
 	err := retryOp(ctx, cfg, func() error {
-		var err error
-		_, idleFor, err = d.Lifecycle.Observe(ctx, Tool, cfg.Region, v.Active)
+		o, err := d.Lifecycle.ObserveDetail(ctx, Tool, cfg.Region, v.Active)
+		idleFor = o.IdleFor
+		made.MadeItem, made.MadeTable = made.MadeItem || o.MadeItem, made.MadeTable || o.MadeTable
 		if errors.Is(err, lifecycle.ErrTableClosing) {
 			return &final{err}
 		}
@@ -431,11 +460,40 @@ func tick(ctx context.Context, cfg Config, d Deps) Result {
 	if err != nil {
 		res.Outcome, res.Err = OutcomeFailed, err
 		if errors.Is(err, lifecycle.ErrTableClosing) {
+			// A live closer's sentinel: Observe takes a dead closer's over
+			// itself (libs#88).
 			logf("idle-verdict region=%s active=%t observe=skipped reason=%q", cfg.Region, v.Active, "the lifecycle table is being deleted")
-			clearStaleSentinel(ctx, cfg, d)
 			return res
 		}
 		logf("idle-verdict region=%s active=%t observe=failed error=%q", cfg.Region, v.Active, err.Error())
+		return res
+	}
+	// Torn down while this run observed: a teardown deletes the rate
+	// schedule before it finishes the region's item, so an observation
+	// after that finish made the item again (lagotto#350).
+	gone, listed := tornDown(ctx, cfg, d, "after observing")
+	res.listed = listed
+	if gone {
+		res.Outcome = OutcomeTornDown
+		if v.Active {
+			// Read again: the teardown that removed the region may have
+			// removed what made it active (its tables), and the item this
+			// run's observation made again would then be left for nothing.
+			v = ReadVerdict(ctx, d.Source.Region(cfg.Region), cfg.Region, cfg.Options)
+			res.Verdict = v
+			for _, w := range v.Warnings {
+				logf("idle-verdict region=%s torn_down=true warning=%q", cfg.Region, w)
+			}
+		}
+		if v.Active {
+			// Its own verdict is that something is in use: the item stays
+			// (ACTIVE), a record of that activity, for the account-wide
+			// teardown to judge once nothing of the region is left.
+			logf("idle-verdict region=%s active=true torn_down=true finish=skipped reason=%q", cfg.Region,
+				"the region is active by this run's own verdict ("+strings.Join(v.Reasons, "; ")+"): its lifecycle item is left for the account-wide teardown")
+			return res
+		}
+		res.Err = finishTornDown(ctx, cfg, d, made)
 		return res
 	}
 	line := fmt.Sprintf("idle-verdict region=%s active=%t idle_for=%s grace=%s", cfg.Region, v.Active, idleFor.Round(time.Second), cfg.Grace)
@@ -540,23 +598,74 @@ func isThrottle(err error) bool {
 	return false
 }
 
-// clearStaleSentinel clears a closing sentinel a CloseTableIfEmpty that died
-// left in the region's lifecycle table, which Observe never clears (libs#88).
-// CloseTableIfEmpty takes a stale sentinel over and drops it again while any
-// tool's item is left; a live closer's it leaves alone. Report mode deletes
-// no table, so it does this only while the table holds an item (and so only
-// ever clears the sentinel); an empty one it leaves to reap mode and the
-// last mile.
-func clearStaleSentinel(ctx context.Context, cfg Config, d Deps) {
-	if !cfg.Reap {
-		items, exists, err := d.Lifecycle.ListItems(ctx, cfg.Region)
-		if err != nil || !exists || len(items) == 0 {
-			return
-		}
+// tornDownWhy is why a run in a torn-down region records nothing.
+const tornDownWhy = "the poller's rate schedule is gone: its region was torn down (lagotto#350)"
+
+// tornDown reports whether the poller's rate schedule is gone from its
+// region: the region was torn down, by the CLI (`lagotto teardown --plan`,
+// `deploy --teardown`) or by a run of this poller that committed, and only
+// a run already in flight, or a retried or duplicate invocation, is left.
+// Every such teardown deletes the schedule before it finishes the region's
+// lifecycle item. The schedule is matched as the account-wide teardown and
+// the job cancel match it (hasPollerSchedule: in any group but the
+// teardown jobs'). It returns what it read, for the job cancel to reuse; a
+// read that fails is logged, and is "no" with nothing read.
+func tornDown(ctx context.Context, cfg Config, d Deps, when string) (bool, *inventory.Region) {
+	ss, err := d.Source.Region(cfg.Region).Schedules(ctx)
+	if err != nil {
+		cfg.Logf("idle-verdict region=%s schedule_check=failed when=%q error=%q", cfg.Region, when, err.Error())
+		return false, nil
+	}
+	r := &inventory.Region{Region: cfg.Region, Schedules: ss}
+	return !hasPollerSchedule(r), r
+}
+
+// finishTornDown ends a run whose region was torn down while it observed
+// (lagotto#350). An Observe that came after the teardown had finished the
+// region's lifecycle item made it again (and the table, if the teardown had
+// closed it), in a region with nothing left to observe or to remove it.
+// Only what this run's own Observe made (made, as lifecycle ObserveDetail
+// reports it) is undone, in either mode: the item, finished as judged
+// (finishIfDead: refused while it is in use, so a creator's mark, a hold or
+// another run's live lease keeps it, and only as it was read), and then the
+// table, closed if no tool is left in it (CloseTableIfEmpty). An older item
+// (one `deploy --teardown` keeps, or a stranded teardown's), with its idle
+// history, and a table this run did not make, are left: the account-wide
+// teardown finishes a dead item once the region's poller is gone. A failure
+// is tried again; the error of one that persists is returned (it leaves a
+// dead item, the account-wide teardown's to finish).
+func finishTornDown(ctx context.Context, cfg Config, d Deps, made lifecycle.Observation) error {
+	if !made.MadeItem {
+		cfg.Logf("idle-verdict region=%s torn_down=true finish=skipped reason=%q", cfg.Region,
+			"this run did not make the region's lifecycle item: an older one is left, with its history, for the account-wide teardown")
+		return nil
+	}
+	var (
+		done bool
+		why  string
+	)
+	err := retryOp(ctx, cfg, func() error {
+		var err error
+		done, why, err = finishIfDead(ctx, d.Lifecycle, cfg.Region, cfg.Sleep)
+		return err
+	})
+	switch {
+	case err != nil:
+		cfg.Logf("idle-verdict region=%s torn_down=true finish=failed error=%q", cfg.Region, err.Error())
+		return fmt.Errorf("finishing the lifecycle item this run made in a torn-down region: %w", err)
+	case !done:
+		cfg.Logf("idle-verdict region=%s torn_down=true finish=skipped reason=%q", cfg.Region, why)
+		return nil
+	}
+	cfg.Logf("idle-verdict region=%s torn_down=true finish=ok reason=%q", cfg.Region, tornDownWhy)
+	if !made.MadeTable {
+		return nil
 	}
 	if _, err := d.Lifecycle.CloseTableIfEmpty(ctx, cfg.Region); err != nil {
-		cfg.Logf("idle-verdict region=%s clear_sentinel=failed error=%q", cfg.Region, err.Error())
+		cfg.Logf("idle-verdict region=%s torn_down=true close_table=failed error=%q", cfg.Region, err.Error())
+		return fmt.Errorf("closing the lifecycle table this run made in a torn-down region: %w", err)
 	}
+	return nil
 }
 
 // final wraps an error retryOp must not retry.

@@ -85,22 +85,11 @@ func idleAsJudged(ctx context.Context, lc *lifecycle.Client, scope string, e lif
 // judged, so it never erases a creator's
 // mark. acceptOlder is for an explicit `lagotto teardown`, whose own reading
 // of the region is its verdict: an older lagotto's ACTIVE, which records no
-// time and so never ages, does not refuse it. A table closing under a
-// closer that died is cleared and tried once more.
+// time and so never ages, does not refuse it. A closing sentinel a closer
+// that died left is taken over by the idle write itself (lifecycle
+// SetIdleIfUnchanged); a live closer's refuses it (ErrTableClosing).
 func ClaimJudged(ctx context.Context, lc *lifecycle.Client, scope string, acceptOlder bool) (*lifecycle.Lease, error) {
-	for attempt := 0; ; attempt++ {
-		l, err := claimJudged(ctx, lc, scope, acceptOlder, sleep)
-		if errors.Is(err, lifecycle.ErrTableClosing) && attempt == 0 {
-			// A closer that died left its sentinel (libs#88):
-			// CloseTableIfEmpty takes a stale one over (and drops it while
-			// items remain); a live closer's it leaves alone.
-			if _, cerr := lc.CloseTableIfEmpty(ctx, scope); cerr != nil {
-				return nil, errors.Join(err, cerr)
-			}
-			continue
-		}
-		return l, err
-	}
+	return claimJudged(ctx, lc, scope, acceptOlder, sleep)
 }
 
 func claimJudged(ctx context.Context, lc *lifecycle.Client, scope string, acceptOlder bool, sleep func(context.Context, time.Duration) error) (*lifecycle.Lease, error) {
@@ -118,6 +107,66 @@ func claimJudged(ctx context.Context, lc *lifecycle.Client, scope string, accept
 		return nil, err
 	}
 	return claimAsJudged(ctx, lc, scope, e, sleep)
+}
+
+// finishIfDead finishes scope's lagotto item, as judged, when it is there
+// and not in use (WhyInUse; an older lagotto's untimed ACTIVE is in use):
+// finishAsJudged. An absent item, or no table, is left so, with no write.
+// It reports whether it finished the item, and why not.
+func finishIfDead(ctx context.Context, lc *lifecycle.Client, scope string, sleep func(context.Context, time.Duration) error) (bool, string, error) {
+	it, ok, err := lc.Get(ctx, Tool, scope)
+	switch {
+	case err != nil:
+		return false, "", err
+	case !ok:
+		return false, "no lifecycle item", nil
+	}
+	if it.Lease != nil && !lc.LeaseStale(it) {
+		// This very Client's own claim, from an earlier try whose finish
+		// and give-back both failed: it finishes it (AdoptLease).
+		if l, err := lc.AdoptLease(ctx, Tool, scope); err == nil {
+			if err := finishLease(ctx, sleep, lc, scope, l); err != nil {
+				if rerr := releaseLease(ctx, sleep, l); rerr != nil {
+					err = errors.Join(err, fmt.Errorf("giving the lease back: %w (it goes stale in 20 min)", rerr))
+				}
+				return false, "", err
+			}
+			return true, "", nil
+		}
+	}
+	if why := WhyInUse(lc, it); why != "" {
+		return false, "in use: " + why, nil
+	}
+	if err := finishAsJudged(ctx, lc, scope, lifecycle.ExpectOf(it, ok), sleep); err != nil {
+		if errors.Is(err, lifecycle.ErrNotClaimable) {
+			return false, err.Error(), nil // changed since it was judged
+		}
+		return false, "", err
+	}
+	return true, "", nil
+}
+
+// finishAsJudged finishes scope's lagotto item exactly as judged (e):
+// recorded IDLE if it is not (idleAsJudged), claimed (claimAsJudged), each
+// only if it has not changed since (a *lifecycle.NotClaimableError: a
+// creator marked it), and finished. A finish that fails gives the lease
+// back, so no creator waits for it.
+func finishAsJudged(ctx context.Context, lc *lifecycle.Client, scope string, e lifecycle.Expect, sleep func(context.Context, time.Duration) error) error {
+	expect, err := idleAsJudged(ctx, lc, scope, e)
+	if err != nil {
+		return err
+	}
+	l, err := claimAsJudged(ctx, lc, scope, expect, sleep)
+	if err != nil {
+		return err
+	}
+	if err := finishLease(ctx, sleep, lc, scope, l); err != nil {
+		if rerr := releaseLease(ctx, sleep, l); rerr != nil {
+			err = errors.Join(err, fmt.Errorf("giving the lease back: %w (it goes stale in 20 min)", rerr))
+		}
+		return err
+	}
+	return nil
 }
 
 // claimAsJudged claims scope exactly as e (with no grace: the judgement was

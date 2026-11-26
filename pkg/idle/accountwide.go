@@ -296,7 +296,7 @@ func TearDownAccountWide(ctx context.Context, cfg AccountWideConfig, d AccountWi
 		} else if cfg.Reap {
 			// Recorded idle from now, as judged (the item made IDLE).
 			if _, err := idleAsJudged(ctx, lc, lifecycle.ScopeGlobal, lifecycle.ExpectOf(g, gok)); err != nil {
-				return globalWriteFailed(ctx, lc, control, err, log, blocked)
+				return globalWriteFailed(err, log, blocked)
 			}
 			why = "the global scope's grace starts now"
 		}
@@ -317,14 +317,14 @@ func TearDownAccountWide(ctx context.Context, cfg AccountWideConfig, d AccountWi
 	// claimed, each only if it is still exactly what was read.
 	expect, err := idleAsJudged(ctx, lc, lifecycle.ScopeGlobal, lifecycle.ExpectOf(g, gok))
 	if err != nil {
-		return globalWriteFailed(ctx, lc, control, err, log, blocked)
+		return globalWriteFailed(err, log, blocked)
 	}
 	gl, err := claimGlobal(ctx, cfg, lc, expect)
 	if err != nil {
 		var nc *lifecycle.NotClaimableError
 		switch {
 		case errors.As(err, &nc) && strings.HasPrefix(nc.Reason, "changed"):
-			return globalWriteFailed(ctx, lc, control, err, log, blocked)
+			return globalWriteFailed(err, log, blocked)
 		case errors.Is(err, lifecycle.ErrNotClaimable):
 			return log(AccountWideResult{Outcome: AccountWideWaiting, Why: "the global lease was not taken", Err: err})
 		}
@@ -440,16 +440,15 @@ func gatherAll(ctx context.Context, cfg AccountWideConfig, d AccountWideDeps) (i
 
 // globalWriteFailed is the result of a write to the global item that did
 // not apply: one refused because the item changed since it was judged (a
-// creator marked it) is "blocked"; a closing table (a closer that died,
-// libs#88, cleared for the next run) and anything else, "failed".
-func globalWriteFailed(ctx context.Context, lc *lifecycle.Client, control string, err error, log func(AccountWideResult) AccountWideResult,
-	blocked func(string, []blocker) AccountWideResult) AccountWideResult {
+// creator marked it) is "blocked"; a closing table (a live closer's
+// sentinel: the idle write takes a dead closer's over itself) and anything
+// else, "failed".
+func globalWriteFailed(err error, log func(AccountWideResult) AccountWideResult, blocked func(string, []blocker) AccountWideResult) AccountWideResult {
 	var nc *lifecycle.NotClaimableError
 	switch {
 	case errors.As(err, &nc) && strings.HasPrefix(nc.Reason, "changed"):
 		return blocked("lagotto's global scope changed since it was judged (a creator marked it)", []blocker{inUse("global: changed since it was judged")})
 	case errors.Is(err, lifecycle.ErrTableClosing):
-		_, _ = lc.CloseTableIfEmpty(ctx, control)
 		return log(AccountWideResult{Outcome: AccountWideFailed, Why: "the control region's lifecycle table is closing", Err: err})
 	}
 	return log(AccountWideResult{Outcome: AccountWideFailed, Why: "could not record the global scope idle", Err: err})
@@ -893,28 +892,10 @@ func (f fencedAccountDeleter) Describe(ctx context.Context, r fp.Resource) (fp.R
 // finished, and the region's table closed if no tool is left in it. A table
 // that cannot be closed is only logged.
 func finishDeadRegion(ctx context.Context, cfg AccountWideConfig, lc *lifecycle.Client, r deadItem) error {
-	expect, err := idleAsJudged(ctx, lc, r.region, r.expect)
-	if errors.Is(err, lifecycle.ErrTableClosing) {
-		// A closer that died left its sentinel (libs#88): CloseTableIfEmpty
-		// takes a stale one over (and drops it while items remain); a live
-		// closer's it leaves alone, and the next run tries again.
-		if _, cerr := lc.CloseTableIfEmpty(ctx, r.region); cerr != nil {
-			return errors.Join(err, cerr)
-		}
-		expect, err = idleAsJudged(ctx, lc, r.region, r.expect)
-	}
-	if err != nil {
-		return err
-	}
-	l, err := claimAsJudged(ctx, lc, r.region, expect, cfg.Sleep)
-	if err != nil {
-		return err
-	}
-	if err := finishLease(ctx, cfg.Sleep, lc, r.region, l); err != nil {
-		// Given back, so no creator in that region waits for it.
-		if rerr := releaseLease(ctx, cfg.Sleep, l); rerr != nil {
-			err = errors.Join(err, fmt.Errorf("giving the lease back: %w (it goes stale in 20 min)", rerr))
-		}
+	// A closer that died left its sentinel: the idle write takes it over
+	// (lifecycle SetIdleIfUnchanged); a live closer's fails it, and the
+	// next run tries again.
+	if err := finishAsJudged(ctx, lc, r.region, r.expect, cfg.Sleep); err != nil {
 		return err
 	}
 	if _, err := lc.CloseTableIfEmpty(ctx, r.region); err != nil {
