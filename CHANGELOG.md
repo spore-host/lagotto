@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.74.0] - 2026-11-26
+
 ### Changed
 
 - **A stuck closing marker no longer delays the poller, `lagotto teardown` or
@@ -2843,7 +2845,8 @@ Initial tagged release from the standalone `spore-host/lagotto` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/lagotto/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.73.0...HEAD
+[Unreleased]: https://github.com/spore-host/lagotto/compare/v0.74.0...HEAD
+[0.74.0]: https://github.com/spore-host/lagotto/compare/v0.73.0...v0.74.0
 [0.73.0]: https://github.com/spore-host/lagotto/compare/v0.72.0...v0.73.0
 [0.72.0]: https://github.com/spore-host/lagotto/compare/v0.71.0...v0.72.0
 [0.71.0]: https://github.com/spore-host/lagotto/compare/v0.70.0...v0.71.0
