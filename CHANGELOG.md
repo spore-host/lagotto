@@ -7,24 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- **Removing a region no longer leaves a stray lifecycle record behind**
-  (#350). When `lagotto teardown --plan --mode reap`, `lagotto deploy
-  --teardown`, or the poller's own idle teardown removed a region while a
-  poller run there was still in flight, that run could write the region's
-  `spore-host-lifecycle` record (and the table) again after the teardown had
-  finished. That left an idle record, in a region with nothing else of
-  lagotto's, that nothing removed until the next account-wide teardown. Now a
-  run that finds its poller's schedule gone records nothing; one whose region
-  was removed while it ran removes the record, and the table, only if it made
-  them itself. It never touches a record that was there before it (such as the
-  one `deploy --teardown` keeps, with its idle history), one a running command
-  holds, or one while it sees the region in use. This holds in report mode
-  too: undoing its own write is the one thing report mode deletes. Each poller
-  run makes two more `scheduler:ListSchedules` reads of its region, which its
-  role already grants.
-
 ### Changed
 
 - **A stuck closing marker no longer delays the poller, `lagotto teardown` or
@@ -35,7 +17,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cleanup is really in progress. This needs libs v0.57.0. No IAM changes:
   lagotto's poller role already grants the lifecycle-table reads and deletes
   involved, and `lagotto-cli-user` the marker delete it already used.
-### Changed
 
 - **lagotto's account-wide teardown now runs under its global lease in AWS
   GovCloud (US)** (#347). The global scope (`tool#lagotto#global`) lives in
@@ -85,6 +66,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ARNs (#347).
 
 ### Fixed
+
+- **Removing a region no longer leaves a stray lifecycle record behind**
+  (#350). When `lagotto teardown --plan --mode reap`, `lagotto deploy
+  --teardown`, or the poller's own idle teardown removed a region while a
+  poller run there was still in flight, that run could write the region's
+  `spore-host-lifecycle` record (and the table) again after the teardown had
+  finished. That left an idle record, in a region with nothing else of
+  lagotto's, that nothing removed until the next account-wide teardown. Now a
+  run that finds its poller's schedule gone records nothing; one whose region
+  was removed while it ran removes the record, and the table, only if it made
+  them itself. It never touches a record that was there before it (such as the
+  one `deploy --teardown` keeps, with its idle history), one a running command
+  holds, or one while it sees the region in use. This holds in report mode
+  too: undoing its own write is the one thing report mode deletes. Each poller
+  run makes two more `scheduler:ListSchedules` reads of its region, which its
+  role already grants.
 
 - **lagotto's IAM ARNs are in the account's partition** (#347). Every ARN
   lagotto built started `arn:aws:`, so in aws-us-gov the poller's runtime
