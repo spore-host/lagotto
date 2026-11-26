@@ -306,7 +306,8 @@ cadence. Once the region has been idle for `LAGOTTO_IDLE_GRACE` (24 h unless
 that variable is set on the function, as a Go duration such as `30m`), it
 claims the teardown lease, re-reads the region, builds the whole teardown plan,
 re-checks every step against the live account and logs it, and gives the lease
-back. It deletes nothing. The log lines start `idle-verdict` and
+back. It deletes nothing (the one exception: a region torn down while the
+run observed, below). The log lines start `idle-verdict` and
 `idle-teardown REPORT`; the last one of a report is
 `idle-teardown REPORT region=<r> would_delete=<n> kept=<m> failed=<f> one_shots=<k> lease=released`.
 The plan names, as `phase=one-shot`, the jobs that would remove what the poller
@@ -719,12 +720,16 @@ the function is deleted. So each run checks that its rate schedule is still
 there before it observes, and records nothing if it is not (`observe=skipped`,
 outcome `torn-down`). It checks again after observing: an observation that
 landed after the teardown finished made the region's item, and the table,
-again, so the run finishes that item as it read it, in either mode (refused
-while it is in use: a creator's fresh mark, a hold, another run's live
-lease), and in reap mode closes the table if no tool is left in it. Report
-mode deletes no table; an empty one is the last mile's to report. A run
-killed in between leaves a dead item, which the account-wide teardown
-finishes.
+again, so the run finishes that item as it read it (refused while it is in
+use: a creator's fresh mark, a hold, another run's live lease) and closes
+the table if no tool is left in it. It does this in report mode as well,
+the one thing report mode deletes: they are the run's own writes. A run
+whose own verdict is active (a watch it saw, a read that failed) leaves the
+item, ACTIVE, for the account-wide teardown to judge. A run killed in
+between leaves a dead item, which the account-wide teardown finishes. Each
+run reads its region's schedules twice for this (each read lists lagotto's
+schedule groups and the default group's `lagotto-` schedules); a reap run's
+job cancel reuses the second read.
 
 A failed step before the commit gives the lease back and nothing that depends
 on it is tried; the next grace period tries again. That includes a commit that

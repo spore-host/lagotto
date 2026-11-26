@@ -405,10 +405,13 @@ type mworld struct {
 	// currentActor is the actor whose lifecycle operation this is (nil
 	// outside the actors).
 	currentActor *actor
-	// planFailed[region]: a CLI plan teardown there failed or crashed after
-	// it began deleting: the user's failed command, which they run again
-	// (it may have left the poller's function without its rate schedule).
-	planFailed map[string]bool
+	// planOrphan[region]: a CLI plan teardown there deleted the poller's
+	// rate schedule but not (yet) its function: a plan that failed or was
+	// killed in between is the user's failed command, which they run again,
+	// and that state its own.
+	planOrphan map[string]bool
+	// finishedBy are the poller runs that deleted their region's item.
+	finishedBy map[*actor]bool
 	// exitedMarks are the marks of creators that have returned.
 	exitedMarks []string
 	// regionMarkedAt[region] is the step of a creator's first mark there.
@@ -452,7 +455,7 @@ type globalSpec string
 
 func newMWorld(reap bool, global globalSpec, specs ...regionSpec) *mworld {
 	m := &mworld{now: t0, tables: map[string]*lifecycletest.Fake{}, reap: reap, acct: inventorytest.Account(acct), due: map[string]time.Time{},
-		read: map[string]map[string]int{}, changed: map[string]int{}, writesBy: map[string]int{}, passedUnder: map[string]bool{}, decidedAt: map[string]int{}, failedRuns: map[string]bool{}, regionMarkedAt: map[string]int{}, markLive: map[string]bool{}, phantomBy: map[string]*actor{}, planFailed: map[string]bool{}}
+		read: map[string]map[string]int{}, changed: map[string]int{}, writesBy: map[string]int{}, passedUnder: map[string]bool{}, decidedAt: map[string]int{}, failedRuns: map[string]bool{}, regionMarkedAt: map[string]int{}, markLive: map[string]bool{}, phantomBy: map[string]*actor{}, planOrphan: map[string]bool{}, finishedBy: map[*actor]bool{}}
 	enabled := []string{modelControl}
 	for _, s := range specs {
 		enabled = append(enabled, s.name)
@@ -625,6 +628,9 @@ func (m *mworld) table(region string) *lifecycletest.Fake {
 					}
 					if !cliRun {
 						m.markLive[region] = false
+					}
+					if op == "DeleteItem" && m.currentActor != nil && strings.HasPrefix(m.current, "poller ") {
+						m.finishedBy[m.currentActor] = true
 					}
 				}
 			}
@@ -1075,7 +1081,16 @@ func (s mScheduler) DeleteSchedule(ctx context.Context, in *scheduler.DeleteSche
 func (m *mworld) tick(region string) *actor {
 	return &actor{name: "poller " + region, run: func(ctx context.Context) {
 		cfg, d := m.run(region)
-		Tick(ctx, cfg, d)
+		res := Tick(ctx, cfg, d)
+		// A run whose own verdict is active never deletes its region's
+		// item, a record of that activity (#354 review G3).
+		a, _ := ctx.Value(actorKey{}).(*actor)
+		m.mu.Lock()
+		finished := m.finishedBy[a]
+		m.mu.Unlock()
+		if res.Verdict.Active && finished {
+			m.violate("poller %s finished its lifecycle item though its own verdict was active (%s) [%s]", region, strings.Join(res.Verdict.Reasons, "; "), m.snapshot())
+		}
 	}}
 }
 
@@ -1468,12 +1483,6 @@ func (m *mworld) cliPlanActor(region string) *actor {
 		if err != nil {
 			return
 		}
-		failed := func(f bool) {
-			m.mu.Lock()
-			m.planFailed[region] = f
-			m.mu.Unlock()
-		}
-		failed(true) // until it has finished (a crash is a failure)
 		del := inventory.NewDeleter(live, inventory.Deleters{AccountID: acct, Region: func(r string) inventory.RegionDeleter { return mCLIRegion{mRegion{m, r}} },
 			Account: mAccount{m}})
 		res, err := fp.Execute(ctx, plan, fp.ModeReap, del, l)
@@ -1490,7 +1499,6 @@ func (m *mworld) cliPlanActor(region string) *actor {
 		if err := l.Finish(ctx); err != nil {
 			return
 		}
-		failed(false)
 		_, _ = c.CloseTableIfEmpty(ctx, region)
 	}}
 }
@@ -1500,7 +1508,23 @@ func (m *mworld) cliPlanActor(region string) *actor {
 type mCLIRegion struct{ mRegion }
 
 func (d mCLIRegion) DeletePollerFunction(ctx context.Context) (bool, error) {
-	return true, d.del(ctx, "function", func(r *inventory.Region) { r.Function = nil })
+	err := d.del(ctx, "function", func(r *inventory.Region) { r.Function = nil })
+	if err == nil {
+		d.m.mu.Lock()
+		d.m.planOrphan[d.region] = false
+		d.m.mu.Unlock()
+	}
+	return true, err
+}
+
+func (d mCLIRegion) DeleteSchedule(ctx context.Context, g, n string) (bool, error) {
+	ok, err := d.mRegion.DeleteSchedule(ctx, g, n)
+	if err == nil && n == deploy.PollerScheduleName && d.m.regionFacts(d.region).Function != nil {
+		d.m.mu.Lock()
+		d.m.planOrphan[d.region] = true
+		d.m.mu.Unlock()
+	}
+	return ok, err
 }
 
 func (d mCLIRegion) DeletePollerLogGroup(ctx context.Context, _ string) (bool, error) {
@@ -1726,9 +1750,9 @@ func (m *mworld) finish() {
 			hasJob = hasJob || s.Name == FunctionJobName
 		}
 		m.mu.Lock()
-		planFailed := m.planFailed[r]
+		planOrphan := m.planOrphan[r]
 		m.mu.Unlock()
-		if f.Function != nil && !hasSchedule && !hasJob && !planFailed {
+		if f.Function != nil && !hasSchedule && !hasJob && !planOrphan {
 			m.violate("an orphaned poller in %s: its function, with no rate schedule and no job to delete it [%s]", r, m.snapshot())
 		}
 		// (A run killed after it made the item leaves a dead item, which
@@ -1952,6 +1976,12 @@ func modelScenarios(long bool) []scenario {
 			actors: acts(func(m *mworld) *actor { return m.cliPlanActor(mA) }, tick(mA)), maxPreempt: p, maxCrash: 1, maxFail: 1, kinds: k},
 		scenario{name: "a CLI plan teardown and its region's poller run, pollers in report mode", reap: true, pollerReport: true, specs: []regionSpec{idle(mA)},
 			actors: acts(func(m *mworld) *actor { return m.cliPlanActor(mA) }, tick(mA)), maxPreempt: p, maxCrash: 1, maxFail: 1, kinds: k},
+		// ... and a watch --local that stores a watch there once the plan is
+		// done (it needs no hosted poller): the run's verdict is active, so
+		// it leaves the region's item (#354 review G3).
+		scenario{name: "a CLI plan teardown, its region's poller run and a watch --local", reap: true, specs: []regionSpec{idle(mA)},
+			actors:     acts(func(m *mworld) *actor { return m.cliPlanActor(mA) }, func(m *mworld) *actor { return m.localWatchActor(mA) }, tick(mA)),
+			maxPreempt: p, maxFail: 1, kinds: k},
 		scenario{name: "the CLI's report run", specs: []regionSpec{empty(mA)}, global: "idle",
 			actors: acts(cli("cli", 0), cli("cli last mile", DefaultGrace)), maxPreempt: p, maxFail: 1, kinds: k},
 	)

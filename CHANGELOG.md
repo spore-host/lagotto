@@ -18,10 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remove it. Each run now checks that its rate schedule is still there before
   it observes, and records nothing if it is not (outcome `torn-down`). If the
   schedule went while it observed, it finishes the item it found, as judged
-  (never one in use: a creator's mark, a hold, another run's live lease), in
-  report mode as well as reap mode; reap mode then closes the table if it is
-  empty. Each check costs one `scheduler:ListSchedules` read, which the
-  poller's runtime policy already grants.
+  (never one in use: a creator's mark, a hold, another run's live lease), and
+  closes the table if no tool is left in it, in report mode as well as reap
+  mode: they are the run's own writes, the one thing report mode deletes. A
+  run whose own verdict is active leaves the item for the account-wide
+  teardown. Each run reads its region's schedules twice for this (each read
+  is the `scheduler:ListSchedules` calls over lagotto's schedule groups and
+  the default group's `lagotto-` schedules, which the runtime policy already
+  grants); a reap run's job cancel reuses the second read.
 
 ### Changed
 

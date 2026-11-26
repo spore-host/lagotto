@@ -9,6 +9,7 @@ import (
 	"github.com/spore-host/libs/lifecycle"
 
 	"github.com/spore-host/lagotto/pkg/inventory"
+	"github.com/spore-host/lagotto/pkg/runtimeiam"
 )
 
 // lagotto#350: a poller run in a region that was torn down (its rate
@@ -41,8 +42,8 @@ func TestTickTornDownBeforeObserving(t *testing.T) {
 // TestTickTornDownWhileObserving: the region's teardown finishes (its rate
 // schedule gone, its item finished, its table closed) between the run's
 // check and its Observe, which makes the item, and the table, again. The
-// run finishes the item it made, in either mode; reap mode closes the
-// table again, report mode deletes no table.
+// run finishes the item it made and closes the empty table again, in
+// either mode (#354 review G2).
 func TestTickTornDownWhileObserving(t *testing.T) {
 	ctx := context.Background()
 	for _, reap := range []bool{false, true} {
@@ -60,9 +61,8 @@ func TestTickTornDownWhileObserving(t *testing.T) {
 		if _, ok, err := h.client.Get(ctx, Tool, region); ok || err != nil {
 			t.Errorf("reap=%t: the item the run made is left (%v)", reap, err)
 		}
-		tableLeft := h.table.Status(lifecycle.TableName) != ""
-		if tableLeft == reap {
-			t.Errorf("reap=%t: table left = %t", reap, tableLeft)
+		if h.table.Status(lifecycle.TableName) != "" {
+			t.Errorf("reap=%t: the table the run made is left", reap)
 		}
 	}
 }
@@ -187,4 +187,58 @@ func (h *harness) other(owner string) *lifecycle.Client {
 		panic(err)
 	}
 	return c
+}
+
+// TestTickTornDownActive (#354 review G3): a run whose own verdict is
+// active, in a region torn down while it observed, leaves the item (ACTIVE,
+// a record of that activity) for the account-wide teardown, in either mode.
+func TestTickTornDownActive(t *testing.T) {
+	ctx := context.Background()
+	for _, reap := range []bool{false, true} {
+		h := newHarness(t)
+		h.src.Update(region, func(r *inventory.Region) { r.ActiveWatches = 1 })
+		h.table.Hook = func(_ context.Context, op string) {
+			if op == "TransactWriteItems" {
+				h.table.Hook = nil
+				h.src.Update(region, noSchedule)
+			}
+		}
+		r := Tick(ctx, h.cfg(reap), h.deps())
+		if r.Outcome != OutcomeTornDown || !strings.Contains(h.log(), "active=true torn_down=true finish=skipped") ||
+			!strings.Contains(h.log(), "1 active watch(es)") {
+			t.Errorf("reap=%t: %+v\n%s", reap, r, h.log())
+		}
+		if it := h.item(t); it.State != lifecycle.StateActive {
+			t.Errorf("reap=%t: the item: %+v", reap, it)
+		}
+		if n := h.table.Calls("DeleteItem") + h.table.Calls("DeleteTable"); n != 0 {
+			t.Errorf("reap=%t: %d deletes", reap, n)
+		}
+	}
+}
+
+// TestTickReusesItsScheduleRead (#354 review G5): a reap run that does not
+// commit reads the region's schedules twice (before and after observing),
+// and its job cancel reuses the second read.
+func TestTickReusesItsScheduleRead(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	if r := Tick(ctx, h.cfg(true), h.deps()); r.Outcome != OutcomeWaiting {
+		t.Fatalf("%+v", r)
+	}
+	if n := h.src.Reads(region + " Schedules"); n != 2 {
+		t.Errorf("%d schedule reads, want 2", n)
+	}
+	// With an earlier run's job there, the cancel still lists again under
+	// its lock before it deletes.
+	h = newHarness(t)
+	h.src.Update(region, func(r *inventory.Region) {
+		r.Schedules = append(r.Schedules, inventory.Schedule{Group: runtimeiam.TeardownScheduleGroup, Name: FunctionJobName})
+	})
+	if r := Tick(ctx, h.cfg(true), h.deps()); r.Outcome != OutcomeWaiting {
+		t.Fatalf("%+v", r)
+	}
+	if n := h.src.Reads(region + " Schedules"); n != 3 || !strings.Contains(strings.Join(h.ev.list(), "\n"), "delete one-shot") {
+		t.Errorf("%d schedule reads, want 3 (the re-list under the lock); events %v\n%s", n, h.ev.list(), h.log())
+	}
 }
