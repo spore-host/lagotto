@@ -418,6 +418,11 @@ func Classify(f Facts, o Options, now time.Time) *fp.Report {
 	// did not would leave an active schedule's invoke role unprotected.
 	part := f.partition()
 	invokeRole := runtimeiam.SchedulerInvokeRoleARN(part, acct)
+	// The regional ARNs it builds (for what has none read) are in that
+	// partition too: in an ISO partition no region's name gives it.
+	inRegion := func(service, region, resource string) string {
+		return awsarn.Regional(part, service, region, acct, resource)
+	}
 
 	var regional, logGroups []fp.Resource
 	add := func(dst *[]fp.Resource, region, typ string, it Item, own fp.Ownership, c fp.Class, deps ...string) {
@@ -439,7 +444,7 @@ func Classify(f Facts, o Options, now time.Time) *fp.Report {
 		}
 
 		var tableARNs []string
-		scheduledARN := TableARN(reg, acct, o.ScheduledTable)
+		scheduledARN := inRegion("dynamodb", reg, "table/"+o.ScheduledTable)
 		for _, t := range r.Tables {
 			add(&regional, reg, TypeTable, t.Item, ownership(t.Tags, true), activeOr(active, fp.ClassLitter))
 			tableARNs = append(tableARNs, t.ARN)
@@ -454,7 +459,7 @@ func Classify(f Facts, o Options, now time.Time) *fp.Report {
 			add(&regional, reg, TypeTopic, *r.Topic, ownership(r.Topic.Tags, true), activeOr(active, fp.ClassLitter))
 		}
 		fnClass := activeOr(active, fp.ClassLitter)
-		fnARN := deploy.PollerFunctionARN(reg, acct)
+		fnARN := inRegion("lambda", reg, "function:"+deploy.PollerFunctionName)
 		if r.Function != nil {
 			fnARN = r.Function.ARN
 			role := r.FunctionRole
@@ -510,7 +515,7 @@ func Classify(f Facts, o Options, now time.Time) *fp.Report {
 			}
 			c = class(t, c)
 			groupActive[s.Group] = groupActive[s.Group] || c == fp.ClassActive
-			add(&regional, reg, TypeSchedule, Item{ARN: ScheduleARN(reg, acct, s.Group, s.Name), Name: s.Name, Tags: copyTags(t)}, own, c, deps...)
+			add(&regional, reg, TypeSchedule, Item{ARN: inRegion("scheduler", reg, "schedule/"+s.Group+"/"+s.Name), Name: s.Name, Tags: copyTags(t)}, own, c, deps...)
 		}
 		for _, g := range r.Groups {
 			add(&regional, reg, TypeScheduleGroup, g, ownership(g.Tags, true), activeOr(groupActive[g.Name], fp.ClassLitter))

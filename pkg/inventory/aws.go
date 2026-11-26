@@ -105,6 +105,24 @@ type AWSSource struct {
 	buckets   pollerReader
 	// account builds the account-wide reader: the full one, or the poller's.
 	account func(*AWSSource) AccountSource
+	// partition, when set (SetPartition), is the one the source names
+	// lagotto's resources in; otherwise each region's name says it.
+	partition string
+}
+
+// SetPartition makes s name lagotto's resources in partition p (the
+// lagotto-cli-user policy, each region's topic and log group, and the ARNs
+// it falls back on), rather than in the one each region's name says
+// (lagotto#347). A reader in an ISO partition or the European Sovereign
+// Cloud, which no region name gives, sets the caller's.
+func (s *AWSSource) SetPartition(p string) { s.partition = p }
+
+// PartitionIn is the partition s names region's resources in.
+func (s *AWSSource) PartitionIn(region string) string {
+	if s.partition != "" {
+		return s.partition
+	}
+	return awsarn.PartitionOrAWS(region)
 }
 
 // NewAWSSource reads with cfg, whose region lists the account's regions.
@@ -113,7 +131,7 @@ func NewAWSSource(cfg aws.Config, accountID string) *AWSSource {
 }
 
 func newFullAccount(s *AWSSource) AccountSource {
-	return &awsAccount{iam: s.iam, accountID: s.accountID, partition: awsarn.PartitionOrAWS(s.cfg.Region)}
+	return &awsAccount{iam: s.iam, accountID: s.accountID, partition: s.PartitionIn(s.cfg.Region)}
 }
 
 func newAWSSource(cfg aws.Config, accountID string, account func(*AWSSource) AccountSource) *AWSSource {
@@ -122,7 +140,7 @@ func newAWSSource(cfg aws.Config, accountID string, account func(*AWSSource) Acc
 		c := cfg.Copy()
 		c.Region = region
 		return &awsRegion{
-			region: region, accountID: accountID,
+			region: region, accountID: accountID, partition: s.PartitionIn(region),
 			ddb: dynamodb.NewFromConfig(c), sns: sns.NewFromConfig(c), logs: cloudwatchlogs.NewFromConfig(c),
 			sched: scheduler.NewFromConfig(c), ec2: ec2.NewFromConfig(c), sm: sagemaker.NewFromConfig(c),
 			cfn: cloudformation.NewFromConfig(c), poller: deploy.New(c),
@@ -162,14 +180,26 @@ func (s *AWSSource) Account() AccountSource { return s.account(s) }
 
 type awsRegion struct {
 	region, accountID string
-	ddb               dynamoReader
-	sns               snsReader
-	logs              logsReader
-	sched             schedulerReader
-	ec2               ec2Reader
-	sm                sagemakerReader
-	cfn               cfnReader
-	poller            pollerReader
+	// partition is the one the region's resources are named in.
+	partition string
+	ddb       dynamoReader
+	sns       snsReader
+	logs      logsReader
+	sched     schedulerReader
+	ec2       ec2Reader
+	sm        sagemakerReader
+	cfn       cfnReader
+	poller    pollerReader
+}
+
+// arn is the ARN of resource of service in r's region, account and
+// partition (the region's own when none was set).
+func (r *awsRegion) arn(service, resource string) string {
+	p := r.partition
+	if p == "" {
+		p = awsarn.PartitionOrAWS(r.region)
+	}
+	return awsarn.Regional(p, service, r.region, r.accountID, resource)
 }
 
 func errorCode(err error) string {
@@ -199,7 +229,7 @@ func (r *awsRegion) Tables(ctx context.Context, o Options) ([]Table, error) {
 		if err != nil {
 			return out, fmt.Errorf("describe table %s: %w", name, err)
 		}
-		t := Table{Item: Item{Name: name, ARN: TableARN(r.region, r.accountID, name)}}
+		t := Table{Item: Item{Name: name, ARN: r.arn("dynamodb", "table/"+name)}}
 		if desc.Table != nil && desc.Table.TableArn != nil {
 			t.ARN = aws.ToString(desc.Table.TableArn)
 		}
@@ -326,13 +356,13 @@ func (r *awsRegion) Poller(ctx context.Context) (*Item, string, error) {
 	}
 	arn := info.ARN
 	if arn == "" {
-		arn = deploy.PollerFunctionARN(r.region, r.accountID)
+		arn = r.arn("lambda", "function:"+deploy.PollerFunctionName)
 	}
 	return &Item{ARN: arn, Name: deploy.PollerFunctionName, Tags: info.Tags, IdleGrace: info.IdleGrace}, info.RoleARN, nil
 }
 
 func (r *awsRegion) Topic(ctx context.Context) (*Item, error) {
-	arn := deploy.AlertsTopicARN(r.region, r.accountID)
+	arn := r.arn("sns", deploy.AlertsTopicName)
 	if _, err := r.sns.GetTopicAttributes(ctx, &sns.GetTopicAttributesInput{TopicArn: aws.String(arn)}); err != nil {
 		if isNotFound(err) {
 			return nil, nil
@@ -358,7 +388,7 @@ func (r *awsRegion) LogGroup(ctx context.Context) (*Item, error) {
 	if !found {
 		return nil, nil
 	}
-	arn := deploy.PollerLogGroupARN(r.region, r.accountID)
+	arn := r.arn("logs", "log-group:"+deploy.PollerLogGroupName)
 	tg, err := r.logs.ListTagsForResource(ctx, &cloudwatchlogs.ListTagsForResourceInput{ResourceArn: aws.String(arn)})
 	if err != nil {
 		return nil, fmt.Errorf("read its tags: %w", err)
@@ -378,7 +408,7 @@ func (r *awsRegion) ScheduleGroups(ctx context.Context) ([]Item, error) {
 		}
 		arn := aws.ToString(g.Arn)
 		if arn == "" {
-			arn = ScheduleGroupARN(r.region, r.accountID, name)
+			arn = r.arn("scheduler", "schedule-group/"+name)
 		}
 		tg, err := r.sched.ListTagsForResource(ctx, &scheduler.ListTagsForResourceInput{ResourceArn: aws.String(arn)})
 		if err != nil {

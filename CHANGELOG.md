@@ -60,11 +60,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `setup` and `deploy` also in aws-cn. Before, `deploy` there marked the
   region's lease and created lagotto's tables before it failed at IAM, and
   left them behind. `deploy --teardown` still runs anywhere.
+- **`lagotto watch` and `lagotto update` refuse `--regions` outside the
+  account's partition** (#347): a region in another partition than the
+  command's own (a GovCloud region from a commercial one, say), in the ISO
+  partitions or the European Sovereign Cloud, or a name that is no region, is
+  refused before anything is written. The account's credentials reach no
+  other partition, so such a watch would never be polled there.
 - Any well-formed region name outside GovCloud, China, the ISO partitions and
   the European Sovereign Cloud is taken to be in the aws partition, so a new
   commercial region needs no lagotto release.
 - `lagotto setup --sagemaker-role` refuses a role ARN in another partition than
-  the region's, and setup drops one from the runtime policy (#347).
+  the region's, and setup drops one the deployed policy carries from the
+  runtime policy, with a warning for each, instead of listing it as
+  authorized (#347).
 - Go API: the ARN and policy builders of `pkg/runtimeiam`, `pkg/cliiam` and
   `pkg/inventory` take the partition (`runtimeiam.RoleARN(partition,
   account)`, `runtimeiam.PolicyDocumentFor(partition, account, auth)`,
@@ -91,6 +99,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `deployment/cloudformation/lagotto-stack.yaml` names its roles and function
   with `${AWS::Partition}`. A GovCloud account set up by an older lagotto
   needs `lagotto setup` again.
+- **`deploy --teardown`, `teardown` and `footprint` name lagotto's resources in
+  the account's partition in the ISO partitions and the European Sovereign
+  Cloud too** (#347), where no region name gives it: the partition of the
+  caller's ARN, as STS reported it. They deleted (and read) by `arn:aws:`
+  ARNs there, which name nothing: the alerts topic, `lagotto-cli-user`, the
+  log group's tags. When STS reported no caller ARN they refuse, having
+  deleted nothing, and the last mile skips.
 
 ## [0.73.0] - 2026-11-25
 

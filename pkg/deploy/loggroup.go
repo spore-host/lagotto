@@ -94,7 +94,7 @@ func (d *Deployer) ensurePollerLogGroup(ctx context.Context, region, accountID s
 	}
 
 	// Only the tags it lacks, so the group keeps its first spore-host:created.
-	arn := aws.String(PollerLogGroupARN(region, accountID))
+	arn := aws.String(d.arn("logs", region, accountID, "log-group:"+PollerLogGroupName))
 	cur, err := d.logs.ListTagsForResource(ctx, &cloudwatchlogs.ListTagsForResourceInput{ResourceArn: arn}, logsInRegion(region))
 	if err != nil {
 		return "", fmt.Errorf("read tags of existing log group %s: %w", PollerLogGroupName, err)

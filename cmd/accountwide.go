@@ -34,7 +34,7 @@ var (
 	// accountWideSource reads lagotto's footprint for the account-wide
 	// teardown, and before each delete every region's poller and jobs.
 	accountWideSource = func(cfg aws.Config, account string) inventory.Source {
-		return inventory.NewAWSSource(cfg, account)
+		return newAWSSource(cfg, account)
 	}
 	// lastMileAccountWideReap lets the last mile's account-wide teardown
 	// delete under SPORE_LASTMILE=reap. False in this release: the last mile

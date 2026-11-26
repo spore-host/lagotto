@@ -70,6 +70,8 @@ type fakeAWS struct {
 	leaseOpts []func(*lifecycle.Options)
 	// region is the config's region; "" is us-east-1.
 	region string
+	// callerARN is the ARN GetCallerIdentity reports; "" is fakeCallerARN.
+	callerARN string
 	// requests counts every request the fake served, of any service.
 	requests int
 }
@@ -207,8 +209,12 @@ func (f *fakeAWS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case strings.Contains(string(body), "Action=GetCallerIdentity"):
 		f.record("sts:GetCallerIdentity")
 		w.Header().Set("Content-Type", "text/xml")
+		caller := f.callerARN
+		if caller == "" {
+			caller = fakeCallerARN
+		}
 		_, _ = io.WriteString(w, `<GetCallerIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><GetCallerIdentityResult><Arn>`+
-			fakeCallerARN+`</Arn><UserId>AIDFAKE</UserId><Account>123456789012</Account></GetCallerIdentityResult><ResponseMetadata><RequestId>r</RequestId></ResponseMetadata></GetCallerIdentityResponse>`)
+			caller+`</Arn><UserId>AIDFAKE</UserId><Account>123456789012</Account></GetCallerIdentityResult><ResponseMetadata><RequestId>r</RequestId></ResponseMetadata></GetCallerIdentityResponse>`)
 	case strings.HasPrefix(r.URL.Path, "/schedules/"):
 		name := strings.TrimPrefix(r.URL.Path, "/schedules/")
 		if name != "lagotto-capacity-poller" {

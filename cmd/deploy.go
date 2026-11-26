@@ -154,6 +154,15 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	}
 
 	if deployTeardown {
+		// The ARNs it deletes by (the topic's) are in the account's
+		// partition: the region's, or in an ISO partition or the European
+		// Sovereign Cloud the caller's (lagotto#347).
+		callerPartition, _ := awsarn.PartitionOfARN(callerARN)
+		partition, perr := teardownPartition(region, callerPartition)
+		if perr != nil {
+			return fmt.Errorf("not deleting anything: %w", perr)
+		}
+		d.SetPartition(partition)
 		// Say exactly what survives. Each of these has burned somebody: the tables
 		// hold the watches, the IAM roles are shared with per-launch schedules
 		// (#146) and with the poller in every OTHER region of the account (#218 —

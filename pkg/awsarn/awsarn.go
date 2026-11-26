@@ -53,14 +53,14 @@ func Partition(region string) (string, error) {
 	switch {
 	case region == "":
 		return "", errors.New("no region, so no partition: set --region, SPORE_REGION or AWS_REGION")
+	case !regionName.MatchString(region):
+		return "", fmt.Errorf("%q is not an AWS region name", region)
 	case strings.HasPrefix(region, "us-gov-"):
 		return GovCloud, nil
 	case strings.HasPrefix(region, "cn-"):
 		return China, nil
 	case strings.Contains(region, "-iso"), strings.HasPrefix(region, "eusc-"):
 		return "", fmt.Errorf("%s: %w", region, ErrUnsupportedPartition)
-	case !regionName.MatchString(region):
-		return "", fmt.Errorf("%q is not an AWS region name", region)
 	}
 	return AWS, nil
 }

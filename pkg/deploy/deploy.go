@@ -160,6 +160,25 @@ type Deployer struct {
 	owner string
 	// holdScheduleMove is Options.HoldScheduleMove for EnsurePollerSchedule.
 	holdScheduleMove string
+	// partition, when set (SetPartition), is the one d names its resources
+	// in; otherwise each region's name says it (awsarn.PartitionOrAWS).
+	partition string
+}
+
+// SetPartition makes d name the poller's resources (its topic, its log group,
+// its schedule group) in partition p, rather than in the one their region's
+// name says (lagotto#347). A teardown in an ISO partition or the European
+// Sovereign Cloud, which no region name gives, sets the caller's.
+func (d *Deployer) SetPartition(p string) { d.partition = p }
+
+// arn is the ARN of resource of service in region and accountID, in d's
+// partition.
+func (d *Deployer) arn(service, region, accountID, resource string) string {
+	p := d.partition
+	if p == "" {
+		p = awsarn.PartitionOrAWS(region)
+	}
+	return awsarn.Regional(p, service, region, accountID, resource)
 }
 
 // New builds a Deployer from an AWS config.

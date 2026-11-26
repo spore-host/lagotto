@@ -36,7 +36,10 @@ func TestPartition(t *testing.T) {
 			t.Errorf("PartitionOrAWS(%q) = %q, want the aws fallback", region, got)
 		}
 	}
-	for _, region := range []string{"local", "us-east", "US-EAST-1", "us-east-1a", "-1", "us east 1"} {
+	// The name's shape is checked first: a malformed one is not a region,
+	// whatever it starts with.
+	for _, region := range []string{"local", "us-east", "US-EAST-1", "us-east-1a", "-1", "us east 1",
+		"us-gov-", "us-gov-west", "cn-north", "cn-", "us-iso-east", "eusc-"} {
 		if got, err := Partition(region); got != "" || err == nil || errors.Is(err, ErrUnsupportedPartition) || !strings.Contains(err.Error(), "not an AWS region name") {
 			t.Errorf("Partition(%q) = %q, %v, want a not-a-region error", region, got, err)
 		}

@@ -259,6 +259,23 @@ func TestResolveAuthorizedSageMakerRoles(t *testing.T) {
 	if _, err := resolveAuthorizedSageMakerRoles(ctx, &fakeRoleIAM{policy: doc}, "aws", "123456789012", &bytes.Buffer{}); err != nil {
 		t.Errorf("revoking a role of another partition: %v", err)
 	}
+	// A deployed policy's role in another partition is dropped, with a
+	// warning, not listed as authorized: the policy builder drops it.
+	govDoc := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"iam:PassRole","Resource":["` + govRole + `","` + role + `"],` +
+		`"Condition":{"StringEquals":{"iam:PassedToService":"sagemaker.amazonaws.com"}}}]}`
+	setupSageMakerRoles, setupRevokeSageMaker = nil, nil
+	out.Reset()
+	got, err := resolveAuthorizedSageMakerRoles(ctx, &fakeRoleIAM{policy: govDoc}, "aws", "123456789012", &out)
+	if err != nil || len(got) != 1 || got[0] != role ||
+		!strings.Contains(out.String(), "warning: dropping the authorized SageMaker role "+govRole) {
+		t.Errorf("carried forward from another partition: %v, %v, %q", got, err, out.String())
+	}
+	// In its own partition it is kept.
+	out.Reset()
+	if got, err := resolveAuthorizedSageMakerRoles(ctx, &fakeRoleIAM{policy: govDoc}, "aws-us-gov", "123456789012", &out); err != nil ||
+		len(got) != 1 || got[0] != govRole || !strings.Contains(out.String(), "dropping the authorized SageMaker role "+role) {
+		t.Errorf("in GovCloud: %v, %v, %q", got, err, out.String())
+	}
 }
 
 // indexBuilding is the emulator, except that the owner index starts absent

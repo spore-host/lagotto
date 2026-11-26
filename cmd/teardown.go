@@ -170,6 +170,10 @@ func runTeardown(cmd *cobra.Command, args []string) error {
 		if acct, err = setupCallerAccount(ctx, cfg); err != nil {
 			return fmt.Errorf("not deleting anything: resolve the account ID (the %s policy's ARN needs it): %w", cliiam.PolicyName, err)
 		}
+		// So are the account-wide resources' partition (lagotto#347).
+		if err := refuseUnknownPartition(cfg.Region); err != nil {
+			return fmt.Errorf("not deleting anything: %w", err)
+		}
 		// The account-wide teardown's own check, in report mode, before
 		// anything regional goes: what this region holds (its tables and
 		// lifecycle item) is this teardown's to remove first.

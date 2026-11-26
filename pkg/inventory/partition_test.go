@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/scheduler"
+	schedtypes "github.com/aws/aws-sdk-go-v2/service/scheduler/types"
 	"github.com/spore-host/libs/tags"
 
 	"github.com/spore-host/lagotto/pkg/awsarn"
@@ -160,5 +162,63 @@ func TestAWSAccountInEachPartition(t *testing.T) {
 		if item, _, err := a.CLIPolicy(context.Background()); err != nil || item == nil || item.ARN != cliiam.PolicyARN(p, acct) {
 			t.Errorf("%s: policy %+v, %v", region, item, err)
 		}
+	}
+}
+
+// TestAWSSourceSetPartition (lagotto#347): a source given a partition names
+// lagotto-cli-user and each region's resources in it, where the region's
+// name gives none (an ISO region); without one each region's name says it.
+func TestAWSSourceSetPartition(t *testing.T) {
+	s := NewAWSSource(aws.Config{Region: "us-iso-east-1"}, acct)
+	if got := s.PartitionIn("us-iso-east-1"); got != awsarn.AWS {
+		t.Errorf("no partition set: %s, want the aws fallback", got)
+	}
+	s.SetPartition("aws-iso")
+	a, ok := s.Account().(*awsAccount)
+	if !ok || a.partition != "aws-iso" {
+		t.Fatalf("account source %+v", a)
+	}
+	a.iam = fakeIAM{}
+	if item, _, err := a.CLIPolicy(context.Background()); err != nil || item == nil || item.ARN != "arn:aws-iso:iam::"+acct+":policy/lagotto-cli-user" {
+		t.Errorf("policy %+v, %v", item, err)
+	}
+	r, ok := s.Region("us-iso-east-1").(*awsRegion)
+	if !ok || r.partition != "aws-iso" || r.arn("sns", deploy.AlertsTopicName) != "arn:aws-iso:sns:us-iso-east-1:"+acct+":"+deploy.AlertsTopicName {
+		t.Errorf("region source %+v", r)
+	}
+}
+
+// TestClassifyInAnISOPartition: the regional ARNs Classify builds are in the
+// partition the account's own ARNs name, which no ISO region's name gives.
+func TestClassifyInAnISOPartition(t *testing.T) {
+	f := Facts{AccountID: acct, AllRegions: true, Account: govAccount("aws-iso"), Regions: []Region{{Region: "us-iso-east-1",
+		Schedules: []Schedule{{Group: runtimeiam.TeardownScheduleGroup, Name: "lagotto-teardown-function"},
+			{Group: "lagotto", Name: deploy.PollerScheduleName}}}}}
+	for _, r := range Classify(f, Options{}, now).Resources {
+		for _, a := range append([]string{r.ARN}, r.DependsOn...) {
+			if !strings.HasPrefix(a, "arn:aws-iso:") {
+				t.Errorf("%s %s names %s", r.Type, r.Name, a)
+			}
+		}
+	}
+}
+
+// arnlessGroups answers GetScheduleGroup with no ARN.
+type arnlessGroups struct{ fakeScheduler }
+
+func (arnlessGroups) GetScheduleGroup(_ context.Context, in *scheduler.GetScheduleGroupInput, _ ...func(*scheduler.Options)) (*scheduler.GetScheduleGroupOutput, error) {
+	if aws.ToString(in.Name) != "lagotto" {
+		return nil, &schedtypes.ResourceNotFoundException{Message: aws.String("no group")}
+	}
+	return &scheduler.GetScheduleGroupOutput{}, nil
+}
+
+// TestScheduleGroupARNInThePartition: a group read with no ARN is named in
+// the source's partition.
+func TestScheduleGroupARNInThePartition(t *testing.T) {
+	r := &awsRegion{region: "us-iso-east-1", accountID: acct, partition: "aws-iso", sched: arnlessGroups{}}
+	groups, err := r.ScheduleGroups(context.Background())
+	if err != nil || len(groups) != 1 || groups[0].ARN != "arn:aws-iso:scheduler:us-iso-east-1:"+acct+":schedule-group/lagotto" {
+		t.Errorf("%+v, %v", groups, err)
 	}
 }

@@ -852,7 +852,11 @@ supported yet: lagotto builds its ARNs there, but `lagotto setup` and
 lagotto#347") until its service principals are verified. lagotto does not
 support the ISO partitions or the European Sovereign Cloud: every creating
 command (`setup`, `deploy`, `watch`, `launch`, `poll`) refuses those regions
-before it does anything. Where there is no global scope (aws-cn, ISO, EUSC)
+before it does anything, and `watch` and `update` refuse `--regions` outside
+the command's own partition. `deploy --teardown`, `teardown` and `footprint`
+still run there, naming lagotto's resources in the partition of the caller's
+ARN as STS reports it (no ISO region's name gives it), and refuse when STS
+reports none. Where there is no global scope (aws-cn, ISO, EUSC)
 the last mile's account-wide teardown does not run, `lagotto teardown
 --iam-roles` removes the account-wide resources as it did before lagotto#340,
 with no lease, once no poller is left in any region (it says so), and

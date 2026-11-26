@@ -241,6 +241,9 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	if err := refuseUnsupportedRegion(cfg.Region, "create a watch", false); err != nil {
 		return err
 	}
+	if err := refuseRegionsOutsidePartition(cfg.Region, cleanList(watchRegions)); err != nil {
+		return err
+	}
 	stsClient := sts.NewFromConfig(cfg)
 	identity, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
 	if err != nil {

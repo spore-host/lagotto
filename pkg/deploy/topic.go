@@ -59,7 +59,7 @@ func (d *Deployer) EnsureAlertsTopic(ctx context.Context, env, region, accountID
 	}
 	want := d.alertsTopicTags(env, region)
 
-	arn := AlertsTopicARN(region, accountID)
+	arn := d.arn("sns", region, accountID, AlertsTopicName)
 	cur, err := d.sns.GetTopicAttributes(ctx, &sns.GetTopicAttributesInput{TopicArn: aws.String(arn)}, inRegion(region))
 	switch {
 	case err == nil:
@@ -166,7 +166,7 @@ func (d *Deployer) convergeTopicAttributes(ctx context.Context, arn, region stri
 // missing topic succeeds silently, so the delete call itself carries no
 // create-vs-absent signal at all.
 func (d *Deployer) alertsTopicExists(ctx context.Context, region, accountID string) (bool, error) {
-	arn := AlertsTopicARN(region, accountID)
+	arn := d.arn("sns", region, accountID, AlertsTopicName)
 	_, err := d.sns.GetTopicAttributes(ctx, &sns.GetTopicAttributesInput{TopicArn: aws.String(arn)}, inRegion(region))
 	if err == nil {
 		return true, nil
@@ -180,7 +180,7 @@ func (d *Deployer) alertsTopicExists(ctx context.Context, region, accountID stri
 // deleteAlertsTopic removes the capacity-alerts topic, tolerating an already-gone
 // topic.
 func (d *Deployer) deleteAlertsTopic(ctx context.Context, region, accountID string) error {
-	arn := AlertsTopicARN(region, accountID)
+	arn := d.arn("sns", region, accountID, AlertsTopicName)
 	_, err := d.sns.DeleteTopic(ctx, &sns.DeleteTopicInput{TopicArn: aws.String(arn)}, inRegion(region))
 	if err == nil || isSNSNotFound(err) {
 		return nil

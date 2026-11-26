@@ -19,7 +19,6 @@ import (
 	"github.com/spore-host/libs/lifecycle"
 	"github.com/spore-host/libs/lifecycle/lifecycletest"
 
-	"github.com/spore-host/lagotto/pkg/awsarn"
 	"github.com/spore-host/lagotto/pkg/awscfg"
 	"github.com/spore-host/lagotto/pkg/cliiam"
 	"github.com/spore-host/lagotto/pkg/deploy"
@@ -157,6 +156,9 @@ func executePlan(ctx context.Context, out io.Writer, cfg aws.Config, acct string
 	}
 	if planned.Account != "" && planned.Account != acct {
 		return fmt.Errorf("not deleting anything: the plan is for account %s, but these credentials are for %s", planned.Account, acct)
+	}
+	if err := refuseUnknownPartition(cfg.Region); err != nil {
+		return fmt.Errorf("not deleting anything: %w", err)
 	}
 	live, err := takeFootprint(ctx, cfg, acct, planScope(planned))
 	if err != nil {
@@ -475,12 +477,20 @@ func (d iamAccountDeleter) DeleteInstanceProfile(ctx context.Context, name strin
 }
 
 func (d iamAccountDeleter) DeletePolicy(ctx context.Context) (cliiam.Deletion, error) {
+	if d.partition == "" {
+		return cliiam.Deletion{}, fmt.Errorf("not deleting %s: its partition is unknown (lagotto#347)", cliiam.PolicyName)
+	}
 	return cliiam.DeletePolicy(ctx, d.client, d.partition, d.accountID)
 }
 
 // newTeardownDeleters builds the deleters a plan is executed with. A seam for
 // tests.
+//
+// Every ARN they name is in the account's partition (lagotto#347): the
+// region's, or the caller's where no region name gives it. With neither,
+// lagotto-cli-user is not deleted (the commands refuse before this).
 var newTeardownDeleters = func(cfg aws.Config, accountID string) inventory.Deleters {
+	partition, _ := observedTeardownPartition(cfg.Region)
 	var mu sync.Mutex
 	regions := map[string]inventory.RegionDeleter{}
 	return inventory.Deleters{
@@ -493,11 +503,15 @@ var newTeardownDeleters = func(cfg aws.Config, accountID string) inventory.Delet
 			}
 			c := cfg.Copy()
 			c.Region = region
-			d := regionDeleter{Deployer: deploy.New(c), Store: watcher.NewStore(c, watchesTable, historyTable)}
+			dep := deploy.New(c)
+			if partition != "" {
+				dep.SetPartition(partition)
+			}
+			d := regionDeleter{Deployer: dep, Store: watcher.NewStore(c, watchesTable, historyTable)}
 			regions[region] = d
 			return d
 		},
-		Account: iamAccountDeleter{client: iam.NewFromConfig(cfg), partition: awsarn.PartitionOrAWS(cfg.Region), accountID: accountID},
+		Account: iamAccountDeleter{client: iam.NewFromConfig(cfg), partition: partition, accountID: accountID},
 	}
 }
 

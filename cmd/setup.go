@@ -512,6 +512,18 @@ func resolveAuthorizedSageMakerRoles(ctx context.Context, client runtimeiam.IAMA
 			keep[a] = true
 		}
 	}
+	// A carried-forward role the policy cannot keep, in another partition or
+	// account, is dropped, and said (lagotto#347): the policy builder drops it
+	// anyway, so listing it as authorized would be false.
+	for _, a := range current {
+		if !keep[a] {
+			continue
+		}
+		if err := runtimeiam.ValidateSageMakerRoleARN(a, partition, accountID); err != nil {
+			delete(keep, a)
+			_, _ = fmt.Fprintf(out, "warning: dropping the authorized SageMaker role %s from the runtime policy: %v\n", a, err)
+		}
+	}
 	final := make([]string, 0, len(keep))
 	for a := range keep {
 		final = append(final, a)

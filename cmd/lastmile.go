@@ -90,7 +90,7 @@ var (
 	lastMileNow       = time.Now
 	// lastMileRegions lists the regions enabled for the account.
 	lastMileRegions = func(ctx context.Context, cfg aws.Config, account string) ([]string, error) {
-		return inventory.NewAWSSource(cfg, account).EnabledRegions(ctx)
+		return newAWSSource(cfg, account).EnabledRegions(ctx)
 	}
 	// lastMileLifecycleAPI is the DynamoDB client of region's lifecycle table.
 	lastMileLifecycleAPI = func(cfg aws.Config, region string) (lifecycle.API, error) {
@@ -100,7 +100,7 @@ var (
 	}
 	// lastMilePollerExists reports whether lagotto's poller runs in region.
 	lastMilePollerExists = func(ctx context.Context, cfg aws.Config, account, region string) (bool, error) {
-		it, _, err := inventory.NewAWSSource(cfg, account).Region(region).Poller(ctx)
+		it, _, err := newAWSSource(cfg, account).Region(region).Poller(ctx)
 		return it != nil, err
 	}
 )
@@ -194,6 +194,10 @@ func lastMile(ctx context.Context, mode lastmile.Mode, logf func(string, ...any)
 	cfg, err := awscfg.Load(ctx, "")
 	if err != nil {
 		logf("lastmile: skipped: load AWS config: %v", err)
+		return
+	}
+	if err := refuseUnknownPartition(cfg.Region); err != nil {
+		logf("lastmile: skipped: %v", err)
 		return
 	}
 	control, err := lastMileControlRegion(cfg.Region)
