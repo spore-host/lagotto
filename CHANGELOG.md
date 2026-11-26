@@ -32,7 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `spore-host-lifecycle` table crashed partway, it left a marker that blocked
   lagotto's lifecycle records until a later run cleared it. They now clear an
   abandoned marker themselves, in the same run, and wait only while another
-  cleanup is really in progress. This needs libs v0.56.1. No IAM changes:
+  cleanup is really in progress. This needs libs v0.57.0. No IAM changes:
   lagotto's poller role already grants the lifecycle-table reads and deletes
   involved, and `lagotto-cli-user` the marker delete it already used.
 
