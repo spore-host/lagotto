@@ -17,7 +17,7 @@ import (
 
 // The ninth review of lagotto#351.
 
-// TestReview9UnfencedIncomplete (G3, G4): outside aws, aws-us-gov and aws-cn, a run
+// TestReview9UnfencedIncomplete (G3, G4): outside aws and aws-us-gov, a run
 // whose policy delete was refused (attached since the plan; the deleter
 // never detaches) is not "removed".
 func TestReview9UnfencedIncomplete(t *testing.T) {

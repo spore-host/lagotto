@@ -46,28 +46,30 @@ const Tool = tags.ToolLagotto
 // ControlRegion is the region whose spore-host-lifecycle table holds lagotto's
 // global-scope lifecycle item (the account-wide teardown's lease, and the
 // creators' marks) in region's partition: its IAM home region, so that every
-// CLI in the partition reads the same one. That is us-east-1 in aws,
-// us-gov-west-1 in aws-us-gov and cn-north-1 in aws-cn (lagotto#347: every ARN
-// lagotto's IAM policies name is in the account's partition, so the creators'
-// marks, under lagotto-cli-user, and the poller's grants reach the lifecycle
-// tables there). An empty region is the commercial partition's.
+// CLI in the partition reads the same one. That is us-east-1 in aws and
+// us-gov-west-1 in aws-us-gov (lagotto#347: every ARN lagotto's IAM policies
+// name is in the account's partition, so the creators' marks, under
+// lagotto-cli-user, and the poller's grants reach the lifecycle tables there).
+// An empty region is the commercial partition's.
 //
 // Any other partition is an error, so the account-wide teardown fails closed
-// there: lagotto does not support the ISO partitions or the European Sovereign
-// Cloud (awsarn.Partition refuses them, and setup and deploy write no IAM
-// there).
+// there: aws-cn is not supported yet (awsarn.SupportedPartition; its control
+// region would be cn-north-1), and lagotto does not support the ISO partitions
+// or the European Sovereign Cloud. setup and deploy write no IAM in any of
+// them.
 func ControlRegion(region string) (string, error) {
 	if region == "" {
 		return controlRegions[awsarn.AWS], nil
 	}
-	p, err := awsarn.Partition(region)
+	p, err := awsarn.SupportedPartition(region)
 	if err != nil {
-		return "", fmt.Errorf("no control region for %s: lagotto's account-wide lease works only in the aws, aws-us-gov and aws-cn partitions (%w)", region, err)
+		return "", fmt.Errorf("no control region for %s: lagotto's account-wide lease works only in the aws and aws-us-gov partitions (%w)", region, err)
 	}
 	return controlRegions[p], nil
 }
 
-// controlRegions is each supported partition's control region.
+// controlRegions is each partition's control region. aws-cn's is used once
+// awsarn enables that partition.
 var controlRegions = map[string]string{
 	awsarn.AWS:      "us-east-1",
 	awsarn.GovCloud: "us-gov-west-1",
@@ -90,9 +92,10 @@ func RunOwner(base string) string {
 
 // NewClient returns a lifecycle client that reaches each region's
 // spore-host-lifecycle table with cfg's credentials, with lagotto's global
-// scope in ControlRegion(cfg.Region) (none in the ISO partitions or the
-// European Sovereign Cloud: every use of the global scope then fails, closed). owner names the caller in a
-// lease (PollerOwner(region), or the CLI caller's ARN).
+// scope in ControlRegion(cfg.Region) (none in aws-cn, the ISO partitions or
+// the European Sovereign Cloud: every use of the global scope then fails,
+// closed). owner names the caller in a lease (PollerOwner(region), or the CLI
+// caller's ARN).
 func NewClient(cfg aws.Config, owner string, opts ...func(*lifecycle.Options)) (*lifecycle.Client, error) {
 	control, _ := ControlRegion(cfg.Region)
 	o := lifecycle.Options{

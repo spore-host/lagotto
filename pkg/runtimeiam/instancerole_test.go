@@ -156,10 +156,18 @@ func TestSageMakerRolesRoundTrip(t *testing.T) {
 		t.Errorf("legacy PassRole on * carried forward as %v", got)
 	}
 	for _, bad := range []string{"arn:aws:iam::" + irAccount + ":role/*", "arn:aws:iam::999999999999:role/x",
-		"arn:aws:iam::" + irAccount + ":role/spored-instance-role", "sm-exec"} {
-		if ValidateSageMakerRoleARN(bad, irAccount) == nil {
+		"arn:aws:iam::" + irAccount + ":role/spored-instance-role", "sm-exec",
+		"arn:aws-us-gov:iam::" + irAccount + ":role/sm-exec"} { // another partition (lagotto#347)
+		if ValidateSageMakerRoleARN(bad, "aws", irAccount) == nil {
 			t.Errorf("ValidateSageMakerRoleARN(%q) accepted", bad)
 		}
+	}
+	// The partition is checked only when given.
+	if err := ValidateSageMakerRoleARN("arn:aws-us-gov:iam::"+irAccount+":role/sm-exec", "", irAccount); err != nil {
+		t.Errorf("no partition given: %v", err)
+	}
+	if err := ValidateSageMakerRoleARN("arn:aws-us-gov:iam::"+irAccount+":role/sm-exec", "aws-us-gov", irAccount); err != nil {
+		t.Errorf("its own partition: %v", err)
 	}
 }
 

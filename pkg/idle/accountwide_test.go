@@ -636,7 +636,7 @@ func TestAccountWideReadFailures(t *testing.T) {
 	if r := TearDownAccountWide(context.Background(), w.cfg(true, 0), d); r.Outcome != AccountWideFailed || reads != 1 {
 		t.Errorf("under the lease: %+v (%d cached reads)", r, reads)
 	}
-	// Outside aws, aws-us-gov and aws-cn there is no global scope.
+	// Outside aws and aws-us-gov there is no global scope.
 	c, _ := lifecycle.New(lifecycle.Options{DynamoDB: func(string) (lifecycle.API, error) { return lifecycletest.New(), nil }})
 	d = w.deps()
 	d.Lifecycle = c

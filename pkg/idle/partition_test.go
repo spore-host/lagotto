@@ -17,17 +17,17 @@ import (
 	"github.com/spore-host/lagotto/pkg/runtimeiam"
 )
 
-// The global-lease protocol in aws-us-gov and aws-cn (lagotto#347): with
-// lagotto's ARNs in the account's partition there is a control region there,
-// so the account-wide teardown runs fenced, as in aws.
+// The global-lease protocol in aws-us-gov (lagotto#347): with lagotto's ARNs
+// in the account's partition there is a control region there, so the
+// account-wide teardown runs fenced, as in aws. aws-cn has none yet.
 
 // TestNewClientControlRegionByPartition: a client made in any region of a
-// partition keeps the global scope in that partition's control region; in an
-// ISO region there is none, and every use of it fails, closed.
+// partition keeps the global scope in that partition's control region; in
+// aws-cn (not yet supported) and an ISO region there is none, and every use
+// of it fails, closed.
 func TestNewClientControlRegionByPartition(t *testing.T) {
 	for region, want := range map[string]string{
 		"us-west-2": "us-east-1", "us-gov-east-1": "us-gov-west-1", "us-gov-west-1": "us-gov-west-1",
-		"cn-northwest-1": "cn-north-1", "cn-north-1": "cn-north-1",
 	} {
 		c, err := NewClient(aws.Config{Region: region}, "alice")
 		if err != nil {
@@ -37,12 +37,14 @@ func TestNewClientControlRegionByPartition(t *testing.T) {
 			t.Errorf("%s: global scope in %q, %v, want %s", region, got, err, want)
 		}
 	}
-	c, err := NewClient(aws.Config{Region: "us-iso-east-1"}, "alice")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, err := c.RegionFor(lifecycle.ScopeGlobal); err == nil {
-		t.Errorf("an ISO region has a global scope, in %q", got)
+	for _, region := range []string{"cn-north-1", "cn-northwest-1", "us-iso-east-1"} {
+		c, err := NewClient(aws.Config{Region: region}, "alice")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, err := c.RegionFor(lifecycle.ScopeGlobal); err == nil {
+			t.Errorf("%s has a global scope, in %q", region, got)
+		}
 	}
 }
 
@@ -108,17 +110,15 @@ func (w *awWorld) clientIn(control, owner string) *lifecycle.Client {
 	return c
 }
 
-// TestAccountWideInEachPartition: in GovCloud and China the account-wide
-// teardown takes the global lease in the partition's control region, is
-// blocked by a creator's global mark there, by a pending one-shot job and by
-// a poller in any of the partition's regions, and otherwise removes every
-// account-wide resource, finishes the global item and closes the control
-// region's table.
+// TestAccountWideInEachPartition: in GovCloud the account-wide teardown
+// takes the global lease in the partition's control region, is blocked by a
+// creator's global mark there, by a pending one-shot job and by a poller in
+// any of the partition's regions, and otherwise removes every account-wide
+// resource, finishes the global item and closes the control region's table.
 func TestAccountWideInEachPartition(t *testing.T) {
 	ctx := context.Background()
 	for p, regions := range map[string][]string{
 		awsarn.GovCloud: {"us-gov-east-1", "us-gov-west-1"},
-		awsarn.China:    {"cn-northwest-1", "cn-north-1"},
 	} {
 		w, control := newPartitionWorld(t, p, regions...)
 		if control != regions[1] {

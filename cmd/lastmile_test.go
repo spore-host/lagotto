@@ -904,16 +904,16 @@ func TestLastMileMaybeDue(t *testing.T) {
 }
 
 // TestLastMileControlRegion: the global scope is read in the partition's
-// home region, whatever region the command used; outside aws, aws-us-gov and
-// aws-cn there is none (lagotto#340, lagotto#347).
+// home region, whatever region the command used; outside aws and aws-us-gov
+// there is none (lagotto#340, lagotto#347).
 func TestLastMileControlRegion(t *testing.T) {
 	for in, want := range map[string]string{"": "us-east-1", "eu-west-1": "us-east-1", "ap-south-1": "us-east-1",
-		"us-gov-east-1": "us-gov-west-1", "cn-northwest-1": "cn-north-1"} {
+		"us-gov-east-1": "us-gov-west-1"} {
 		if got, err := lastMileControlRegion(in); got != want || err != nil {
 			t.Errorf("lastMileControlRegion(%q) = %q, %v, want %q", in, got, err, want)
 		}
 	}
-	for _, in := range []string{"us-iso-east-1", "eu-isoe-west-1", "eusc-de-east-1"} {
+	for _, in := range []string{"cn-northwest-1", "us-iso-east-1", "eu-isoe-west-1", "eusc-de-east-1"} {
 		if got, err := lastMileControlRegion(in); got != "" || err == nil {
 			t.Errorf("%s: %q, %v", in, got, err)
 		}

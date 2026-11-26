@@ -41,15 +41,17 @@ func TestEvaluate_PoliciesInEachPartition(t *testing.T) {
 }
 
 // TestAttachFixInTheCallersPartition: the fix names lagotto-cli-user by its
-// ARN in the caller's partition; with no principal, the aws one.
+// ARN in the caller's partition; with no principal, the region's.
 func TestAttachFixInTheCallersPartition(t *testing.T) {
 	c := EvalCallerPermissions(cliiam.CallerResult{PrincipalARN: "arn:aws-us-gov:iam::111122223333:role/r",
-		Status: cliiam.CallerMissing, Missing: []string{"dynamodb:GetItem on x"}}, "111122223333")
+		Status: cliiam.CallerMissing, Missing: []string{"dynamodb:GetItem on x"}}, "111122223333", "us-east-1")
 	if fix := strings.Join(c.Fix, "\n"); !strings.Contains(fix, "--role-name r --policy-arn arn:aws-us-gov:iam::111122223333:policy/lagotto-cli-user") {
 		t.Errorf("GovCloud fix:\n%s", fix)
 	}
-	c = EvalCallerPermissions(cliiam.CallerResult{Status: cliiam.CallerMissing, Missing: []string{"dynamodb:GetItem on x"}}, "111122223333")
-	if fix := strings.Join(c.Fix, "\n"); !strings.Contains(fix, "attach arn:aws:iam::111122223333:policy/lagotto-cli-user") {
-		t.Errorf("no principal:\n%s", fix)
+	for region, want := range map[string]string{"us-gov-east-1": "arn:aws-us-gov:", "us-west-2": "arn:aws:", "": "arn:aws:"} {
+		c = EvalCallerPermissions(cliiam.CallerResult{Status: cliiam.CallerMissing, Missing: []string{"dynamodb:GetItem on x"}}, "111122223333", region)
+		if fix := strings.Join(c.Fix, "\n"); !strings.Contains(fix, "attach "+want+"iam::111122223333:policy/lagotto-cli-user") {
+			t.Errorf("no principal, region %q:\n%s", region, fix)
+		}
 	}
 }

@@ -6,13 +6,15 @@ import (
 	"testing"
 )
 
-// TestPartition: every region of the three supported partitions names its
-// partition; the ISO partitions, the European Sovereign Cloud, an empty
-// region and one in no known partition are refused (lagotto#347).
+// TestPartition: us-gov-* is aws-us-gov, cn-* is aws-cn, and any other region
+// name is aws (a new commercial region needs no release); the ISO partitions,
+// the European Sovereign Cloud, an empty region and a string that is not a
+// region name are refused (lagotto#347).
 func TestPartition(t *testing.T) {
 	for region, want := range map[string]string{
 		"us-east-1": AWS, "us-west-2": AWS, "eu-west-1": AWS, "ap-southeast-4": AWS, "ca-west-1": AWS,
 		"sa-east-1": AWS, "me-central-1": AWS, "af-south-1": AWS, "il-central-1": AWS, "mx-central-1": AWS,
+		"xx-mars-1": AWS, "ap-southeast-10": AWS, // a region lagotto has not heard of yet
 		"us-gov-west-1": GovCloud, "us-gov-east-1": GovCloud,
 		"cn-north-1": China, "cn-northwest-1": China,
 	} {
@@ -34,9 +36,9 @@ func TestPartition(t *testing.T) {
 			t.Errorf("PartitionOrAWS(%q) = %q, want the aws fallback", region, got)
 		}
 	}
-	for _, region := range []string{"xx-mars-1", "local", "us-east", "US-EAST-1"} {
-		if got, err := Partition(region); got != "" || !errors.Is(err, ErrUnsupportedPartition) || !strings.Contains(err.Error(), "no partition lagotto knows") {
-			t.Errorf("Partition(%q) = %q, %v, want an unknown-partition error", region, got, err)
+	for _, region := range []string{"local", "us-east", "US-EAST-1", "us-east-1a", "-1", "us east 1"} {
+		if got, err := Partition(region); got != "" || err == nil || errors.Is(err, ErrUnsupportedPartition) || !strings.Contains(err.Error(), "not an AWS region name") {
+			t.Errorf("Partition(%q) = %q, %v, want a not-a-region error", region, got, err)
 		}
 	}
 	if got, err := Partition(""); got != "" || err == nil || errors.Is(err, ErrUnsupportedPartition) || !strings.Contains(err.Error(), "no region") {
@@ -44,6 +46,28 @@ func TestPartition(t *testing.T) {
 	}
 	if got := PartitionOrAWS(""); got != AWS {
 		t.Errorf("PartitionOrAWS(\"\") = %q", got)
+	}
+}
+
+// TestSupportedPartition: aws and aws-us-gov are supported; aws-cn is not yet,
+// with a message that says so; what Partition refuses, it refuses too.
+func TestSupportedPartition(t *testing.T) {
+	for region, want := range map[string]string{"us-east-1": AWS, "xx-mars-1": AWS, "us-gov-east-1": GovCloud, "us-gov-west-1": GovCloud} {
+		if got, err := SupportedPartition(region); got != want || err != nil {
+			t.Errorf("SupportedPartition(%q) = %q, %v, want %q", region, got, err, want)
+		}
+	}
+	for _, region := range []string{"cn-north-1", "cn-northwest-1"} {
+		got, err := SupportedPartition(region)
+		if got != "" || !errors.Is(err, ErrPartitionNotYetSupported) ||
+			!strings.Contains(err.Error(), region+" is in aws-cn: aws-cn not yet supported; tracked in lagotto#347") {
+			t.Errorf("SupportedPartition(%q) = %q, %v", region, got, err)
+		}
+	}
+	for _, region := range []string{"us-iso-east-1", "eusc-de-east-1", "local", ""} {
+		if got, err := SupportedPartition(region); got != "" || err == nil || errors.Is(err, ErrPartitionNotYetSupported) {
+			t.Errorf("SupportedPartition(%q) = %q, %v", region, got, err)
+		}
 	}
 }
 

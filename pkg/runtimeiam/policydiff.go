@@ -238,7 +238,8 @@ func DiffRuntimePolicy(deployed, region, accountID string) (*PolicyDiff, error) 
 	if err != nil {
 		return nil, fmt.Errorf("read authorized sagemaker roles: %w", err)
 	}
-	partition, err := partitionOf(region)
+	// The region's partition, aws-cn included: doctor only reads.
+	partition, err := awsarn.Partition(region)
 	if err != nil {
 		return nil, fmt.Errorf("build expected policy: %w", err)
 	}
@@ -422,7 +423,7 @@ func AuthorizedSageMakerRoles(deployed string) ([]string, error) {
 			conditionPermitsService(g.Condition, "ec2.amazonaws.com") {
 			continue
 		}
-		if seen[g.Resource] || ValidateSageMakerRoleARN(g.Resource, "") != nil {
+		if seen[g.Resource] || ValidateSageMakerRoleARN(g.Resource, "", "") != nil {
 			continue
 		}
 		seen[g.Resource] = true

@@ -123,6 +123,9 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("load AWS config: %w", err)
 	}
+	if err := refuseUnsupportedRegion(cfg.Region, "set up lagotto's IAM", true); err != nil {
+		return err
+	}
 	// Everything setup creates or adopts carries the spore.host tags (#324),
 	// with the administrator running it as the spore-host:owner.
 	setupStamp = managedtags.Stamp{Owner: setupCallerOwner(ctx, cfg)}
@@ -167,8 +170,8 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve account ID: %w", err)
 	}
-	// In the region's partition (lagotto#347); step 2 refused a region outside
-	// aws, aws-us-gov and aws-cn.
+	// In the region's partition (lagotto#347): a region outside aws and
+	// aws-us-gov was refused before anything was written.
 	if err := applyCLIUserPolicy(ctx, newSetupPolicyClient(cfg), awsarn.PartitionOrAWS(cfg.Region), acct, out); err != nil {
 		return err
 	}
@@ -392,7 +395,7 @@ func applySetupRoles(ctx context.Context, iamClient runtimeiam.IAMAPI, profiles 
 	if err != nil {
 		return err
 	}
-	smRoles, err := resolveAuthorizedSageMakerRoles(ctx, iamClient, accountID, out)
+	smRoles, err := resolveAuthorizedSageMakerRoles(ctx, iamClient, awsarn.PartitionOrAWS(region), accountID, out)
 	if err != nil {
 		return err
 	}
@@ -468,9 +471,16 @@ func applySetupRoles(ctx context.Context, iamClient runtimeiam.IAMAPI, profiles 
 // SageMaker execution roles (--sagemaker-role / --revoke-sagemaker-role).
 // The old blanket PassRole-to-SageMaker on "*" names no role and is not
 // carried forward.
-func resolveAuthorizedSageMakerRoles(ctx context.Context, client runtimeiam.IAMAPI, accountID string, out io.Writer) ([]string, error) {
-	for _, a := range append(append([]string{}, setupSageMakerRoles...), setupRevokeSageMaker...) {
-		if err := runtimeiam.ValidateSageMakerRoleARN(a, accountID); err != nil {
+func resolveAuthorizedSageMakerRoles(ctx context.Context, client runtimeiam.IAMAPI, partition, accountID string, out io.Writer) ([]string, error) {
+	// A role to authorize must be in the region's partition (lagotto#347); one
+	// to revoke may be in any (an older policy's, which setup drops anyway).
+	for _, a := range setupSageMakerRoles {
+		if err := runtimeiam.ValidateSageMakerRoleARN(a, partition, accountID); err != nil {
+			return nil, err
+		}
+	}
+	for _, a := range setupRevokeSageMaker {
+		if err := runtimeiam.ValidateSageMakerRoleARN(a, "", accountID); err != nil {
 			return nil, err
 		}
 	}

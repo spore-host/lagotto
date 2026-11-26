@@ -153,6 +153,9 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 	if region == "" {
 		return fmt.Errorf("no AWS region set; pass --region or configure one")
 	}
+	if err := refuseUnsupportedRegion(region, "arm a scheduled launch", false); err != nil {
+		return err
+	}
 
 	// --reservation-id (#210): the launch itself must target the reservation, not
 	// just be timed by it. Read the reservation and make the stored config launch

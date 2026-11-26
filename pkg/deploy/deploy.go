@@ -231,7 +231,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) (*Result, error) {
 	// Every ARN the poller is wired with is in the region's partition
 	// (lagotto#347): one lagotto does not support is refused before anything
 	// is created.
-	if _, err := awsarn.Partition(opts.Region); err != nil {
+	if _, err := awsarn.SupportedPartition(opts.Region); err != nil {
 		return nil, fmt.Errorf("deploy: %w", err)
 	}
 	d.owner = opts.Owner

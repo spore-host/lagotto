@@ -100,7 +100,8 @@ func contains(ss []string, want string) bool {
 	return false
 }
 
-// TestFactsPartition: the regions read name the partition; none read, aws.
+// TestFactsPartition: an ARN IAM returned names the partition first; then the
+// regions read; none read, aws.
 func TestFactsPartition(t *testing.T) {
 	for regions, want := range map[string]string{"": awsarn.AWS, "us-gov-east-1": awsarn.GovCloud, "cn-northwest-1": awsarn.China, "eu-west-1": awsarn.AWS} {
 		var f Facts
@@ -110,6 +111,23 @@ func TestFactsPartition(t *testing.T) {
 		if got := f.partition(); got != want {
 			t.Errorf("%q: %s, want %s", regions, got, want)
 		}
+	}
+	// The account's own ARNs win over the regions: each kind of resource.
+	gov := govAccount(awsarn.GovCloud)
+	for name, a := range map[string]Account{
+		"role":               {Roles: []Item{{ARN: "not an ARN"}, gov.Roles[0]}},
+		"authorized role":    {AuthorizedRoles: gov.Roles},
+		"profile":            {InstanceProfiles: gov.InstanceProfiles},
+		"authorized profile": {AuthorizedProfiles: gov.InstanceProfiles},
+		"policy":             {Policy: gov.Policy},
+	} {
+		f := Facts{Account: a, Regions: []Region{{Region: "eu-west-1"}}}
+		if got := f.partition(); got != awsarn.GovCloud {
+			t.Errorf("%s: %s, want aws-us-gov", name, got)
+		}
+	}
+	if got := (Facts{Account: Account{Roles: []Item{{ARN: ""}}}, Regions: []Region{{Region: "cn-north-1"}}}).partition(); got != awsarn.China {
+		t.Errorf("no usable ARN: %s, want the region's", got)
 	}
 }
 

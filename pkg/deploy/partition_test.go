@@ -36,11 +36,13 @@ func TestResourceARNsInEachPartition(t *testing.T) {
 }
 
 // TestDeployRefusesUnsupportedPartitions: deploy creates nothing in a region
-// lagotto does not support (the Deployer has no clients: any call panics).
+// lagotto does not support, aws-cn included (the Deployer has no clients:
+// any call panics).
 func TestDeployRefusesUnsupportedPartitions(t *testing.T) {
-	for _, region := range []string{"us-iso-east-1", "eusc-de-east-1"} {
+	for region, want := range map[string]error{"us-iso-east-1": awsarn.ErrUnsupportedPartition,
+		"eusc-de-east-1": awsarn.ErrUnsupportedPartition, "cn-north-1": awsarn.ErrPartitionNotYetSupported} {
 		_, err := (&Deployer{}).Deploy(context.Background(), Options{AccountID: "123456789012", Region: region, Version: "0.73.0"})
-		if !errors.Is(err, awsarn.ErrUnsupportedPartition) {
+		if !errors.Is(err, want) {
 			t.Errorf("%s: %v", region, err)
 		}
 	}

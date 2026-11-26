@@ -20,7 +20,7 @@ import (
 	"strings"
 )
 
-// The partitions lagotto supports.
+// The partitions lagotto builds ARNs in.
 const (
 	// AWS is the commercial partition.
 	AWS = "aws"
@@ -30,48 +30,69 @@ const (
 	China = "aws-cn"
 )
 
-// The region names of each supported partition: the regionRegex of each in
-// the AWS SDK's partitions.json (aws-sdk-go-v2 internal/endpoints/awsrulesfn).
-// The commercial one matches none of the others' regions (us-gov-west-1,
-// us-iso-east-1 and eu-isoe-west-1 have two words between the dashes).
-var (
-	commercialRegion = regexp.MustCompile(`^(us|eu|ap|sa|ca|me|af|il|mx)-\w+-\d+$`)
-	govCloudRegion   = regexp.MustCompile(`^us-gov-\w+-\d+$`)
-	chinaRegion      = regexp.MustCompile(`^cn-\w+-\d+$`)
-)
+// regionName is the shape of an AWS region name: lower-case words joined by
+// dashes, ending in a number (us-east-1, ap-southeast-4, us-gov-west-1).
+var regionName = regexp.MustCompile(`^[a-z]{2,}(-[a-z]+)+-[0-9]+$`)
 
 // ErrUnsupportedPartition is [Partition]'s refusal of a region in a partition
 // lagotto does not support: the ISO partitions (us-iso-*, us-isob-*,
 // us-isof-*, eu-isoe-*) and the European Sovereign Cloud (eusc-*).
-var ErrUnsupportedPartition = errors.New("lagotto supports the aws, aws-us-gov and aws-cn partitions only")
+var ErrUnsupportedPartition = errors.New("lagotto does not support the ISO partitions or the European Sovereign Cloud")
+
+// ErrPartitionNotYetSupported is [SupportedPartition]'s refusal of a
+// partition whose ARNs lagotto builds but where it does not yet write IAM or
+// keep a global lease: aws-cn (lagotto#347).
+var ErrPartitionNotYetSupported = errors.New("not yet supported; tracked in lagotto#347")
 
 // Partition returns the partition region is in: aws-us-gov for us-gov-*,
-// aws-cn for cn-*, aws for the commercial regions. A region in the ISO
-// partitions or the European Sovereign Cloud is an error wrapping
-// [ErrUnsupportedPartition]; an empty region, or one that is in no known
-// partition, is an error too.
+// aws-cn for cn-*, and aws for any other region name, so a new commercial
+// region needs no lagotto release. A region in the ISO partitions or the
+// European Sovereign Cloud is an error wrapping [ErrUnsupportedPartition]; an
+// empty region, or a string that is not a region name, is an error too.
 func Partition(region string) (string, error) {
 	switch {
 	case region == "":
 		return "", errors.New("no region, so no partition: set --region, SPORE_REGION or AWS_REGION")
-	case govCloudRegion.MatchString(region):
+	case strings.HasPrefix(region, "us-gov-"):
 		return GovCloud, nil
-	case chinaRegion.MatchString(region):
+	case strings.HasPrefix(region, "cn-"):
 		return China, nil
-	case commercialRegion.MatchString(region):
-		return AWS, nil
 	case strings.Contains(region, "-iso"), strings.HasPrefix(region, "eusc-"):
 		return "", fmt.Errorf("%s: %w", region, ErrUnsupportedPartition)
+	case !regionName.MatchString(region):
+		return "", fmt.Errorf("%q is not an AWS region name", region)
 	}
-	return "", fmt.Errorf("%s is in no partition lagotto knows (%w)", region, ErrUnsupportedPartition)
+	return AWS, nil
+}
+
+// enabled are the partitions lagotto writes its IAM in and keeps a global
+// lease in. aws-cn is not one yet (lagotto#347): its ARNs are built
+// (arn:aws-cn:), but whether China wants other service principals and
+// iam:PassedToService values (ec2.amazonaws.com.cn, historically) is not
+// verified. Enabling it is this entry, once they are.
+var enabled = map[string]bool{AWS: true, GovCloud: true}
+
+// SupportedPartition is [Partition] for the commands that write lagotto's IAM
+// or use its global lease (setup, deploy, the account-wide teardown's control
+// region): it also refuses a partition lagotto does not support yet, aws-cn,
+// with an error wrapping [ErrPartitionNotYetSupported].
+func SupportedPartition(region string) (string, error) {
+	p, err := Partition(region)
+	if err != nil {
+		return "", err
+	}
+	if !enabled[p] {
+		return "", fmt.Errorf("%s is in %s: %s %w", region, p, p, ErrPartitionNotYetSupported)
+	}
+	return p, nil
 }
 
 // PartitionOrAWS is [Partition] for the ARN builders that cannot fail: those
 // of one region's own resources (its poller function, its topic, its tables,
 // its schedules). A region Partition refuses gets the aws partition, as every
 // ARN lagotto built did before lagotto#347. Nothing lagotto writes there
-// depends on it: setup and deploy refuse such a region before they write any
-// IAM ([Partition]), and the account-wide teardown has no global lease there.
+// depends on it: every creating command refuses such a region before it
+// creates anything, and the account-wide teardown has no global lease there.
 func PartitionOrAWS(region string) string {
 	if p, err := Partition(region); err == nil {
 		return p

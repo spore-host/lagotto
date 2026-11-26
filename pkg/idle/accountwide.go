@@ -150,8 +150,7 @@ type AccountWideOutcome string
 
 // Outcomes.
 const (
-	// AccountWideSkipped: no global scope (outside aws, aws-us-gov and
-	// aws-cn).
+	// AccountWideSkipped: no global scope (outside aws and aws-us-gov).
 	AccountWideSkipped AccountWideOutcome = "skipped"
 	// AccountWideNothing: nothing account-wide is left, and no global item.
 	AccountWideNothing AccountWideOutcome = "nothing"
@@ -750,7 +749,7 @@ func accountWideResources(facts inventory.Facts, cfg AccountWideConfig) (planned
 }
 
 // AccountWideResources is accountWideResources for a caller with no
-// global lease (`teardown --iam-roles` outside aws, aws-us-gov and aws-cn): the
+// global lease (`teardown --iam-roles` outside aws and aws-us-gov): the
 // account-wide resources of facts to delete, limited to only when set, and
 // those kept, with why.
 func AccountWideResources(facts inventory.Facts, o inventory.Options, now time.Time, only map[string]bool) ([]fp.Resource, []inventory.Kept) {

@@ -83,10 +83,10 @@ func SchedulerInvokeRoleARN(partition, accountID string) string {
 }
 
 // partitionOf is region's partition for the Ensure* writers: an error, which
-// stops them before they write anything, for a region outside aws, aws-us-gov
-// and aws-cn (lagotto#347).
+// stops them before they write anything, for a region outside aws and
+// aws-us-gov (lagotto#347; aws-cn is not supported yet).
 func partitionOf(region string) (string, error) {
-	p, err := awsarn.Partition(region)
+	p, err := awsarn.SupportedPartition(region)
 	if err != nil {
 		return "", fmt.Errorf("runtimeiam: %w", err)
 	}
@@ -219,7 +219,7 @@ func EnsureRoles(ctx context.Context, client IAMAPI, region, accountID string, s
 // Both roles carry the spore.host tags, as in [EnsureRoles].
 //
 // Every ARN they are written with is in region's partition (lagotto#347); a
-// region outside aws, aws-us-gov and aws-cn is refused before anything is
+// region outside aws and aws-us-gov is refused before anything is
 // written.
 func EnsureSetupRoles(ctx context.Context, client IAMAPI, region, accountID string, auth Authorizations, stamp ...managedtags.Stamp) ([]string, error) {
 	if region == "" || accountID == "" {
@@ -489,13 +489,17 @@ func ValidateInstanceRoleName(name string) error {
 }
 
 // ValidateSageMakerRoleARN rejects anything that is not a concrete IAM role
-// ARN in accountID, and the reserved roles. An authorized ARN is interpolated
-// into a Resource, so a wildcard would let the poller pass every matching role
-// to SageMaker.
-func ValidateSageMakerRoleARN(roleARN, accountID string) error {
+// ARN in accountID and partition (each unchecked when empty), and the
+// reserved roles. An authorized ARN is interpolated into a Resource, so a
+// wildcard would let the poller pass every matching role to SageMaker, and
+// one in another partition would name no role at all (lagotto#347).
+func ValidateSageMakerRoleARN(roleARN, partition, accountID string) error {
 	acct, name, err := watcher.ParseRoleARN(roleARN)
 	if err != nil {
 		return fmt.Errorf("runtimeiam: --sagemaker-role: %w", err)
+	}
+	if p, _ := awsarn.PartitionOfARN(strings.TrimSpace(roleARN)); partition != "" && p != partition {
+		return fmt.Errorf("runtimeiam: --sagemaker-role %q is in the %s partition, not this region's (%s)", roleARN, p, partition)
 	}
 	if accountID != "" && acct != accountID {
 		return fmt.Errorf("runtimeiam: --sagemaker-role %q is in account %s, not this account (%s)", roleARN, acct, accountID)
@@ -506,13 +510,14 @@ func ValidateSageMakerRoleARN(roleARN, accountID string) error {
 	return nil
 }
 
-// normalizeSageMakerRoles trims, drops invalid ARNs, de-duplicates and sorts.
-func normalizeSageMakerRoles(arns []string, accountID string) []string {
+// normalizeSageMakerRoles trims, drops invalid ARNs (including one of another
+// partition), de-duplicates and sorts.
+func normalizeSageMakerRoles(arns []string, partition, accountID string) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, a := range arns {
 		t := strings.TrimSpace(a)
-		if t == "" || seen[t] || ValidateSageMakerRoleARN(t, accountID) != nil {
+		if t == "" || seen[t] || ValidateSageMakerRoleARN(t, partition, accountID) != nil {
 			continue
 		}
 		seen[t] = true
@@ -873,7 +878,7 @@ func PolicyDocumentFor(partition, accountID string, auth Authorizations) (string
 	// SageMaker execution roles: only those an administrator authorized with
 	// `setup --sagemaker-role`, by exact ARN. With none, no SageMaker PassRole
 	// at all, so a SageMaker watch fails at submit until one is authorized.
-	if smRoles := normalizeSageMakerRoles(auth.SageMakerRoles, accountID); len(smRoles) > 0 {
+	if smRoles := normalizeSageMakerRoles(auth.SageMakerRoles, partition, accountID); len(smRoles) > 0 {
 		statements = append(statements, statement{Effect: "Allow", Action: []string{InstanceRolePassAction},
 			Resource: smRoles, Condition: passToService("sagemaker.amazonaws.com")})
 	}

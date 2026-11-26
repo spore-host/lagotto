@@ -68,6 +68,10 @@ type fakeAWS struct {
 	leases *lifecycletest.Fake
 	// leaseOpts adjust the commands' lifecycle client (a clock, say).
 	leaseOpts []func(*lifecycle.Options)
+	// region is the config's region; "" is us-east-1.
+	region string
+	// requests counts every request the fake served, of any service.
+	requests int
 }
 
 // leaseTable is f's lifecycle table, made on first use.
@@ -119,6 +123,9 @@ func schedError(w http.ResponseWriter, code string) {
 }
 
 func (f *fakeAWS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	f.requests++
+	f.mu.Unlock()
 	body, _ := io.ReadAll(r.Body)
 	target := r.Header.Get("X-Amz-Target")
 	switch {
@@ -288,9 +295,13 @@ func installFakeAWS(t *testing.T, f *fakeAWS) {
 	installFakeLeases(t, f.leaseTable(), f.leaseOpts...)
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
+	region := f.region
+	if region == "" {
+		region = "us-east-1"
+	}
 	awscfg.SetLoaderForTest(t, func(context.Context, ...func(*awsconfig.LoadOptions) error) (aws.Config, error) {
 		return aws.Config{
-			Region:       "us-east-1",
+			Region:       region,
 			Credentials:  credentials.NewStaticCredentialsProvider("fake", "fake", ""),
 			BaseEndpoint: aws.String(srv.URL),
 			HTTPClient:   srv.Client(),

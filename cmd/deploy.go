@@ -121,6 +121,12 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	if region == "" {
 		return fmt.Errorf("no AWS region set; pass --region or configure one")
 	}
+	// A deploy creates; --teardown only removes, so it runs anywhere.
+	if !deployTeardown {
+		if err := refuseUnsupportedRegion(region, "deploy the poller", true); err != nil {
+			return err
+		}
+	}
 
 	acctID, owner, callerARN := "", "", ""
 	if id, ierr := sts.NewFromConfig(cfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{}); ierr == nil && id.Account != nil {

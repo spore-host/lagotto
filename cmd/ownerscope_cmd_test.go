@@ -230,22 +230,34 @@ func TestResolveAuthorizedSageMakerRoles(t *testing.T) {
 
 	doc, _ := runtimeiam.PolicyDocumentFor("aws", "123456789012", runtimeiam.Authorizations{SageMakerRoles: []string{role}})
 	setupSageMakerRoles, setupRevokeSageMaker = nil, nil
-	if got, err := resolveAuthorizedSageMakerRoles(ctx, &fakeRoleIAM{policy: doc}, "123456789012", &bytes.Buffer{}); err != nil || len(got) != 1 {
+	if got, err := resolveAuthorizedSageMakerRoles(ctx, &fakeRoleIAM{policy: doc}, "aws", "123456789012", &bytes.Buffer{}); err != nil || len(got) != 1 {
 		t.Errorf("carried forward: %v, %v", got, err)
 	}
 	var out bytes.Buffer
 	setupRevokeSageMaker = []string{role, "arn:aws:iam::123456789012:role/never"}
-	if got, err := resolveAuthorizedSageMakerRoles(ctx, &fakeRoleIAM{policy: doc}, "123456789012", &out); err != nil || len(got) != 0 ||
+	if got, err := resolveAuthorizedSageMakerRoles(ctx, &fakeRoleIAM{policy: doc}, "aws", "123456789012", &out); err != nil || len(got) != 0 ||
 		!strings.Contains(out.String(), "nothing to revoke") {
 		t.Errorf("revoked: %v, %v, %q", got, err, out.String())
 	}
 	setupRevokeSageMaker = nil
-	if _, err := resolveAuthorizedSageMakerRoles(ctx, &fakeRoleIAM{getErr: errors.New("AccessDenied")}, "123456789012", &bytes.Buffer{}); err == nil {
+	if _, err := resolveAuthorizedSageMakerRoles(ctx, &fakeRoleIAM{getErr: errors.New("AccessDenied")}, "aws", "123456789012", &bytes.Buffer{}); err == nil {
 		t.Error("an unreadable policy was treated as no roles")
 	}
 	setupSageMakerRoles = []string{"arn:aws:iam::123456789012:role/*"}
-	if _, err := resolveAuthorizedSageMakerRoles(ctx, &fakeRoleIAM{policy: doc}, "123456789012", &bytes.Buffer{}); err == nil {
+	if _, err := resolveAuthorizedSageMakerRoles(ctx, &fakeRoleIAM{policy: doc}, "aws", "123456789012", &bytes.Buffer{}); err == nil {
 		t.Error("a wildcard role was accepted")
+	}
+	// A role to authorize must be in the region's partition; one to revoke
+	// may be in any (lagotto#347).
+	govRole := "arn:aws-us-gov:iam::123456789012:role/sm"
+	setupSageMakerRoles = []string{govRole}
+	if _, err := resolveAuthorizedSageMakerRoles(ctx, &fakeRoleIAM{policy: doc}, "aws", "123456789012", &bytes.Buffer{}); err == nil ||
+		!strings.Contains(err.Error(), "aws-us-gov partition") {
+		t.Errorf("a role in another partition was accepted: %v", err)
+	}
+	setupSageMakerRoles, setupRevokeSageMaker = nil, []string{govRole}
+	if _, err := resolveAuthorizedSageMakerRoles(ctx, &fakeRoleIAM{policy: doc}, "aws", "123456789012", &bytes.Buffer{}); err != nil {
+		t.Errorf("revoking a role of another partition: %v", err)
 	}
 }
 

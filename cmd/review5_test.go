@@ -69,7 +69,7 @@ func (b *syncBuffer) Write(p []byte) (int, error) {
 }
 func (b *syncBuffer) String() string { b.mu.Lock(); defer b.mu.Unlock(); return b.b.String() }
 
-// TestReview5UnfencedPendingJobs (G4): outside aws, aws-us-gov and aws-cn the
+// TestReview5UnfencedPendingJobs (G4): outside aws and aws-us-gov the
 // account-wide resources do not go while a lagotto-teardown job, which runs
 // as the invoke role, is pending in any region, or a poller is left, or the
 // footprint is incomplete.

@@ -324,9 +324,27 @@ func IAMARN(partition, accountID, kind, name string) string {
 	return awsarn.IAM(partition, accountID, kind+"/"+name)
 }
 
-// partition is the partition of f's account, from the regions f read (every
-// region an account lists is in its partition); aws when it read none.
+// partition is the partition of f's account: that of an ARN IAM returned for
+// one of its account-wide resources, the ones the dependencies built here must
+// match; failing that, that of the regions f read (every region an account
+// lists is in its partition); aws when it read neither.
 func (f Facts) partition() string {
+	a := f.Account
+	var arns []string
+	for _, it := range append(append([]Item{}, a.Roles...), a.AuthorizedRoles...) {
+		arns = append(arns, it.ARN)
+	}
+	for _, p := range append(append([]Profile{}, a.InstanceProfiles...), a.AuthorizedProfiles...) {
+		arns = append(arns, p.ARN)
+	}
+	if a.Policy != nil {
+		arns = append(arns, a.Policy.ARN)
+	}
+	for _, arn := range arns {
+		if p, err := awsarn.PartitionOfARN(arn); err == nil {
+			return p
+		}
+	}
 	if len(f.Regions) > 0 {
 		return awsarn.PartitionOrAWS(f.Regions[0].Region)
 	}

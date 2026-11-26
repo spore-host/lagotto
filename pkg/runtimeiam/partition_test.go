@@ -189,7 +189,7 @@ func TestPolicyBuildersNeedAPartition(t *testing.T) {
 // TestEnsureRolesInEachPartition: setup and deploy write the partition's
 // policies and attach the partition's managed policy, derived from the region.
 func TestEnsureRolesInEachPartition(t *testing.T) {
-	for region, p := range map[string]string{"us-gov-east-1": awsarn.GovCloud, "cn-northwest-1": awsarn.China, "eu-west-1": awsarn.AWS} {
+	for region, p := range map[string]string{"us-gov-east-1": awsarn.GovCloud, "eu-west-1": awsarn.AWS} {
 		f := &fakeIAM{}
 		if _, err := EnsureSetupRoles(context.Background(), f, region, ptAccount, ptAuth(p)); err != nil {
 			t.Fatal(err)
@@ -227,17 +227,21 @@ func TestEnsureRolesInEachPartition(t *testing.T) {
 	}
 }
 
-// TestEnsureRolesRefuseUnsupportedPartitions: in the ISO partitions and the
-// European Sovereign Cloud nothing is created or written, and the error says
-// why.
+// TestEnsureRolesRefuseUnsupportedPartitions: in aws-cn (not yet supported),
+// the ISO partitions and the European Sovereign Cloud nothing is created or
+// written, and the error says why.
 func TestEnsureRolesRefuseUnsupportedPartitions(t *testing.T) {
-	for _, region := range []string{"us-iso-east-1", "eu-isoe-west-1", "eusc-de-east-1", "xx-mars-1"} {
+	for region, want := range map[string]error{
+		"cn-north-1": awsarn.ErrPartitionNotYetSupported, "cn-northwest-1": awsarn.ErrPartitionNotYetSupported,
+		"us-iso-east-1": awsarn.ErrUnsupportedPartition, "eu-isoe-west-1": awsarn.ErrUnsupportedPartition,
+		"eusc-de-east-1": awsarn.ErrUnsupportedPartition,
+	} {
 		f := &fakeIAM{}
 		_, err1 := EnsureSetupRoles(context.Background(), f, region, ptAccount, Authorizations{})
 		err2 := EnsureRoles(context.Background(), f, region, ptAccount)
 		err3 := EnsureRuntimeRole(context.Background(), f, region, ptAccount, Authorizations{})
 		for i, err := range []error{err1, err2, err3} {
-			if !errors.Is(err, awsarn.ErrUnsupportedPartition) || !strings.Contains(err.Error(), region) {
+			if !errors.Is(err, want) || !strings.Contains(err.Error(), region) {
 				t.Errorf("%s (%d): %v", region, i, err)
 			}
 		}
